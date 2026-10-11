@@ -152,6 +152,7 @@ type ImageObserved struct {
 }
 
 func (s *Image) Name() string          { return "image" }
+func (s *Image) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *Image) NewObserved() Observed { return &ImageObserved{} }
 
 func (s *Image) Observe(ctx context.Context) (Observed, error) {

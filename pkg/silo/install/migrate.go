@@ -64,6 +64,7 @@ type MigrateObserved struct {
 }
 
 func (s *Migrate) Name() string          { return "migrate" }
+func (s *Migrate) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *Migrate) NewObserved() Observed { return &MigrateObserved{} }
 
 func (s *Migrate) Observe(ctx context.Context) (Observed, error) {

@@ -337,6 +337,9 @@ func (d dnsAPI) CreateManagedZone(ctx context.Context, project string, z *instal
 type artifacts struct{ f *Fake }
 
 func (a artifacts) GetRepository(ctx context.Context, project, location, name string) (*install.Repository, error) {
+	if location == "" {
+		return nil, badRequest("Request contains an invalid argument.")
+	}
 	a.f.mu.Lock()
 	defer a.f.mu.Unlock()
 	if r := a.f.Repositories[location+"/"+name]; r != nil {

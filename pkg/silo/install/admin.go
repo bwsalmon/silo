@@ -45,6 +45,7 @@ type AdminObserved struct {
 }
 
 func (s *Admin) Name() string          { return "admin" }
+func (s *Admin) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *Admin) NewObserved() Observed { return &AdminObserved{} }
 
 // members are the identities granted the tunnel, each once, in flag
