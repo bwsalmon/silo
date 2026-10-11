@@ -592,10 +592,15 @@ func ControlUserData(p ControlParams) string {
 		// A health-checked MIG: the fence lets Google's checkers in.
 		silodArgs = append(silodArgs, "--gateway-replicas")
 	}
+	silodSelf := ""
 	if p.AgentSessions > 0 {
 		// Harness sessions, through the launcher; silod counts its own
 		// slots from its VM's size, up to the fleet's count.
 		silodArgs = append(silodArgs, "--sessiond-socket", SessiondSocket, "--agent-sessions", strconv.Itoa(p.AgentSessions))
+		// Its heartbeat names this VM's gateway, which another control
+		// VM's gateway redirects its sessions' tool channels to: the
+		// VM's own address, as the gateway's --host-address.
+		silodSelf = ` --gateway-address "$(md network-interfaces/0/ip)"`
 	}
 	silodPorts := "8443"
 	if p.GatewayReplicas > 0 {
@@ -609,7 +614,7 @@ func ControlUserData(p ControlParams) string {
 	}
 	r := strings.NewReplacer(
 		"@REGISTRY@", registry,
-		"@SILOD_ARGS@", strings.Join(quoted, " "),
+		"@SILOD_ARGS@", strings.Join(quoted, " ")+silodSelf,
 		"@SILOD_UID@", strconv.Itoa(SilodUID),
 		"@GATEWAY_UID@", strconv.Itoa(GatewayUID),
 		"@GATEWAY_GID@", strconv.Itoa(GatewayGroup),

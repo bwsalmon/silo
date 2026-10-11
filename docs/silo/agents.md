@@ -564,6 +564,10 @@ from the session counts each replica reports in its heartbeat. The
 harness's session socket is on its host, and its calls go to that
 VM's silod. Any silod can serve them
 ([`state.md`](state.md#more-than-one-silod-and-the-leader-call-34)).
+The heartbeat also carries the host's gateway address, which a tool
+server's attach that lands on another control VM is
+[redirected](#the-tool-channel) to. An attach for a session whose host
+has no live heartbeat is not redirected; the leader moves that session.
 
 ### Sizing {#SV-117}
 

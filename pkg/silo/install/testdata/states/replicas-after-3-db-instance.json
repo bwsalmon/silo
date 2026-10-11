@@ -51,7 +51,7 @@
           "us-central1-f"
         ],
         "control": {
-          "template": "silo-control-4b8a815a03"
+          "template": "silo-control-16aab3aa11"
         },
         "gateway": {},
         "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
