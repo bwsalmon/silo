@@ -211,6 +211,12 @@ func (c ComputeExtras) DeleteAddress(ctx context.Context, project, region, name 
 }
 
 func (c ComputeExtras) InstanceZone(ctx context.Context, project, region, name string) (string, error) {
+	// No region (uninstall with no install record has no home region):
+	// nothing to look in. regions.get of "" would get GCE's region list,
+	// whose string id doesn't decode as a Region's.
+	if region == "" {
+		return "", nil
+	}
 	r, err := c.s.Regions.Get(project, region).Context(ctx).Do()
 	if err != nil {
 		return "", err

@@ -14,6 +14,7 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/silo/install"
 	crm "google.golang.org/api/cloudresourcemanager/v1"
+	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/option"
 	serviceusage "google.golang.org/api/serviceusage/v1"
 	sqladmin "google.golang.org/api/sqladmin/v1"
@@ -132,5 +133,29 @@ func TestSQLAdminVersions(t *testing.T) {
 	got, err := SQLAdmin{svc}.ListDatabaseVersions(ctx, "p-1")
 	if err != nil || !reflect.DeepEqual(got, []string{"MYSQL_8_0", "POSTGRES_16", "POSTGRES_17"}) {
 		t.Errorf("got %v %v", got, err)
+	}
+}
+
+// TestInstanceZoneWithNoRegion: with no home region (uninstall with no
+// install record), InstanceZone finds nothing rather than asking for
+// regions/"", which GCE answers with the region list, whose id ("projects/
+// p/regions") doesn't decode as a Region's uint64.
+func TestInstanceZoneWithNoRegion(t *testing.T) {
+	ctx := context.Background()
+	var calls atomic.Int32
+	opts := server(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		reply(w, map[string]any{"kind": "compute#regionList", "id": "projects/p/regions/", "items": []any{}})
+	})
+	svc, err := compute.NewService(ctx, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone, err := ComputeExtras{s: svc}.InstanceZone(ctx, "p", "", "silo-control")
+	if zone != "" || err != nil {
+		t.Errorf("got %q, %v; want no zone and no error", zone, err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d calls to GCE, want none", n)
 	}
 }
