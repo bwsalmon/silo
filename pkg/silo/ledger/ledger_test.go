@@ -577,6 +577,19 @@ func TestRegions(t *testing.T) {
 		_, err := tx.Exec(ctx, `DELETE FROM charges WHERE object = 'stray'`)
 		return err
 	})
+	// So does a subnet, charged to a global count: its own range in
+	// the address space names its region.
+	do(t, f.db, func(tx store.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO address_own (silo, object, start, bits, region, updated_at)
+			VALUES (?, 'subnetworks/europe-west4/web', 0, 24, 'europe-west4', 0)`, f.b.ID)
+		return err
+	})
+	err = try(f.db, func(tx store.Tx) error { return ledger.SetRegions(ctx, tx, f.a.ID, []string{"us-central1"}) })
+	want(t, err, ledger.FailedPrecondition)
+	do(t, f.db, func(tx store.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM address_own WHERE object = 'subnetworks/europe-west4/web'`)
+		return err
+	})
 	// Now it goes, from /a and from /a/b with it.
 	do(t, f.db, func(tx store.Tx) error { return ledger.SetRegions(ctx, tx, f.a.ID, []string{"us-central1"}) })
 	do(t, f.db, func(tx store.Tx) error {

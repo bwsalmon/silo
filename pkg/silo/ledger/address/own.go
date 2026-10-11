@@ -121,8 +121,8 @@ func SetOwn(ctx context.Context, tx store.Tx, siloID string, ranges []OwnRange) 
 		if _, err := tx.Exec(ctx, `DELETE FROM address_own WHERE silo = ? AND object = ?`, siloID, r.Object); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO address_own (silo, object, start, bits, updated_at) VALUES (?, ?, ?, ?, ?)`,
-			siloID, r.Object, int64(sp[i].start), sp[i].bits, store.Millis(now)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO address_own (silo, object, start, bits, region, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			siloID, r.Object, int64(sp[i].start), sp[i].bits, r.Region, store.Millis(now)); err != nil {
 			return err
 		}
 		if err := logChange(ctx, tx, siloID, map[string]string{"op": "own", "object": r.Object, "range": sp[i].String()}); err != nil {
@@ -172,7 +172,11 @@ func Expand(ctx context.Context, tx store.Tx, siloID, object string, to netip.Pr
 	if err := CheckExpand(ctx, tx, siloID, object, to); err != nil {
 		return err
 	}
-	return SetOwn(ctx, tx, siloID, []OwnRange{{Object: object, Range: to}})
+	var region string
+	if err := tx.QueryRow(ctx, `SELECT region FROM address_own WHERE silo = ? AND object = ?`, siloID, object).Scan(&region); err != nil {
+		return err
+	}
+	return SetOwn(ctx, tx, siloID, []OwnRange{{Object: object, Range: to, Region: region}})
 }
 
 // RemoveOwn forgets silo's own ranges for objects, as when a subnet is

@@ -2,6 +2,7 @@ package gce
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 // to end through the fence API and the facade: the root's regions, the
 // facade's 403 for anything outside a silo's, the lists, quota only in
 // an allowed region, removing one only when nothing in the subtree
-// uses it, adding one granting nothing, images' and snapshots'
+// uses it (quota, an object charged there, or a subnet), adding one granting nothing, images' and snapshots'
 // storageLocations, and templates made in a region since removed.
 func TestAllowedRegions(t *testing.T) {
 	e := newTemplateEnv(t, 2)
@@ -155,6 +156,16 @@ func TestAllowedRegions(t *testing.T) {
 	e.run()
 	fenceFail("FAILED_PRECONDITION", e.root, "PATCH", "/silo/v1/silos/team-b", obj{"regions": []string{central}, "quota": obj{east: obj{"standard_disk_gb": 0}}})
 	e.ok(e.b, "GET", cv(host, "zones/us-east1-b/disks/d"), nil)
+	// So does a subnet, though it is charged to a global count: while
+	// team-b has one in us-east1, us-east1 can't be taken away, or the
+	// subnet could no longer be deleted and its range would be stranded.
+	e.ok(e.root, "PATCH", "/silo/v1/silos/team-b", obj{"quota": obj{"global": obj{"firewall_rules": 2, "subnetworks": 2}}})
+	taken := e.blocks(kid)
+	for _, r := range e.own(e.b) {
+		taken = append(taken, netip.MustParsePrefix(r))
+	}
+	e.ok(e.b, "POST", cv(host, "regions/us-east1/subnetworks"), obj{"name": "web", "ipCidrRange": freeIn(e.blocks(e.b)[0], 24, taken...).String()})
+	e.run()
 
 	// Storage locations: an allowed region, or the multi-region that
 	// contains one (call 25); for team-b, us-east1 now too.
@@ -179,6 +190,9 @@ func TestAllowedRegions(t *testing.T) {
 	e.ok(e.b, "POST", cv(host, templatesPath), tpl("g", "e2-medium", obj{"networkInterfaces": []obj{{}}}))
 	e.run()
 	e.ok(e.b, "DELETE", cv(host, "zones/us-east1-b/disks/d"), nil)
+	e.run()
+	fenceFail("FAILED_PRECONDITION", e.root, "PATCH", "/silo/v1/silos/team-b", obj{"regions": []string{central}, "quota": obj{east: obj{"standard_disk_gb": 0}}})
+	e.ok(e.b, "DELETE", cv(host, "regions/us-east1/subnetworks/web"), nil)
 	e.run()
 	e.ok(e.root, "PATCH", "/silo/v1/silos/team-b", obj{"regions": []string{central}, "quota": obj{east: obj{"standard_disk_gb": 0}}})
 	if got := regions(e.b, "self"); got != "[us-central1]" {

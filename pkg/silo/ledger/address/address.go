@@ -104,9 +104,13 @@ type Range struct {
 
 // OwnRange is a subnet's primary or secondary range, named by the
 // facade's object (a subnet, or a subnet and secondary range name).
+// Region is the subnet's region: while a silo has an own range in a
+// region, the region can't be removed from it (allocators.md, "Allowed
+// regions", SV-37).
 type OwnRange struct {
 	Object string
 	Range  netip.Prefix
+	Region string
 }
 
 // Want is what a block is asked for with: a prefix length, for silod

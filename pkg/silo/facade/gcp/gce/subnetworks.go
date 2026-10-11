@@ -103,7 +103,7 @@ func subnetOwn(region, name, primary string, secondary []*compute.SubnetworkSeco
 	if err != nil {
 		return nil, err
 	}
-	out := []address.OwnRange{{Object: ownObject(region, name, ""), Range: p}}
+	out := []address.OwnRange{{Object: ownObject(region, name, ""), Range: p, Region: region}}
 	seen := map[string]bool{}
 	for i, r := range secondary {
 		field := "resource.secondaryIpRanges[" + itoa(i) + "]"
@@ -118,7 +118,7 @@ func subnetOwn(region, name, primary string, secondary []*compute.SubnetworkSeco
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, address.OwnRange{Object: ownObject(region, name, r.RangeName), Range: p})
+		out = append(out, address.OwnRange{Object: ownObject(region, name, r.RangeName), Range: p, Region: region})
 	}
 	return out, nil
 }

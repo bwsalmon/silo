@@ -277,7 +277,14 @@ always a subset of the parent's regions, chosen for residency or cost.
   `zones.list` show only the allowed set.
 - Quota can only be granted in an allowed region. Removing a region
   from a child fails with `FAILED_PRECONDITION` if the child or any of
-  its descendants still holds quota, or objects, in that region.
+  its descendants still holds quota, or objects, in that region. A
+  subnet counts as an object in its region, even though it is charged
+  to a global count: once the region was gone, the facade would refuse
+  the call to delete it, and its range would stay allocated. silod
+  finds subnets from the silo's own ranges in the address space, each
+  of which records its subnet's region. Instance templates, including
+  regional ones, don't count. A template can outlive its region, and
+  an instance made from it is refused at insert.
 - Adding a region to a child grants it no quota. A child may be
   allowed a region and have no quota there.
 

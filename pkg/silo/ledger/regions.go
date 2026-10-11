@@ -45,8 +45,9 @@ func hasRegion(ctx context.Context, tx store.Tx, silo, region string) (bool, err
 //   - a child's regions must be a subset of its parent's, or it is
 //     LOOSER_THAN_PARENT. The root's are what install was given;
 //   - removing a region that the silo or any descendant still holds
-//     quota in (granted, delegated or used), or still has objects in,
-//     is FAILED_PRECONDITION. Otherwise the region is removed from the
+//     quota in (granted, delegated or used), or still has objects in
+//     (a charge there, or a subnet's own range), is
+//     FAILED_PRECONDITION. Otherwise the region is removed from the
 //     descendants too, which keeps every child's regions a subset of
 //     its parent's;
 //   - adding a region grants nothing.
@@ -131,6 +132,17 @@ func SetRegions(ctx context.Context, tx store.Tx, silo string, regions []string)
 		if n > 0 {
 			return &Error{Code: FailedPrecondition, Silo: silo, Key: Key{Region: r},
 				Message: fmt.Sprintf("can't remove %s from %s: %s or a descendant still has objects there", r, s.Path, s.Path)}
+		}
+		// A subnet is charged to a global count, but it is an object in
+		// its region: its own ranges in the address space say where.
+		var owner string
+		err = tx.QueryRow(ctx, `SELECT COUNT(*), COALESCE(MIN(silo), '') FROM address_own WHERE region = ? AND silo IN (`+in+`)`, args...).Scan(&n, &owner)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			return &Error{Code: FailedPrecondition, Silo: owner, Key: Key{Region: r},
+				Message: fmt.Sprintf("can't remove %s from %s: %s or a descendant still has subnets there", r, s.Path, s.Path)}
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM silo_regions WHERE region = ? AND silo IN (`+in+`)`, args...); err != nil {
 			return err
