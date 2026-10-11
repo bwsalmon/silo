@@ -159,6 +159,86 @@ func ProbeScript(checks []Check) string {
 	return b.String()
 }
 
+// ExporterServers is a script for an exporter's probe that serves, for
+// d seconds in the background:
+//
+//   - HTTP on 7000, answering every GET with the path it was asked for
+//     and the Silo-* headers it got, one per line;
+//   - TCP on 7003, which reads a PROXY v2 header if the connection
+//     starts with one and answers "pp2 src=<address>", or answers
+//     "noproxy src=<peer>" if not, then holds the connection open,
+//     sending a byte every 100ms, until the other end goes.
+//
+// It also serves plain HTTP on 7002, a port the link cases' links
+// don't name.
+func ExporterServers(d int) Check {
+	return Check{ID: "serve", Kind: "sh", Script: fmt.Sprintf(`
+cat >/tmp/web.py <<'EOF'
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = ("path=%%s\n" %% self.path + "".join("%%s: %%s\n" %% (k, v) for k, v in self.headers.items() if k.lower().startswith("silo"))).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("0.0.0.0", 7000), H).serve_forever()
+EOF
+cat >/tmp/tcp.py <<'EOF'
+import socket, struct, threading, time
+SIG = b"\r\n\r\n\x00\r\nQUIT\n"
+def recv(c, n):
+    d = b""
+    while len(d) < n:
+        x = c.recv(n - len(d))
+        if not x: raise EOFError
+        d += x
+    return d
+def serve(c, peer):
+    try:
+        c.settimeout(2)
+        try:
+            head = recv(c, 16)
+        except socket.timeout:
+            head = b""
+        if head[:12] == SIG:
+            rest = recv(c, struct.unpack("!H", head[14:16])[0])
+            src = socket.inet_ntoa(rest[0:4]) if head[13] == 0x11 else "family-%%d" %% head[13]
+            c.sendall(("pp2 src=%%s\n" %% src).encode())
+        else:
+            c.sendall(("noproxy src=%%s\n" %% peer[0]).encode())
+        c.settimeout(None)
+        while True:
+            c.sendall(b"."); time.sleep(0.1)
+    except Exception:
+        pass
+    finally:
+        c.close()
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", 7003)); s.listen(16)
+while True:
+    c, peer = s.accept()
+    threading.Thread(target=serve, args=(c, peer), daemon=True).start()
+EOF
+(timeout %[1]d python3 /tmp/web.py >/dev/null 2>&1 &)
+(timeout %[1]d python3 /tmp/tcp.py >/dev/null 2>&1 &)
+(timeout %[1]d python3 -m http.server 7002 >/dev/null 2>&1 &)
+for i in $(seq 20); do (exec 3<>/dev/tcp/127.0.0.1/7000) 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/7003) 2>/dev/null && exit 0; sleep 0.5; done; exit 1`, d)}
+}
+
+// TCPHello is a check that connects to host:port and reports the first
+// line the far end sends.
+func TCPHello(id, host string, port int) Check {
+	return Check{ID: id, Kind: "sh", Script: fmt.Sprintf(`python3 -c '
+import socket
+s = socket.create_connection((%q, %d), 8); s.settimeout(8)
+d = b""
+while b"\n" not in d:
+    x = s.recv(64)
+    if not x: break
+    d += x
+print(d.split(b"\n")[0].decode())
+assert b"\n" in d'`, host, port)}
+}
+
 // shellWord quotes s for the probe's shell.
 func shellWord(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
