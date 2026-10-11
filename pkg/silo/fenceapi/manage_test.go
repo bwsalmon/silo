@@ -11,7 +11,7 @@ import (
 // TestManageGrants walks a manage grant through its states on the
 // fence API alone, so it runs on both backends (TestPostgres). The
 // facade's side, and the rest of testing.md's cases, are in
-// pkg/silo/facade/gce's manage tests.
+// pkg/silo/facade/gcp/gce's manage tests.
 func TestManageGrants(t *testing.T) {
 	e := newEnv(t, fenceapi.Options{})
 	prod := e.mk(e.root, "-"+e.root, "prod", nil)

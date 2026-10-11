@@ -6,8 +6,8 @@ import (
 	"net/netip"
 	"sort"
 
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake/fenceeval"
 	"github.com/bwsalmon/silo/pkg/silo/control"
-	"github.com/bwsalmon/silo/pkg/silo/gce/fake/fenceeval"
 	compute "google.golang.org/api/compute/v1"
 )
 

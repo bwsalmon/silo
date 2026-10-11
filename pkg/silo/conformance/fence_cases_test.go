@@ -28,9 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake/fenceeval"
 	"github.com/bwsalmon/silo/pkg/silo/client"
 	"github.com/bwsalmon/silo/pkg/silo/gateway"
-	"github.com/bwsalmon/silo/pkg/silo/gce/fake/fenceeval"
 	compute "google.golang.org/api/compute/v1"
 )
 

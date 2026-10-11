@@ -70,7 +70,7 @@ type ToolVMSpec struct {
 // agent, and otherwise the ancestor or manage holder that does, so
 // that every check, charge and rewrite applies and a sealed silo's
 // tool VM is made under its ancestor's authority. Package
-// pkg/silo/facade/gce implements it; an error is an *Error.
+// pkg/silo/facade/gcp/gce implements it; an error is an *Error.
 type ToolVMs interface {
 	// Create makes instance (agents.InstanceName) with the hidden
 	// label silo-agent=<agent> and startupScript, and returns its IP.

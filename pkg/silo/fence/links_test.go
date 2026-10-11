@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	fe "github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake/fenceeval"
 	"github.com/bwsalmon/silo/pkg/silo/fence"
-	fe "github.com/bwsalmon/silo/pkg/silo/gce/fake/fenceeval"
 	"github.com/bwsalmon/silo/pkg/silo/ledger/address"
 	"github.com/bwsalmon/silo/pkg/silo/store"
 	compute "google.golang.org/api/compute/v1"

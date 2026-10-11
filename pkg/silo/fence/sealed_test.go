@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	fe "github.com/bwsalmon/silo/pkg/silo/gce/fake/fenceeval"
+	fe "github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake/fenceeval"
 )
 
 // TestSealedSiloKeeps is the fence's half of gateway.md, "What a sealed

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/store"
 	compute "google.golang.org/api/compute/v1"
 )

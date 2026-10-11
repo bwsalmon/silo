@@ -35,10 +35,10 @@ import (
 	"strings"
 	"time"
 
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
+	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fence"
 	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/gce"
 	"github.com/bwsalmon/silo/pkg/silo/ids"
 	"github.com/bwsalmon/silo/pkg/silo/leader"
 	"github.com/bwsalmon/silo/pkg/silo/ledger"
