@@ -251,7 +251,6 @@ func serve(ctx context.Context, args []string) error {
 	sessiondSocket := fs.String("sessiond-socket", "", "run agents' harness sessions through the session launcher on this socket (silod sessiond); with neither this nor --fake-agents, agents stay PROVISIONING")
 	sessionStateDir := fs.String("session-state-dir", harness.DefaultLayout.StateDir, "where sessiond keeps each session's private directory, as <dir>/<agent id>")
 	sessionHost := fs.String("session-host", "", "this control VM's name, which agents' hosts record (default the hostname)")
-	gatewayAddress := fs.String("gateway-address", "", "with --sessiond-socket: where this control VM's gateway is reached, host[:port], which a tool channel attach for one of its sessions that lands on another control VM is redirected to")
 	agentSessions := fs.Int("agent-sessions", 0, "install's --agent-sessions: this VM runs as many sessions as it can carry, up to this (0 with --sessiond-socket: as many as it can carry)")
 	fakeAgents := fs.Bool("fake-agents", false, "run agents' harness sessions with agents.Fake, which starts nothing and reports each tool server connected (development and tests only)")
 	callerHeader := fs.Bool("dev-caller-header", false, "trust a Silo-Caller: <silo id> header as the caller (development and tests only)")
@@ -333,7 +332,7 @@ func serve(ctx context.Context, args []string) error {
 		}
 		runner = &harness.Runner{Host: host, Slots: slots, Runtime: &harness.Client{Socket: *sessiondSocket},
 			Layout: harness.Layout{SocketDir: *sessionDir, StateDir: *sessionStateDir}}
-		replica.Host, replica.AgentSlots, replica.GatewayAddress = host, slots, *gatewayAddress
+		replica.Host, replica.AgentSlots = host, slots
 		log.Printf("running up to %d harness sessions on %s (%d vCPU, %d MiB), through %s", slots, host, cpus, memMB, *sessiondSocket)
 	}
 	if why == "" && v >= store.HeartbeatSchema {
@@ -522,19 +521,15 @@ func serve(ctx context.Context, args []string) error {
 		if why == "" {
 			go pub.Run(ctx)
 		}
-		tools := &gateway.ToolChannels{Agent: api.ToolChannelAgent, Hub: hub}
-		if runner != nil && why == "" && v >= store.GatewaySchema {
-			// An attach for a session another control VM hosts is
-			// redirected to that VM's gateway (agents.md, "The tool
-			// channel"); without a runner, or before the heartbeat
-			// carries gateway addresses, whichever silod it reaches
-			// takes it.
-			self := runner.Host
-			tools.Host = func(ctx context.Context, agent string) (string, error) {
-				return api.SessionGateway(ctx, agent, self)
-			}
-		}
-		gatewayHandler = gateway.Silod(db, gateway.SilodOptions{API: handler, Publisher: pub, Tools: tools, ToolVMAgent: api.ToolVMAgentAt})
+		gatewayHandler = gateway.Silod(db, gateway.SilodOptions{API: handler, Publisher: pub, Tools: &gateway.ToolChannels{
+			// Host stays nil: an attach is taken by whichever silod it
+			// reaches. Sessions are placed on a control VM now (the
+			// agent's host), and redirecting an attach to the session's
+			// host needs each control VM's gateway address, which the
+			// heartbeat doesn't carry yet.
+			Agent: api.ToolChannelAgent,
+			Hub:   hub,
+		}, ToolVMAgent: api.ToolVMAgentAt})
 	}
 	if *gatewayTLS != "" {
 		// Gateway replicas: only a client whose certificate the leader

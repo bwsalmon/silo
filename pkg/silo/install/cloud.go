@@ -197,6 +197,13 @@ type SQLAdmin interface {
 	ListUsers(ctx context.Context, project, instance string) ([]SQLUser, error)
 	// InsertUser creates a user, with no password, and waits for it.
 	InsertUser(ctx context.Context, project, instance string, u *SQLUser) error
+	// SetDeletionProtection sets the instance's deletion protection, and
+	// nothing else, and waits for it. Only uninstall --delete-data
+	// calls it, to lift it on the one instance it is about to delete.
+	SetDeletionProtection(ctx context.Context, project, name string, on bool) error
+	// DeleteInstance deletes the instance, taking a final backup that
+	// Cloud SQL keeps for finalBackupDays days, and waits for it.
+	DeleteInstance(ctx context.Context, project, name string, finalBackupDays int64) error
 }
 
 // ServiceAccount is the part of an IAM service account install reads.
@@ -455,6 +462,36 @@ type Silod interface {
 	// Regions is the facade's regions.list, as the installer's silo sees
 	// it.
 	Regions(ctx context.Context) ([]string, error)
+
+	// Uninstall's (install.md "silo uninstall", SV-96).
+	//
+	// Tree is describe / with its subtree: every silo silod knows, the
+	// root first.
+	Tree(ctx context.Context) ([]SiloNode, error)
+	// Agents are the agents in silo, by name.
+	Agents(ctx context.Context, silo string) ([]string, error)
+	// DeleteSilo is silo delete --force on path: the silo, its subtree
+	// and every object in them. It waits for the delete to finish.
+	DeleteSilo(ctx context.Context, path string) error
+	// DeleteAgent deletes the agent silo/name.
+	DeleteAgent(ctx context.Context, silo, name string) error
+	// Credentials are the agent credentials silod holds, by name; never
+	// their secrets. ErrNoCredentialAPI is a silod with no credentials
+	// endpoint (one from before agents.md "Credentials"), which holds
+	// none.
+	Credentials(ctx context.Context) ([]string, error)
+	// DeleteCredential deletes one agent credential from the database.
+	DeleteCredential(ctx context.Context, name string) error
+}
+
+// ErrNoCredentialAPI is Silod.Credentials's answer from a silod with no
+// credentials endpoint: it holds no credentials.
+var ErrNoCredentialAPI = errors.New("silod has no credentials endpoint")
+
+// SiloNode is one silo of the tree, as uninstall lists it.
+type SiloNode struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
 }
 
 // SilodHealth is /silod/health's answer.

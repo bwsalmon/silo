@@ -90,8 +90,8 @@ func (c *cli) uninstall(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("silo uninstall", flag.ContinueOnError)
 	fs.StringVar(&cfg.Project, "project", "", "the host project (required)")
 	fs.StringVar(&cfg.Credentials, "credentials", "", "a service-account key file (default Application Default Credentials)")
-	force := fs.Bool("force", false, "also delete every silo and orphaned silo object")
-	deleteData := fs.Bool("delete-data", false, "also delete the Cloud SQL instance, keeping a final backup for 30 days")
+	fs.BoolVar(&cfg.Force, "force", false, "also delete every silo, agent and object of the tree, and orphaned silo objects")
+	fs.BoolVar(&cfg.DeleteData, "delete-data", false, "also delete the Cloud SQL instance, keeping a final backup for 30 days")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&cfg.Yes, "yes", false, "don't ask for confirmation")
 	fs.StringVar(&cfg.Output, "output", "table", "the plan's format: table or json")
@@ -109,9 +109,6 @@ func (c *cli) uninstall(ctx context.Context, args []string) error {
 	if cfg.Output == "json" && !cfg.DryRun {
 		return usagef("--output json is for --dry-run")
 	}
-	// The steps that delete tenant objects and the database read these;
-	// none of the steps built so far does.
-	_, _ = *force, *deleteData
 	cloud, err := newCloud(ctx, cfg.Credentials, version)
 	if err != nil {
 		return err
@@ -119,10 +116,40 @@ func (c *cli) uninstall(ctx context.Context, args []string) error {
 	if err := install.LoadRecord(ctx, &cfg, cloud); err != nil {
 		return fmt.Errorf("reading the install's record: %w", err)
 	}
-	steps := install.Steps(install.NewEnv(cfg, cloud))
+	// The tenants, orphans and credentials steps ask silod, through the
+	// front door, what the tree holds; the tunnel opens on the first
+	// call, which a step makes only if silo-control exists.
+	fd, err := c.newFrontDoor(&frontDoorFlags{project: cfg.Project, instance: install.ControlVM})
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+	if cloud.Silod == nil {
+		if cloud.Silod, err = install.NewSilod(fd); err != nil {
+			return err
+		}
+	}
+	steps := install.UninstallSteps(install.NewEnv(cfg, cloud))
 	plans := install.PlanRemoveAll(ctx, steps)
-	return c.plan("silo uninstall: project "+cfg.Project, plans, cfg.DryRun, cfg.Yes,
-		"Delete everything above marked delete?", func() error { return install.Remove(ctx, steps, c.stdout) })
+	return c.plan("silo uninstall: project "+cfg.Project, plans, cfg.DryRun, cfg.Yes, uninstallPrompt(plans),
+		func() error { return install.Remove(ctx, steps, c.stdout) })
+}
+
+// uninstallPrompt is uninstall's confirmation, which names the database
+// instance when the plan deletes it.
+func uninstallPrompt(plans []install.StepPlan) string {
+	for _, p := range plans {
+		if p.Step != "db-instance" {
+			continue
+		}
+		for _, ch := range p.Changes {
+			if ch.Action == install.ActionDelete {
+				return fmt.Sprintf("Delete everything above marked delete, including the Cloud SQL instance %s and every grant, policy and audit record in it (a final backup is kept %d days)?",
+					ch.Object, install.FinalBackupDays)
+			}
+		}
+	}
+	return "Delete everything above marked delete?"
 }
 
 // plan prints plans, and unless dryRun, asks prompt (unless yes) and

@@ -1,0 +1,33 @@
+silo uninstall: project silo-test-project
+
+  tenants           ok      no silo-control: no silod to hold a tree (orphans finds what one left)
+  orphans           ok      no object with a silo's label or prefix that silod doesn't know
+  credentials       ok      no agent credentials, and no control VM holds silo-credential-key
+  admin             ok      no VM silo-control to hold roles/iap.tunnelResourceAccessor
+  control           ok      no VM silo-control
+  migrate           ok      no silo-migrate
+  db-endpoint       ok      no database endpoint
+  image             ok      no repository silo
+  dns               ok      no zone silo-internal
+  address           ok      no address silo-gateway-ip
+  fence             delete  silo-fence
+  nat               delete  silo-router and silo-gateway-nat
+  control-subnet    delete  silo-ctl
+  gateway-subnet    delete  silo-gateway
+  network           delete  silo
+  role              delete  projects/silo-test-project/roles/silod bound to silod
+                            roles/logging.logWriter bound to silod
+                            roles/artifactregistry.reader bound to silod
+                            projects/silo-test-project/roles/silod
+  service-account   delete  silod@silo-test-project.iam.gserviceaccount.com
+  db-instance       delete  silo-db-t3st deletion protection lifted on this instance only, then
+                            deleted, with every grant, policy and audit record in it, and its IAM
+                            user; a final backup is kept 30 days
+  apis              keep    leaves on artifactregistry, cloudbilling, cloudquotas,
+                            cloudresourcemanager, compute, dns, iam, iap, logging, serviceusage,
+                            sqladmin
+                            why: uninstall doesn't disable APIs: something else in the project may
+                            use them
+
+  19 steps: 8 to delete, 1 to keep, 10 ok
+  Estimated time: about 7 minutes, most of it waiting for Cloud SQL.

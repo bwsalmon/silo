@@ -1,0 +1,243 @@
+{
+  "args": null,
+  "after": 15,
+  "observed": {
+    "address": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "admin": {
+      "computeEnabled": true
+    },
+    "apis": {
+      "enabled": [
+        "compute.googleapis.com",
+        "dns.googleapis.com",
+        "iam.googleapis.com",
+        "iap.googleapis.com",
+        "artifactregistry.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "serviceusage.googleapis.com",
+        "logging.googleapis.com",
+        "sqladmin.googleapis.com",
+        "cloudquotas.googleapis.com",
+        "cloudbilling.googleapis.com"
+      ]
+    },
+    "control": {
+      "computeEnabled": true,
+      "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+      "dbConnection": "silo-test-project:us-central1:silo-db-t3st",
+      "replicas": {
+        "computeEnabled": true,
+        "zones": [
+          "us-central1-a",
+          "us-central1-b",
+          "us-central1-c",
+          "us-central1-f"
+        ],
+        "control": {
+          "template": "silo-control-a2781a560d"
+        },
+        "gateway": {},
+        "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+        "dbConnection": "silo-test-project:us-central1:silo-db-t3st"
+      }
+    },
+    "control-subnet": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "credentials": {},
+    "db-endpoint": {
+      "computeEnabled": true,
+      "dnsEnabled": true,
+      "instance": "silo-db-t3st",
+      "serviceAttachment": "projects/sql-producer-silo-db-t3st/regions/us-central1/serviceAttachments/a-silo-db-t3st",
+      "dnsName": "t3st.us-central1.sql.goog."
+    },
+    "db-instance": {
+      "sqlEnabled": true,
+      "instance": {
+        "name": "silo-db-t3st",
+        "region": "us-central1",
+        "databaseVersion": "POSTGRES_17",
+        "state": "RUNNABLE",
+        "labels": {
+          "silo-install": "i7a71c41be6",
+          "silo-role": "db",
+          "silo-schema": "17"
+        },
+        "edition": "ENTERPRISE",
+        "tier": "db-g1-small",
+        "availability": "ZONAL",
+        "diskType": "PD_SSD",
+        "diskSizeGB": 10,
+        "autoResize": true,
+        "backups": true,
+        "backupRetention": 14,
+        "pitr": true,
+        "logRetentionDays": 7,
+        "deletionProtection": true,
+        "psc": true,
+        "pscConsumers": [
+          "silo-test-project"
+        ],
+        "flags": {
+          "cloudsql.iam_authentication": "on"
+        },
+        "maintenanceDay": 7,
+        "maintenanceHour": 5,
+        "serviceAttachment": "projects/sql-producer-silo-db-t3st/regions/us-central1/serviceAttachments/a-silo-db-t3st",
+        "dnsName": "t3st.us-central1.sql.goog.",
+        "connectionName": "silo-test-project:us-central1:silo-db-t3st"
+      }
+    },
+    "dns": {
+      "dnsEnabled": true
+    },
+    "fence": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "gateway-subnet": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "image": {
+      "source": "ghcr.io/bwsalmon/silod:v1.0.0",
+      "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+      "enabled": true
+    },
+    "migrate": {
+      "instance": "silo-db-t3st",
+      "state": "RUNNABLE",
+      "schema": 17
+    },
+    "nat": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "network": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "orphans": {
+      "computeEnabled": true
+    },
+    "role": {
+      "iamEnabled": true,
+      "crmEnabled": true,
+      "role": {
+        "title": "silod",
+        "description": "silo-install:i7a71c41be6 silod's role: only what its facade, fence and reconcile need",
+        "permissions": [
+          "compute.instances.create",
+          "compute.instances.delete",
+          "compute.instances.get",
+          "compute.instances.list",
+          "compute.instances.start",
+          "compute.instances.stop",
+          "compute.instances.reset",
+          "compute.instances.suspend",
+          "compute.instances.resume",
+          "compute.instances.attachDisk",
+          "compute.instances.detachDisk",
+          "compute.instances.setLabels",
+          "compute.instances.setMetadata",
+          "compute.instances.setTags",
+          "compute.instances.setMachineType",
+          "compute.instances.setDeletionProtection",
+          "compute.instances.getSerialPortOutput",
+          "compute.instances.setScheduling",
+          "compute.disks.create",
+          "compute.disks.delete",
+          "compute.disks.get",
+          "compute.disks.list",
+          "compute.disks.resize",
+          "compute.disks.update",
+          "compute.disks.setLabels",
+          "compute.disks.use",
+          "compute.disks.useReadOnly",
+          "compute.disks.createSnapshot",
+          "compute.instanceTemplates.create",
+          "compute.instanceTemplates.delete",
+          "compute.instanceTemplates.get",
+          "compute.instanceTemplates.list",
+          "compute.instanceTemplates.useReadOnly",
+          "compute.regionInstanceTemplates.create",
+          "compute.regionInstanceTemplates.delete",
+          "compute.regionInstanceTemplates.get",
+          "compute.regionInstanceTemplates.list",
+          "compute.regionInstanceTemplates.useReadOnly",
+          "compute.images.create",
+          "compute.images.delete",
+          "compute.images.get",
+          "compute.images.list",
+          "compute.images.getFromFamily",
+          "compute.images.setLabels",
+          "compute.images.deprecate",
+          "compute.images.useReadOnly",
+          "compute.snapshots.create",
+          "compute.snapshots.delete",
+          "compute.snapshots.get",
+          "compute.snapshots.list",
+          "compute.snapshots.setLabels",
+          "compute.snapshots.useReadOnly",
+          "compute.subnetworks.create",
+          "compute.subnetworks.delete",
+          "compute.subnetworks.get",
+          "compute.subnetworks.list",
+          "compute.subnetworks.update",
+          "compute.subnetworks.expandIpCidrRange",
+          "compute.subnetworks.use",
+          "compute.networks.get",
+          "compute.networks.updatePolicy",
+          "compute.networks.use",
+          "compute.firewalls.create",
+          "compute.firewalls.delete",
+          "compute.firewalls.get",
+          "compute.firewalls.list",
+          "compute.firewalls.update",
+          "compute.firewallPolicies.get",
+          "compute.firewallPolicies.update",
+          "compute.zoneOperations.get",
+          "compute.zoneOperations.list",
+          "compute.regionOperations.get",
+          "compute.regionOperations.list",
+          "compute.globalOperations.get",
+          "compute.globalOperations.list",
+          "compute.regions.get",
+          "compute.regions.list",
+          "compute.zones.get",
+          "compute.zones.list",
+          "compute.machineTypes.get",
+          "compute.machineTypes.list",
+          "compute.diskTypes.get",
+          "compute.diskTypes.list",
+          "compute.acceleratorTypes.get",
+          "compute.acceleratorTypes.list",
+          "compute.projects.get",
+          "cloudquotas.quotas.get",
+          "cloudquotas.quotas.list",
+          "cloudsql.instances.connect",
+          "cloudsql.instances.get",
+          "cloudsql.instances.login"
+        ],
+        "stage": "GA"
+      },
+      "bound": [
+        "projects/silo-test-project/roles/silod",
+        "roles/logging.logWriter",
+        "roles/artifactregistry.reader"
+      ]
+    },
+    "service-account": {
+      "iamEnabled": true,
+      "exists": true,
+      "displayName": "silod",
+      "description": "silo-install:i7a71c41be6 silod, the Silo control plane"
+    },
+    "tenants": {}
+  }
+}

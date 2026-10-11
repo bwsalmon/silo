@@ -40,15 +40,7 @@ type Replica struct {
 	Host          string
 	AgentSlots    int
 	AgentSessions int
-	// GatewayAddress is where the control VM's gateway is reached,
-	// host[:port], which a tool channel attach for one of its sessions
-	// is redirected to (from GatewaySchema on).
-	GatewayAddress string
 }
-
-// GatewaySchema is the first schema with the heartbeat's gateway
-// address.
-const GatewaySchema = 18
 
 // HostSchema is the first schema with agents' hosts, the heartbeat's
 // session slots and the harnesses' saved state.
@@ -76,16 +68,6 @@ func Heartbeat(ctx context.Context, s Store, r Replica) error {
 	return s.Tx(ctx, func(tx Tx) error {
 		now, err := tx.Now(ctx)
 		if err != nil {
-			return err
-		}
-		if v >= GatewaySchema {
-			_, err = tx.Exec(ctx, `INSERT INTO replicas (id, release, schema_latest, started_at, heartbeat_at, sessions, address, host, agent_slots, agent_sessions, gateway_address)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET release = excluded.release, schema_latest = excluded.schema_latest,
-			heartbeat_at = excluded.heartbeat_at, sessions = excluded.sessions, address = excluded.address,
-			host = excluded.host, agent_slots = excluded.agent_slots, agent_sessions = excluded.agent_sessions,
-			gateway_address = excluded.gateway_address`,
-				r.ID, r.Release, r.Latest, Millis(r.Started), Millis(now), r.Sessions, r.Address, r.Host, r.AgentSlots, r.AgentSessions, r.GatewayAddress)
 			return err
 		}
 		if v >= HostSchema {

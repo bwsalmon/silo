@@ -24,6 +24,7 @@
     "admin": {
       "computeEnabled": true,
       "zone": "us-central1-a",
+      "ours": true,
       "members": [
         "user:admin@example.com"
       ],
@@ -185,7 +186,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "18"
+            "silo-schema": "17"
           },
           "edition": "ENTERPRISE",
           "tier": "db-g1-small",
@@ -597,7 +598,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "18"
+            "silo-schema": "17"
           },
           "edition": "ENTERPRISE",
           "tier": "db-g1-small",

@@ -128,6 +128,29 @@ func (c SQLAdmin) PatchInstance(ctx context.Context, project string, in *install
 	return c.waitOp(ctx, project, op, err)
 }
 
+// SetDeletionProtection patches settings.deletionProtectionEnabled
+// alone: the patch sends no other field.
+func (c SQLAdmin) SetDeletionProtection(ctx context.Context, project, name string, on bool) error {
+	if err := c.idle(ctx, project, name); err != nil {
+		return err
+	}
+	patch := &sqladmin.DatabaseInstance{Settings: &sqladmin.Settings{
+		DeletionProtectionEnabled: on, ForceSendFields: []string{"DeletionProtectionEnabled"}}}
+	op, err := c.s.Instances.Patch(project, name, patch).Context(ctx).Do()
+	return c.waitOp(ctx, project, op, err)
+}
+
+// DeleteInstance deletes the instance with a final backup kept for
+// finalBackupDays days.
+func (c SQLAdmin) DeleteInstance(ctx context.Context, project, name string, finalBackupDays int64) error {
+	if err := c.idle(ctx, project, name); err != nil {
+		return err
+	}
+	op, err := c.s.Instances.Delete(project, name).EnableFinalBackup(true).FinalBackupTtlDays(finalBackupDays).
+		FinalBackupDescription("silo uninstall --delete-data").Context(ctx).Do()
+	return c.waitOp(ctx, project, op, err)
+}
+
 // idle waits until no operation is running on the instance: Cloud SQL
 // refuses a second one.
 func (c SQLAdmin) idle(ctx context.Context, project, name string) error {

@@ -129,41 +129,6 @@ func (s *Server) PlaceAgent(ctx context.Context, agent, host string) error {
 	})
 }
 
-// SessionGateway is the gateway address of the control VM that hosts
-// agent's session, which a tool channel attach that reached self is
-// redirected to (agents.md, "The tool channel", SV-106): "" if the
-// session is self's, or unplaced, or its host has no live replica
-// (a heartbeat newer than store.ReplicaTimeout by database time) that
-// reports one. The leader's MoveSessions re-places a session whose host
-// is gone, and the tool server's next attach is redirected to the new
-// one.
-func (s *Server) SessionGateway(ctx context.Context, agent, self string) (string, error) {
-	var addr string
-	err := s.st.Tx(ctx, func(tx store.Tx) error {
-		addr = ""
-		var host string
-		err := tx.QueryRow(ctx, `SELECT host FROM agents WHERE id = ?`, agent).Scan(&host)
-		if errors.Is(err, sql.ErrNoRows) || err == nil && (host == "" || host == self) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		now, err := tx.Now(ctx)
-		if err != nil {
-			return err
-		}
-		err = tx.QueryRow(ctx, `SELECT gateway_address FROM replicas WHERE host = ? AND gateway_address <> '' AND heartbeat_at > ?
-			ORDER BY heartbeat_at DESC, id LIMIT 1`, host, store.Millis(now.Add(-store.ReplicaTimeout))).Scan(&addr)
-		if errors.Is(err, sql.ErrNoRows) {
-			addr = ""
-			return nil
-		}
-		return err
-	})
-	return addr, err
-}
-
 // sessionStates are the states whose sessions a host runs: the ones
 // that hold a session slot.
 var sessionStates = []any{agents.StateProvisioning, agents.StateRunning, agents.StateIdle, agents.StateWaiting}

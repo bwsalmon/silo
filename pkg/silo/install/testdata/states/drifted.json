@@ -22,6 +22,7 @@
     "admin": {
       "computeEnabled": true,
       "zone": "us-central1-a",
+      "ours": true,
       "rooted": true,
       "rootMembers": [
         "user:admin@example.com"
@@ -151,7 +152,7 @@
         "labels": {
           "silo-install": "i7a71c41be6",
           "silo-role": "db",
-          "silo-schema": "18"
+          "silo-schema": "17"
         },
         "edition": "ENTERPRISE",
         "tier": "db-f1-micro",
@@ -397,7 +398,7 @@
     "migrate": {
       "instance": "silo-db-t3st",
       "state": "RUNNABLE",
-      "schema": 18
+      "schema": 17
     },
     "nat": {
       "computeEnabled": true,
@@ -569,7 +570,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "18"
+            "silo-schema": "17"
           },
           "edition": "ENTERPRISE",
           "tier": "db-f1-micro",

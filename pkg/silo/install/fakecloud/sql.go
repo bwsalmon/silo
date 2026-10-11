@@ -76,10 +76,52 @@ func (s sqlAdmin) PatchInstance(ctx context.Context, project string, in *install
 	}
 	cur := s.f.SQLInstances[i]
 	next := *copyInstance(*in)
+	if cur.DeletionProtection != next.DeletionProtection {
+		s.f.ProtectionChanges = append(s.f.ProtectionChanges, fmt.Sprintf("%s=%t", in.Name, next.DeletionProtection))
+	}
 	// Read only.
 	next.State, next.Region = cur.State, cur.Region
 	next.ServiceAttachment, next.DNSName, next.ConnectionName = cur.ServiceAttachment, cur.DNSName, cur.ConnectionName
 	s.f.SQLInstances[i] = next
+	return nil
+}
+
+func (s sqlAdmin) SetDeletionProtection(ctx context.Context, project, name string, on bool) error {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	if err := s.f.need("sqladmin.googleapis.com"); err != nil {
+		return err
+	}
+	i := s.f.sqlInstance(name)
+	if i < 0 {
+		return notFound("instance " + name)
+	}
+	if s.f.SQLInstances[i].DeletionProtection != on {
+		s.f.ProtectionChanges = append(s.f.ProtectionChanges, fmt.Sprintf("%s=%t", name, on))
+	}
+	s.f.SQLInstances[i].DeletionProtection = on
+	return nil
+}
+
+// DeleteInstance refuses an instance with deletion protection, as Cloud
+// SQL does, and records the final backup in FinalBackups.
+func (s sqlAdmin) DeleteInstance(ctx context.Context, project, name string, finalBackupDays int64) error {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	if err := s.f.need("sqladmin.googleapis.com"); err != nil {
+		return err
+	}
+	i := s.f.sqlInstance(name)
+	if i < 0 {
+		return notFound("instance " + name)
+	}
+	if s.f.SQLInstances[i].DeletionProtection {
+		return &googleapi.Error{Code: http.StatusBadRequest, Message: "The instance is protected. Please disable the deletion protection and try again."}
+	}
+	s.f.SQLInstances = append(s.f.SQLInstances[:i], s.f.SQLInstances[i+1:]...)
+	delete(s.f.Databases, name)
+	delete(s.f.Users, name)
+	s.f.FinalBackups[name] = finalBackupDays
 	return nil
 }
 

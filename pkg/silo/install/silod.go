@@ -128,3 +128,107 @@ func (s *silodAPI) Regions(ctx context.Context) ([]string, error) {
 	}
 	return out, nil
 }
+
+func (s *silodAPI) Tree(ctx context.Context) ([]SiloNode, error) {
+	root, err := s.c.Describe(ctx, "/", true)
+	if err != nil {
+		return nil, err
+	}
+	var out []SiloNode
+	var walk func(*client.Silo)
+	walk = func(n *client.Silo) {
+		out = append(out, SiloNode{ID: n.ID, Path: n.Path})
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(root)
+	return out, nil
+}
+
+func (s *silodAPI) Agents(ctx context.Context, silo string) ([]string, error) {
+	as, err := s.c.Agents(ctx, silo)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, a := range as {
+		out = append(out, a.Name)
+	}
+	return out, nil
+}
+
+// opWait is how often uninstall polls silod's delete operations.
+const opWait = 2 * time.Second
+
+func (s *silodAPI) DeleteSilo(ctx context.Context, path string) error {
+	res, err := s.c.Delete(ctx, path, true, client.Mutation{})
+	if err != nil {
+		if client.IsCode(err, "NOT_FOUND") {
+			return nil
+		}
+		return err
+	}
+	if res.Done && res.Error == nil {
+		return nil
+	}
+	_, err = s.c.WaitOperation(ctx, res.ID, opWait)
+	return err
+}
+
+func (s *silodAPI) DeleteAgent(ctx context.Context, silo, name string) error {
+	if silo == "/" {
+		silo = ""
+	}
+	out, err := s.c.DeleteAgent(ctx, silo+"/agents/"+name, client.Mutation{})
+	if err != nil {
+		if client.IsCode(err, "NOT_FOUND") {
+			return nil
+		}
+		return err
+	}
+	if done, _ := out["done"].(bool); done {
+		return nil
+	}
+	id, _ := out["id"].(string)
+	if id == "" {
+		id, _ = out["name"].(string)
+	}
+	if id == "" {
+		return nil
+	}
+	_, err = s.c.WaitOperation(ctx, id, opWait)
+	return err
+}
+
+// The credentials endpoint (agents.md "Credentials"): GET
+// /silod/credentials lists them, {"credentials": [{"name": ...}]}, and
+// DELETE /silod/credentials/<name> deletes one. A silod without it
+// answers 404, and holds none.
+func (s *silodAPI) Credentials(ctx context.Context) ([]string, error) {
+	var out struct {
+		Credentials []struct {
+			Name string `json:"name"`
+		} `json:"credentials"`
+	}
+	code, err := s.raw(ctx, http.MethodGet, "/silod/credentials", nil, &out)
+	if code == http.StatusNotFound {
+		return nil, ErrNoCredentialAPI
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, c := range out.Credentials {
+		names = append(names, c.Name)
+	}
+	return names, nil
+}
+
+func (s *silodAPI) DeleteCredential(ctx context.Context, name string) error {
+	code, err := s.raw(ctx, http.MethodDelete, "/silod/credentials/"+url.PathEscape(name), nil, nil)
+	if code == http.StatusNotFound {
+		return nil
+	}
+	return err
+}

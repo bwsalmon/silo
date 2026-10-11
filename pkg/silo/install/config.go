@@ -58,6 +58,12 @@ type Config struct {
 	FrontDoorMembers []string
 	AuditSink        bool
 
+	// Force and DeleteData are uninstall's: delete the tree's silos,
+	// agents and objects, and orphans; and delete the database, which
+	// uninstall otherwise keeps (install.md "silo uninstall").
+	Force      bool
+	DeleteData bool
+
 	DryRun bool
 	Yes    bool
 	// Output is table or json; json is for --dry-run.
