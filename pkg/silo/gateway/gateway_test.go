@@ -87,6 +87,7 @@ type env struct {
 type envOptions struct {
 	gatewaySkipsControl bool // silod's check alone
 	silodSkipsControl   bool // the gateway's check alone
+	gatewaySkipsNow     func() bool
 	silodWait           time.Duration
 }
 
@@ -136,7 +137,7 @@ func newEnv(t *testing.T, o envOptions) *env {
 	e.resolver = &fakeResolver{names: map[string][]netip.Addr{}}
 	e.upstream = newUpstream(t)
 	e.exp = newExportUpstream(t)
-	e.gw = New(Options{SkipControl: o.gatewaySkipsControl, Retry: 50 * time.Millisecond, SilodWait: o.silodWait, Dial: func(ctx context.Context) (net.Conn, error) {
+	e.gw = New(Options{SkipControl: o.gatewaySkipsControl, SkipControlNow: o.gatewaySkipsNow, Retry: 50 * time.Millisecond, SilodWait: o.silodWait, Dial: func(ctx context.Context) (net.Conn, error) {
 		if e.silodDown.Load() {
 			return nil, errors.New("connect: connection refused")
 		}

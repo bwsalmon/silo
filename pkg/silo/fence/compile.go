@@ -121,6 +121,12 @@ type Config struct {
 	// GatewayReplicas is set when install made a gateway MIG, whose
 	// health checks gw-health-in lets in.
 	GatewayReplicas bool
+	// KeepControlPort, when it returns true, keeps a sealed silo's
+	// api-out rule, so that the conformance suite can show the
+	// gateway's and silod's refusals hold without the fence's
+	// (testing.md, "Sealed and read silos"). Only silod's conformance
+	// build (SILO_TEST_KEEP_CONTROL_PORT) sets it; nil everywhere else.
+	KeepControlPort func() bool
 }
 
 // DefaultConfig is install's defaults.
@@ -291,7 +297,7 @@ func siloRules(in *Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*com
 			newRule(n.ID+slotSuffix[SlotGatewayOut], base+SlotGatewayOut, "EGRESS", "allow", b, gw,
 				[]L4{{Protocol: "tcp", Ports: []string{strconv.Itoa(HTTPPort), strconv.Itoa(ProxyPort), cfg.ExportPorts}}}),
 		)
-		if !n.Sealed {
+		if !n.Sealed || (cfg.KeepControlPort != nil && cfg.KeepControlPort()) {
 			out = append(out, newRule(n.ID+slotSuffix[SlotAPIOut], base+SlotAPIOut, "EGRESS", "allow", b, gw,
 				[]L4{{Protocol: "tcp", Ports: []string{strconv.Itoa(APIPort)}}}))
 		}

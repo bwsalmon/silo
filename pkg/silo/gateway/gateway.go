@@ -60,6 +60,10 @@ type Options struct {
 	// SkipControl skips the gateway's control-policy check, so that a
 	// test can show silod's check holds alone. Never set outside tests.
 	SkipControl bool
+	// SkipControlNow, when it returns true, skips the check as
+	// SkipControl does, call by call. Only silod's conformance build
+	// (SILO_TEST_SKIP_CONTROL_GATE) sets it; nil everywhere else.
+	SkipControlNow func() bool
 	// Retry is how long the gateway waits before following silod's
 	// tables again after the stream breaks; a second if zero.
 	Retry time.Duration
@@ -342,7 +346,7 @@ func (g *Gateway) serveAPI(w http.ResponseWriter, r *http.Request) {
 		forbidden(fmt.Sprintf("silo: %s is in %s's blocks but in no subnet of it", ip, info.Path)).write(w, p)
 		return
 	}
-	if !g.opts.SkipControl {
+	if !g.opts.SkipControl && (g.opts.SkipControlNow == nil || !g.opts.SkipControlNow()) {
 		var class control.Class
 		var op string
 		if isFacade {

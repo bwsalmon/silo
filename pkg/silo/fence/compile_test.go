@@ -173,3 +173,25 @@ func TestCheckStepsCatchesUnsealing(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// KeepControlPort (only the conformance build of silod sets it) keeps a
+// sealed silo's api-out, and only while it says so.
+func TestCompileKeepControlPort(t *testing.T) {
+	on := true
+	cfg := DefaultConfig
+	cfg.KeepControlPort = func() bool { return on }
+	rules, err := Compile(smallInput(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := byName(rules)["b-api-out"]; r == nil || r.Priority != 170009 {
+		t.Errorf("sealed b with the control port kept: api-out = %+v", r)
+	}
+	on = false
+	if rules, err = Compile(smallInput(), cfg, rules); err != nil {
+		t.Fatal(err)
+	}
+	if byName(rules)["b-api-out"] != nil {
+		t.Errorf("sealed b has an api-out with the switch off")
+	}
+}
