@@ -223,3 +223,22 @@ func TestUninstallLeavesAnotherInstallAlone(t *testing.T) {
 		}
 	}
 }
+
+// The credentials check passes a real project's testIamPermissions: the
+// first real install failed it because the set named a billing
+// permission, which projects refuse outright (the fake now does too).
+func TestCredentialsCheckIsValidOnAProject(t *testing.T) {
+	for _, p := range install.Permissions() {
+		if strings.HasPrefix(p, "billing.") {
+			t.Errorf("Permissions() has %s, which a project's testIamPermissions refuses", p)
+		}
+	}
+	f := fakecloud.New(project)
+	g, err := f.Cloud().ResourceManager.TestIamPermissions(context.Background(), project, install.Permissions())
+	if err != nil {
+		t.Fatalf("testIamPermissions: %v", err)
+	}
+	if len(g) != len(install.Permissions()) {
+		t.Errorf("granted %d of %d", len(g), len(install.Permissions()))
+	}
+}

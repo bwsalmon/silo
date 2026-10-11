@@ -78,7 +78,6 @@
       "granted": [
         "artifactregistry.repositories.create",
         "artifactregistry.repositories.setIamPolicy",
-        "billing.resourceAssociations.list",
         "cloudsql.databases.create",
         "cloudsql.instances.create",
         "cloudsql.users.create",
