@@ -1,0 +1,136 @@
+{
+  "args": [
+    "--project",
+    "silo-test-project",
+    "--regions",
+    "us-central1,europe-west4",
+    "--admin",
+    "user:admin@example.com",
+    "--control-replicas",
+    "3",
+    "--gateway-replicas",
+    "2",
+    "--agent-sessions",
+    "4"
+  ],
+  "after": 1,
+  "observed": {
+    "address": {
+      "computeEnabled": false,
+      "exists": false
+    },
+    "admin": {
+      "computeEnabled": false
+    },
+    "apis": {
+      "enabled": []
+    },
+    "control": {
+      "computeEnabled": false,
+      "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+      "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139",
+      "replicas": {
+        "computeEnabled": false,
+        "control": {},
+        "gateway": {},
+        "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+        "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139"
+      }
+    },
+    "control-subnet": {
+      "computeEnabled": false,
+      "exists": false
+    },
+    "db": {
+      "sqlEnabled": false
+    },
+    "db-endpoint": {
+      "computeEnabled": false,
+      "dnsEnabled": false
+    },
+    "db-instance": {
+      "sqlEnabled": false
+    },
+    "dns": {
+      "dnsEnabled": false
+    },
+    "fence": {
+      "computeEnabled": false,
+      "exists": false
+    },
+    "gateway-subnet": {
+      "computeEnabled": false,
+      "exists": false
+    },
+    "image": {
+      "source": "ghcr.io/bwsalmon/silod:v1.0.0",
+      "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+      "enabled": false,
+      "harnessSource": "ghcr.io/bwsalmon/silod-harness:v1.0.0",
+      "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139"
+    },
+    "migrate": {
+      "schema": -1
+    },
+    "nat": {
+      "computeEnabled": false,
+      "exists": false
+    },
+    "network": {
+      "computeEnabled": false,
+      "exists": false
+    },
+    "prereqs": {
+      "project": {
+        "id": "silo-test-project",
+        "number": 123456789012
+      },
+      "granted": [
+        "artifactregistry.repositories.create",
+        "artifactregistry.repositories.setIamPolicy",
+        "billing.resourceAssociations.list",
+        "cloudsql.databases.create",
+        "cloudsql.instances.create",
+        "cloudsql.users.create",
+        "compute.addresses.create",
+        "compute.firewallPolicies.create",
+        "compute.forwardingRules.create",
+        "compute.instanceGroupManagers.create",
+        "compute.instances.create",
+        "compute.networks.create",
+        "compute.projects.get",
+        "compute.regions.list",
+        "compute.routers.create",
+        "compute.subnetworks.create",
+        "dns.changes.create",
+        "dns.managedZones.create",
+        "iam.roles.create",
+        "iam.roles.update",
+        "iam.serviceAccounts.create",
+        "iam.serviceAccounts.get",
+        "iap.tunnelInstances.setIamPolicy",
+        "resourcemanager.projects.get",
+        "resourcemanager.projects.getIamPolicy",
+        "resourcemanager.projects.setIamPolicy",
+        "serviceusage.services.enable",
+        "serviceusage.services.list"
+      ],
+      "billingDeferred": true,
+      "computeDeferred": true,
+      "firewallPolicies": 0,
+      "instances": 0,
+      "ruleQuotaDeferred": true,
+      "sqlDeferred": true
+    },
+    "role": {
+      "iamEnabled": false,
+      "crmEnabled": false
+    },
+    "root": {},
+    "service-account": {
+      "iamEnabled": false,
+      "exists": false
+    },
+    "verify": {}
+  }
+}

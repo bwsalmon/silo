@@ -1,0 +1,49 @@
+silo install: project silo-test-project
+
+  prereqs           ok      credentials ok; no organization
+                    defer   billing: checked once the apis step has enabled
+                            cloudbilling.googleapis.com
+                            regions, quota, VPC, firewall policy, address space and project checks:
+                            checked once the apis step has enabled compute.googleapis.com
+                            Cloud SQL: checked once the apis step has enabled
+                            sqladmin.googleapis.com
+  apis              enable  compute.googleapis.com, dns.googleapis.com, iam.googleapis.com,
+                            iap.googleapis.com, artifactregistry.googleapis.com,
+                            cloudresourcemanager.googleapis.com, serviceusage.googleapis.com,
+                            logging.googleapis.com, sqladmin.googleapis.com,
+                            cloudquotas.googleapis.com, cloudbilling.googleapis.com
+  db-instance       create  silo-db-<suffix> POSTGRES_17 db-g1-small zonal us-central1 (takes
+                            several minutes; install continues meanwhile)
+  service-account   create  silod@silo-test-project.iam.gserviceaccount.com
+  role              create  projects/silo-test-project/roles/silod (91 permissions)
+                            projects/silo-test-project/roles/silod bound to silod
+                            roles/logging.logWriter bound to silod
+                            roles/artifactregistry.reader bound to silod
+  network           create  silo (custom, global routing, firewall policy first)
+  gateway-subnet    create  silo-gateway 10.255.255.0/24 us-central1, Private Google Access on
+  control-subnet    create  silo-ctl 10.255.254.0/24 us-central1, Private Google Access off
+  nat               create  silo-router us-central1, with NAT silo-gateway-nat for silo-gateway only
+  fence             create  silo-fence ctl-deny-out, gw-in, gw-admin-in, gw-out, catch-in, catch-out
+                            (no silo rules until the root exists)
+                            silo-fence -> silo association
+  address           create  silo-gateway-ip internal, in silo-gateway
+  dns               create  silo-internal private zone for silo.internal., visible to silo
+                            silo.internal. A silo-gateway-ip
+  image             create  silo docker repository in us-central1
+                    apply   silod@sha256:7dd5524d6d0b copy from ghcr.io/bwsalmon/silod
+  db                create  database silo, IAM user silod@silo-test-project.iam
+  db-endpoint       create  silo-db-psc (address) internal, in silo-ctl
+                            silo-db-psc (forwarding rule) to the instance's service attachment
+                            silo-db private zone for the instance's PSC DNS name, A silo-db-psc
+  migrate           apply   schema 0 -> 17
+  control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
+                            (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
+  root              create  / blocks 10.0.0.0/8 (minus 10.255.254.0/23)
+                            us-central1, europe-west4: capacity read from the project's quotas once
+                            compute is on
+  admin             create  user:admin@example.com -> /
+                            user:admin@example.com roles/iap.tunnelResourceAccessor on silo-control
+  verify            apply   describe / and regions.list through the front door
+
+  20 steps: 19 to create or apply, 0 to update, 1 ok
+  Estimated time: about 24 minutes.

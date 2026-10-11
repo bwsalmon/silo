@@ -1,0 +1,285 @@
+{
+  "args": [
+    "--project",
+    "silo-test-project",
+    "--regions",
+    "us-central1,xx-nowhere1",
+    "--agent-sessions",
+    "12",
+    "--control-replicas",
+    "2",
+    "--db-tier",
+    "db-perf-optimized-N-2",
+    "--db-version",
+    "POSTGRES_99"
+  ],
+  "after": -1,
+  "observed": {
+    "address": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "admin": {
+      "computeEnabled": true
+    },
+    "apis": {
+      "enabled": [
+        "compute.googleapis.com",
+        "dns.googleapis.com",
+        "iam.googleapis.com",
+        "iap.googleapis.com",
+        "artifactregistry.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "serviceusage.googleapis.com",
+        "logging.googleapis.com",
+        "sqladmin.googleapis.com",
+        "cloudquotas.googleapis.com",
+        "cloudbilling.googleapis.com"
+      ]
+    },
+    "control": {
+      "computeEnabled": true,
+      "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+      "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139",
+      "replicas": {
+        "computeEnabled": true,
+        "zones": [
+          "us-central1-a",
+          "us-central1-b",
+          "us-central1-c",
+          "us-central1-f"
+        ],
+        "control": {},
+        "gateway": {},
+        "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+        "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139"
+      }
+    },
+    "control-subnet": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "db": {
+      "sqlEnabled": true
+    },
+    "db-endpoint": {
+      "computeEnabled": true,
+      "dnsEnabled": true
+    },
+    "db-instance": {
+      "sqlEnabled": true
+    },
+    "dns": {
+      "dnsEnabled": true
+    },
+    "fence": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "gateway-subnet": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "image": {
+      "source": "ghcr.io/bwsalmon/silod:v1.0.0",
+      "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
+      "enabled": true,
+      "harnessSource": "ghcr.io/bwsalmon/silod-harness:v1.0.0",
+      "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139"
+    },
+    "migrate": {
+      "schema": -1
+    },
+    "nat": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "network": {
+      "computeEnabled": true,
+      "exists": false
+    },
+    "prereqs": {
+      "project": {
+        "id": "silo-test-project",
+        "number": 123456789012,
+        "parent": "organizations/1234"
+      },
+      "granted": [
+        "artifactregistry.repositories.create",
+        "artifactregistry.repositories.setIamPolicy",
+        "cloudsql.databases.create",
+        "cloudsql.instances.create",
+        "cloudsql.users.create",
+        "compute.addresses.create",
+        "compute.firewallPolicies.create",
+        "compute.forwardingRules.create",
+        "compute.instanceGroupManagers.create",
+        "compute.instances.create",
+        "compute.projects.get",
+        "compute.regions.list",
+        "compute.routers.create",
+        "compute.subnetworks.create",
+        "dns.changes.create",
+        "dns.managedZones.create",
+        "iam.roles.create",
+        "iam.roles.update",
+        "iam.serviceAccounts.create",
+        "iam.serviceAccounts.get",
+        "iap.tunnelInstances.setIamPolicy",
+        "resourcemanager.projects.get",
+        "resourcemanager.projects.getIamPolicy",
+        "resourcemanager.projects.setIamPolicy",
+        "serviceusage.services.enable",
+        "serviceusage.services.list"
+      ],
+      "regions": {
+        "us-central1": {
+          "exists": true,
+          "quotas": {
+            "CPUS": {
+              "limit": 4,
+              "usage": 0
+            },
+            "INSTANCES": {
+              "limit": 100,
+              "usage": 0
+            },
+            "SSD_TOTAL_GB": {
+              "limit": 500,
+              "usage": 0
+            }
+          },
+          "zones": [
+            "us-central1-a",
+            "us-central1-b",
+            "us-central1-c",
+            "us-central1-f"
+          ],
+          "machineZone": "us-central1-a",
+          "cpus": 2,
+          "memoryMb": 8192
+        },
+        "xx-nowhere1": {
+          "exists": false
+        }
+      },
+      "projectQuotas": {
+        "FIREWALLS": {
+          "limit": 200,
+          "usage": 0
+        },
+        "NETWORKS": {
+          "limit": 15,
+          "usage": 1
+        },
+        "SUBNETWORKS": {
+          "limit": 2,
+          "usage": 2
+        }
+      },
+      "subnets": [
+        {
+          "name": "other",
+          "network": "default",
+          "region": "europe-west4",
+          "ranges": [
+            "192.168.0.0/24"
+          ]
+        },
+        {
+          "name": "default",
+          "network": "default",
+          "region": "us-central1",
+          "ranges": [
+            "10.128.0.0/20"
+          ]
+        }
+      ],
+      "firewallPolicies": 0,
+      "instances": 0,
+      "sqlTiers": [
+        {
+          "tier": "db-f1-micro",
+          "regions": [
+            "us-central1",
+            "europe-west4",
+            "us-east1"
+          ]
+        },
+        {
+          "tier": "db-g1-small",
+          "regions": [
+            "us-central1",
+            "europe-west4",
+            "us-east1"
+          ]
+        },
+        {
+          "tier": "db-custom-1-3840",
+          "regions": [
+            "us-central1",
+            "europe-west4",
+            "us-east1"
+          ]
+        }
+      ],
+      "sqlVersions": [
+        "MYSQL_8_0",
+        "POSTGRES_15",
+        "POSTGRES_16",
+        "POSTGRES_17"
+      ],
+      "sqlInstances": [
+        {
+          "name": "silo-db-kept",
+          "region": "us-central1",
+          "labels": {
+            "silo-install": "i7a71c41be6"
+          }
+        }
+      ],
+      "orgPolicies": {
+        "compute.disablePrivateServiceConnectCreationForConsumers": {
+          "constraint": "",
+          "allowed": [
+            "SERVICE_PRODUCERS"
+          ]
+        },
+        "compute.restrictCloudNATUsage": {
+          "constraint": "compute.restrictCloudNATUsage"
+        },
+        "compute.restrictPrivateServiceConnectProducer": {
+          "constraint": "compute.restrictPrivateServiceConnectProducer"
+        },
+        "compute.trustedImageProjects": {
+          "constraint": "compute.trustedImageProjects"
+        },
+        "gcp.resourceLocations": {
+          "constraint": "gcp.resourceLocations",
+          "allowed": [
+            "in:europe-locations"
+          ]
+        },
+        "iam.allowedPolicyMemberDomains": {
+          "constraint": "iam.allowedPolicyMemberDomains"
+        },
+        "iam.disableServiceAccountCreation": {
+          "constraint": "iam.disableServiceAccountCreation",
+          "enforced": true
+        }
+      }
+    },
+    "role": {
+      "iamEnabled": true,
+      "crmEnabled": true
+    },
+    "root": {
+      "capacityError": "rootcap: regions.get xx-nowhere1: googleapi: Error 404: The resource 'projects/silo-test-project/regions/xx-nowhere1' was not found, notFound"
+    },
+    "service-account": {
+      "iamEnabled": true,
+      "exists": false
+    },
+    "verify": {}
+  }
+}

@@ -1,0 +1,101 @@
+# Silo's CI, run by grain (.grain/workflows) on every push and pull
+# request. The jobs are the two of grain's own tests.yml that covered
+# Silo while it lived in grain's repository: `go`, which formats, builds,
+# vets and race-tests the whole module, and `postgres`, which runs the
+# store against a real PostgreSQL server. They are independent, so
+# neither waits on the other.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Deliberately not -mod=mod: a sandbox that cannot reach the network
+  # should fail saying the module is missing rather than hanging on a
+  # proxy it will never reach.
+  GOFLAGS: -mod=readonly
+
+jobs:
+  go:
+    name: go
+    # Everything but the documentation: no test opens anything under
+    # docs/ or a top-level Markdown file.
+    paths-ignore: &not-read-by-the-go-program
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 8
+      memory-mb: 16384
+    timeout-minutes: 60
+    steps:
+      - name: Format
+        run: make fmt
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: |
+          set +e
+          go test -race -timeout 45m ./... > /tmp/gotest.log 2>&1
+          status=$?
+          set -e
+          echo "=== failing tests ==="
+          grep -n -A 30 -- '--- FAIL' /tmp/gotest.log | head -500
+          echo "=== panics ==="
+          grep -n -A 30 -- '^panic:' /tmp/gotest.log | head -200
+          echo "=== data races ==="
+          grep -n -A 30 -- '^WARNING: DATA RACE' /tmp/gotest.log | head -200
+          echo "=== per-package results ==="
+          grep -E '^(ok|FAIL|\?)[[:space:]]' /tmp/gotest.log | head -200
+          echo "=== last 200 lines of the raw run ==="
+          tail -n 200 /tmp/gotest.log
+          exit $status
+
+  # ./pkg/silo/store/... is silod's store: the conformance suite, and the
+  # Postgres-only lease and change-log cases, against a throwaway server
+  # per test (pkg/silo/internal/pgtest). SILO_REQUIRE_POSTGRES makes every
+  # "postgres is not available" skip a failure instead, so a server that
+  # does not come up is this job's red rather than a quiet `ok`. The `go`
+  # job, which has no PostgreSQL, skips those cases.
+  # docs/silo/state.md, "Testing the store".
+  postgres:
+    name: postgres
+    paths-ignore: *not-read-by-the-go-program
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 30
+    steps:
+      # `infrastructure:` because this is a download: an archive that is
+      # down errors the job instead of failing the commit. policy-rc.d
+      # (the image's own, or one written here when it has none) keeps
+      # the package's own cluster from starting -- the tests start
+      # theirs on a free port and want nothing on 5432.
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+          ls /usr/lib/postgresql/*/bin/initdb
+
+      - name: Test
+        env:
+          SILO_REQUIRE_POSTGRES: "1"
+        # The fence API's TestPostgres runs its cases on Postgres too.
+        run: |
+          set -e
+          go test -count=1 -timeout 20m ./pkg/silo/store/...
+          go test -count=1 -timeout 10m -run TestPostgres ./pkg/silo/fenceapi/

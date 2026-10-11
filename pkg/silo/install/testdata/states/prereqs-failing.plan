@@ -1,0 +1,121 @@
+silo install: project silo-test-project
+
+  prereqs           ok      CPUS us-central1 0/4 used; NETWORKS 1/15; firewall policy rule
+                            attributes 2000 (not reported by Cloud Quotas: the documented default),
+                            for about 360 silos
+                    fail    admin: no --admin, and this is the first install
+                            why: the root needs a first member, or nobody can manage the tree
+                            fix: add --admin user:<you@example.com> (repeatable)
+                    fail    credentials: missing compute.networks.create,
+                            billing.resourceAssociations.list
+                            why: install creates and configures every object it sets up with these
+                            credentials
+                            fix: on project silo-test-project, grant roles/owner, or each of:
+                            roles/compute.admin; roles/billing.viewer (or roles/viewer on the
+                            project) (gcloud projects add-iam-policy-binding silo-test-project
+                            --member <you> --role <role>)
+                    fail    billing: billing is not enabled on silo-test-project
+                            why: GCE, Cloud SQL and Artifact Registry need a billing account
+                            fix: link one at
+                            https://console.cloud.google.com/billing/linkedaccount?project=silo-test-project
+                    fail    regions: region xx-nowhere1 doesn't exist
+                            why: the root's regions are where its silos may run
+                            fix: check --regions (gcloud compute regions list)
+                    fail    quota: CPUS in us-central1: 0 of 4 used, and the control plane needs 6
+                            more
+                            why: the control VMs, gateway replicas and the migration VM run in the
+                            home region
+                            fix: raise it at
+                            https://console.cloud.google.com/iam-admin/quotas?project=silo-test-project
+                    fail    agent capacity: 12 sessions, but 2 e2-standard-2 VMs carry 10
+                            why: each session takes 0.2 vCPU and 0.5 GB, and each VM keeps 1 vCPU
+                            and 2 GB for silod and the gateway
+                            fix: each e2-standard-2 carries 5 sessions: use --control-replicas 4, or
+                            a larger --control-machine-type
+                    fail    VPC limits: SUBNETWORKS: 2 of 2 used, less than 10% left
+                            why: every silo's subnets and the tree's firewall rules come out of the
+                            project's limits
+                            fix: raise it at
+                            https://console.cloud.google.com/iam-admin/quotas?project=silo-test-project
+                    fail    address space: --address-space 10.0.0.0/8 overlaps subnet default
+                            (10.128.0.0/20) of VPC default in us-central1
+                            why: the root's block must be the project's alone, or silos' addresses
+                            would collide with it
+                            fix: pick another --address-space, or delete the subnet
+                    fail    Cloud SQL: us-central1 doesn't offer --db-tier db-perf-optimized-N-2
+                            why: the database lives in the home region
+                            fix: pick one it offers: db-f1-micro, db-g1-small, db-custom-1-3840
+                    fail    Cloud SQL: Cloud SQL doesn't offer --db-version POSTGRES_99
+                            why: silod's schema is PostgreSQL
+                            fix: pick one it offers: POSTGRES_15, POSTGRES_16, POSTGRES_17
+                    fail    PSC:
+                            constraints/compute.disablePrivateServiceConnectCreationForConsumers
+                            disables endpoints to service producers
+                            why: silod reaches its database through a Private Service Connect
+                            endpoint (Private services access, the alternative, isn't built in v1)
+                            fix: ask the organization's admin to exempt the project from
+                            constraints/compute.disablePrivateServiceConnectCreationForConsumers
+                    fail    org policy: constraints/iam.disableServiceAccountCreation forbids
+                            creating silod's service account
+                            why: it blocks the service-account step
+                            fix: ask the organization's admin to exempt the project from
+                            constraints/iam.disableServiceAccountCreation
+                    fail    org policy: constraints/gcp.resourceLocations excludes us-central1, one
+                            of --regions
+                            why: it blocks the network step
+                            fix: ask the organization's admin to exempt the project from
+                            constraints/gcp.resourceLocations
+                    fail    org policy: constraints/gcp.resourceLocations excludes xx-nowhere1, one
+                            of --regions
+                            why: it blocks the network step
+                            fix: ask the organization's admin to exempt the project from
+                            constraints/gcp.resourceLocations
+  apis              ok      11 APIs enabled
+  db-instance       create  silo-db-<suffix> POSTGRES_99 db-perf-optimized-N-2 zonal us-central1
+                            (takes several minutes; install continues meanwhile)
+  service-account   create  silod@silo-test-project.iam.gserviceaccount.com
+  role              create  projects/silo-test-project/roles/silod (91 permissions)
+                            projects/silo-test-project/roles/silod bound to silod
+                            roles/logging.logWriter bound to silod
+                            roles/artifactregistry.reader bound to silod
+  network           create  silo (custom, global routing, firewall policy first)
+  gateway-subnet    create  silo-gateway 10.255.255.0/24 us-central1, Private Google Access on
+  control-subnet    create  silo-ctl 10.255.254.0/24 us-central1, Private Google Access off
+  nat               create  silo-router us-central1, with NAT silo-gateway-nat for silo-gateway only
+  fence             create  silo-fence ctl-deny-out, gw-in, gw-admin-in, gw-health-in, gw-out,
+                            catch-in, catch-out (no silo rules until the root exists)
+                            silo-fence -> silo association
+  address           create  silo-gateway-ip internal, in silo-gateway
+  dns               create  silo-internal private zone for silo.internal., visible to silo
+                            silo.internal. A silo-gateway-ip
+  image             create  silo docker repository in us-central1
+                    apply   silod@sha256:7dd5524d6d0b copy from ghcr.io/bwsalmon/silod
+                            silod-harness@sha256:3f2a28973b74 copy from
+                            ghcr.io/bwsalmon/silod-harness
+  db                create  database silo, IAM user silod@silo-test-project.iam
+  db-endpoint       create  silo-db-psc (address) internal, in silo-ctl
+                            silo-db-psc (forwarding rule) to the instance's service attachment
+                            silo-db private zone for the instance's PSC DNS name, A silo-db-psc
+  migrate           apply   schema 0 -> 17
+  control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
+                            (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
+                            silo-control-lb-ip internal, in silo-gateway
+                            silo-control-<hash> instance template: e2-standard-2 cos-stable, the
+                            silod service account, silod@sha256:7dd5524d6d0b
+                            silo-control-hc TCP 8080
+                            silo-control-mig regional MIG of 1, silo-control-<hash>
+                            silo-control-lb (backend service) internal passthrough, TCP,
+                            silo-control-anchor, silo-control-mig
+                            silo-control-lb (forwarding rule) silo-control-lb-ip, all TCP ports,
+                            global access
+                    update  silo.internal. A the NLB's address
+  root              fail    / reading the project's quotas: rootcap: regions.get xx-nowhere1:
+                            googleapi: Error 404: The resource
+                            'projects/silo-test-project/regions/xx-nowhere1' was not found, notFound
+                            why: the root's capacity is the project's quota
+                            fix: check the installer can read compute regions and Cloud Quotas
+  admin             ok      no --admin or --front-door-member to grant
+  verify            apply   describe / and regions.list through the front door
+
+  20 steps: 16 to create or apply, 0 to update, 2 ok, 2 failing
+  Nothing can be applied until every failing check passes.
