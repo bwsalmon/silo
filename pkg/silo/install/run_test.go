@@ -172,7 +172,7 @@ func TestUninstall(t *testing.T) {
 	}
 	plans := install.PlanRemoveAll(ctx, st)
 	out := render(plans)
-	for _, want := range []string{"network           delete  silo", "apis              keep    leaves on artifactregistry", "db-instance       keep    silo-db-t3st kept", "12 to delete, 2 to keep"} {
+	for _, want := range []string{"network           delete  silo", "apis              keep    leaves on artifactregistry", "db-instance       keep    silo-db-t3st kept", "13 to delete, 2 to keep", "admin             delete  roles/iap.tunnelResourceAccessor on silo-control"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("uninstall plan lacks %q:\n%s", want, out)
 		}
@@ -192,6 +192,10 @@ func TestUninstall(t *testing.T) {
 	}
 	if len(f.SQLInstances) != 1 || !f.SQLInstances[0].DeletionProtection {
 		t.Errorf("uninstall didn't keep the database: %+v", f.SQLInstances)
+	}
+	// Without --delete-data, deletion protection is never touched.
+	if len(f.ProtectionChanges) != 0 || len(f.FinalBackups) != 0 {
+		t.Errorf("uninstall touched the database: protection %v, final backups %v", f.ProtectionChanges, f.FinalBackups)
 	}
 	for _, b := range f.ProjectPolicy.Bindings {
 		t.Errorf("uninstall left a binding: %+v", b)

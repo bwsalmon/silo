@@ -39,6 +39,11 @@ type Fake struct {
 	// Databases and Users are each instance's, by instance name.
 	Databases map[string][]string
 	Users     map[string][]install.SQLUser
+	// ProtectionChanges records every change to an instance's deletion
+	// protection, as <name>=<on>; FinalBackups are the final backups of
+	// deleted instances, by name, with the days each is kept.
+	ProtectionChanges []string
+	FinalBackups      map[string]int64
 	// RefuseRoles makes users.insert refuse databaseRoles, as open
 	// question 19 fears it might.
 	RefuseRoles bool
@@ -77,6 +82,18 @@ type Fake struct {
 	// before; Members are the root's members.
 	Root    *install.BootstrapRequest
 	Members []string
+	// RootID is the root's id. Silos are the silos below the root, by
+	// path, with their ids, and Agents each silo's agents by name, by
+	// path. Deleting a silo deletes the GCE objects labelled with its id
+	// and its descendants'.
+	RootID string
+	Silos  map[string]string
+	Agents map[string][]string
+	// Credentials are the agent credentials silod holds. CredentialAPI
+	// is whether silod serves the credentials endpoint; without it, it
+	// answers 404, as a silod from before agents.md "Credentials" does.
+	Credentials   []string
+	CredentialAPI bool
 }
 
 // New is a fresh project with no organization: billing on, every
@@ -118,6 +135,10 @@ func New(project string) *Fake {
 		InstancePolicies: map[string]*install.Policy{},
 		Databases:        map[string][]string{},
 		Users:            map[string][]install.SQLUser{},
+		FinalBackups:     map[string]int64{},
+		RootID:           "r2r2r2",
+		Silos:            map[string]string{},
+		Agents:           map[string][]string{},
 		ForwardingRules:  map[string]*compute.ForwardingRule{},
 		HealthChecks:     map[string]*compute.HealthCheck{},
 		MIGs:             map[string]*compute.InstanceGroupManager{},

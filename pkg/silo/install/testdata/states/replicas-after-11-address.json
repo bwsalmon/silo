@@ -58,7 +58,7 @@
           "us-central1-f"
         ],
         "control": {
-          "template": "silo-control-16aab3aa11"
+          "template": "silo-control-4b8a815a03"
         },
         "gateway": {},
         "gatewayIP": "10.255.255.2",

@@ -107,3 +107,28 @@ func TestInstallUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestUninstallDeleteDataNamesTheInstance(t *testing.T) {
+	f := withFakeCloud(t)
+	if code, _, errOut := runCLI(t, "", append(installArgs, "--yes")...); code != 0 {
+		t.Fatalf("install: exit %d\n%s", code, errOut)
+	}
+	name := f.SQLInstances[0].Name
+	code, out, errOut := runCLI(t, "n\n", "uninstall", "--project", "silo-test-project", "--delete-data")
+	if code != 1 || !strings.Contains(errOut, "including the Cloud SQL instance "+name) || !strings.Contains(out, "db-instance       delete  "+name) {
+		t.Fatalf("declined: exit %d\n%s%s", code, out, errOut)
+	}
+	if len(f.SQLInstances) != 1 || !f.SQLInstances[0].DeletionProtection || len(f.ProtectionChanges) != 0 {
+		t.Fatalf("a declined uninstall touched the database: %+v %v", f.SQLInstances, f.ProtectionChanges)
+	}
+	// A tree with a silo in it stops uninstall without --force.
+	f.Silos["/team-a"] = "aaaaaa"
+	code, out, errOut = runCLI(t, "", "uninstall", "--project", "silo-test-project", "--delete-data", "--yes")
+	if code != 1 || !strings.Contains(out, "silo /team-a") || f.SQLInstances[0].Name != name {
+		t.Fatalf("without --force: exit %d\n%s%s", code, out, errOut)
+	}
+	code, out, errOut = runCLI(t, "", "uninstall", "--project", "silo-test-project", "--delete-data", "--force", "--yes")
+	if code != 0 || len(f.SQLInstances) != 0 || f.FinalBackups[name] != 30 || len(f.Silos) != 0 {
+		t.Fatalf("--force --delete-data: exit %d, instances %+v\n%s%s", code, f.SQLInstances, out, errOut)
+	}
+}

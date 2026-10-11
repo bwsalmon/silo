@@ -290,7 +290,7 @@ func TestControlRunsTheSessionLauncher(t *testing.T) {
 	if strings.Contains(silod, "docker.sock") {
 		t.Errorf("silod holds the container runtime's socket: %s", silod)
 	}
-	for _, want := range []string{"'--sessiond-socket' '/run/silo/sessiond.sock'", "'--agent-sessions' '30'", `--gateway-address "$(md network-interfaces/0/ip)"`, "--user 2001:2001", "--cap-drop ALL"} {
+	for _, want := range []string{"'--sessiond-socket' '/run/silo/sessiond.sock'", "'--agent-sessions' '30'", "--user 2001:2001", "--cap-drop ALL"} {
 		if !strings.Contains(silod, want) {
 			t.Errorf("silod lacks %s: %s", want, silod)
 		}

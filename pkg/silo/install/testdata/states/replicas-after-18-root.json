@@ -28,6 +28,7 @@
     "admin": {
       "computeEnabled": true,
       "zone": "us-central1-a",
+      "ours": true,
       "rooted": true,
       "rootMembers": [
         "user:admin@example.com"
@@ -60,7 +61,7 @@
       "metadata": {
         "silo-credential-key": "set",
         "silo-image": "us-central1-docker.pkg.dev/silo-test-project/silo/silod@sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
-        "silo-user-data-sha256": "6022d629665162a3165bfe84a3f3d4f0ce0f0ab9b48871237ede1295f830e37f"
+        "silo-user-data-sha256": "a48cf16d897493965c85573c5745eac85d1c60ebe6f4d6dd6539987e3cf9783f"
       },
       "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
       "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139",
@@ -80,11 +81,11 @@
           "silo-control"
         ],
         "control": {
-          "template": "silo-control-16aab3aa11",
+          "template": "silo-control-4b8a815a03",
           "templateExists": true,
           "mig": true,
           "migOurs": true,
-          "migTemplate": "silo-control-16aab3aa11",
+          "migTemplate": "silo-control-4b8a815a03",
           "migSize": 2,
           "migSurge": 4,
           "healthCheck": true,
@@ -97,7 +98,7 @@
           "ruleIP": "10.255.255.3",
           "addressIP": "10.255.255.3",
           "templates": [
-            "silo-control-16aab3aa11"
+            "silo-control-4b8a815a03"
           ]
         },
         "gateway": {
@@ -207,7 +208,7 @@
         "labels": {
           "silo-install": "i7a71c41be6",
           "silo-role": "db",
-          "silo-schema": "18"
+          "silo-schema": "17"
         },
         "edition": "ENTERPRISE",
         "tier": "db-g1-small",
@@ -472,7 +473,7 @@
     "migrate": {
       "instance": "silo-db-t3st",
       "state": "RUNNABLE",
-      "schema": 18
+      "schema": 17
     },
     "nat": {
       "computeEnabled": true,
@@ -647,7 +648,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "18"
+            "silo-schema": "17"
           },
           "edition": "ENTERPRISE",
           "tier": "db-g1-small",

@@ -294,8 +294,50 @@ func (s *DBInstance) PlanRemove(o Observed) []Change {
 	if obs.Instance == nil || !s.Env.ours(obs.Instance) {
 		return []Change{{Action: ActionOK, Detail: "no database instance"}}
 	}
-	return []Change{{Action: ActionKeep, Object: obs.Instance.Name,
-		Detail: "kept, with its deletion protection and backups (--delete-data deletes it)"}}
+	if !s.Env.Config.DeleteData {
+		return []Change{{Action: ActionKeep, Object: obs.Instance.Name,
+			Detail: "kept, with its deletion protection and backups (--delete-data deletes it)"}}
+	}
+	detail := "with every grant, policy and audit record in it, and its IAM user; a final backup is kept " +
+		fmt.Sprint(FinalBackupDays) + " days"
+	if obs.Instance.DeletionProtection {
+		detail = "deletion protection lifted on this instance only, then deleted, " + detail
+	}
+	return []Change{{Action: ActionDelete, Object: obs.Instance.Name, Detail: detail, Estimate: 5 * time.Minute, Waiting: "Cloud SQL"}}
+}
+
+// FinalBackupDays is how long Cloud SQL keeps the final backup of a
+// database uninstall --delete-data deletes.
+const FinalBackupDays = 30
+
+// remove is uninstall --delete-data: it lifts deletion protection on the
+// one instance the plan named, and only if that instance is still this
+// install's database, then deletes it with a final backup. Nothing else
+// ever changes an instance's deletion protection.
+func (s *DBInstance) remove(ctx context.Context, name string) error {
+	sql, project := s.Env.Cloud.SQLAdmin, s.Env.Config.Project
+	if !s.Env.Config.DeleteData {
+		return fmt.Errorf("refusing to delete %s without --delete-data", name)
+	}
+	in, err := sql.GetInstance(ctx, project, name)
+	if IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !s.Env.ours(in) {
+		return fmt.Errorf("%s is no longer this install's database: it is left alone", name)
+	}
+	if in.DeletionProtection {
+		if err := sql.SetDeletionProtection(ctx, project, name, false); err != nil {
+			return fmt.Errorf("lifting deletion protection on %s: %w", name, err)
+		}
+	}
+	if err := sql.DeleteInstance(ctx, project, name, FinalBackupDays); err != nil && !IsNotFound(err) {
+		return fmt.Errorf("deleting %s: %w", name, err)
+	}
+	return nil
 }
 
 func (s *DBInstance) Apply(ctx context.Context, changes []Change) error {
@@ -303,6 +345,10 @@ func (s *DBInstance) Apply(ctx context.Context, changes []Change) error {
 	project := s.Env.Config.Project
 	for _, ch := range changes {
 		switch ch.Action {
+		case ActionDelete:
+			if err := s.remove(ctx, ch.Object); err != nil {
+				return err
+			}
 		case ActionCreate:
 			suffix := newSuffix
 			if s.Env.NewSuffix != nil {
