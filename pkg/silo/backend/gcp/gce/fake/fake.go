@@ -333,6 +333,9 @@ func (f *Fake) zoneExists(zone string) error {
 }
 
 func (f *Fake) regionExists(region string) error {
+	if region == "" {
+		return badRequest("Invalid value for field 'region': ''")
+	}
 	if f.catalog.region(region) == nil {
 		return gce.NotFound("projects/" + f.opts.Project + "/regions/" + region)
 	}

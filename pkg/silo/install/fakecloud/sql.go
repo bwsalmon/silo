@@ -210,6 +210,9 @@ func (s sqlAdmin) InsertUser(ctx context.Context, project, instance string, u *i
 }
 
 func (x computeExtras) GetForwardingRule(ctx context.Context, project, region, name string) (*compute.ForwardingRule, error) {
+	if err := noRegion(region); err != nil {
+		return nil, err
+	}
 	x.f.mu.Lock()
 	defer x.f.mu.Unlock()
 	if err := x.f.need("compute.googleapis.com"); err != nil {

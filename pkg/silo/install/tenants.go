@@ -564,6 +564,9 @@ func (s *Credentials) Observe(ctx context.Context) (Observed, error) {
 // keyHolders are this install's VMs in the home region, silo-control and
 // its replicas, whose metadata holds the key.
 func (s *Credentials) keyHolders(ctx context.Context) ([]string, error) {
+	if s.Env.Config.HomeRegion() == "" {
+		return nil, nil
+	}
 	c, p := s.Env.Cloud.Compute, s.Env.Config.Project
 	zones, err := c.ListZones(ctx, p)
 	if err != nil {

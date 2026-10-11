@@ -2,6 +2,7 @@ package fakecloud
 
 import (
 	"context"
+	"strings"
 
 	compute "google.golang.org/api/compute/v1"
 )
@@ -10,6 +11,9 @@ import (
 // for instance groups).
 
 func getObj[T any](f *Fake, m map[string]*T, k, what string) (*T, error) {
+	if strings.HasPrefix(k, "/") {
+		return nil, noRegion("")
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.need("compute.googleapis.com"); err != nil {

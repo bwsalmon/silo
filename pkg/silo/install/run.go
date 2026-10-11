@@ -117,6 +117,10 @@ func PlanRemoveAll(ctx context.Context, steps []Step) []StepPlan {
 		if !ok {
 			continue
 		}
+		if noHomeRegion(r) {
+			plans = append(plans, StepPlan{Step: r.Name(), Changes: noRecordChanges()})
+			continue
+		}
 		obs, err := r.Observe(ctx)
 		if err != nil {
 			plans = append(plans, StepPlan{Step: r.Name(), Err: err})
@@ -125,6 +129,22 @@ func PlanRemoveAll(ctx context.Context, steps []Step) []StepPlan {
 		plans = append(plans, StepPlan{Step: r.Name(), Changes: r.PlanRemove(obs)})
 	}
 	return plans
+}
+
+// homeRegional is a step whose objects are all keyed by the home
+// region. Uninstall takes the home region from the install's record
+// (LoadRecord), which the network step writes before any of them
+// exists; with no record there is no home region, and nothing of
+// theirs to find, so uninstall plans them ok without observing.
+type homeRegional interface{ homeRegion() string }
+
+func noHomeRegion(s Step) bool {
+	h, ok := s.(homeRegional)
+	return ok && h.homeRegion() == ""
+}
+
+func noRecordChanges() []Change {
+	return []Change{{Action: ActionOK, Detail: "nothing to do: no install record names a home region"}}
 }
 
 // Reporter is a step that reports what it found even when it has
@@ -209,7 +229,7 @@ func Apply(ctx context.Context, steps []Step, progress io.Writer) error {
 func Remove(ctx context.Context, steps []Step, progress io.Writer) error {
 	for i := len(steps) - 1; i >= 0; i-- {
 		r, ok := steps[i].(Remover)
-		if !ok {
+		if !ok || noHomeRegion(r) {
 			continue
 		}
 		obs, err := r.Observe(ctx)

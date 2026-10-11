@@ -32,6 +32,7 @@ type DNSObserved struct {
 }
 
 func (s *DNSStep) Name() string          { return "dns" }
+func (s *DNSStep) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *DNSStep) NewObserved() Observed { return &DNSObserved{} }
 
 func (s *DNSStep) networkURL() string { return gce.SelfLinkBase + networkPath(s.Env.Config.Project) }
