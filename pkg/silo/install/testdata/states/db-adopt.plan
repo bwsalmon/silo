@@ -27,7 +27,7 @@ silo install: project silo-test-project
                             (silo-db-restored), from a-silo-db-t3st
                             silo-db recreated for restored.us-central1.sql.goog., not
                             t3st.us-central1.sql.goog.
-  migrate           apply   schema ? -> 18; reconcile report-only (adopted instance)
+  migrate           apply   schema ? -> 19; reconcile report-only (adopted instance)
   control           update  silo-control boot configuration, silod@sha256:7dd5524d6d0b (resets the
                             VM)
   root              ok      / exists (changed through the fence API, not by install)

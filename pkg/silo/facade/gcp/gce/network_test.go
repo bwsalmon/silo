@@ -217,6 +217,13 @@ func TestSubnetworks(t *testing.T) {
 	if got := e.own(e.a); got["subnetworks/us-central1/web"] != wide.String() {
 		t.Errorf("own ranges after expand: %v", got)
 	}
+	// The range keeps its region, which pins us-central1 (SV-37).
+	var region string
+	if err := e.db.Tx(ctx, func(tx store.Tx) error {
+		return tx.QueryRow(ctx, `SELECT region FROM address_own WHERE silo = ? AND object = ?`, e.a, "subnetworks/us-central1/web").Scan(&region)
+	}); err != nil || region != "us-central1" {
+		t.Errorf("web's region after expand: %q %v", region, err)
+	}
 	e.gce.RunOperations()
 
 	// The refused methods.
