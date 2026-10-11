@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/store"
 	"github.com/bwsalmon/silo/pkg/silo/store/migrations"
 	"github.com/bwsalmon/silo/pkg/silo/store/sqlite"

@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/silo/agents"
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake"
+	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/gce/fake"
 	"github.com/bwsalmon/silo/pkg/silo/ledger/address"
 	"github.com/bwsalmon/silo/pkg/silo/store"
 	"github.com/bwsalmon/silo/pkg/silo/store/sqlite"

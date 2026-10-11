@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 )
 
 // The private zone silo.internal lives in.

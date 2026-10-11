@@ -37,14 +37,14 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/silo/agents"
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/gceclient"
+	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fence"
 	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
 	"github.com/bwsalmon/silo/pkg/silo/frontdoor"
 	"github.com/bwsalmon/silo/pkg/silo/gateway"
-	"github.com/bwsalmon/silo/pkg/silo/gce"
-	"github.com/bwsalmon/silo/pkg/silo/gce/fake"
-	"github.com/bwsalmon/silo/pkg/silo/gce/gcp"
 	"github.com/bwsalmon/silo/pkg/silo/gwtls"
 	"github.com/bwsalmon/silo/pkg/silo/harness"
 	"github.com/bwsalmon/silo/pkg/silo/leader"
@@ -403,7 +403,7 @@ func serve(ctx context.Context, args []string) error {
 	go watchTestSwitches(ctx)
 	opts := fenceapi.Options{Ready: func() string { return why }, Budget: fence.Budget{Config: cfg}}
 	if *fenceProject != "" {
-		client, err := gcp.New(ctx, gcpOptions(*computeEndpoint))
+		client, err := gceclient.New(ctx, gcpOptions(*computeEndpoint))
 		if err != nil {
 			return err
 		}
@@ -433,7 +433,7 @@ func serve(ctx context.Context, args []string) error {
 			if client, err = devFake(ctx, *hostProject); err != nil {
 				return err
 			}
-		} else if client, err = gcp.New(ctx, gcpOptions(*computeEndpoint)); err != nil {
+		} else if client, err = gceclient.New(ctx, gcpOptions(*computeEndpoint)); err != nil {
 			return err
 		}
 		hostClient = client
@@ -676,8 +676,8 @@ func serve(ctx context.Context, args []string) error {
 // compute endpoint other than GCE's is a test's fake, which serves the
 // Cloud Quotas read at its root (fake.Server.CloudQuotasEndpoint), so a
 // silod pointed at one never calls Google's.
-func gcpOptions(computeEndpoint string) gcp.Options {
-	o := gcp.Options{ComputeEndpoint: computeEndpoint}
+func gcpOptions(computeEndpoint string) gceclient.Options {
+	o := gceclient.Options{ComputeEndpoint: computeEndpoint}
 	if u, err := url.Parse(computeEndpoint); err == nil && computeEndpoint != "" {
 		o.CloudQuotasEndpoint = u.Scheme + "://" + u.Host + "/"
 	}

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
 )

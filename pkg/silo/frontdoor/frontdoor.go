@@ -24,7 +24,7 @@ import (
 	"net/http"
 	"strings"
 
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gce"
+	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
 	"github.com/bwsalmon/silo/pkg/silo/store"
 	"github.com/bwsalmon/silo/pkg/silo/tree"

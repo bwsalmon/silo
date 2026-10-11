@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
-	gcefake "github.com/bwsalmon/silo/pkg/silo/gce/fake"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
+	gcefake "github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/silo/install"
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"

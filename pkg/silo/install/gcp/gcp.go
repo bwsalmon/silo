@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
-	gcegcp "github.com/bwsalmon/silo/pkg/silo/gce/gcp"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/gceclient"
 	"github.com/bwsalmon/silo/pkg/silo/install"
 	"golang.org/x/oauth2/google"
 	artifactregistry "google.golang.org/api/artifactregistry/v1"
@@ -37,7 +37,7 @@ func New(ctx context.Context, credentials, version string) (install.Cloud, error
 	}
 	opts = append(opts, option.WithUserAgent("silo-install/"+version))
 	var cloud install.Cloud
-	compute, err := gcegcp.New(ctx, gcegcp.Options{Version: version, ClientOptions: opts})
+	compute, err := gceclient.New(ctx, gceclient.Options{Version: version, ClientOptions: opts})
 	if err != nil {
 		return cloud, fmt.Errorf("compute: %w", err)
 	}

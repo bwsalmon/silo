@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fence"
-	"github.com/bwsalmon/silo/pkg/silo/gce"
 	compute "google.golang.org/api/compute/v1"
 )
 
