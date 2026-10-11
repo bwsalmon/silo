@@ -321,8 +321,11 @@ func sessionObject(agent string) string { return "agent-session:" + agent }
 // holdSession charges an agent's session slot to its silo: QUOTA_EXCEEDED
 // with class agent_sessions if the silo has none free, and
 // RESOURCE_EXHAUSTED if the control VMs have none.
-func (s *Server) holdSession(ctx context.Context, tx store.Tx, chain []*tree.Silo, c Caller, agent string) error {
+func (s *Server) holdSession(ctx context.Context, tx store.Tx, chain []*tree.Silo, c Caller, agent, credential string) error {
 	t := chain[len(chain)-1]
+	if err := s.credentialSessions(ctx, tx, credential, agent); err != nil {
+		return err
+	}
 	if err := ledger.Charge(ctx, tx, ledger.ChargeRequest{Object: sessionObject(agent), Silo: t.ID, Via: chargeVia(chain, c),
 		Amounts: []ledger.Amount{{Key: AgentSessions, Amount: ledger.Units(1)}}}); err != nil {
 		return err
@@ -383,12 +386,9 @@ func (s *Server) agentPolicy(ctx context.Context, tx store.Tx, chain []*tree.Sil
 	if pol.Adapters != nil && !contains(pol.Adapters, adapter) {
 		return 0, deny("adapters", adapter)
 	}
-	var cred agents.Credential
-	found := false
-	if s.opts.Credentials != nil && credential != "" {
-		if cred, found, err = s.opts.Credentials.Credential(ctx, credential); err != nil {
-			return 0, err
-		}
+	cred, found, err := s.credential(ctx, tx, credential)
+	if err != nil {
+		return 0, err
 	}
 	if !found {
 		return 0, errorf(InvalidArgument, "harness.credential %q is not one of this deployment's credentials", credential).with("field", "harness.credential")
@@ -607,7 +607,7 @@ func (s *Server) createAgent(q *request, ref string) (any, error) {
 		if err := ledger.ReserveModelBudget(ctx, tx, t.ID, id, chargeVia(chain, q.caller), micros); err != nil {
 			return budgetError(err)
 		}
-		if err := s.holdSession(ctx, tx, chain, q.caller, id); err != nil {
+		if err := s.holdSession(ctx, tx, chain, q.caller, id, req.Harness.Credential); err != nil {
 			return err
 		}
 		period, err := ledger.BudgetPeriod(ctx, tx)
@@ -1048,15 +1048,14 @@ func (s *Server) patchAgent(q *request, ref, name string) (any, error) {
 			switch {
 			case a.State == agents.StateBudgetExhausted && a.spent < a.budget:
 				// Raising the budget puts it back to IDLE, resumed.
-				if err := s.holdSession(ctx, tx, chain, q.caller, a.ID); err != nil {
+				if err := s.holdSession(ctx, tx, chain, q.caller, a.ID, a.Harness.Credential); err != nil {
 					return err
 				}
 				a.State, a.StatusMessage, start = agents.StateIdle, "", true
 			case agents.HoldsSession(a.State) && a.State != agents.StateProvisioning && a.spent >= a.budget:
-				if err := releaseSession(ctx, tx, a.ID); err != nil {
+				if stop, err = s.exhaust(ctx, tx, t, a); err != nil {
 					return err
 				}
-				a.State, a.StatusMessage, stop = agents.StateBudgetExhausted, "the budget for this period is spent", true
 			}
 		}
 		if p.Labels != nil {
@@ -1154,7 +1153,7 @@ func (s *Server) resumeAgent(q *request, ref, name string) (any, error) {
 		if a.spent >= a.budget {
 			return false, false, errorf(FailedPrecondition, "agent %s has spent its budget for this period; raise budget.usd", a.Name)
 		}
-		if err := s.holdSession(ctx, tx, chain, q.caller, a.ID); err != nil {
+		if err := s.holdSession(ctx, tx, chain, q.caller, a.ID, a.Harness.Credential); err != nil {
 			return false, false, err
 		}
 		a.State, a.StatusMessage = agents.StateIdle, ""

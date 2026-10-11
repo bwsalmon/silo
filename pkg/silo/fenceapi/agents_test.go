@@ -89,7 +89,7 @@ func newAgentEnv(t *testing.T) *agentEnv {
 	vms := &fakeVMs{}
 	runner := &agents.Fake{}
 	e := &agentEnv{vms: vms, runner: runner}
-	e.env = newEnv(t, fenceapi.Options{ToolVMs: vms, Runner: runner,
+	e.env = newEnv(t, fenceapi.Options{ToolVMs: vms, Runner: runner, CredentialKey: testCredentialKey,
 		Credentials: agents.StaticCredentials{"anthropic-api": "anthropic", "openai-api": "openai", "spare": "anthropic"}})
 	runner.Connected = e.api.ToolServerConnected
 	if err := e.db.Tx(ctx, func(tx store.Tx) error {

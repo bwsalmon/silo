@@ -186,7 +186,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "17"
+            "silo-schema": "18"
           },
           "edition": "ENTERPRISE",
           "tier": "db-g1-small",
@@ -598,7 +598,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "17"
+            "silo-schema": "18"
           },
           "edition": "ENTERPRISE",
           "tier": "db-g1-small",

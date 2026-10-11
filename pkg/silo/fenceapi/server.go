@@ -147,8 +147,13 @@ type Options struct {
 	// Runner runs agents' harness sessions. Nil runs none: agents stay
 	// PROVISIONING until something reports their tool server connected.
 	Runner agents.SessionRunner
-	// Credentials are the deployment's agent credentials; nil has none.
+	// Credentials are more agent credentials than those stored, as
+	// API keys with no cap (silod's --agent-credentials, for
+	// development); nil has none.
 	Credentials agents.Credentials
+	// CredentialKey is silo-credential-key, the AES-256 key the stored
+	// credentials are sealed with; without it none can be added or used.
+	CredentialKey []byte
 }
 
 // Server serves silo/v1.
@@ -220,6 +225,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.bootstrap(w, r)
 		return
+	case path == "/silod/credentials" || strings.HasPrefix(path, "/silod/credentials/"):
+		// silo uninstall's step 3 (install.md) lists the credentials
+		// here and deletes each: the same calls as /silo/v1/credentials,
+		// root members only.
+		path = "/silo/v1/credentials" + strings.TrimPrefix(path, "/silod/credentials")
+		r.URL.Path, r.URL.RawPath = path, ""
 	}
 	rest, ok := strings.CutPrefix(path, "/silo/v1/")
 	if !ok {
@@ -394,6 +405,16 @@ var handlers = map[string]func(s *Server, q *request, c control.FenceCall){
 	control.OpAgentsRequestsList: func(s *Server, q *request, c control.FenceCall) { s.listRequests(q, c.Ref, c.ID) },
 	control.OpAgentsRequestsAnswer: func(s *Server, q *request, c control.FenceCall) {
 		s.mutating(q, func(q *request) (any, error) { return s.answerRequest(q, c.Ref, c.ID, c.Item) }, true)
+	},
+	control.OpCredentialsList: func(s *Server, q *request, _ control.FenceCall) { s.listCredentials(q) },
+	control.OpCredentialsAdd: func(s *Server, q *request, _ control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.addCredential(q) }, false)
+	},
+	control.OpCredentialsDelete: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.removeCredential(q, c.ID) }, true)
+	},
+	control.OpCredentialsDeleteAll: func(s *Server, q *request, _ control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.removeAllCredentials(q) }, true)
 	},
 	control.OpModelPricesList: func(s *Server, q *request, _ control.FenceCall) { s.listModelPrices(q) },
 	control.OpModelPricesSet: func(s *Server, q *request, c control.FenceCall) {

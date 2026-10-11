@@ -113,7 +113,7 @@ func newEnv(t *testing.T) *env {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaInternal}, nil
 	}
 	e := &env{t: t, db: db, runner: &agents.Fake{}, worker: map[string]string{}}
-	e.sockets = &session.Sockets{Dir: dir, Tools: fakeTools{}}
+	e.sockets = &session.Sockets{Dir: dir, Tools: fakeTools{}, Model: fakeModel{}}
 	fc := facade.New(db, facade.Options{GCE: fake.New(fake.Options{Project: host}), HostProject: host, Caller: caller})
 	e.api = fenceapi.New(db, fenceapi.Options{Caller: caller, ToolVMs: &fakeVMs{},
 		Runner:      &session.Runner{Inner: e.runner, Sockets: e.sockets},
@@ -293,8 +293,9 @@ func TestIdentityBySocket(t *testing.T) {
 	if text, isErr := e.tool(w, "exec", obj{"command": "uptime"}); isErr || text != "ran uptime on "+w {
 		t.Errorf("exec: %v %s", isErr, text)
 	}
-	// The model proxy is reserved.
-	if r := e.on(w, "POST", "/model/anthropic/v1/messages", obj{}); r.code != 501 {
+	// The model proxy is handed the socket's agent, the provider and
+	// the rest of the path.
+	if r := e.on(w, "POST", "/model/anthropic/v1/messages", obj{}); r.code != 200 || !strings.Contains(string(r.raw), w+" anthropic /v1/messages") {
 		t.Errorf("/model/: %d %s", r.code, r.raw)
 	}
 	if r := e.on(w, "GET", "/elsewhere", nil); r.code != 404 {
@@ -453,7 +454,7 @@ func TestSealedAndRead(t *testing.T) {
 		if text, isErr := e.tool(a, "exec", obj{"command": "systemctl restart app"}); isErr {
 			t.Errorf("exec: %s", text)
 		}
-		if r := e.on(a, "GET", "/model/anthropic/", nil); r.code != 501 {
+		if r := e.on(a, "GET", "/model/anthropic/", nil); r.code != 200 {
 			t.Errorf("/model/: %d", r.code)
 		}
 		e.ok(e.on(a, "GET", "/silo/v1/self/agents", nil))
@@ -593,4 +594,12 @@ func get(o obj, path ...string) any {
 		cur = m[p]
 	}
 	return cur
+}
+
+// fakeModel is a model proxy that says what it was asked.
+type fakeModel struct{}
+
+func (fakeModel) ServeModel(w http.ResponseWriter, r *http.Request, agent, provider string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"got": agent + " " + provider + " " + r.URL.Path})
 }

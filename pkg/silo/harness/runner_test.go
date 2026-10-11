@@ -147,6 +147,10 @@ func (c *control) SessionWaiting(_ context.Context, agent, why string) error {
 	return nil
 }
 
+func (c *control) ReportUsage(ctx context.Context, agent string, usage map[string]any) error {
+	return c.RecordEvent(ctx, agent, fenceapi.EventUsage, usage)
+}
+
 func (c *control) SessionStarted(_ context.Context, agent string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

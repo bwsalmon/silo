@@ -18,9 +18,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -47,6 +49,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/silo/harness"
 	"github.com/bwsalmon/silo/pkg/silo/leader"
 	"github.com/bwsalmon/silo/pkg/silo/ledger/rootcap"
+	"github.com/bwsalmon/silo/pkg/silo/modelproxy"
 	"github.com/bwsalmon/silo/pkg/silo/reconcile"
 	"github.com/bwsalmon/silo/pkg/silo/session"
 	"github.com/bwsalmon/silo/pkg/silo/store"
@@ -207,6 +210,52 @@ func migrateResult(to int, err error) string {
 // metadataHost is the metadata server; a test points it elsewhere.
 var metadataHost = "http://metadata.google.internal"
 
+// credentialKeyAttribute is install's silo-credential-key, in the
+// control VMs' metadata (install.CredentialKeyKey).
+const credentialKeyAttribute = "silo-credential-key"
+
+// credentialKey is the key the agent credentials are sealed with: from
+// file, or, on a control VM that runs sessions, from the metadata
+// server, which only silod can reach (agents.md, §6 and "Isolation on
+// the control VM"). None leaves credentials unusable, not silod.
+func credentialKey(ctx context.Context, file string, fromMetadata bool) ([]byte, error) {
+	var text string
+	switch {
+	case file != "":
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		text = string(b)
+	case fromMetadata:
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			metadataHost+"/computeMetadata/v1/instance/attributes/"+credentialKeyAttribute, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Metadata-Flavor", "Google")
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			log.Printf("agent credentials: reading %s: %v; none can be used", credentialKeyAttribute, err)
+			return nil, nil
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("agent credentials: reading %s: %s; none can be used", credentialKeyAttribute, resp.Status)
+			return nil, nil
+		}
+		text = string(b)
+	default:
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(text))
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("%s: want 32 bytes, base64", credentialKeyAttribute)
+	}
+	return key, nil
+}
+
 // reportGuestAttribute writes value to the VM's guest attribute key, so
 // that install, which can't reach the database, reads the result.
 func reportGuestAttribute(ctx context.Context, key, value string) {
@@ -247,6 +296,7 @@ func serve(ctx context.Context, args []string) error {
 	imageProjects := fs.String("image-projects", "", "comma-separated public image projects tenants may read (default the facade's list)")
 	facadeEndpoint := fs.String("facade-endpoint", facade.DefaultEndpoint, "the facade's base URL, that selfLinks are written on")
 	agentCredentials := fs.String("agent-credentials", "", "comma-separated name=provider pairs naming the deployment's agent credentials (anthropic-api=anthropic), until credentials are stored")
+	credentialKeyFile := fs.String("credential-key-file", "", "a file holding silo-credential-key, base64 (development and tests; on a control VM with --agent-sessions silod reads it from the metadata server)")
 	sessionDir := fs.String("session-dir", session.DefaultDir, "where each agent session's socket is made, as <dir>/<agent id>/silo.sock")
 	sessiondSocket := fs.String("sessiond-socket", "", "run agents' harness sessions through the session launcher on this socket (silod sessiond); with neither this nor --fake-agents, agents stay PROVISIONING")
 	sessionStateDir := fs.String("session-state-dir", harness.DefaultLayout.StateDir, "where sessiond keeps each session's private directory, as <dir>/<agent id>")
@@ -410,6 +460,9 @@ func serve(ctx context.Context, args []string) error {
 		}
 		opts.Credentials = creds
 	}
+	if opts.CredentialKey, err = credentialKey(ctx, *credentialKeyFile, *agentSessions > 0); err != nil {
+		return err
+	}
 	var fakeRunner *agents.Fake
 	// Each session gets its own socket, opened before it starts (agents.md,
 	// §5, SV-107).
@@ -439,6 +492,9 @@ func serve(ctx context.Context, args []string) error {
 	}
 	hub := &toolchan.Hub{Connected: connected, Disconnected: api.ToolServerDisconnected}
 	sockets.API, sockets.Control, sockets.Tools = api, api, hub
+	// The model proxy, for API-key sessions, on their sockets alone
+	// (agents.md, "Metering", SV-110).
+	sockets.Model = &modelproxy.Proxy{Meter: api}
 	if fc != nil {
 		sockets.Facade = fc
 	}
@@ -857,9 +913,10 @@ func runExportTargets(ctx context.Context, db store.Store, resolve fenceapi.Inst
 	}
 }
 
-// runAgentExpiry deletes agents whose lease has run out, while this
-// replica holds the agent-expiry lease (agents.md, "The lease runs
-// out").
+// runAgentExpiry warns agents whose lease ends within ten minutes,
+// deletes those whose lease has run out, and starts agents' new budget
+// periods, while this replica holds the agent-expiry lease (agents.md,
+// "The lease runs out" and "Budget runs out").
 func runAgentExpiry(ctx context.Context, db store.Store, api *fenceapi.Server) {
 	for ctx.Err() == nil {
 		lost, err := db.Lead(ctx, "agent-expiry")
@@ -875,10 +932,20 @@ func runAgentExpiry(ctx context.Context, db store.Store, api *fenceapi.Server) {
 			case <-lost:
 				break lead
 			case <-t.C:
+				if n, err := api.WarnLeases(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("agents: lease warnings: %v", err)
+				} else if n > 0 {
+					log.Printf("agents: %d warned their lease ends soon", n)
+				}
 				if n, err := api.ExpireAgents(ctx); err != nil && ctx.Err() == nil {
 					log.Printf("agents: %v", err)
 				} else if n > 0 {
 					log.Printf("agents: %d expired", n)
+				}
+				if n, err := api.ResetBudgetPeriods(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("agents: budget periods: %v", err)
+				} else if n > 0 {
+					log.Printf("agents: %d started a new budget period", n)
 				}
 			}
 		}
