@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/silo/pkg/silo/agents"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fence"
-	"github.com/bwsalmon/silo/pkg/silo/gce"
 )
 
 // Prereqs is step 1, prereqs (install.md "Prerequisite checks", SV-94):

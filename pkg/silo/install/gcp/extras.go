@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/install"
 	crm "google.golang.org/api/cloudresourcemanager/v1"
 	compute "google.golang.org/api/compute/v1"

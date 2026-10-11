@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fence"
-	"github.com/bwsalmon/silo/pkg/silo/gce"
 	"github.com/bwsalmon/silo/pkg/silo/gwtls"
 	"github.com/bwsalmon/silo/pkg/silo/install"
 	"github.com/bwsalmon/silo/pkg/silo/install/fakecloud"

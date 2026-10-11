@@ -48,6 +48,7 @@ open are under [Open questions](#open-questions).
 | [`fence-api.md`](fence-api.md) | The `silo/v1` fence API: objects, operations, errors, who may call what, the control policy and `manage` grants |
 | [`allocators.md`](allocators.md) | Regional quota, allowed regions and address space: how each is handed down the tree, checked and returned |
 | [`gcp-backend.md`](gcp-backend.md) | The v1 GCP backend: subnet-backed silos in one host project, the fence firewall policy, and the `compute/v1` facade |
+| [`facades.md`](facades.md) | Where facades and backends live in the code, the request pipeline every facade shares, and when its shared core is extracted |
 | [`gateway.md`](gateway.md) | The gateway: origin identity, `silo.internal`, proxied exports, the egress proxy and the front door |
 | [`install.md`](install.md) | `silo install` and `silo uninstall` |
 | [`state.md`](state.md) | silod's state: Cloud SQL for PostgreSQL by default, SQLite for dev and tests, the store interface, leadership, migrations and backups |

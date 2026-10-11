@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/gce"
-	"github.com/bwsalmon/silo/pkg/silo/gce/fake"
-	"github.com/bwsalmon/silo/pkg/silo/gce/gcp"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake"
+	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/gceclient"
 	"github.com/bwsalmon/silo/pkg/silo/ledger"
 	"github.com/bwsalmon/silo/pkg/silo/ledger/rootcap"
 	"github.com/bwsalmon/silo/pkg/silo/store"
@@ -471,7 +471,7 @@ func TestThroughRealClient(t *testing.T) {
 	fx.fake.SetQuota(euw, "NVIDIA_H100_GPUS", 8)
 	srv := fake.NewServer(fx.fake)
 	defer srv.Close()
-	c, err := gcp.New(ctx, gcp.Options{ComputeEndpoint: srv.ComputeEndpoint(), CloudQuotasEndpoint: srv.CloudQuotasEndpoint(),
+	c, err := gceclient.New(ctx, gceclient.Options{ComputeEndpoint: srv.ComputeEndpoint(), CloudQuotasEndpoint: srv.CloudQuotasEndpoint(),
 		HTTPClient: srv.Client(), PageSize: 2})
 	if err != nil {
 		t.Fatal(err)

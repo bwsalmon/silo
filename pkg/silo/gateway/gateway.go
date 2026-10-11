@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/silo/control"
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gce"
+	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
 )
 
 // The gateway's ports (gateway.md, "Address", SV-78).
