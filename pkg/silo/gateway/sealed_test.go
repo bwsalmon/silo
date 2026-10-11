@@ -210,6 +210,8 @@ func TestSealedChildAPIPortEachLayer(t *testing.T) {
 	}{
 		{"gateway-alone", envOptions{silodSkipsControl: true}},
 		{"silod-alone", envOptions{gatewaySkipsControl: true}},
+		// SILO_TEST_SKIP_CONTROL_GATE in silod's conformance build.
+		{"silod-alone-by-switch", envOptions{gatewaySkipsNow: func() bool { return true }}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			e := newEnv(t, mode.o)

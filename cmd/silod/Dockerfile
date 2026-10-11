@@ -27,11 +27,14 @@ ARG GOPROXY
 ARG TARGETOS
 ARG TARGETARCH
 ARG RELEASE=dev
+# silo_conformance builds the conformance suite's image, with its test-only
+# switches (cmd/silod/testswitch_conformance.go). Never set for a release.
+ARG GO_TAGS=
 
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -buildvcs=false -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -buildvcs=false -trimpath -tags "${GO_TAGS}" \
     -ldflags="-s -w -X main.release=${RELEASE}" -o /out/silod ./cmd/silod
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab

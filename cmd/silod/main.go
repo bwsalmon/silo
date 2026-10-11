@@ -398,6 +398,9 @@ func serve(ctx context.Context, args []string) error {
 	cfg := fence.DefaultConfig
 	var applier *fence.Applier
 	cfg.GatewayReplicas = *gatewayReplicas
+	// nil but in the conformance build (testswitch_conformance.go).
+	cfg.KeepControlPort = keepControlPortSwitch()
+	go watchTestSwitches(ctx)
 	opts := fenceapi.Options{Ready: func() string { return why }, Budget: fence.Budget{Config: cfg}}
 	if *fenceProject != "" {
 		client, err := gcp.New(ctx, gcpOptions(*computeEndpoint))
@@ -794,7 +797,8 @@ func runGateway(ctx context.Context, args []string) error {
 		}
 		host = a
 	}
-	g := gateway.New(gateway.Options{Dial: dial, TCPHost: *exportHost, ToolsDir: *toolsDir, HostAddress: host})
+	g := gateway.New(gateway.Options{Dial: dial, TCPHost: *exportHost, ToolsDir: *toolsDir, HostAddress: host,
+		SkipControlNow: skipControlGateSwitch()})
 	api, err := net.Listen("tcp", *apiAddr)
 	if err != nil {
 		return err

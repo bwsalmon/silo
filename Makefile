@@ -39,6 +39,7 @@ silod-image:
 		--build-arg GO_IMAGE=$(GO_IMAGE) \
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		$(if $(RELEASE),--build-arg RELEASE=$(RELEASE),) \
+		$(if $(SILOD_TAGS),--build-arg GO_TAGS=$(SILOD_TAGS),) \
 		$(if $(SILOD_PLATFORMS),--platform $(SILOD_PLATFORMS),) \
 		$(if $(SILOD_PUSH),--push,--load) \
 		-t $(SILOD_IMAGE) -f cmd/silod/Dockerfile .
@@ -53,6 +54,7 @@ silod-harness-image:
 		--build-arg GO_IMAGE=$(GO_IMAGE) \
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		$(if $(RELEASE),--build-arg RELEASE=$(RELEASE),) \
+		$(if $(SILOD_TAGS),--build-arg GO_TAGS=$(SILOD_TAGS),) \
 		$(if $(SILOD_PLATFORMS),--platform $(SILOD_PLATFORMS),) \
 		$(if $(SILOD_PUSH),--push,--load) \
 		-t $(SILOD_HARNESS_IMAGE) -f cmd/silod/Dockerfile.harness .
