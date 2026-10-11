@@ -40,6 +40,20 @@ var (
 	flagKey     = flag.String("silo.key", envOr("SILO_CONFORMANCE_KEY", "/home/debian/.gcp-service-account.json"), "the gcp-key capability's key")
 	flagImage   = flag.String("silo.image", os.Getenv("SILO_CONFORMANCE_IMAGE"), "silod's image, by digest (install --image)")
 	flagKeep    = flag.Bool("silo.keep", false, "don't uninstall at the end (debugging only)")
+
+	flagHarnessImage = flag.String("silo.harness-image", os.Getenv("SILO_CONFORMANCE_HARNESS_IMAGE"), "the harness image, by digest (install --harness-image), needed with -silo.image")
+	flagModelKey     = flag.String("silo.model-key", os.Getenv("SILO_CONFORMANCE_MODEL_KEY"), "a file holding an Anthropic API key for the agent cases' model calls; without it they are skipped")
+)
+
+// The agent cases' install settings: harness sessions on the control
+// VMs, a machine type that carries them (agents.SessionSlots gives an
+// e2-standard-2, 2 vCPU and 8 GiB, five slots, and the cases run two
+// agents at once), and a small root model budget, so that a runaway
+// agent can't spend much.
+const (
+	agentSessions      = "4"
+	controlMachineType = "e2-standard-2"
+	rootModelBudget    = "5"
 )
 
 func envOr(k, def string) string {
@@ -176,7 +190,7 @@ func silo(ctx context.Context, args ...string) (string, error) {
 
 // install is the real install (SV-97), with the run's cost settings:
 // the cheapest database tier and two control replicas, so that
-// failover is tested.
+// failover is tested, and agent sessions for the agent cases.
 func install(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Minute)
 	defer cancel()
@@ -184,9 +198,14 @@ func install(ctx context.Context) error {
 		"--admin", run.admin, "--credentials", run.key,
 		"--address-space", run.space.String(), "--gateway-range", run.gateway.String(),
 		"--control-range", run.control.String(),
-		"--db-tier", "db-f1-micro", "--control-replicas", "2", "--yes"}
+		"--db-tier", "db-f1-micro", "--control-replicas", "2",
+		"--agent-sessions", agentSessions, "--control-machine-type", controlMachineType,
+		"--root-model-budget", rootModelBudget, "--yes"}
 	if *flagImage != "" {
 		args = append(args, "--image", *flagImage)
+	}
+	if *flagHarnessImage != "" {
+		args = append(args, "--harness-image", *flagHarnessImage)
 	}
 	stop := watchMigrateVM(ctx)
 	out, err := silo(ctx, args...)

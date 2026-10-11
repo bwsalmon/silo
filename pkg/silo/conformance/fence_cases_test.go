@@ -803,7 +803,7 @@ func TestManageGrants(t *testing.T) {
 	p := mkSilo(t, "/mp", 26, "", &client.Egress{Allow: []string{"releases.hashicorp.com", "registry.terraform.io", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}})
 	offer := func(t *testing.T, target, holder string) (map[string]any, error) {
 		out := map[string]any{}
-		err := run.api.Do(ctx, "POST", "/silo/v1/silos/"+strings.TrimPrefix(target, "/")+"/manageGrants", nil, map[string]any{
+		err := run.api.Do(ctx, "POST", "silos/"+strings.TrimPrefix(target, "/")+"/manageGrants", nil, map[string]any{
 			"name": "rollout", "holder": holder,
 			"scope": map[string]any{"facade": map[string]any{"resources": []string{"instances", "disks"}, "access": "write"}, "fence": []string{"read"}},
 			"lease": map[string]any{"ttl": "1800s", "renew_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
@@ -815,7 +815,7 @@ func TestManageGrants(t *testing.T) {
 		t.Fatalf("the offer: %v", err)
 	}
 	id, _ := g["id"].(string)
-	defer run.api.Do(ctx, "DELETE", "/silo/v1/silos/"+strings.TrimPrefix(s.path, "/")+"/manageGrants/rollout", nil, nil, nil)
+	defer run.api.Do(ctx, "DELETE", "silos/"+strings.TrimPrefix(s.path, "/")+"/manageGrants/rollout", nil, nil, nil)
 	sp := "/compute/v1/projects/" + s.project
 	sInstances := api + sp + "/zones/" + run.zone + "/instances"
 	inst := func(name string) string {
@@ -915,7 +915,7 @@ grep -q 403 /tmp/tf.log`, proxy, s.project, run.zone, api)
 			}
 			time.Sleep(3 * time.Second)
 		}
-		if err := run.api.Do(ctx, "DELETE", "/silo/v1/silos/ms/manageGrants/rollout", nil, nil, nil); err != nil {
+		if err := run.api.Do(ctx, "DELETE", "silos/ms/manageGrants/rollout", nil, nil, nil); err != nil {
 			t.Fatalf("revoking: %v", err)
 		}
 		revoked := time.Now()

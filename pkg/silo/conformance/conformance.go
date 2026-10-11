@@ -363,3 +363,63 @@ var FacadeInstanceFields = map[string]bool{
 	"keyRevocationActionType": true, "instanceEncryptionKey": true,
 	"shieldedVmConfig": true, "privateIpv6GoogleAccess": true,
 }
+
+// SessionEvent is one event of an agent's session, as GET
+// .../agents/{agent}/session shows it (agents.md, §8).
+type SessionEvent struct {
+	Seq  int64           `json:"seq"`
+	Kind string          `json:"kind"`
+	Data json.RawMessage `json:"data"`
+}
+
+// ToolOutcome is one of a session's tool calls and, once it has one,
+// its result.
+type ToolOutcome struct {
+	ID        string
+	Tool      string
+	Arguments map[string]any
+	Done      bool // a tool_result came
+	IsError   bool
+	Content   string
+}
+
+// ToolOutcomes pairs a session's tool_call events with their
+// tool_result events by id, in the order the calls were made. A result
+// with no call before it is dropped.
+func ToolOutcomes(events []SessionEvent) []ToolOutcome {
+	var out []ToolOutcome
+	at := map[string]int{}
+	for _, e := range events {
+		var d struct {
+			ID        string         `json:"id"`
+			Tool      string         `json:"tool"`
+			Arguments map[string]any `json:"arguments"`
+			IsError   bool           `json:"is_error"`
+			Content   string         `json:"content"`
+		}
+		if json.Unmarshal(e.Data, &d) != nil {
+			continue
+		}
+		switch e.Kind {
+		case "tool_call":
+			at[d.ID] = len(out)
+			out = append(out, ToolOutcome{ID: d.ID, Tool: d.Tool, Arguments: d.Arguments})
+		case "tool_result":
+			if i, ok := at[d.ID]; ok {
+				out[i].Done, out[i].IsError, out[i].Content = true, d.IsError, d.Content
+			}
+		}
+	}
+	return out
+}
+
+// CountEvents is how many of events are of kind.
+func CountEvents(events []SessionEvent, kind string) int {
+	n := 0
+	for _, e := range events {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
+}

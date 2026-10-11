@@ -176,3 +176,32 @@ func TestExporterServersAndTCPHello(t *testing.T) {
 		t.Errorf("PROXY v2 connection: %v %q, want pp2 src=10.1.2.3", err, line)
 	}
 }
+
+func TestToolOutcomes(t *testing.T) {
+	ev := func(seq int64, kind, data string) SessionEvent {
+		return SessionEvent{Seq: seq, Kind: kind, Data: []byte(data)}
+	}
+	events := []SessionEvent{
+		ev(1, "turn", `{"turn":1}`),
+		ev(2, "tool_call", `{"id":"a","tool":"exec","arguments":{"command":"hostname"}}`),
+		ev(3, "usage", `{"input":10}`),
+		ev(4, "tool_call", `{"id":"b","tool":"silo_create_child","arguments":{}}`),
+		ev(5, "tool_result", `{"id":"b","tool":"silo_create_child","is_error":true,"content":"CONTROL_DENIED"}`),
+		ev(6, "tool_result", `{"id":"a","tool":"exec","is_error":false,"content":"agent-op"}`),
+		ev(7, "tool_result", `{"id":"zz","tool":"exec","content":"orphan"}`),
+		ev(8, "tool_call", `{"id":"c","tool":"ask","arguments":{"question":"go?"}}`),
+		ev(9, "usage", `{"input":3}`),
+	}
+	got := ToolOutcomes(events)
+	want := []ToolOutcome{
+		{ID: "a", Tool: "exec", Arguments: map[string]any{"command": "hostname"}, Done: true, Content: "agent-op"},
+		{ID: "b", Tool: "silo_create_child", Arguments: map[string]any{}, Done: true, IsError: true, Content: "CONTROL_DENIED"},
+		{ID: "c", Tool: "ask", Arguments: map[string]any{"question": "go?"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+	if n := CountEvents(events, "usage"); n != 2 {
+		t.Errorf("usage events: %d, want 2", n)
+	}
+}
