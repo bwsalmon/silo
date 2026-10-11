@@ -4,7 +4,7 @@ package conformance
 
 // The fence's cases (docs/silo/testing.md, "Cases", SV-122): origin
 // spoofing, crossing silos without consent (TCP, UDP and ICMP; the
-// export and link sub-cases are the cross-silo task's), egress and the
+// export and link sub-cases are in grant_cases_test.go), egress and the
 // gateway, the database cases cases_test.go doesn't have, sealed and
 // read silos with the conformance build's test switches, control
 // inheritance, manage grants, and the fence against the fake's

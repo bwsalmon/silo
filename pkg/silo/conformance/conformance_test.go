@@ -1,10 +1,16 @@
 package conformance
 
 import (
+	"bufio"
+	"io"
+	"net"
+	"net/http"
 	"net/netip"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPickAddressSpaceAvoidsUsedRanges(t *testing.T) {
@@ -111,5 +117,62 @@ func TestDriftFields(t *testing.T) {
 	}
 	if _, err := DriftFields(doc, "Nope", nil); err == nil {
 		t.Error("no error for a missing schema")
+	}
+}
+
+// TestExporterServersAndTCPHello runs the exporter probe's servers and
+// the importer's TCPHello here, to check what the real-GCP export cases
+// read off a probe: the HTTP server echoes the path and Silo-* headers,
+// and the TCP server tells a plain connection from one with a PROXY v2
+// header and names the source either way.
+func TestExporterServersAndTCPHello(t *testing.T) {
+	for _, tool := range []string{"bash", "python3", "timeout"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("no %s here", tool)
+		}
+	}
+	if out, err := exec.Command("bash", "-c", ExporterServers(20).Script).CombinedOutput(); err != nil {
+		t.Skipf("the servers didn't start here (a port in use?): %v %s", err, out)
+	}
+
+	req, _ := http.NewRequest("GET", "http://127.0.0.1:7000/hello", nil)
+	req.Header.Set("Silo-Caller", "k7f3qa")
+	req.Header.Set("Silo-Caller-Path", "/team-a/ci")
+	req.Header.Set("Other", "dropped")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{"path=/hello\n", "Silo-Caller: k7f3qa\n", "Silo-Caller-Path: /team-a/ci\n"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("HTTP answer %q doesn't have %q", body, want)
+		}
+	}
+	if strings.Contains(string(body), "Other") {
+		t.Errorf("HTTP answer %q names a header that isn't Silo-*", body)
+	}
+
+	out, err := exec.Command("bash", "-c", TCPHello("x", "127.0.0.1", 7003).Script).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "noproxy src=127.0.0.1" {
+		t.Errorf("TCPHello without PROXY: %v %q", err, out)
+	}
+
+	conn, err := net.Dial("tcp", "127.0.0.1:7003")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// PROXY v2: signature, PROXY command, TCP over IPv4, 12 bytes of
+	// addresses and ports.
+	hdr := append([]byte("\r\n\r\n\x00\r\nQUIT\n"), 0x21, 0x11, 0, 12, 10, 1, 2, 3, 10, 9, 9, 9, 0x9c, 0x40, 0x1b, 0x5b)
+	if _, err := conn.Write(hdr); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || line != "pp2 src=10.1.2.3\n" {
+		t.Errorf("PROXY v2 connection: %v %q, want pp2 src=10.1.2.3", err, line)
 	}
 }
