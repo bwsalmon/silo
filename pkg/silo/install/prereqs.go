@@ -150,7 +150,11 @@ var rolePermissions = []struct {
 	{"roles/iap.admin", []string{"iap.tunnelInstances.setIamPolicy"}},
 	{"roles/cloudsql.admin", []string{"cloudsql.instances.create", "cloudsql.databases.create", "cloudsql.users.create"}},
 	{"roles/browser", []string{"resourcemanager.projects.get"}},
-	{"roles/billing.viewer (or roles/viewer on the project)", []string{"billing.resourceAssociations.list"}},
+	// Not billing.resourceAssociations.list: a project's
+	// testIamPermissions refuses the whole request (400, "not valid for
+	// this resource") when it names a permission projects don't carry,
+	// which the first real install hit. Reading the billing info is
+	// checked by reading it, in the billing check.
 }
 
 // Permissions are every permission prereqs tests.

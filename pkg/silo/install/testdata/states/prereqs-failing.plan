@@ -6,14 +6,12 @@ silo install: project silo-test-project
                     fail    admin: no --admin, and this is the first install
                             why: the root needs a first member, or nobody can manage the tree
                             fix: add --admin user:<you@example.com> (repeatable)
-                    fail    credentials: missing compute.networks.create,
-                            billing.resourceAssociations.list
+                    fail    credentials: missing compute.networks.create
                             why: install creates and configures every object it sets up with these
                             credentials
                             fix: on project silo-test-project, grant roles/owner, or each of:
-                            roles/compute.admin; roles/billing.viewer (or roles/viewer on the
-                            project) (gcloud projects add-iam-policy-binding silo-test-project
-                            --member <you> --role <role>)
+                            roles/compute.admin (gcloud projects add-iam-policy-binding
+                            silo-test-project --member <you> --role <role>)
                     fail    billing: billing is not enabled on silo-test-project
                             why: GCE, Cloud SQL and Artifact Registry need a billing account
                             fix: link one at

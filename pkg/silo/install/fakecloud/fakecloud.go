@@ -231,6 +231,12 @@ func (r resourceManager) TestIamPermissions(ctx context.Context, project string,
 	defer r.f.mu.Unlock()
 	var out []string
 	for _, p := range perms {
+		// As GCE does: a permission projects don't carry (a billing
+		// account's, say) fails the whole request rather than coming
+		// back ungranted.
+		if strings.HasPrefix(p, "billing.") {
+			return nil, fmt.Errorf("googleapi: Error 400: Permission %s is not valid for this resource., badRequest", p)
+		}
 		if !r.f.Denied[p] {
 			out = append(out, p)
 		}
