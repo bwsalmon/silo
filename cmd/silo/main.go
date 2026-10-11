@@ -13,6 +13,7 @@
 //	silo members get|put|delete <silo> [identity]
 //	silo audit [silo] [--since ...] [--kind ...] [--subtree]
 //	silo agent create|list|get|patch|delete|stop|resume|renew ...
+//	silo credential add|login|list|remove ...
 //	silo model-price list|set ...
 //	silo install --project ... --regions ... --admin ... [flags]
 //	silo uninstall --project ... [--force] [--delete-data] [--dry-run]
@@ -78,6 +79,11 @@ commands:
   agent get|delete|stop|resume <agent>
   agent patch <agent> [--budget] [--labels]
   agent renew <agent> --ttl|--expire-time
+  credential add <name> --provider p --kind api_key < key
+                                    add an agent credential (root only)
+  credential login <name> --provider p [--from <home>]
+                                    log in a subscription and store its files
+  credential list|remove <name>     list or remove them; never read back
   model-price list                  the model price table
   model-price set <provider>/<model> --input-usd --output-usd --cache-write-usd --cache-read-usd
                                     override a price (root only; --delete removes it)
@@ -176,6 +182,8 @@ var commands = map[string]command{
 		"create": (*cli).agentCreate, "list": (*cli).agentList, "get": (*cli).agentGet, "patch": (*cli).agentPatch,
 		"delete": (*cli).agentDelete, "stop": agentAction("stop"), "resume": agentAction("resume"), "renew": (*cli).agentRenew,
 	}),
+	"credential": group("credential", map[string]command{"add": (*cli).credentialAdd, "login": (*cli).credentialLogin,
+		"list": (*cli).credentialList, "remove": (*cli).credentialRemove}),
 	"model-price": group("model-price", map[string]command{"list": (*cli).modelPriceList, "set": (*cli).modelPriceSet}),
 	"reconcile":   (*cli).reconcile,
 	"install":     (*cli).install,

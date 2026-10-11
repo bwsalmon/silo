@@ -17,8 +17,10 @@
 //     request_approval;
 //   - /silo/v1/ and /compute/v1/, the fence API and the facade over
 //     HTTP, for adapters that would rather call them directly;
-//   - /model/<provider>/, the model proxy, which is a later task's: 501
-//     until then.
+//   - /model/<provider>/, the model proxy (package modelproxy), for
+//     API-key credentials: it adds the key on the way out, and meters
+//     every call against the agent's budget. It is served only here,
+//     never through the gateway.
 //
 // The silo's control policy binds the fence tools and compute as it
 // binds the same calls over HTTP; silod's own checks (the fence API's
@@ -67,6 +69,12 @@ type Control interface {
 	WaitAnswer(ctx context.Context, agent, id string) (*fenceapi.AgentControlRequest, error)
 }
 
+// ModelProxy carries a session's model calls to its provider (package
+// modelproxy's Proxy). r's path is what follows /model/<provider>.
+type ModelProxy interface {
+	ServeModel(w http.ResponseWriter, r *http.Request, agent, provider string)
+}
+
 // Sockets are this silod's session sockets, one an agent. Its fields
 // are set before the first Open.
 type Sockets struct {
@@ -82,6 +90,9 @@ type Sockets struct {
 	// Tools reaches the agents' tool VMs; with none, their tools are
 	// listed but every call is retryable.
 	Tools ToolChannel
+	// Model is the model proxy, served at /model/<provider>/; with none,
+	// it is UNAVAILABLE.
+	Model ModelProxy
 
 	mu   sync.Mutex
 	open map[string]*socket
@@ -200,7 +211,14 @@ func (s *Sockets) Handler(agent, silo string) http.Handler {
 			}
 			s.Facade.ServeHTTP(w, r)
 		case strings.HasPrefix(p, "/model/"):
-			writeErr(w, http.StatusNotImplemented, "UNIMPLEMENTED", "silo: the model proxy is not built yet")
+			if s.Model == nil {
+				writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "silo: the model proxy isn't served here")
+				return
+			}
+			provider, rest, _ := strings.Cut(strings.TrimPrefix(p, "/model/"), "/")
+			r2 := r.Clone(r.Context())
+			r2.URL.Path, r2.URL.RawPath = "/"+rest, ""
+			s.Model.ServeModel(w, r2, agent, provider)
 		default:
 			writeErr(w, http.StatusNotFound, "NOT_FOUND", "silo: no such path "+p+"; the session socket serves /mcp, /silo/v1/, /compute/v1/ and /model/")
 		}

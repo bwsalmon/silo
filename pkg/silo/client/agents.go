@@ -264,3 +264,64 @@ func (c *Client) SetModelPrice(ctx context.Context, p ModelPrice, m Mutation) (*
 func (c *Client) DeleteModelPrice(ctx context.Context, provider, model string, m Mutation) error {
 	return c.Do(ctx, http.MethodDelete, "modelPrices/"+url.PathEscape(provider)+"/"+url.PathEscape(model), m.query(nil), nil, nil)
 }
+
+// Credential is one of the deployment's agent credentials, as the API
+// shows it: never its secret.
+type Credential struct {
+	Name        string    `json:"name"`
+	Provider    string    `json:"provider"`
+	Kind        string    `json:"kind"`
+	MaxSessions int       `json:"max_sessions"`
+	CreateTime  time.Time `json:"create_time"`
+	UpdateTime  time.Time `json:"update_time"`
+}
+
+// CredentialRequest adds a credential: an api_key's Secret, or a
+// subscription's login Files (by path under the harness's home, base64).
+// MaxSessions nil takes the kind's default.
+type CredentialRequest struct {
+	Name        string            `json:"name"`
+	Provider    string            `json:"provider"`
+	Kind        string            `json:"kind"`
+	MaxSessions *int              `json:"max_sessions,omitempty"`
+	Secret      string            `json:"secret,omitempty"`
+	Files       map[string]string `json:"files,omitempty"`
+}
+
+// Credentials lists the deployment's credentials (root members only).
+func (c *Client) Credentials(ctx context.Context) ([]Credential, error) {
+	var out struct {
+		Credentials []Credential `json:"credentials"`
+	}
+	if err := c.Do(ctx, http.MethodGet, "credentials", nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Credentials, nil
+}
+
+// AddCredential adds a credential, or replaces the secret of one of the
+// same provider and kind (root members only).
+func (c *Client) AddCredential(ctx context.Context, req CredentialRequest, m Mutation) (*Credential, error) {
+	var out Credential
+	if err := c.Do(ctx, http.MethodPost, "credentials", m.query(nil), req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RemoveCredential removes a credential (root members only).
+func (c *Client) RemoveCredential(ctx context.Context, name string, m Mutation) error {
+	return c.Do(ctx, http.MethodDelete, "credentials/"+url.PathEscape(name), m.query(nil), nil, nil)
+}
+
+// RemoveAllCredentials removes every credential, and returns their
+// names: silo uninstall's first step (root members only).
+func (c *Client) RemoveAllCredentials(ctx context.Context, m Mutation) ([]string, error) {
+	var out struct {
+		Deleted []string `json:"deleted"`
+	}
+	if err := c.Do(ctx, http.MethodDelete, "credentials", m.query(nil), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Deleted, nil
+}

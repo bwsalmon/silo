@@ -24,6 +24,8 @@ type silod struct {
 	t    *testing.T
 	url  string
 	root string // the root silo's id
+	// stdin is what the next command reads on its stdin.
+	stdin string
 }
 
 func startSilod(t *testing.T) *silod {
@@ -40,7 +42,8 @@ func startSilod(t *testing.T) *silod {
 	runner := &agents.Fake{AutoConnect: true}
 	api := fenceapi.New(db, fenceapi.Options{Caller: func(r *http.Request) (fenceapi.Caller, error) {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaInternal}, nil
-	}, ToolVMs: toolVMs{}, Runner: runner, Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"}})
+	}, ToolVMs: toolVMs{}, Runner: runner, Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"},
+		CredentialKey: bytes.Repeat([]byte{1}, 32)})
 	runner.Connected = api.ToolServerConnected
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() { srv.Close(); api.Close() })
@@ -83,7 +86,7 @@ type result struct {
 func (d *silod) silo(caller string, args ...string) result {
 	d.t.Helper()
 	var out, errb bytes.Buffer
-	c := &cli{stdout: &out, stderr: &errb, transport: asCaller{caller},
+	c := &cli{stdin: strings.NewReader(d.stdin), stdout: &out, stderr: &errb, transport: asCaller{caller},
 		getenv: func(k string) string {
 			if k == "SILO_ENDPOINT" {
 				return d.url

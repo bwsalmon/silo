@@ -240,6 +240,11 @@ func TestTokenVerification(t *testing.T) {
 	if code, out := e.call(tok, "GET", "/silo/v1/silos/b", nil); code != 404 {
 		t.Errorf("alice reading /b: %d %v, want 404", code, out)
 	}
+	// Uninstall's credentials path is served, as the member's silo: a
+	// member of /a isn't the root's, so it is refused there.
+	if code, out := e.call(tok, "GET", "/silod/credentials", nil); code != 403 {
+		t.Errorf("alice listing the credentials: %d %v, want 403", code, out)
+	}
 	// Headers meant for silod's other transports buy nothing: an unmapped
 	// caller claiming the root is still unmapped, and a mapped one is
 	// still its own silo.

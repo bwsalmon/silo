@@ -127,6 +127,12 @@ const (
 	OpModelPricesList   = "modelPrices.list"
 	OpModelPricesSet    = "modelPrices.set"
 	OpModelPricesDelete = "modelPrices.delete"
+	// The deployment's agent credentials (agents.md, §6, SV-108), root
+	// members only, at credentials and credentials/{name}.
+	OpCredentialsList      = "credentials.list"
+	OpCredentialsAdd       = "credentials.add"
+	OpCredentialsDelete    = "credentials.delete"
+	OpCredentialsDeleteAll = "credentials.deleteAll"
 
 	// Exports (fence-api.md, "Exports (proxied)", SV-14). Each is served
 	// under self and, on a descendant's behalf, under silos/{silo}
@@ -188,9 +194,13 @@ var fenceOps = map[string]Class{
 	OpAgentsRequestsList:   Reading,
 	OpAgentsRequestsAnswer: Mutation,
 
-	OpModelPricesList:   Reading,
-	OpModelPricesSet:    Mutation,
-	OpModelPricesDelete: Mutation,
+	OpModelPricesList:      Reading,
+	OpModelPricesSet:       Mutation,
+	OpModelPricesDelete:    Mutation,
+	OpCredentialsList:      Reading,
+	OpCredentialsAdd:       Mutation,
+	OpCredentialsDelete:    Mutation,
+	OpCredentialsDeleteAll: Mutation,
 
 	OpExportsList:       Reading,
 	OpExportsCreate:     Mutation,
@@ -284,6 +294,19 @@ func ParseFence(method, rest string) FenceCall {
 		segs := splitPath(strings.TrimPrefix(rest, "agents/"))
 		if len(segs) == 1 && strings.HasPrefix(segs[0], "-") && len(segs[0]) > 1 && method == http.MethodGet {
 			return FenceCall{Op: OpAgentGetByID, ID: segs[0]}
+		}
+		return FenceCall{}
+	case rest == "credentials" || strings.HasPrefix(rest, "credentials/"):
+		segs := splitPath(strings.TrimPrefix(rest, "credentials"))
+		switch {
+		case len(segs) == 0 && method == http.MethodGet:
+			return FenceCall{Op: OpCredentialsList}
+		case len(segs) == 0 && method == http.MethodPost:
+			return FenceCall{Op: OpCredentialsAdd}
+		case len(segs) == 0 && method == http.MethodDelete:
+			return FenceCall{Op: OpCredentialsDeleteAll}
+		case len(segs) == 1 && method == http.MethodDelete:
+			return FenceCall{Op: OpCredentialsDelete, ID: segs[0]}
 		}
 		return FenceCall{}
 	case rest == "modelPrices" || strings.HasPrefix(rest, "modelPrices/"):

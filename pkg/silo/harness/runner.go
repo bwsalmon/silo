@@ -19,6 +19,9 @@ type Control interface {
 	TakeMessages(ctx context.Context, agent string) ([]fenceapi.AgentMessage, error)
 	EndTurn(ctx context.Context, agent string) (more bool, err error)
 	RecordEvent(ctx context.Context, agent, kind string, data any) error
+	// ReportUsage meters a turn's usage as the harness reports it: a
+	// subscription session's charge (agents.md, "Metering", SV-110).
+	ReportUsage(ctx context.Context, agent string, usage map[string]any) error
 	Reply(ctx context.Context, agent, text string) (*fenceapi.AgentMessage, error)
 	AgentState(ctx context.Context, agent string) (string, error)
 	LoadSessionState(ctx context.Context, agent string) (fenceapi.SessionState, error)
@@ -472,7 +475,9 @@ func (h *handler) line(b []byte) {
 			h.r.event(h.ctx, h.agent, fenceapi.EventError, map[string]any{
 				"message": "the harness called its built-in tool " + ev.Tool + ", which its adapter turns off; the container allows it nothing"})
 		case EvUsage:
-			h.r.event(h.ctx, h.agent, fenceapi.EventUsage, ev.Usage)
+			if err := h.r.Control.ReportUsage(context.WithoutCancel(h.ctx), h.agent, ev.Usage); err != nil {
+				log.Printf("harness: %s: metering its usage: %v", h.agent, err)
+			}
 		case EvError:
 			h.r.event(h.ctx, h.agent, fenceapi.EventError, map[string]any{"message": ev.Text})
 		}

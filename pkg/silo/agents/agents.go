@@ -109,12 +109,21 @@ func (a Adapter) Takes(provider string) bool {
 	return false
 }
 
+// The kinds of credential (agents.md, §6, SV-108).
+const (
+	CredentialAPIKey       = "api_key"
+	CredentialSubscription = "subscription"
+)
+
 // Credential is one of the deployment's agent credentials, as the
-// fence API needs it: its name and the provider it logs in to. Storing
-// and using them is the credentials task's (agents.md, §6).
+// fence API needs it: its name, the provider it logs in to, its kind,
+// and how many sessions may use it at once (0: no cap). Its secret is
+// the fence API's, sealed in its database (agents.md, §6).
 type Credential struct {
-	Name     string
-	Provider string
+	Name        string
+	Provider    string
+	Kind        string
+	MaxSessions int
 }
 
 // Credentials finds the deployment's credentials by name.
@@ -131,7 +140,7 @@ type StaticCredentials map[string]string
 // Credential implements Credentials.
 func (s StaticCredentials) Credential(_ context.Context, name string) (Credential, bool, error) {
 	p, ok := s[name]
-	return Credential{Name: name, Provider: p}, ok, nil
+	return Credential{Name: name, Provider: p, Kind: CredentialAPIKey}, ok, nil
 }
 
 // Names implements Credentials.

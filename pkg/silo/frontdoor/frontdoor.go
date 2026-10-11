@@ -40,10 +40,12 @@ func Audience(hostProject string) string { return "silo:" + hostProject }
 
 // The paths the front door serves. /silod/bootstrap is install's, and
 // only while there is no root; /silod/health is what install waits on
-// before it.
+// before it; /silod/credentials is where uninstall lists the agent
+// credentials and deletes each, as a root member.
 const (
-	BootstrapPath = "/silod/bootstrap"
-	HealthPath    = "/silod/health"
+	BootstrapPath   = "/silod/bootstrap"
+	HealthPath      = "/silod/health"
+	CredentialsPath = "/silod/credentials"
 )
 
 // Options configure a Handler.
@@ -68,7 +70,8 @@ type handler struct {
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
-	api := strings.HasPrefix(path, "/compute/v1/") || strings.HasPrefix(path, "/silo/v1/")
+	api := strings.HasPrefix(path, "/compute/v1/") || strings.HasPrefix(path, "/silo/v1/") ||
+		path == CredentialsPath || strings.HasPrefix(path, CredentialsPath+"/")
 	if !api && path != BootstrapPath && path != HealthPath {
 		refuse(w, path, http.StatusNotFound, "silo: no such path "+path)
 		return

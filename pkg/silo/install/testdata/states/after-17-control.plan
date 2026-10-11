@@ -18,7 +18,7 @@ silo install: project silo-test-project
   image             ok      silo silod@sha256:7dd5524d6d0b
   db                ok      database silo, IAM user silod@silo-test-project.iam
   db-endpoint       ok      silo-db-psc 10.255.254.2 in silo-ctl, zone silo-db
-  migrate           ok      schema 17
+  migrate           ok      schema 18
   control           ok      silo-control us-central1-a, silod@sha256:7dd5524d6d0b
   root              create  / blocks 10.0.0.0/8 (minus 10.255.254.0/23)
                             us-central1 vcpu 22, ssd_disk_gb 500, local_ssd_gb 0,
