@@ -79,14 +79,25 @@ func Ranges(space netip.Prefix) (gateway, control netip.Prefix) {
 }
 
 // A Check is one thing a probe VM tries: a TCP connect, a UDP send that
-// expects an answer, an ICMP echo, or a DNS lookup.
+// expects an answer, an ICMP echo, a DNS lookup, an HTTP request, or a
+// shell script of the case's own.
 type Check struct {
 	// ID names the check in the probe's report.
 	ID    string
-	Kind  string // "tcp", "udp", "icmp" or "dns"
+	Kind  string // "tcp", "udp", "icmp", "dns", "http" or "sh"
 	Host  string
 	Port  int
 	Count int // icmp only; 0 is 2
+
+	// http: Method (GET if ""), URL, an optional JSON Body, Proxy
+	// (curl's -x) and Headers ("Name: value"). The check is ok when
+	// curl got an answer at all; its detail starts with the HTTP status
+	// (HTTPStatus), then the head of the body.
+	Method, URL, Body, Proxy string
+	Headers                  []string
+
+	// sh: a bash script, ok when it exits 0.
+	Script string
 }
 
 // Probe report lines on the serial console. A probe can't be reached
@@ -107,6 +118,7 @@ func ProbeScript(checks []Check) string {
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("exec >/dev/ttyS0 2>&1\n")
 	b.WriteString("command -v nc >/dev/null || (apt-get update -qq && apt-get install -y -qq netcat-openbsd) >/dev/null 2>&1\n")
+	b.WriteString("h() { curl -sS -m 20 -o /tmp/body -w '%{http_code} ' \"$@\" && head -c 400 /tmp/body; }\n")
 	b.WriteString("r() { if \"${@:2}\" >/tmp/out 2>&1; then echo \"" + reportPrefix + "$1 ok $(head -c 200 /tmp/out | tr '\\n' ' ')\"; else echo \"" + reportPrefix + "$1 fail $(head -c 200 /tmp/out | tr '\\n' ' ')\"; fi; }\n")
 	for _, c := range checks {
 		switch c.Kind {
@@ -123,6 +135,24 @@ func ProbeScript(checks []Check) string {
 			fmt.Fprintf(&b, "r %s ping -c %d -W 3 %s\n", shellWord(c.ID), n, shellWord(c.Host))
 		case "dns":
 			fmt.Fprintf(&b, "r %s getent hosts %s\n", shellWord(c.ID), shellWord(c.Host))
+		case "http":
+			m := c.Method
+			if m == "" {
+				m = "GET"
+			}
+			fmt.Fprintf(&b, "r %s h -X %s", shellWord(c.ID), shellWord(m))
+			if c.Proxy != "" {
+				fmt.Fprintf(&b, " -x %s", shellWord(c.Proxy))
+			}
+			for _, h := range c.Headers {
+				fmt.Fprintf(&b, " -H %s", shellWord(h))
+			}
+			if c.Body != "" {
+				fmt.Fprintf(&b, " -H 'Content-Type: application/json' --data-binary %s", shellWord(c.Body))
+			}
+			fmt.Fprintf(&b, " %s\n", shellWord(c.URL))
+		case "sh":
+			fmt.Fprintf(&b, "r %s bash -c %s\n", shellWord(c.ID), shellWord(c.Script))
 		}
 	}
 	b.WriteString("echo " + reportDone + "\n")
@@ -165,6 +195,17 @@ func ParseProbeReport(serial string) (map[string]ProbeResult, bool) {
 		out[f[0]] = r
 	}
 	return out, done
+}
+
+// HTTPStatus is the HTTP status an "http" check's detail starts with, 0
+// if it has none (curl got no answer).
+func HTTPStatus(r ProbeResult) int {
+	var code int
+	if !r.OK {
+		return 0
+	}
+	fmt.Sscanf(r.Detail, "%d", &code)
+	return code
 }
 
 // Object is a cloud object the leftover check found.
