@@ -70,6 +70,10 @@ type Launch struct {
 	SessionID string
 	// Resume is set to continue SessionID from its saved state.
 	Resume bool
+	// Subscription is set for a subscription session: the CLI uses
+	// its own login, through the egress proxy, not the model proxy
+	// (agents.md, §6, SV-108).
+	Subscription bool
 }
 
 // Command is what a container runs for one turn.

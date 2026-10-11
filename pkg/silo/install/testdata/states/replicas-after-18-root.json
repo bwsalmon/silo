@@ -61,7 +61,7 @@
       "metadata": {
         "silo-credential-key": "set",
         "silo-image": "us-central1-docker.pkg.dev/silo-test-project/silo/silod@sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
-        "silo-user-data-sha256": "a48cf16d897493965c85573c5745eac85d1c60ebe6f4d6dd6539987e3cf9783f"
+        "silo-user-data-sha256": "d3454235abd4cced2f1254e771960bed4b6c0bceb3376b40b0c4ab05244ca6a3"
       },
       "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
       "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139",
@@ -81,11 +81,11 @@
           "silo-control"
         ],
         "control": {
-          "template": "silo-control-4b8a815a03",
+          "template": "silo-control-ccaec8e021",
           "templateExists": true,
           "mig": true,
           "migOurs": true,
-          "migTemplate": "silo-control-4b8a815a03",
+          "migTemplate": "silo-control-ccaec8e021",
           "migSize": 2,
           "migSurge": 4,
           "healthCheck": true,
@@ -98,7 +98,7 @@
           "ruleIP": "10.255.255.3",
           "addressIP": "10.255.255.3",
           "templates": [
-            "silo-control-4b8a815a03"
+            "silo-control-ccaec8e021"
           ]
         },
         "gateway": {

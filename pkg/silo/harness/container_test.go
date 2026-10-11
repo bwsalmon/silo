@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,7 +90,7 @@ func TestSpecIsolation(t *testing.T) {
 		!n.HostConfig.ReadonlyRootfs || len(n.HostConfig.Mounts) != 0 || !slices.Equal(n.Cmd, []string{"pause"}) {
 		t.Errorf("namespace container %+v", n)
 	}
-	fw := harness.FirewallContainer(&s, "img@sha256:1")
+	fw := harness.FirewallContainer(&s, "img@sha256:1", netip.AddrPort{})
 	if fw.HostConfig.NetworkMode != h.NetworkMode || !slices.Equal(fw.HostConfig.CapAdd, []string{"NET_ADMIN", "NET_RAW"}) ||
 		len(fw.HostConfig.Mounts) != 0 || !fw.HostConfig.ReadonlyRootfs {
 		t.Errorf("firewall container %+v", fw)
@@ -142,6 +143,17 @@ type engine struct {
 	created map[string]harness.Container
 	out     []string
 	fwExit  int
+	// during runs as the harness does, between start and wait.
+	during func()
+}
+
+func (e *engine) EgressNetwork(_ context.Context, n string) (netip.Addr, error) {
+	e.log("network " + n)
+	return netip.MustParseAddr("127.0.0.1"), nil
+}
+func (e *engine) Address(_ context.Context, n, network string) (netip.Addr, error) {
+	e.log("address " + n + " " + network)
+	return netip.MustParseAddr("172.30.0.5"), nil
 }
 
 func (e *engine) log(s string) {
@@ -194,6 +206,9 @@ func (e *engine) Labelled(context.Context, string) (map[string]string, error) {
 }
 func (e *engine) Logs(_ context.Context, n string, line func([]byte)) error {
 	e.log("logs " + n)
+	if e.during != nil {
+		e.during()
+	}
 	for _, l := range e.out {
 		line([]byte(l))
 	}

@@ -188,12 +188,22 @@ type runtime struct {
 	lines   []string
 	err     error
 	state   []byte
+	// login is each turn's Result.Login; stopLogin what Login reads
+	// as the session stops.
+	login     map[string][]byte
+	stopLogin map[string][]byte
+}
+
+func (r *runtime) Login(_ context.Context, agent string, paths []string) (map[string][]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopLogin, nil
 }
 
 func (r *runtime) Turn(ctx context.Context, s harness.Spec, line func([]byte)) (harness.Result, error) {
 	r.mu.Lock()
 	r.specs = append(r.specs, s)
-	lines, err, st := r.lines, r.err, r.state
+	lines, err, st, login := r.lines, r.err, r.state, r.login
 	r.mu.Unlock()
 	if err != nil {
 		return harness.Result{}, err
@@ -201,7 +211,7 @@ func (r *runtime) Turn(ctx context.Context, s harness.Spec, line func([]byte)) (
 	for _, l := range lines {
 		line([]byte(l))
 	}
-	return harness.Result{State: st}, nil
+	return harness.Result{State: st, Login: login}, nil
 }
 
 func (r *runtime) Remove(_ context.Context, agent string) error {

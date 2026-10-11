@@ -381,8 +381,10 @@ A **credential** is a model provider login held on the control VM:
 - **Who manages them.** Root members only, through the front door:
   `silo credential add <name> --provider anthropic --kind api_key`
   reads the secret from stdin; `silo credential login <name>` runs the
-  adapter's login flow on the control VM and stores the files it
-  writes. Credentials can be listed and removed, never read back.
+  adapter's login flow (`claude setup-token`, `codex login`) in a
+  temporary home on the operator's machine, uploads the files it
+  writes through the front door, and removes the home; silod seals
+  them. Credentials can be listed and removed, never read back.
 - **Where they live.** In silod's database
   ([`state.md`](state.md)), so that every control VM can use them,
   encrypted with a key that install puts in the control VMs' metadata
@@ -391,10 +393,29 @@ A **credential** is a model provider login held on the control VM:
   server. The database's backups hold the credentials only encrypted,
   without the key. `silo uninstall` deletes the credentials and the key
   before anything else ([`install.md`](install.md#silo-uninstall)).
-- **Subscription login files** are decrypted by silod into a session's
-  private directory when the session starts. If the harness refreshes
-  the login, silod writes the new files back to the database, so the
-  next session on that login, on any control VM, gets them.
+- **Why the login runs on the operator's machine, not the control
+  VM.** Both flows are browser OAuth: the operator's browser, signed
+  in to the plan's account, does the half that matters wherever the
+  CLI runs, and `codex login` waits for the browser's redirect on the
+  machine it runs on. Running them on the control VM would need an
+  interactive terminal into it over the front door (a one-off login
+  container under sessiond, its stdin and stdout carried through
+  IAP), a new way into the crown jewel ([§11](#11-security)), to keep
+  off the operator's machine a login that the operator's browser
+  already holds. The tokens the flows write aren't bound to the
+  machine that got them, so a login made there works on any control
+  VM; the files cross the front door once, over TLS, and are kept
+  only sealed.
+- **Subscription login files** are decrypted by silod for each turn of
+  a session and handed to sessiond, which puts them in the session's
+  login directory (its own, on a tmpfs), mounted read-only into the
+  container. The container's entrypoint copies them into the
+  harness's home, as the session's user, before the CLI runs. After
+  each turn, and when the session stops, sessiond reads those paths
+  back from the home; if the harness refreshed the login, silod writes
+  the new files back to the database, so the next session on that
+  login, on any control VM, gets them. A refresh that can't be written
+  back is kept and given to the session's next turn until it is.
 - **Who may use them.** Each silo's **agent policy** (call 51) lists
   the credentials, adapters and models its subtree may use, and the
   longest lease an agent in it may have. Like egress, the effective
@@ -639,7 +660,19 @@ Each session runs in its own container (call 50):
   socket. Subscription sessions get a network namespace whose only
   route is a small egress proxy on the control VM that allows the
   provider's hosts for that credential (for example `api.anthropic.com`
-  and its login-refresh host) and nothing else;
+  and its login-refresh host) and nothing else. The namespace is on
+  `silo-egress`, an internal bridge (no route off the VM, no traffic
+  between its containers); a firewall in it allows only the loopback
+  and the proxy, on the bridge's gateway, port 3128; and the proxy,
+  served by sessiond, knows each session by its address and lets it
+  `CONNECT` to its provider's hosts on 443, on addresses that aren't
+  internal, and refuses the rest:
+
+  | provider | hosts |
+  | --- | --- |
+  | `anthropic` | `api.anthropic.com`, `console.anthropic.com`, `platform.claude.com` |
+  | `openai` | `api.openai.com`, `auth.openai.com`, `chatgpt.com` |
+
 - **no metadata server.** As for the gateway's container, an
   `iptables` rule in its namespace drops `169.254.169.254`, so it
   can't fetch silod's service-account token;

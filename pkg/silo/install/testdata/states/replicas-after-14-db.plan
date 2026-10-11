@@ -24,10 +24,10 @@ silo install: project silo-test-project
   control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
                             (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
                             silo-control-lb-ip internal, in silo-gateway
-                            silo-control-4b8a815a03 instance template: e2-standard-2 cos-stable, the
+                            silo-control-ccaec8e021 instance template: e2-standard-2 cos-stable, the
                             silod service account, silod@sha256:7dd5524d6d0b
                             silo-control-hc TCP 8080
-                            silo-control-mig regional MIG of 2, silo-control-4b8a815a03
+                            silo-control-mig regional MIG of 2, silo-control-ccaec8e021
                             silo-control-lb (backend service) internal passthrough, TCP,
                             silo-control-anchor, silo-control-mig
                             silo-control-lb (forwarding rule) silo-control-lb-ip, all TCP ports,

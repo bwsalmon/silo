@@ -483,7 +483,7 @@ func serve(ctx context.Context, args []string) error {
 	defer api.Close()
 	connected := api.ToolServerConnected
 	if runner != nil {
-		runner.Control = api
+		runner.Control, runner.Logins = api, api
 		// A tool server's attach may begin the first turn, which the
 		// session's host runs.
 		connected = func(ctx context.Context, agent string) error {

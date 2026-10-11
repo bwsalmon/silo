@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -72,17 +73,29 @@ type Spec struct {
 	// ReadOnlyRoot makes the image's filesystem read-only: the private
 	// directory and a small /tmp are the only places it writes.
 	ReadOnlyRoot bool `json:"read_only_root"`
-	// Network is "none": an API-key session's only way out is its
-	// socket. (A subscription session's namespace with a route to its
-	// provider's egress proxy comes with stored credentials; until
-	// then every session has none, which can only fail closed.)
+	// Network is "none" for an API-key session, whose only way out is
+	// its socket, and "egress" for a subscription session, whose
+	// namespace's only route is sessiond's egress proxy, which lets it
+	// reach Provider's hosts (EgressHosts) and nothing else.
 	Network string `json:"network"`
+	// Provider is a subscription session's provider: which hosts its
+	// egress proxy allows. Empty for an API-key session.
+	Provider string `json:"provider,omitempty"`
+	// Login are a subscription session's login files, by path under
+	// Home, as silod decrypted them (agents.md, §6, SV-108). sessiond
+	// puts them in the session's login directory, mounted read-only at
+	// LoginPath, and harness-init copies them into Home before the CLI
+	// runs. After the turn sessiond returns the files at those paths
+	// as the harness left them (Result.Login), for silod to write back
+	// if the harness refreshed its login. Empty for an API-key session.
+	Login map[string][]byte `json:"login,omitempty"`
 	// DropMetadata is the iptables drop of the metadata server in the
 	// session's network namespace, put there before the harness runs.
 	DropMetadata bool `json:"drop_metadata"`
 	// Mounts are the session socket, read-write so the harness can
-	// connect, and the private directory, at Home. Nothing else of
-	// silod's.
+	// connect, and the private directory, at Home; and for a
+	// subscription session its login directory, read-only, at
+	// LoginPath. Nothing else of silod's.
 	Mounts []Mount `json:"mounts"`
 	// TmpBytes is the size of the tmpfs at /tmp.
 	TmpBytes    int64 `json:"tmp_bytes"`
@@ -97,8 +110,18 @@ type Spec struct {
 	Restore []byte `json:"restore,omitempty"`
 }
 
-// Layout is where a control VM keeps sessions' sockets and private
-// directories, as silod and sessiond both see them.
+// LoginPath is where a subscription session's login directory is
+// mounted, read-only.
+const LoginPath = "/run/silo/login"
+
+// Network modes of a session.
+const (
+	NetworkNone   = "none"
+	NetworkEgress = "egress"
+)
+
+// Layout is where a control VM keeps sessions' sockets, private
+// directories and login files, as silod and sessiond both see them.
 type Layout struct {
 	// SocketDir holds /<agent>/silo.sock (package session's Dir).
 	SocketDir string
@@ -108,10 +131,17 @@ type Layout struct {
 	// as SocketDir: it holds a hard link to each session's socket,
 	// which is what a session's container mounts (Sessiond.socket).
 	LinkDir string
+	// LoginDir is sessiond's own directory, root's, on a tmpfs, that
+	// holds each subscription session's login files, /<agent>: under
+	// LinkDir, so that nothing of silod's is on the way to it.
+	LoginDir string
 }
 
 // DefaultLayout is the control VM's.
-var DefaultLayout = Layout{SocketDir: "/run/silo/sessions", StateDir: "/var/lib/silo/sessions", LinkDir: "/run/silo/sessiond"}
+var DefaultLayout = Layout{SocketDir: "/run/silo/sessions", StateDir: "/var/lib/silo/sessions", LinkDir: "/run/silo/sessiond", LoginDir: "/run/silo/sessiond/logins"}
+
+// Login is agent's login directory.
+func (l Layout) Login(agent string) string { return filepath.Join(l.LoginDir, agent) }
 
 // Link is sessiond's hard link to agent's socket.
 func (l Layout) Link(agent string) string { return filepath.Join(l.LinkDir, agent+".sock") }
@@ -154,7 +184,7 @@ func NewSpec(layout Layout, agent string, slot int, a Adapter, cmd Command, lim 
 		CapDrop:         []string{"ALL"},
 		NoNewPrivileges: true,
 		ReadOnlyRoot:    true,
-		Network:         "none",
+		Network:         NetworkNone,
 		DropMetadata:    true,
 		Mounts: []Mount{
 			{Source: layout.Socket(agent), Target: SocketPath},
@@ -166,6 +196,24 @@ func NewSpec(layout Layout, agent string, slot int, a Adapter, cmd Command, lim 
 		Pids:        lim.Pids,
 		StatePaths:  a.StatePaths(),
 	}
+}
+
+// Subscribe makes s a subscription session's: its login files in,
+// read-only, and a namespace whose only route is the egress proxy for
+// provider's hosts. harness-init copies the files into Home before the
+// CLI runs (HarnessInit).
+func (s *Spec) Subscribe(layout Layout, provider string, files map[string][]byte) {
+	s.Network, s.Provider, s.Login = NetworkEgress, provider, files
+	s.Mounts = append(s.Mounts, Mount{Source: layout.Login(s.Agent), Target: LoginPath, ReadOnly: true})
+	// harness-init's own flags come before its "--".
+	i := slices.Index(s.Argv, "--")
+	s.Argv = slices.Insert(s.Argv, i, "--login", LoginPath)
+}
+
+// ValidLoginPath reports whether p can be a login file's path: relative,
+// under the home, with no way out of it.
+func ValidLoginPath(p string) bool {
+	return p != "" && !filepath.IsAbs(p) && filepath.Clean(p) == p && p != "." && p != ".." && !strings.HasPrefix(p, "../")
 }
 
 // ValidAgent reports whether id can name a session's containers and
@@ -209,20 +257,41 @@ func (s *Spec) Validate(layout Layout) error {
 	if !s.ReadOnlyRoot {
 		bad("the root filesystem must be read-only")
 	}
-	if s.Network != "none" {
-		bad("network must be none, not %q", s.Network)
-	}
 	if !s.DropMetadata {
 		bad("the metadata server must be dropped")
 	}
 	want := map[string]string{SocketPath: layout.Socket(s.Agent), Home: layout.Private(s.Agent)}
+	switch s.Network {
+	case NetworkNone:
+		if s.Provider != "" || len(s.Login) > 0 {
+			bad("an API-key session (network none) gets no provider and no login files")
+		}
+	case NetworkEgress:
+		if _, ok := EgressHosts[s.Provider]; !ok {
+			bad("a subscription session needs a provider with egress hosts, not %q", s.Provider)
+		}
+		if len(s.Login) == 0 {
+			bad("a subscription session needs its login files")
+		}
+		for p := range s.Login {
+			if !ValidLoginPath(p) {
+				bad("login file %q must be relative, under the home", p)
+			}
+		}
+		want[LoginPath] = layout.Login(s.Agent)
+	default:
+		bad("network must be none or egress, not %q", s.Network)
+	}
 	if len(s.Mounts) != len(want) {
-		bad("want exactly the socket and the private directory mounted, not %d mounts", len(s.Mounts))
+		bad("want exactly the socket, the private directory and (for a subscription) the login files mounted, not %d mounts", len(s.Mounts))
 	}
 	for _, m := range s.Mounts {
 		if src, ok := want[m.Target]; !ok || m.Source != src {
-			bad("mount %s at %s: only %s at %s and %s at %s", m.Source, m.Target,
-				want[SocketPath], SocketPath, want[Home], Home)
+			bad("mount %s at %s: only %s at %s, %s at %s, and a subscription's %s at %s", m.Source, m.Target,
+				want[SocketPath], SocketPath, want[Home], Home, layout.Login(s.Agent), LoginPath)
+		}
+		if m.Target == LoginPath && !m.ReadOnly {
+			bad("the login files must be mounted read-only")
 		}
 	}
 	if s.MemoryBytes <= 0 || s.MemoryBytes > 8<<30 {
