@@ -408,3 +408,69 @@ func tenantVM(name, silo string) *compute.Instance {
 type removerStep struct{ install.Remover }
 
 func (r removerStep) Plan(o install.Observed) []install.Change { return r.PlanRemove(o) }
+
+// TestUninstallWithoutRecord is uninstall of a project install never got
+// as far as the network step in, so there is no record to read the home
+// region from: no step fails, every step whose objects are in the home
+// region is ok without observing with an empty region (the fakes answer
+// that 400, as GCE does), and Remove deletes what install did make.
+func TestUninstallWithoutRecord(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name    string
+		compute bool
+		// steps is how many of install's steps ran before it stopped.
+		steps int
+	}{
+		{name: "nothing"},
+		{name: "compute enabled", compute: true},
+		{name: "after apis", steps: 2},
+		{name: "after silod-role", steps: 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := fakecloud.New(project)
+			f.Enabled["compute.googleapis.com"] = c.compute
+			if c.steps > 0 {
+				if err := install.Apply(ctx, steps(t, f)[:c.steps], &bytes.Buffer{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := install.Defaults()
+			cfg.Project, cfg.Force, cfg.DeleteData = project, true, true
+			if err := install.LoadRecord(ctx, &cfg, f.Cloud()); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.HomeRegion() != "" {
+				t.Fatalf("LoadRecord found home region %q with no record", cfg.HomeRegion())
+			}
+			st := install.UninstallSteps(newEnv(cfg, f))
+			plans := install.PlanRemoveAll(ctx, st)
+			out := render(plans)
+			regional := map[string]bool{}
+			for _, s := range []string{"admin", "control", "migrate", "db-endpoint", "image", "dns", "address", "nat", "control-subnet", "gateway-subnet"} {
+				regional[s] = true
+			}
+			for _, p := range plans {
+				if p.Failed() {
+					t.Errorf("%s failed:\n%s", p.Step, out)
+				}
+				if !regional[p.Step] {
+					if c.steps == 0 && p.Changing() {
+						t.Errorf("%s has something to do in an untouched project:\n%s", p.Step, out)
+					}
+					continue
+				}
+				delete(regional, p.Step)
+				if len(p.Changes) != 1 || p.Changes[0].Action != install.ActionOK || !strings.Contains(p.Changes[0].Detail, "no install record") {
+					t.Errorf("%s isn't nothing to do for want of a record:\n%s", p.Step, out)
+				}
+			}
+			for s := range regional {
+				t.Errorf("plan lacks %s:\n%s", s, out)
+			}
+			if err := install.Remove(ctx, st, &bytes.Buffer{}); err != nil {
+				t.Fatalf("Remove: %v", err)
+			}
+		})
+	}
+}

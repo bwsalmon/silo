@@ -71,6 +71,7 @@ type SystemSubnetObserved struct {
 }
 
 func (s *Subnet) Name() string          { return s.step }
+func (s *Subnet) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *Subnet) NewObserved() Observed { return &SystemSubnetObserved{} }
 
 func onOff(b bool) string {
@@ -207,6 +208,7 @@ type NATConfig struct {
 }
 
 func (s *NAT) Name() string          { return "nat" }
+func (s *NAT) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *NAT) NewObserved() Observed { return &NATObserved{} }
 
 func (s *NAT) wantConfig() NATConfig {
@@ -355,6 +357,7 @@ type AddressObserved struct {
 }
 
 func (s *Address) Name() string          { return "address" }
+func (s *Address) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *Address) NewObserved() Observed { return &AddressObserved{} }
 
 func (s *Address) Observe(ctx context.Context) (Observed, error) {

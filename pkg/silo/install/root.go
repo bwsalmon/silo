@@ -20,6 +20,11 @@ var SilodTimeout = 10 * time.Minute
 // never fails the observation: a silod that isn't serving yet is what
 // the root step waits for.
 func observeSilod(ctx context.Context, env *Env) (zone string, h *SilodHealth, why string, err error) {
+	// With no home region (uninstall with no install record) there is
+	// no control VM of this install's to look for.
+	if env.Config.HomeRegion() == "" {
+		return "", nil, "", nil
+	}
 	on, err := computeOn(ctx, env)
 	if err != nil || !on {
 		return "", nil, "", err

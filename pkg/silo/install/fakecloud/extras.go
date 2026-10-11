@@ -252,7 +252,18 @@ func (x computeExtras) SetPrivateIpGoogleAccess(ctx context.Context, project, re
 
 func regional(region, name string) string { return region + "/" + name }
 
+// noRegion is GCE's answer to a regional call with no region.
+func noRegion(region string) error {
+	if region == "" {
+		return badRequest("Invalid value for field 'region': ''")
+	}
+	return nil
+}
+
 func (x computeExtras) GetRouter(ctx context.Context, project, region, name string) (*compute.Router, error) {
+	if err := noRegion(region); err != nil {
+		return nil, err
+	}
 	x.f.mu.Lock()
 	defer x.f.mu.Unlock()
 	if err := x.f.need("compute.googleapis.com"); err != nil {
@@ -304,6 +315,9 @@ func (x computeExtras) DeleteRouter(ctx context.Context, project, region, name s
 }
 
 func (x computeExtras) GetAddress(ctx context.Context, project, region, name string) (*compute.Address, error) {
+	if err := noRegion(region); err != nil {
+		return nil, err
+	}
 	x.f.mu.Lock()
 	defer x.f.mu.Unlock()
 	if err := x.f.need("compute.googleapis.com"); err != nil {
@@ -358,6 +372,9 @@ func (x computeExtras) DeleteAddress(ctx context.Context, project, region, name 
 
 // InstanceZone finds the instance in the GCE fake, in region's zones.
 func (x computeExtras) InstanceZone(ctx context.Context, project, region, name string) (string, error) {
+	if err := noRegion(region); err != nil {
+		return "", err
+	}
 	zones, err := x.f.Compute.ListZones(ctx, project)
 	if err != nil {
 		return "", err

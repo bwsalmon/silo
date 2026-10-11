@@ -42,6 +42,7 @@ type DBEndpointObserved struct {
 }
 
 func (s *DBEndpointStep) Name() string          { return "db-endpoint" }
+func (s *DBEndpointStep) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *DBEndpointStep) NewObserved() Observed { return &DBEndpointObserved{} }
 
 func (s *DBEndpointStep) networkURL() string {

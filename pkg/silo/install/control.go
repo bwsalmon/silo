@@ -91,6 +91,7 @@ type ControlObserved struct {
 }
 
 func (s *Control) Name() string          { return "control" }
+func (s *Control) homeRegion() string    { return s.Env.Config.HomeRegion() }
 func (s *Control) NewObserved() Observed { return &ControlObserved{} }
 
 func (s *Control) Observe(ctx context.Context) (Observed, error) {
