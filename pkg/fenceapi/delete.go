@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/control"
 	"github.com/bwsalmon/silo/pkg/ids"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
@@ -433,6 +434,9 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		name := req.Name
 		if name == "" {
 			name = "root"
+		}
+		if control.ReservedName(name) {
+			return errorf(InvalidArgument, "name %q is reserved: it names a collection in fence API paths", name).with("field", "name")
 		}
 		root, err := tree.CreateRoot(ctx, tx, name, req.Labels)
 		if err != nil {

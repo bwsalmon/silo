@@ -305,10 +305,6 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "root": rooted})
 }
 
-// reservedNames are the custom-allocator collections v1 reserves
-// (custom-allocators.md, fence API items 6 to 11).
-var reservedNames = map[string]bool{"allocators": true, "allocator-offers": true, "allocator-grants": true, "resources": true}
-
 // reserved reports whether rest (the path after /silo/v1/) is one of
 // the reserved paths, under self, a silo, or at the top.
 func reserved(rest string) bool {
@@ -320,7 +316,7 @@ func reserved(rest string) bool {
 		return false
 	}
 	for _, seg := range segs[1:] {
-		if reservedNames[strings.SplitN(seg, ":", 2)[0]] {
+		if control.AllocatorCollections[strings.SplitN(seg, ":", 2)[0]] {
 			return true
 		}
 	}

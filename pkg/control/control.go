@@ -246,13 +246,23 @@ func AgentSurface(op string) bool { return agentSurface[op] }
 func FenceClass(op string) Class { return fenceOps[op] }
 
 // Collections are the names that, as a path segment after a silo
-// reference, start a sub-resource. A silo with one of these names is
-// reached by its id. Some are not served yet; their paths parse but
-// name no operation, so they are mutations.
+// reference, start a sub-resource. No silo may take one as its name
+// (ReservedName). Some are not served yet; their paths parse but name
+// no operation, so they are mutations.
 var Collections = map[string]bool{
 	"children": true, "members": true, "audit": true,
 	"exports": true, "imports": true, "offers": true, "links": true, "manageGrants": true, "agents": true,
 }
+
+// AllocatorCollections are the custom-allocator collections v1
+// reserves (custom-allocators.md, fence API items 6 to 11): a path
+// with one as a segment is UNIMPLEMENTED.
+var AllocatorCollections = map[string]bool{"allocators": true, "allocator-offers": true, "allocator-grants": true, "resources": true}
+
+// ReservedName reports whether name, as a path segment, would be read
+// as a collection rather than a silo, so no silo may take it as its
+// name: a silo so named could not be addressed by path.
+func ReservedName(name string) bool { return Collections[name] || AllocatorCollections[name] }
 
 // FenceCall is a fence API path, parsed.
 type FenceCall struct {

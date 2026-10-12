@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sort"
 
+	"github.com/bwsalmon/silo/pkg/control"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -113,6 +114,9 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		}
 		if !tree.ValidName(req.Name) {
 			return errorf(InvalidArgument, "name %q is not a DNS label", req.Name).with("field", "name")
+		}
+		if control.ReservedName(req.Name) {
+			return errorf(InvalidArgument, "name %q is reserved: it names a collection in fence API paths", req.Name).with("field", "name")
 		}
 		if req.Address == nil {
 			return errorf(InvalidArgument, "address is required: prefix_length or range").with("field", "address")
