@@ -62,6 +62,14 @@ func TestAgentMessages(t *testing.T) {
 	if a := e.ok(e.root, "GET", path, nil); get(a, "session", "turns") != float64(3) {
 		t.Errorf("session: %v", a["session"])
 	}
+	// Listed in the order they were sent, even when the clock can't tell
+	// them apart: give them all the same time.
+	if err := e.db.Tx(ctx, func(tx store.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE agent_messages SET at = 0 WHERE agent = ?`, id)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var dirs []string
 	for _, m := range e.ok(e.root, "GET", path+"/messages", nil)["messages"].([]any) {
 		dirs = append(dirs, m.(obj)["direction"].(string)+":"+m.(obj)["text"].(string))

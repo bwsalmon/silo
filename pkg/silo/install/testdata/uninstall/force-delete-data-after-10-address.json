@@ -43,7 +43,7 @@
           "us-central1-f"
         ],
         "control": {
-          "template": "silo-control-5eb4667bbc"
+          "template": "silo-control-49f2d46781"
         },
         "gateway": {},
         "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
@@ -76,7 +76,7 @@
         "labels": {
           "silo-install": "i7a71c41be6",
           "silo-role": "db",
-          "silo-schema": "19"
+          "silo-schema": "20"
         },
         "edition": "ENTERPRISE",
         "tier": "db-g1-small",
@@ -285,7 +285,7 @@
     "migrate": {
       "instance": "silo-db-t3st",
       "state": "RUNNABLE",
-      "schema": 19
+      "schema": 20
     },
     "nat": {
       "computeEnabled": true,

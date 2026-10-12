@@ -169,6 +169,15 @@ func appendEvent(ctx context.Context, tx store.Tx, agent, kind string, data any)
 	return seq, err
 }
 
+// nextSeq is the seq for agent's next row in table (agent_messages or
+// agent_requests), numbered after its last so that they are listed in
+// the order they were made, whatever the clock says.
+func nextSeq(ctx context.Context, tx store.Tx, table, agent string) (int64, error) {
+	var seq int64
+	err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM `+table+` WHERE agent = ?`, agent).Scan(&seq)
+	return seq, err
+}
+
 func readEvents(ctx context.Context, tx store.Tx, agent string, after int64, limit int) ([]AgentEvent, error) {
 	rows, err := tx.Query(ctx, `SELECT seq, at, kind, data FROM agent_events WHERE agent = ? AND seq > ? ORDER BY seq LIMIT ?`, agent, after, limit)
 	if err != nil {
@@ -206,7 +215,7 @@ func scanMessage(row interface{ Scan(...any) error }) (AgentMessage, error) {
 }
 
 func readMessages(ctx context.Context, tx store.Tx, where string, args ...any) ([]AgentMessage, error) {
-	rows, err := tx.Query(ctx, `SELECT `+messageColumns+` FROM agent_messages WHERE `+where+` ORDER BY at, id`, args...)
+	rows, err := tx.Query(ctx, `SELECT `+messageColumns+` FROM agent_messages WHERE `+where+` ORDER BY seq`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +255,7 @@ func scanRequest(row interface{ Scan(...any) error }) (*AgentControlRequest, err
 }
 
 func readRequests(ctx context.Context, tx store.Tx, where string, args ...any) ([]*AgentControlRequest, error) {
-	rows, err := tx.Query(ctx, `SELECT `+requestColumns+` FROM agent_requests WHERE `+where+` ORDER BY at, id`, args...)
+	rows, err := tx.Query(ctx, `SELECT `+requestColumns+` FROM agent_requests WHERE `+where+` ORDER BY seq`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -474,8 +483,12 @@ func (s *Server) postMessage(q *request, ref, name string) (any, error) {
 		if q.validateOnly {
 			return errValidateOnly
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO agent_messages (id, agent, at, direction, text, sender, member) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			out.ID, a.ID, store.Millis(now), MessageIn, out.Text, q.caller.Silo, q.caller.Member); err != nil {
+		seq, err := nextSeq(ctx, tx, "agent_messages", a.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_messages (id, agent, seq, at, direction, text, sender, member) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			out.ID, a.ID, seq, store.Millis(now), MessageIn, out.Text, q.caller.Silo, q.caller.Member); err != nil {
 			return err
 		}
 		if _, err := appendEvent(ctx, tx, a.ID, EventMessage, map[string]any{"id": out.ID, "direction": MessageIn, "text": out.Text, "sender": out.Sender}); err != nil {
@@ -754,8 +767,12 @@ func (s *Server) Reply(ctx context.Context, agent, text string) (*AgentMessage, 
 			return err
 		}
 		out = &AgentMessage{ID: "m-" + ids.New() + ids.New(), Direction: MessageOut, Text: text, Time: now, Delivered: true}
-		if _, err := tx.Exec(ctx, `INSERT INTO agent_messages (id, agent, at, direction, text) VALUES (?, ?, ?, ?, ?)`,
-			out.ID, agent, store.Millis(now), MessageOut, text); err != nil {
+		seq, err := nextSeq(ctx, tx, "agent_messages", agent)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_messages (id, agent, seq, at, direction, text) VALUES (?, ?, ?, ?, ?, ?)`,
+			out.ID, agent, seq, store.Millis(now), MessageOut, text); err != nil {
 			return err
 		}
 		_, err = appendEvent(ctx, tx, agent, EventMessage, map[string]any{"id": out.ID, "direction": MessageOut, "text": text})
@@ -799,8 +816,12 @@ func (s *Server) OpenRequest(ctx context.Context, c Caller, kind, text string) (
 			return err
 		}
 		out = &AgentControlRequest{ID: "r-" + ids.New() + ids.New(), Agent: a.ID, Kind: kind, Text: text, State: RequestOpen, Time: now}
-		if _, err := tx.Exec(ctx, `INSERT INTO agent_requests (id, agent, at, kind, text, state) VALUES (?, ?, ?, ?, ?, ?)`,
-			out.ID, a.ID, store.Millis(now), kind, text, RequestOpen); err != nil {
+		seq, err := nextSeq(ctx, tx, "agent_requests", a.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_requests (id, agent, seq, at, kind, text, state) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			out.ID, a.ID, seq, store.Millis(now), kind, text, RequestOpen); err != nil {
 			return err
 		}
 		if _, err := appendEvent(ctx, tx, a.ID, EventRequest, map[string]any{"id": out.ID, "kind": kind, "text": text}); err != nil {

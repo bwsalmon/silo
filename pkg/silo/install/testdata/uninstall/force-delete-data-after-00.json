@@ -56,7 +56,7 @@
       "metadata": {
         "silo-credential-key": "set",
         "silo-image": "us-central1-docker.pkg.dev/silo-test-project/silo/silod@sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
-        "silo-user-data-sha256": "1ae3b6f8e9831d75a627abe91c4fbb2d6512febdb1a4e185e9df829f1c01725e"
+        "silo-user-data-sha256": "66e1ab56c7551122e88926814ad4c982af628be7ea3a8b91782df64c45b94b84"
       },
       "digest": "sha256:7dd5524d6d0b074fe5259678d242267abcaaf78a27f28cb1da7bdd617366ab35",
       "harnessDigest": "sha256:3f2a28973b74ffe1884e034294657ca5ae76ff669604c44550daa0257c35b139",
@@ -72,7 +72,7 @@
         ],
         "anchorZone": "us-central1-a",
         "control": {
-          "template": "silo-control-5eb4667bbc"
+          "template": "silo-control-49f2d46781"
         },
         "gateway": {
           "template": "silo-gateway-034fb828ef"
@@ -153,7 +153,7 @@
         "labels": {
           "silo-install": "i7a71c41be6",
           "silo-role": "db",
-          "silo-schema": "19"
+          "silo-schema": "20"
         },
         "edition": "ENTERPRISE",
         "tier": "db-g1-small",
@@ -391,7 +391,7 @@
     "migrate": {
       "instance": "silo-db-t3st",
       "state": "RUNNABLE",
-      "schema": 19
+      "schema": 20
     },
     "nat": {
       "computeEnabled": true,
