@@ -112,6 +112,15 @@ const (
 	// ReconcileApply is the setting silo reconcile --apply writes:
 	// orphans are deleted after their grace period, as when unset.
 	ReconcileApply = "apply"
+	// SettingDataDirID is, on the local backend, the id in the data
+	// directory's layout.json that this store belongs with
+	// (local-rootless-storage.md call L35). Written at the first start
+	// on a data directory, and checked at every later one.
+	SettingDataDirID = "data_dir_id"
+	// SettingStorageDriver is, on the local backend, the storage
+	// driver the data directory's silos are kept with ("dir"). It is
+	// written once and never changes (call L37).
+	SettingStorageDriver = "storage_driver"
 )
 
 // SetSetting writes a setting.

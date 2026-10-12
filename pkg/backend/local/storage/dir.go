@@ -1,0 +1,153 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+)
+
+// Dir is the dir driver: a directory per silo under Root, and a
+// directory per volume under the silo's volumes/.
+//
+//	<Root>/<silo id>/                  the silo's subtree
+//	<Root>/<silo id>/volumes/<volume>/ a volume
+//
+// Create is mkdir plus ownership, Delete is a recursive remove and
+// Usage is a walk. Sizes are charged, not enforced, and it takes no
+// snapshots. In production it runs in the namespace holder, where the
+// silos' subuids are mapped; in tests it runs in silod's own process.
+type Dir struct {
+	// Root is the data directory's silos/.
+	Root string
+	// Owner, if set, is who a silo's directories belong to: the uid
+	// and gid that container root maps to for that silo. ok false, or
+	// a nil Owner, leaves them owned by the process.
+	Owner func(silo string) (uid, gid int, ok bool)
+}
+
+var _ Driver = (*Dir)(nil)
+
+// DirName is the dir driver's Name.
+const DirName = "dir"
+
+func (d *Dir) Name() string { return DirName }
+
+func (d *Dir) Guarantees() Guarantees { return Guarantees{} }
+
+// Path is where ref is kept. It doesn't check that it exists.
+func (d *Dir) Path(ref Ref) (string, error) {
+	if err := ref.Valid(); err != nil {
+		return "", err
+	}
+	if ref.Volume == "" {
+		return filepath.Join(d.Root, ref.Silo), nil
+	}
+	return filepath.Join(d.Root, ref.Silo, "volumes", ref.Volume), nil
+}
+
+// Create makes ref's directory. A volume needs its silo's subtree to
+// exist already: the subtree is made when the silo is, and a volume
+// for a silo with none is a bug, not something to paper over. size is
+// not enforced.
+func (d *Dir) Create(ctx context.Context, ref Ref, size int64) (string, error) {
+	p, err := d.Path(ref)
+	if err != nil {
+		return "", err
+	}
+	if ref.Volume != "" {
+		silo, _ := d.Path(Ref{Silo: ref.Silo})
+		if _, err := os.Stat(silo); err != nil {
+			return "", fmt.Errorf("storage: volume %s: silo %s has no subtree: %w", ref, ref.Silo, err)
+		}
+		if err := d.mkdir(ref.Silo, filepath.Dir(p)); err != nil {
+			return "", err
+		}
+	}
+	if err := d.mkdir(ref.Silo, p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+func (d *Dir) mkdir(silo, p string) error {
+	if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("storage: %w", err)
+	}
+	if d.Owner == nil {
+		return nil
+	}
+	uid, gid, ok := d.Owner(silo)
+	if !ok {
+		return nil
+	}
+	if err := os.Lchown(p, uid, gid); err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	return nil
+}
+
+// Delete removes ref's directory and everything in it. One that is
+// gone already is not an error.
+func (d *Dir) Delete(ctx context.Context, ref Ref) error {
+	p, err := d.Path(ref)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(p); err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	return nil
+}
+
+// Usage walks ref's directory. A file with several links in it is
+// counted once. ref missing is an error wrapping fs.ErrNotExist.
+func (d *Dir) Usage(ctx context.Context, ref Ref) (Usage, error) {
+	p, err := d.Path(ref)
+	if err != nil {
+		return Usage{}, err
+	}
+	var u Usage
+	seen := map[fileID]bool{}
+	err = filepath.WalkDir(p, func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			// A file removed while the walk ran is not in use.
+			if path != p && errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		fi, err := e.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		bytes, id, linked := onDisk(fi)
+		if linked {
+			if seen[id] {
+				return nil
+			}
+			seen[id] = true
+		}
+		u.Bytes += bytes
+		u.Inodes++
+		return nil
+	})
+	if err != nil {
+		return Usage{}, fmt.Errorf("storage: usage of %s: %w", ref, err)
+	}
+	return u, nil
+}
+
+// Snapshot is unsupported: plain directories have no point-in-time
+// copy.
+func (d *Dir) Snapshot(ctx context.Context, ref Ref, name string) (Snapshot, error) {
+	return Snapshot{}, ErrSnapshotUnsupported
+}

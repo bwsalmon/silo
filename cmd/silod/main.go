@@ -42,6 +42,8 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gceclient"
+	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
+	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
@@ -119,6 +121,7 @@ var release = "dev"
 type storeFlags struct {
 	spec, url              string
 	instance, name, dbUser string
+	dataDir                string
 }
 
 func (f *storeFlags) register(fs *flag.FlagSet) {
@@ -127,6 +130,28 @@ func (f *storeFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.instance, "db-instance", "", "the Cloud SQL instance, <project>:<region>:<instance> (default $SILOD_DB_INSTANCE)")
 	fs.StringVar(&f.name, "db-name", "silo", "the Cloud SQL database")
 	fs.StringVar(&f.dbUser, "db-user", "", "the IAM database user, silod@<project>.iam (default $SILOD_DB_USER)")
+	fs.StringVar(&f.dataDir, "data-dir", "", "the local backend's data directory, which holds all of silod's persistent state; the store is its state/silo.db")
+}
+
+// openDataDir opens --data-dir, if it was given, and points the store
+// at the data directory's own: a --store naming another is refused, as
+// nothing persistent is kept outside the data directory
+// (local-rootless-storage.md call L35).
+func (f *storeFlags) openDataDir(fs *flag.FlagSet) (*datadir.Dir, error) {
+	if f.dataDir == "" {
+		return nil, nil
+	}
+	dd, err := datadir.Open(f.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	explicit := false
+	fs.Visit(func(fl *flag.Flag) { explicit = explicit || fl.Name == "store" })
+	if explicit && f.spec != dd.StoreSpec() {
+		return nil, fmt.Errorf("--store=%s with --data-dir: the store is the data directory's, %s", f.spec, dd.StoreSpec())
+	}
+	f.spec = dd.StoreSpec()
+	return dd, nil
 }
 
 // openStore opens the --store database. Postgres is a Cloud SQL
@@ -171,6 +196,9 @@ func migrate(ctx context.Context, args []string) (err error) {
 	reportOnly := fs.Bool("reconcile-report-only", false, "set reconcile to report-only: the database was restored from a backup")
 	guestAttr := fs.Bool("report-guest-attribute", false, "report the result as the guest attribute "+MigrateAttribute+", for install's migrate VM")
 	fs.Parse(args)
+	if _, err := sf.openDataDir(fs); err != nil {
+		return err
+	}
 	if *guestAttr {
 		defer func() { reportGuestAttribute(ctx, MigrateAttribute, migrateResult(*to, err)) }()
 	}
@@ -337,6 +365,10 @@ func serve(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("--reconcile=%s: the only mode is report-only", *reconcileMode)
 	}
+	dd, err := sf.openDataDir(fs)
+	if err != nil {
+		return err
+	}
 	db, sp, err := openStore(ctx, sf)
 	if err != nil {
 		return err
@@ -365,6 +397,15 @@ func serve(ctx context.Context, args []string) error {
 	if why != "" {
 		log.Printf("schema version %d (contract steps requiring schema %d) is outside what this release runs on (%d to %d, and later expand steps): not serving the API",
 			v, requires, migrations.Oldest, db.Latest())
+	}
+	if dd != nil && why == "" && v >= store.HeartbeatSchema {
+		// The dir driver is the only one; the local backend (step 5 of
+		// local-backend.md §15) takes it from here.
+		drv := &storage.Dir{Root: dd.Silos()}
+		if err := dd.Bind(ctx, db, drv.Name()); err != nil {
+			return err
+		}
+		log.Printf("data directory %s (id %s); storage driver %s: %s", dd.Path, dd.ID, drv.Name(), drv.Guarantees())
 	}
 	replica := store.Replica{ID: replicaID(), Release: release, Latest: db.Latest(), Started: time.Now(), Address: *advertise}
 	if replica.Address == "" {
