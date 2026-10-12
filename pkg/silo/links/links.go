@@ -80,7 +80,6 @@ func Canonical(rules []Rule) ([]Rule, error) {
 		return nil, fmt.Errorf("a link names at most %d rules", MaxRules)
 	}
 	byProto := map[string]map[string]bool{} // nil: every port
-	nports := 0
 	for _, r := range rules {
 		p := strings.ToLower(strings.TrimSpace(r.Protocol))
 		if !Protocols[p] {
@@ -111,11 +110,14 @@ func Canonical(rules []Rule) ([]Rule, error) {
 			} else {
 				s = strconv.Itoa(lo) + "-" + strconv.Itoa(hi)
 			}
-			if !cur[s] {
-				cur[s] = true
-				nports++
-			}
+			cur[s] = true
 		}
+	}
+	// Count only the ports kept: a whole-range rule for the same
+	// protocol drops the ones named before it.
+	nports := 0
+	for _, ports := range byProto {
+		nports += len(ports)
 	}
 	if nports > MaxPorts {
 		return nil, fmt.Errorf("a link names at most %d ports", MaxPorts)
