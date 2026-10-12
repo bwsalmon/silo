@@ -6,16 +6,16 @@ import (
 	"log"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/silo/fence"
-	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/gwtls"
-	"github.com/bwsalmon/silo/pkg/silo/leader"
-	"github.com/bwsalmon/silo/pkg/silo/ledger/rootcap"
-	"github.com/bwsalmon/silo/pkg/silo/reconcile"
-	"github.com/bwsalmon/silo/pkg/silo/store"
-	"github.com/bwsalmon/silo/pkg/silo/tree"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/gwtls"
+	"github.com/bwsalmon/silo/pkg/leader"
+	"github.com/bwsalmon/silo/pkg/ledger/rootcap"
+	"github.com/bwsalmon/silo/pkg/reconcile"
+	"github.com/bwsalmon/silo/pkg/store"
+	"github.com/bwsalmon/silo/pkg/tree"
 )
 
 // leaderConfig is what the leader's duties work on. Any of gce, facade

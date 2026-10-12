@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 // parseAddress reads --address: "/20" (or "20") asks silod to place a

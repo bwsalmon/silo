@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 // The agent commands (fence-api.md, "Agents"; agents.md). An agent is

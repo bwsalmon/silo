@@ -41,7 +41,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 const usage = `usage: silo <command> [flags]

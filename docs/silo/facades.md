@@ -18,13 +18,13 @@ code keeps them apart by direction:
   its silo, served by silod at `silo.internal` and through the front
   door ([`gateway.md`](gateway.md)). It is default-deny, fenced to the
   caller's silo, and rewrites everything it returns. It lives in
-  `pkg/silo/facade/<cloud>/<service>`.
+  `pkg/facade/<cloud>/<service>`.
 - A **backend** is outbound. It is silod's client of the real cloud:
   an interface with only the calls silod makes, the real
   implementation, an in-memory fake that CI runs silod against
   ([`testing.md`, Fake GCE backend](testing.md#fake-gce-backend)), and
   behaviour tests both must pass. It lives in
-  `pkg/silo/backend/<cloud>/<service>`. Only backends hold or use cloud
+  `pkg/backend/<cloud>/<service>`. Only backends hold or use cloud
   credentials (principle 3 in the [README](README.md#2-principles)).
 
 A facade calls its backend, never the cloud directly. Other parts of
@@ -35,12 +35,12 @@ Today there is one of each, for GCE:
 
 | Package | What it is |
 | --- | --- |
-| `pkg/silo/facade/gcp/gce` | The per-silo `compute/v1` facade (package `gce`) |
-| `pkg/silo/facade/gcp/gce/filter` | The facade's list-filter grammar (SV-74) |
-| `pkg/silo/backend/gcp/gce` | The GCE client interface silod calls, `gce.Client`, with `Await` and the error helpers (package `gce`) |
-| `pkg/silo/backend/gcp/gce/gceclient` | The real client, over the generated `compute/v1` client and Cloud Quotas' REST API |
-| `pkg/silo/backend/gcp/gce/fake` | The in-memory fake, in process and over HTTP; `fake/fenceeval` evaluates the fence firewall policy |
-| `pkg/silo/backend/gcp/gce/gcetest` | Behaviour tests, run against the fake directly and against `gceclient` pointed at the fake's HTTP server |
+| `pkg/facade/gcp/gce` | The per-silo `compute/v1` facade (package `gce`) |
+| `pkg/facade/gcp/gce/filter` | The facade's list-filter grammar (SV-74) |
+| `pkg/backend/gcp/gce` | The GCE client interface silod calls, `gce.Client`, with `Await` and the error helpers (package `gce`) |
+| `pkg/backend/gcp/gce/gceclient` | The real client, over the generated `compute/v1` client and Cloud Quotas' REST API |
+| `pkg/backend/gcp/gce/fake` | The in-memory fake, in process and over HTTP; `fake/fenceeval` evaluates the fence firewall policy |
+| `pkg/backend/gcp/gce/gcetest` | Behaviour tests, run against the fake directly and against `gceclient` pointed at the fake's HTTP server |
 
 The two packages share the name `gce` because each is named after the
 service it is a facade or a client of. The facade imports the backend
@@ -75,7 +75,7 @@ top of `facade.go`:
    types the grant's scope names (as `via=manage:<holder>`). Anything
    else is refused the same way whether or not it exists (SV-62).
 2. **Hold the caller to its control policy**, by
-   `pkg/silo/control`'s classification of the method as reading or
+   `pkg/control`'s classification of the method as reading or
    mutating (SV-62, [`fence-api.md`, Control policy](fence-api.md#control-policy)).
 3. **Look the method up in the method table.** A method not in it is
    refused; a resource type the facade does not know is not found
@@ -117,12 +117,12 @@ method table, its idea of location, its allowlists and its naming.
 
 ## When the shared core is extracted
 
-Not now. The shared steps are in `pkg/silo/facade/gcp/gce` today, in
+Not now. The shared steps are in `pkg/facade/gcp/gce` today, in
 GCE's terms: the caller and target resolution, the control check and
 the audit write are methods on the GCE `Server`, over GCE's parsed
 path.
 
-**Decision:** the shared core moves into `pkg/silo/facade` when the
+**Decision:** the shared core moves into `pkg/facade` when the
 second facade lands, as part of that work, and is shaped by the two
 real users rather than guessed from one. Guessing the seams from GCE
 alone would bake GCE's notions (zones, `compute/v1` paths, its

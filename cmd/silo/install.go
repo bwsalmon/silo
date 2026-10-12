@@ -9,8 +9,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/bwsalmon/silo/pkg/silo/install"
-	installgcp "github.com/bwsalmon/silo/pkg/silo/install/gcp"
+	"github.com/bwsalmon/silo/pkg/install"
+	installgcp "github.com/bwsalmon/silo/pkg/install/gcp"
 )
 
 // version is this CLI's release, the default of silo install --version.

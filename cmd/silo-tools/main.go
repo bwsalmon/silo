@@ -34,8 +34,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/toolchan"
-	"github.com/bwsalmon/silo/pkg/silo/tools"
+	"github.com/bwsalmon/silo/pkg/toolchan"
+	"github.com/bwsalmon/silo/pkg/tools"
 )
 
 func main() {

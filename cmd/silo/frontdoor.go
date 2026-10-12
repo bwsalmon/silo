@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/frontdoor"
-	"github.com/bwsalmon/silo/pkg/silo/install"
+	"github.com/bwsalmon/silo/pkg/frontdoor"
+	"github.com/bwsalmon/silo/pkg/install"
 	"google.golang.org/api/idtoken"
 )
 

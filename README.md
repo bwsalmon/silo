@@ -17,9 +17,9 @@ stable ids, `{#SV-n}`, which code and commits cite.
 | `cmd/silo` | The `silo` CLI: install, proxy, agents, links, exports |
 | `cmd/silod` | The control plane: `silod serve`, `gateway`, `migrate`, `pause`, `harness-init`, and its container images |
 | `cmd/silo-tools` | The MCP tool server agents' tool VMs run |
-| `pkg/silo/...` | Everything they are built from |
-| `pkg/silo/facade/<cloud>/<service>` | The cloud APIs tenants call inside a silo, such as `facade/gcp/gce`, the `compute/v1` facade ([`docs/silo/facades.md`](docs/silo/facades.md)) |
-| `pkg/silo/backend/<cloud>/<service>` | silod's own clients of the real cloud, with their fakes, such as `backend/gcp/gce` |
+| `pkg/...` | Everything they are built from |
+| `pkg/facade/<cloud>/<service>` | The cloud APIs tenants call inside a silo, such as `facade/gcp/gce`, the `compute/v1` facade ([`docs/silo/facades.md`](docs/silo/facades.md)) |
+| `pkg/backend/<cloud>/<service>` | silod's own clients of the real cloud, with their fakes, such as `backend/gcp/gce` |
 | `docs/silo/` | The specification |
 | `docs/test-runs/` | Reports of end-to-end test runs |
 
@@ -39,6 +39,8 @@ unless `SILO_REQUIRE_POSTGRES` is set. CI is grain's
 
 Silo was developed inside
 [bwsalmon/grain](https://github.com/bwsalmon/grain) under `pkg/silo`,
-`cmd/silo*` and `docs/silo`, and moved here with that layout unchanged,
-so paths cited in grain's commits, test plans and test reports still
-name the same files. Its earlier history is grain's.
+`cmd/silo*` and `docs/silo`, and moved here with that layout. The
+packages have since been flattened: commits and test reports from
+before then (including grain's, and `docs/test-runs/`) cite
+`pkg/silo/<x>`, which now lives at `pkg/<x>`. Its earlier history is
+grain's.

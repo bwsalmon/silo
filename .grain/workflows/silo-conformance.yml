@@ -55,7 +55,7 @@ jobs:
           set -o pipefail
           go build -o /tmp/silo ./cmd/silo
           trap '/tmp/silo uninstall --project bsalmon-fun-sandbox --credentials "$GOOGLE_APPLICATION_CREDENTIALS" --force --delete-data --yes || true' EXIT
-          go test -tags silo_conformance -count=1 -timeout 160m -v ./pkg/silo/conformance/ 2>&1 | tee /tmp/conformance.log
+          go test -tags silo_conformance -count=1 -timeout 160m -v ./pkg/conformance/ 2>&1 | tee /tmp/conformance.log
           status=$?
           echo "=== cases ==="
           grep -E -- '--- (PASS|FAIL|SKIP)' /tmp/conformance.log
