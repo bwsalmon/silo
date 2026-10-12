@@ -101,7 +101,7 @@ func agentSilo(t *testing.T, path, control string) siloInfo {
 	}
 	t.Cleanup(func() { run.api.Delete(context.Background(), path, true, client.Mutation{}) })
 	blk := netip.MustParsePrefix(s.Address.Blocks[0])
-	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netip.PrefixFrom(blk.Addr(), 24)}
+	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netOf(blk)}
 	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.region+"/subnetworks",
 		map[string]any{"name": s.ID + "-net", "network": "default", "ipCidrRange": info.subnet.String()})
 	if code != 200 {

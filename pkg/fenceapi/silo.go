@@ -230,24 +230,10 @@ func addressOf(ctx context.Context, tx store.Tx, t *tree.Silo) (Address, error) 
 			}
 			a.Delegated = append(a.Delegated, Delegated{Range: r.Range.String(), Child: who})
 		case address.StateOwn:
-			a.OwnRanges = append(a.OwnRanges, OwnRange{Range: r.Range.String(), Subnet: ownObject(t.ID, r.Holder)})
+			a.OwnRanges = append(a.OwnRanges, OwnRange{Range: r.Range.String(), Subnet: address.ObjectName(t.ID, r.Holder)})
 		}
 	}
 	return a, nil
-}
-
-// ownObject is an own range's facade object as the tenant names it.
-// The space map keys a subnet's ranges by its name less the silo's
-// prefix (subnetworks/<region>/<rest>[/<range>]); the tenant's name
-// for the subnet is the real one, <id>-<rest> (gcp-backend.md,
-// "Naming", SV-76).
-func ownObject(id, holder string) string {
-	f := strings.SplitN(holder, "/", 4)
-	if len(f) < 3 || f[0] != "subnetworks" {
-		return holder
-	}
-	f[2] = ids.NamePrefix(id) + f[2]
-	return strings.Join(f, "/")
 }
 
 // subtree fills in children recursively.

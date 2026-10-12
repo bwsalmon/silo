@@ -32,7 +32,14 @@ import (
 type siloInfo struct {
 	path, id, project string
 	block             netip.Prefix
-	subnet            netip.Prefix // the "net" subnet, the block's first /24
+	subnet            netip.Prefix // the "net" subnet: netOf(block)
+}
+
+// netOf is the range of a silo's "net" subnet: the block's first /24,
+// or its first half if the block is a /24 or smaller, which leaves the
+// rest for a case's other subnets.
+func netOf(block netip.Prefix) netip.Prefix {
+	return netip.PrefixFrom(block.Masked().Addr(), max(24, block.Bits()+1))
 }
 
 var (
@@ -70,8 +77,7 @@ func makeTree(t *testing.T) error {
 			return siloInfo{}, fmt.Errorf("%s has no block", p)
 		}
 		blk := netip.MustParsePrefix(s.Address.Blocks[0])
-		info := siloInfo{path: p, id: s.ID, project: "silo-" + s.ID, block: blk,
-			subnet: netip.PrefixFrom(blk.Addr(), 24)}
+		info := siloInfo{path: p, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netOf(blk)}
 		return info, nil
 	}
 	var err error
@@ -291,8 +297,10 @@ func TestListAndGetLeaks(t *testing.T) {
 	})
 }
 
-// TestNameCollisions: the same name in two silos, the 56-character limit
-// and silo-prefixed labels.
+// TestNameCollisions: the same name in two silos, GCE's 63-character
+// limit with the <id>- prefix counted, names without the prefix, and
+// labels and tags starting with silo, which are refused 403 as the
+// facade's own.
 func TestNameCollisions(t *testing.T) {
 	tree(t)
 	t.Run("SameNameInTwoSilos", func(t *testing.T) {
@@ -332,12 +340,12 @@ func TestNameCollisions(t *testing.T) {
 		}
 	})
 	t.Run("SiloLabelRefused", func(t *testing.T) {
-		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-x-label", a, func(m map[string]any) {
+		refused(t, 403, "POST", instances(a), instanceBody(a.id+"-x-label", a, func(m map[string]any) {
 			m["labels"] = map[string]string{"silo-x": "y"}
 		}), instances(a)+"/"+a.id+"-x-label")
 	})
 	t.Run("SiloTagRefused", func(t *testing.T) {
-		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-x-tag", a, func(m map[string]any) {
+		refused(t, 403, "POST", instances(a), instanceBody(a.id+"-x-tag", a, func(m map[string]any) {
 			m["tags"] = map[string]any{"items": []string{"silo-gw"}}
 		}), instances(a)+"/"+a.id+"-x-tag")
 	})

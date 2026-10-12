@@ -67,7 +67,7 @@ func mkSilo(t *testing.T, path string, prefix int, control string, egress *clien
 	}
 	t.Cleanup(func() { run.api.Delete(context.Background(), path, true, client.Mutation{}) })
 	blk := netip.MustParsePrefix(s.Address.Blocks[0])
-	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netip.PrefixFrom(blk.Addr(), 24)}
+	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netOf(blk)}
 	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.region+"/subnetworks",
 		map[string]any{"name": s.ID + "-net", "network": "default", "ipCidrRange": info.subnet.String()})
 	if code != 200 {
@@ -588,7 +588,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 	apiChecks := []Check{
 		{ID: "facade-read", Kind: "http", URL: api + sList},
 		{ID: "facade-write", Kind: "http", Method: "POST", URL: api + "/compute/v1/projects/" + s.project + "/regions/" + run.region + "/subnetworks",
-			Body: `{"name":"x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 128), 28).String() + `"}`},
+			Body: `{"name":"x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 32), 28).String() + `"}`},
 		{ID: "fence-read", Kind: "http", URL: api + "/silo/v1/self"},
 		{ID: "fence-write", Kind: "http", Method: "PATCH", URL: api + "/silo/v1/self", Body: `{"labels":{"x":"y"}}`},
 	}
@@ -648,7 +648,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 		}
 		bodies := map[string]string{
 			"instances.insert": `{"name":"` + r.id + `-x"}`, "disks.insert": `{"name":"` + r.id + `-x","sizeGb":"10"}`,
-			"subnetworks.insert": `{"name":"` + r.id + `-x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(r.block, 128), 28).String() + `"}`,
+			"subnetworks.insert": `{"name":"` + r.id + `-x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(r.block, 32), 28).String() + `"}`,
 			"firewalls.insert":   `{"name":"` + r.id + `-x","network":"default","allowed":[{"IPProtocol":"tcp"}]}`, "images.insert": `{"name":"` + r.id + `-x"}`,
 			"fence.create": `{"name":x","address":{"prefix_length":28}}`, "fence.patch": `{"labels":{"x":"y"}}`,
 			"fence.grow": `{"to_prefix_length":25}`, "fence.exportOffer": `{"name":x","target":"` + addrIn(r, 5) + `:80","protocol":"http","to":["/a"]}`,
@@ -695,7 +695,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 		for _, x := range []siloInfo{s, r} {
 			p := "projects/" + x.project + "/regions/" + run.region + "/subnetworks"
 			code, op := facade(t, "POST", p, map[string]any{"name": x.id + "-from-root", "network": "default",
-				"ipCidrRange": netip.PrefixFrom(addrOf(x.block, 128), 28).String()})
+				"ipCidrRange": netip.PrefixFrom(addrOf(x.block, 32), 28).String()})
 			if code != 200 {
 				t.Errorf("the root writing %s's facade: %d %v", x.path, code, op)
 				continue

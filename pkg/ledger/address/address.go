@@ -43,8 +43,10 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/ids"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
@@ -131,6 +133,7 @@ type occupant struct {
 	span
 	state   string // StateDelegated, StateOwn, or StateFree for a cooling range
 	who     string // the child, the object, or ""
+	silo    string // for an own range, the silo whose it is
 	cooling time.Time
 }
 
@@ -326,7 +329,7 @@ func occupants(ctx context.Context, tx store.Tx, holder string, now time.Time) (
 		defer rows.Close()
 		for rows.Next() {
 			var start, at int64
-			o := occupant{state: state}
+			o := occupant{state: state, silo: holder}
 			if err := rows.Scan(&start, &o.bits, &o.who, &at); err != nil {
 				return err
 			}
@@ -551,9 +554,24 @@ func describe(ctx context.Context, tx store.Tx, o occupant) string {
 	case o.state == StateDelegated:
 		return fmt.Sprintf("%s, delegated to %s", o.span, name(ctx, tx, o.who))
 	case o.state == StateOwn:
-		return fmt.Sprintf("%s, own range %s", o.span, o.who)
+		return fmt.Sprintf("%s, own range %s", o.span, ObjectName(o.silo, o.who))
 	}
 	return fmt.Sprintf("%s, freed and not reusable until %s", o.span, o.cooling.Format(time.RFC3339))
+}
+
+// ObjectName is silo id's own-range object as the tenant names it. The
+// space map keys a subnet's ranges by its name less the "<id>-" prefix,
+// subnetworks/<region>/<name>[/<range>], so that rows written before
+// names carried the prefix are still found (gcp-backend.md, "Naming",
+// SV-76); messages and the fence API give the subnet's real name.
+// Anything else is returned as it is.
+func ObjectName(id, object string) string {
+	f := strings.SplitN(object, "/", 4)
+	if len(f) < 3 || f[0] != "subnetworks" {
+		return object
+	}
+	f[2] = ids.NamePrefix(id) + f[2]
+	return strings.Join(f, "/")
 }
 
 // Grow widens one of child's blocks to a /to (call 7). block names

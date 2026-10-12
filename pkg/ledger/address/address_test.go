@@ -521,6 +521,31 @@ func TestOwnRanges(t *testing.T) {
 	h := w.child(t, a, "h")
 	_, err = w.delegate(h, address.Want{Exact: p("10.0.200.0/24")})
 	want(t, err, ledger.FailedPrecondition, "own range sub")
+
+	// A subnet's ranges are keyed by its name less the "<id>-" prefix;
+	// errors name the subnet by its real name.
+	if err := set(own("subnetworks/r/web", "10.0.202.0/24")); err != nil {
+		t.Fatal(err)
+	}
+	want(t, set(own("subnetworks/r/web2", "10.0.202.0/25")), ledger.InvalidArgument,
+		"subnetworks/r/"+a+"-web2: ", "own range subnetworks/r/"+a+"-web in")
+	_, err = w.delegate(h, address.Want{Exact: p("10.0.202.0/24")})
+	want(t, err, ledger.FailedPrecondition, "own range subnetworks/r/"+a+"-web")
+	err = w.db.Tx(ctx, func(tx store.Tx) error { return address.Expand(ctx, tx, a, "subnetworks/r/nope", p("10.0.208.0/22")) })
+	want(t, err, ledger.NotFound, "no own range subnetworks/r/"+a+"-nope")
+}
+
+func TestObjectName(t *testing.T) {
+	for _, c := range []struct{ object, want string }{
+		{"subnetworks/us-central1/web", "subnetworks/us-central1/k7f3qa-web"},
+		{"subnetworks/us-central1/web/pods", "subnetworks/us-central1/k7f3qa-web/pods"},
+		{"subnetworks/us-central1", "subnetworks/us-central1"},
+		{"sub", "sub"},
+	} {
+		if got := address.ObjectName("k7f3qa", c.object); got != c.want {
+			t.Errorf("ObjectName(%q) = %q, want %q", c.object, got, c.want)
+		}
+	}
 }
 
 func TestLookup(t *testing.T) {
