@@ -30,6 +30,14 @@ privileges, install and restart sections) say so. Its calls are
 L26–L40, its open questions are 13–20, and its staged-plan steps are
 items 14–18 [below](#15-staged-implementation-plan).
 
+**Part 3** is [`local-git.md`](local-git.md) (task 3360). It adds git
+repositories that silos host for their agents, served at
+`http://silo.internal/git/` and mirrored outbound into one external
+"uber repo" as namespaced branches, with a submodule index on its
+`main`. It adds to the first two parts without replacing anything in
+them. Its calls are L41–L55, its open questions are 21–30, and its
+staged-plan steps are items 19–24 [below](#15-staged-implementation-plan).
+
 ### What was checked, and against what
 
 - **granule**: gke-labs/granule at `9cd65eb` (2026-10-12): its README,
@@ -70,6 +78,7 @@ items 14–18 [below](#15-staged-implementation-plan).
 16. [Calls made on this page](#calls-made-on-this-page)
 17. [Open questions](#open-questions)
 18. Part 2: [rootless operation and the data directory](local-rootless-storage.md)
+19. Part 3: [git repositories for agents, mirrored into one external repo](local-git.md)
 
 ## 1. Settled direction
 
@@ -1701,7 +1710,9 @@ depends on the items it names. Items 14–18 were added with
 [part 2](local-rootless-storage.md)'s rootless and storage decisions.
 They are numbered after the others so that existing references stay
 valid. Earlier items that now depend on them say so, and none of those
-earlier items is built rootful first.
+earlier items is built rootful first. Items 19–24 were added with
+[part 3](local-git.md)'s hosted git repos and their outbound mirror.
+Nothing earlier depends on them.
 
 1. **Backend interfaces and the reconcile on them.**
    - Add `pkg/backend` (`Inventory`, `Fence`, `Capacity`, `Classes`,
@@ -1849,6 +1860,48 @@ earlier items is built rootful first.
 
     Depends on 7 and 14. No backup command: that is
     [later](local-rootless-storage.md#later).
+19. **Repos in the fence API, the store and `silo repo`**
+    ([part 3, §2](local-git.md#2-repos-as-silo-objects)):
+    - the repo object, its operations and `silo repo create|list|get|delete|url`;
+    - the `repos` quota class and the never-looser `repos.mirror`
+      policy;
+    - the `repos` type in manage-grant scopes;
+    - `silos/<id>/repos/` through the storage driver;
+    - seeding.
+
+    Depends on 4 and 14.
+20. **The git service** ([part 3, §3–§4](local-git.md#3-the-git-service)):
+    - smart HTTP at `silo.internal/git/` on port 80;
+    - the access table, with 404 for the invisible;
+    - stateless `upload-pack`/`receive-pack` with a scrubbed
+      environment;
+    - the `pre-receive` hook (ref namespaces, blob size, disk, local
+      archive refs);
+    - push audit;
+    - `git-remote-silo` on the front door.
+
+    Depends on 19, and on 15 for the listener in `silo-net`.
+21. **The outbound mirror** ([part 3, §8](local-git.md#8-the-outbound-mirror)):
+    - `silo mirror` and the credential in `keys/mirror/`;
+    - per-repo atomic passes with leases, retries and stall audits;
+    - archive refs;
+    - deleting through archives;
+    - renames;
+    - chunked pushes.
+
+    Tested against a local `git http-backend` behind a fault-injecting
+    proxy. Depends on 20.
+22. **The submodule index, and a check against real GitHub**
+    ([part 3, §7](local-git.md#7-the-submodule-index)): the index
+    branch with gitlinks and `url = ./`, its lease, and one supervised
+    run that settles part 3's *verify* items. Depends on 21.
+23. **Mapping back:** `silo repo external`, `silo repo which` and
+    `silo repo external-clone`
+    ([part 3, §9](local-git.md#9-mapping-back-the-ref-layout-and-silo-repo-external)).
+    Depends on 21 and 22.
+24. **Repo and mirror conformance cases** in `local-conformance`
+    ([part 3, §11](local-git.md#11-staged-implementation-plan)).
+    Depends on 12, 21 and 22.
 
 ## Calls made on this page
 
@@ -1950,6 +2003,11 @@ L26–L40 are in part 2, under
 They cover rootless operation (L26–L34) and the data directory,
 storage driver, safe copies and restore (L35–L40).
 
+L41–L55 are in part 3, under
+[Calls made on that page](local-git.md#calls-made-on-this-page). They
+cover hosted git repos, the fence on them, submodule URLs, the outbound
+mirror to the uber repo, and its submodule index.
+
 ## Open questions
 
 1. **Ambient versus a dedicated agent user.** Ambient (the operator's
@@ -2001,6 +2059,13 @@ other users, hard volume quotas without root, the subuid range, ZFS
 mounting, the default account, crun for the `vm` class, and whether
 logs are data.
 
+Open questions 21–30 are in
+[part 3](local-git.md#open-questions). They cover ancestors pushing
+into descendants' repos, repo grants between silos, read-only code for
+a subtree, the external ref layout, archive refs, a diverged index,
+attribution, sandboxing git's server side, mirror lag, and hosts other
+than GitHub.
+
 ## Later
 
 - Mixed nesting ([README §9](README.md#9-later)).
@@ -2012,3 +2077,6 @@ logs are data.
 - Backups: a per-silo backup policy, WAL streaming of the store,
   off-host snapshot shipping, and `silo backup`/`silo restore`
   ([part 2, Later](local-rootless-storage.md#later)).
+- For hosted git: two-way sync with the uber repo, a rewritten-tree
+  folder view, the GCP backend, per-silo external repos and LFS
+  ([part 3, Later](local-git.md#10-later)).
