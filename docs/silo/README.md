@@ -54,6 +54,7 @@ open are under [Open questions](#open-questions).
 | [`state.md`](state.md) | silod's state: Cloud SQL for PostgreSQL by default, SQLite for dev and tests, the store interface, leadership, migrations and backups |
 | [`agents.md`](agents.md) | Agents as silo resources: the agent object, harnesses on the control VM, tool VMs and the tool server, credentials, model budget, the control surface, and grain's mapping onto it |
 | [`testing.md`](testing.md) | The fake GCE backend and the `silo/v1` conformance suite |
+| [`local-backend.md`](local-backend.md) | A single-machine backend, designed now: granule VMs or gVisor sandboxes behind a Docker Engine API subset, a local network fence, the backend interface under silod, and the facade core's extraction. Its calls and open questions are listed on the page. |
 | [`custom-allocators.md`](custom-allocators.md) | Custom allocators (`allocator/v1`), in the serve and lend shapes: designed now, built after v1. Also what v1's ledger and fence API must already allow. Its calls and open questions are listed on the page. |
 
 The spec pages are normative. If a spec page and this file disagree,
@@ -410,6 +411,20 @@ that some host-project facts show through (names, project-wide
 metadata, internal DNS). This is why the [conformance suite](testing.md)
 carries the weight.
 
+### A single-machine backend
+
+The backings above are all GCP's. A deployment can instead run on one
+machine, with the **local backend**
+([`local-backend.md`](local-backend.md)). Its workloads are granule
+microVMs where the host has KVM, and gVisor sandboxes where it
+doesn't. Its fence is a bridge per network with anti-spoofing and
+nftables, in a network namespace of its own. The API inside one of
+its silos is a subset of the Docker Engine API. The fence API is the
+same.
+
+A silod has one backend, `gcp` or `local`. Mixing them in one tree is
+[later](#9-later).
+
 ### Mixing backings
 
 The fence API carries a backing on every silo from the start, so
@@ -700,11 +715,14 @@ These are true of v1 by design.
   space is big enough that every silo gets room to grow in place
   ([`allocators.md`, IPv6](allocators.md#ipv6-later)).
 - **A docker+granule backend**: a Docker Engine API subset, one bridge
-  per silo with anti-spoofing.
+  per silo with anti-spoofing. Now designed as the single-machine
+  local backend, with gVisor sandboxes beside granule VMs, in
+  [`local-backend.md`](local-backend.md).
 - **A k8s backend**: the Kubernetes API, roughly what vcluster does.
 - **An AWS backend**: an EC2/VPC subset.
 - **Mixed nesting**: a GCE silo hosting a nested-virt VM that runs a
-  granule child silo.
+  granule child silo. The local backend leaves this out: one silod has
+  one backend ([`local-backend.md`](local-backend.md#1-settled-direction)).
 - Load balancers, NAT and managed services in the facade.
 - More of GCE's compute features in the facade (call 22):
   - **managed instance groups**, with a mechanism of their own, since

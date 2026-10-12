@@ -142,3 +142,9 @@ where to look:
 Until then, a change to one of these in the GCE facade should keep it
 free of GCE-only assumptions where that costs nothing, and say so in
 the code when it cannot.
+
+The second facade is now designed: the Docker Engine API subset of the
+local backend. Its design for the extraction, built from both users,
+is in [`local-backend.md`, Extracting the facade core](local-backend.md#8-extracting-the-facade-core).
+It also covers how a Docker request names its silo when there is no
+project in the path.
