@@ -43,3 +43,9 @@ func Valid(s string) bool {
 	}
 	return true
 }
+
+// NamePrefix is what the GCE names of silo id's objects, and the
+// network tags on its instances, must start with: "<id>-", such as
+// k7f3qa- (docs/silo/gcp-backend.md, "Naming", SV-76). A tenant names
+// its objects with it; the compute/v1 facade refuses a name without it.
+func NamePrefix(id string) string { return id + "-" }

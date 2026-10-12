@@ -206,6 +206,7 @@ func TestBootstrapAndDescribe(t *testing.T) {
 		"grant_policy.effective.allocators": "allow",
 		"address.blocks":                    "[10.0.0.0/8]",
 		"facade.project":                    "silo-" + e.root,
+		"facade.name_prefix":                e.root + "-",
 	} {
 		if got := str(get(r, strings.Split(path, ".")...)); got != want {
 			t.Errorf("%s = %s, want %s", path, got, want)

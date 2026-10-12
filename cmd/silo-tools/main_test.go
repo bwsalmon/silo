@@ -2,6 +2,8 @@ package main
 
 import (
 	"debug/elf"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,5 +37,28 @@ func TestStaticBuilds(t *testing.T) {
 			}
 		}
 		f.Close()
+	}
+}
+
+// Without -name-prefix, silo-tools reads the facade's silo-name-prefix
+// from the metadata server.
+func TestMetadataNamePrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Metadata-Flavor") != "Google" {
+			http.Error(w, "no flavor", http.StatusForbidden)
+			return
+		}
+		w.Write([]byte("k7f3qa-\n"))
+	}))
+	defer srv.Close()
+	old := metadataURL
+	defer func() { metadataURL = old }()
+	metadataURL = srv.URL
+	if got := metadataNamePrefix(); got != "k7f3qa-" {
+		t.Errorf("prefix %q, want k7f3qa-", got)
+	}
+	metadataURL = srv.URL + "/nowhere\x00"
+	if got := metadataNamePrefix(); got != "" {
+		t.Errorf("a bad URL: %q", got)
 	}
 }

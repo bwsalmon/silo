@@ -53,7 +53,7 @@ func (e *env) mkAgent(name string) (string, netip.Addr) {
 	})
 	e.ok(e.a, "POST", "/silo/v1/self/agents", obj{"name": name, "harness": obj{"adapter": "claude-code", "credential": "anthropic-api"},
 		"model": "claude-sonnet-5-5", "budget": obj{"usd": "10"}, "lease": obj{"ttl": "2h"},
-		"tool_vm": obj{"zone": "us-central1-a", "subnet": "web", "machine_type": "e2-standard-2"}})
+		"tool_vm": obj{"zone": "us-central1-a", "subnet": e.a + "-web", "machine_type": "e2-standard-2"}})
 	e.fakeGCE.RunOperations()
 	a := e.agent(name)
 	ip, err := netip.ParseAddr(a["tool_vm"].(obj)["ip"].(string))

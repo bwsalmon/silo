@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -253,5 +254,23 @@ func TestRunsAsUser(t *testing.T) {
 	run(t, s, "write_file", map[string]any{"file_path": p, "content": "x"})
 	if r := run(t, s, "exec", map[string]any{"command": "echo y >> " + p + " && cat " + p, "workdir": "/"}); r.IsError {
 		t.Errorf("the user can't change a file write_file made: %+v", r)
+	}
+}
+
+// exec's commands find the silo's name prefix in SILO_NAME_PREFIX
+// (gcp-backend.md, "Naming", SV-76).
+func TestNamePrefixEnv(t *testing.T) {
+	s, err := New(Options{NamePrefix: "k7f3qa-"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(s.Env(), "SILO_NAME_PREFIX=k7f3qa-") {
+		t.Errorf("env %v has no SILO_NAME_PREFIX", s.Env())
+	}
+	s, _ = New(Options{})
+	for _, kv := range s.Env() {
+		if strings.HasPrefix(kv, NamePrefixEnv+"=") {
+			t.Errorf("no prefix, but %s", kv)
+		}
 	}
 }

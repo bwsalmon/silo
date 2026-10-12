@@ -29,8 +29,8 @@ Silo. Install warns if it already holds instances.
 | Database | `silo-db-<suffix>` | Cloud SQL for PostgreSQL, silod's state, with no public IP ([`state.md`](state.md#the-cloud-sql-instance-call-33)). |
 | Database endpoint | `silo-db-psc` | A PSC endpoint (address and forwarding rule) for the database, in `silo-ctl`, and the private DNS zone `silo-db` that names it. |
 | Gateway MIG and ILB (optional) | `silo-gateway-*` | With `--gateway-replicas`, a MIG of gateways behind an internal passthrough NLB with global access. The NLB's address is then `silo.internal`. |
-| Tenant subnets | `<id>-<name>` | Regional subnets of `silo`, inside the owning silo's blocks. |
-| Tenant objects | `<id>-<name>` | Instances, disks, images, snapshots, firewall rules and instance templates, labelled `silo=<id>` where GCE has labels. |
+| Tenant subnets | `<id>-<rest>` | Regional subnets of `silo`, inside the owning silo's blocks. The tenant names them so ([Naming](#naming)). |
+| Tenant objects | `<id>-<rest>` | Instances, disks, images, snapshots, firewall rules and instance templates, labelled `silo=<id>` where GCE has labels. |
 
 Every object silod makes for a tenant carries the labels `silo=<id>` and
 `silo-managed=true`, or, where GCE has no labels (subnets, firewall
@@ -304,7 +304,8 @@ These return 403 with a message naming the method or the field:
 - OS Login: the instance metadata keys `enable-oslogin`,
   `enable-oslogin-2fa` and `enable-windows-ssh`;
 - the instance metadata key `block-project-ssh-keys` set to anything but
-  `true` (the facade sets it on every instance);
+  `true` (the facade sets it on every instance), and `silo-name-prefix`
+  set to anything but the silo's prefix ([Naming](#naming));
 - `networks.insert`, `delete`, `patch`, `addPeering`, `switchToCustomMode`;
 - `subnetworks.setPrivateIpGoogleAccess`, and `privateIpGoogleAccess:
   true`;
@@ -356,10 +357,11 @@ On `instances.insert`, the facade:
    the refused keys), `description`, `minCpuPlatform` and
    `deletionProtection`, `guestAccelerators` and local SSD `disks[]`
    entries;
-7. writes the real instance: the name gets its prefix, the tags are
-   prefixed and get `<id>` added, the labels get `silo=<id>` and
-   `silo-managed=true`, the metadata gets `block-project-ssh-keys: true`,
-   and `serviceAccounts` is empty.
+7. writes the real instance: the name is the tenant's, which carries
+   the silo's prefix ([Naming](#naming)), as must each tag; the tags
+   get `<id>` added, the labels get `silo=<id>` and
+   `silo-managed=true`, the metadata gets `block-project-ssh-keys: true`
+   and `silo-name-prefix: <id>-`, and `serviceAccounts` is empty.
 
 The tenant never sees the `silo` labels or the `<id>` tag. The facade
 strips them from responses, and refuses a tenant label key or tag that
@@ -471,9 +473,10 @@ disk types. So a template can't name another silo's subnetwork, image
 or disk. For a regional template, its region must be allowed. For a
 global one, every region its properties name (through `subnetwork` or a
 disk source) must be. The real template is written rewritten as an
-instance would be: prefixed names and tags, the `<id>` tag, the
-`silo` labels in `properties.labels`, `block-project-ssh-keys`, and no
-service accounts. The facade maps it back on `get` and `list`.
+instance would be: names and tags checked for the silo's prefix, the
+`<id>` tag, the `silo` labels in `properties.labels`,
+`block-project-ssh-keys` and `silo-name-prefix`, and no service
+accounts. The facade maps its links back on `get` and `list`.
 
 **Templates charge no regional quota**: a template is not an instance.
 Each counts once in the global count `instance_templates`, because GCE
@@ -497,7 +500,8 @@ The facade's network is `default`, a fiction over the silo's own
 space in the shared VPC.
 
 - `subnetworks.insert` runs the [address checks](allocators.md#checks-the-facade-makes),
-  charges `subnetworks`, and creates `<id>-<name>` in `silo`. It allows
+  charges `subnetworks`, and creates the subnet, named `<id>-<rest>`
+  by the tenant, in `silo`. It allows
   `name`, `description`, `region`, `ipCidrRange`, `secondaryIpRanges`,
   `logConfig`, `stackType: IPV4_ONLY` and `purpose: PRIVATE`.
 - `patch` allows changing `secondaryIpRanges` (with the same checks),
@@ -519,9 +523,11 @@ Tenant firewall rules become real VPC firewall rules in `silo`, pinned
 to the silo (call 11). On `insert`, `patch` and `update`, the facade:
 
 - refuses `targetServiceAccounts` and `sourceServiceAccounts`;
-- prefixes every `targetTags` and `sourceTags` entry with `<id>-`. If
-  `targetTags` is empty, it sets `targetTags: [<id>]`, which every
-  instance of the silo carries. So a rule can only ever target the silo's
+- refuses (400, `invalid`) a `targetTags` or `sourceTags` entry
+  without the silo's prefix `<id>-`, as it does a name; a tenant tags
+  its instances with prefixed tags too. If `targetTags` is empty, it
+  sets `targetTags: [<id>]`, which every instance of the silo carries
+  and which responses drop. So a rule can only ever target the silo's
   own instances;
 - for `INGRESS`, intersects `sourceRanges` with the silo's own space,
   and refuses the rule (400, `invalid`) if that leaves nothing when
@@ -533,7 +539,8 @@ to the silo (call 11). On `insert`, `patch` and `update`, the facade:
 
 The facade returns the rule as the tenant wrote it. It records the
 original next to the real rule, so that `get` doesn't show the
-intersected ranges.
+intersected ranges; the tags it shows are the real rule's, less
+`<id>`.
 
 Since the fence runs first and passes only intra-silo packets on, a
 tenant rule can't open anything across silos, even when it is wrong.
@@ -582,44 +589,93 @@ Errors are GCE-shaped:
 | A `manage` grant doesn't cover the resource type or the access | 403 | `forbidden`, naming the grant |
 | Region or zone not allowed | 403 | `regionNotAllowed` |
 | Project outside the caller's reach | 403 | `forbidden` |
-| Range outside the silo's own space, name too long, filter not supported | 400 | `invalid` |
+| Range outside the silo's own space, name without the silo's prefix (the message names it) or one GCE refuses, filter not supported | 400 | `invalid` |
 | Object not found (or another silo's) | 404 | `notFound` |
 | Name already used in this silo | 409 | `alreadyExists` |
 | silod unavailable | 503 | `backendError` |
 
 ### Naming {#SV-76}
 
-A tenant's name `builder` is the real name `<id>-builder`, for example
-`k7f3qa-builder` (call 1). The facade:
+A tenant names each object by its real name. Every object in the
+collections the tenant names (instances, disks, images, snapshots,
+subnetworks, firewall rules and instance templates) is named
+`<id>-<rest>`, where `<id>` is the silo's id, for example
+`k7f3qa-builder` (call 1, revised in task 3024). The name is used
+unchanged everywhere: in requests and responses, in the host project,
+as the guest's hostname, in GCE's internal DNS and on the metadata
+server. There is one name per object.
 
-- refuses a name longer than 56 characters (400, `invalid`), because
-  the real name would pass GCE's limit of 63;
-- maps names back in every response, including in `selfLink`,
-  `targetLink`, `zone`, `region`, `network`, `subnetwork`, `source`,
-  `sourceImage`, `sourceDisk`, `users` and `disks[].source`. A
-  `selfLink` is
-  `http://silo.internal:8080/compute/v1/projects/silo-<id>/zones/<z>/instances/builder`;
-- maps names in requests the same way, whether given bare, as a
-  partial path or as a full URL. A full URL may use `silo.internal`,
-  `www.googleapis.com` or `compute.googleapis.com`.
+The facade checks names. It doesn't rewrite them:
 
-Two silos can both have a `builder`, and neither can name the other's.
+- A name without the silo's prefix, or with another silo's, is 400
+  (`invalid`), and the message says what the prefix must be:
+  `Invalid value for field 'name': 'builder'. silo: names in this
+  silo must start with "k7f3qa-"`. That holds for a name in a request
+  body, in a path, and in a link the request names an object by,
+  whether bare, a partial path or a full URL. A full URL may use
+  `silo.internal`, `www.googleapis.com` or `compute.googleapis.com`.
+  A `get`, `delete` or other call naming an object by a bare name is
+  refused the same way rather than given 404, so a caller that still
+  holds a bare name learns the prefix.
+- The limit is GCE's own: a name GCE refuses, longer than 63
+  characters or not a match of
+  `[a-z]([-a-z0-9]{0,61}[a-z0-9])?`, is 400 (`invalid`), with GCE's
+  message. The prefix counts, since the whole name is the tenant's.
+- Network tags on instances and in firewall rules' `targetTags` and
+  `sourceTags` must carry the prefix too ([Firewall
+  rules](#firewall-rules)).
+- A caller writing another silo's facade, an ancestor or a `manage`
+  holder ([Projects and the caller](#projects-and-the-caller)), names
+  that silo's objects, so uses that silo's prefix: through
+  `projects/silo-<target>`, the names must start with `<target>-`.
+- Names in public image projects pass through unchecked.
+
+The facade still maps projects and the network. The host project is
+`silo-<id>` in every response, link and message; a link the facade
+writes is on its own endpoint, for example
+`http://silo.internal:8080/compute/v1/projects/silo-k7f3qa/zones/<z>/instances/k7f3qa-builder`;
+and the shared VPC is `default` (call 12).
+
+`list` and `aggregatedList` show only the silo's own objects, by its
+label or name prefix ([Lists and filters](#lists-and-filters)), so
+a filter such as `name eq k7f3qa-builder` is on the real name.
+
+A tenant learns its prefix without guessing:
+
+- from the 400 above;
+- from the silo object, as `facade.name_prefix`
+  ([`fence-api.md`, Silo](fence-api.md#silo)), which `silo describe`
+  prints as `Name prefix:`;
+- on any instance, from the metadata key `silo-name-prefix`, which the
+  facade sets on every instance it makes or whose metadata it sets
+  (a tenant may send the key, but only with that value);
+- on an agent's tool VM, from `SILO_NAME_PREFIX` in the environment of
+  the commands `silo-tools` runs, and from the agent's `compute` tool
+  description ([`agents.md`, Tools](agents.md#tools)).
+
+Before task 3024 the facade gave each name a hidden prefix: a tenant's
+`builder` was the real `k7f3qa-builder`, and the facade mapped names
+both ways. Nothing in GCE changes, since the real names were already
+`<id>-…`; only the facade's view does. A caller that stored a bare
+name gets the 400 with the prefix, and uses the real name from then
+on. Records silod keeps by name, firewall originals and the space
+map's subnet ranges, stay keyed by the name less the prefix, so those
+an earlier release wrote are still found. An agent's tool VM is now
+`<id>-agent-<name>`; an agent made before keeps its record of
+`agent-<name>`, which silod prefixes when it reaches the VM.
 
 ### Where the real names show through
 
-The facade can rewrite only what passes through it. The real name
-shows through in these places:
+There is one name, so nothing shows through: the name the tenant gives
+is the guest's hostname (`hostname` on `k7f3qa-builder` prints
+`k7f3qa-builder`), its GCE internal DNS name
+(`k7f3qa-builder.us-central1-a.c.<host-project>.internal`), the name
+on the metadata server and in serial console and guest-agent logs.
+What still shows through is not a name:
 
-- **Guest hostnames.** GCE sets the guest's hostname from the real
-  instance name, so `hostname` on `builder` prints `k7f3qa-builder`
-  ([Open question 5](README.md#open-questions)).
-- **GCE internal DNS.**
-  `k7f3qa-builder.us-central1-a.c.<host-project>.internal` resolves
-  from any VM in the VPC. `builder` alone does not.
-- **The metadata server** reports the real name, the host project ID
-  and numeric project number, and `instance/zone` in the host project.
-- **Serial console output** and guest-agent logs.
-- **The 63-character limit**, which is 56 characters for the tenant.
+- **The metadata server** reports the host project ID and numeric
+  project number, and `instance/zone` in the host project, where the
+  facade says `silo-<id>`.
 - **Numeric `id` fields** are GCE's. They are unique and harmless, but
   they are not stable across a delete and a re-create with the same
   name, which is also true in GCE.

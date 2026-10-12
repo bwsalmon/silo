@@ -73,6 +73,7 @@ func writeSilo(w *tw, s *client.Silo) {
 	w.row("State:", s.State)
 	w.row("Backing:", s.Backing.Kind)
 	w.row("Facade:", s.Facade.Project+" at "+s.Facade.Endpoint)
+	w.row("Name prefix:", s.Facade.NamePrefix)
 	w.row("Regions:", orNone(s.Regions))
 	w.row("Blocks:", fmt.Sprintf("%s (max %d)", orNone(s.Address.Blocks), s.Address.MaxBlocks))
 	for _, d := range s.Address.Delegated {

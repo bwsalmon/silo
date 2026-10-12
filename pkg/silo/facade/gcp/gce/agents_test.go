@@ -61,7 +61,7 @@ func TestAgentToolVM(t *testing.T) {
 	agent := func(name, machine string) obj {
 		return obj{"name": name, "harness": obj{"adapter": "claude-code", "credential": "anthropic-api"},
 			"model": "claude-sonnet-5-5", "budget": obj{"usd": "10"}, "lease": obj{"ttl": "2h"},
-			"tool_vm": obj{"zone": zoneA, "subnet": "web", "machine_type": machine, "image": debian, "disk_gb": 30}}
+			"tool_vm": obj{"zone": zoneA, "subnet": e.a + "-web", "machine_type": machine, "image": debian, "disk_gb": 30}}
 	}
 
 	// A tool VM past the silo's quota fails the create, and holds
@@ -106,16 +106,16 @@ func TestAgentToolVM(t *testing.T) {
 	}
 	toolChannelBinding(t, e, api, fence, id)
 	// The tenant sees it, without the label.
-	got := e.ok(e.a, "GET", cv(host, instancesPath+"/agent-fixer"), nil)
+	got := e.ok(e.a, "GET", cv(host, instancesPath+"/"+e.a+"-agent-fixer"), nil)
 	if labels, _ := got["labels"].(obj); labels[agents.LabelAgent] != nil {
 		t.Errorf("the tenant sees the hidden label: %v", labels)
 	}
 	// ... and may not write to it.
 	for _, w := range []struct{ method, path string }{
-		{"DELETE", instancesPath + "/agent-fixer"},
-		{"POST", instancesPath + "/agent-fixer/stop"},
-		{"POST", instancesPath + "/agent-fixer/setMetadata"},
-		{"POST", instancesPath + "/agent-fixer/setMachineType"},
+		{"DELETE", instancesPath + "/" + e.a + "-agent-fixer"},
+		{"POST", instancesPath + "/" + e.a + "-agent-fixer/stop"},
+		{"POST", instancesPath + "/" + e.a + "-agent-fixer/setMetadata"},
+		{"POST", instancesPath + "/" + e.a + "-agent-fixer/setMachineType"},
 	} {
 		msg := e.fail(403, ReasonForbidden, e.a, w.method, cv(host, w.path), obj{})
 		if !strings.Contains(msg, "/team-a/agents/fixer") {
@@ -123,7 +123,7 @@ func TestAgentToolVM(t *testing.T) {
 		}
 	}
 	// Nor may its ancestor, through the facade.
-	e.fail(403, ReasonForbidden, e.root, "DELETE", cv("silo-"+e.a, instancesPath+"/agent-fixer"), nil)
+	e.fail(403, ReasonForbidden, e.root, "DELETE", cv("silo-"+e.a, instancesPath+"/"+e.a+"-agent-fixer"), nil)
 	// Deleting the agent deletes it.
 	_, op = fence(e.a, "DELETE", "/silo/v1/self/agents/fixer", nil)
 	for i := 0; i < 500; i++ {

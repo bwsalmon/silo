@@ -341,7 +341,7 @@ func catalogAggregated(kind, coll string, list zoneLister) handler {
 // ownImage reports whether img is the silo's: labelled silo=<id> and
 // named with its prefix.
 func (q *request) owns(name string, labels map[string]string) bool {
-	_, ok := q.n.tenantName(name)
+	ok := q.n.ours(name)
 	return ok && labels["silo"] == q.target.ID
 }
 
@@ -353,10 +353,10 @@ func (s *Server) getImage(q *request) (any, error) {
 		}
 		return q.shape("compute#image", img)
 	}
-	if err := checkName(q.call.Name); err != nil {
+	if err := q.n.checkName(q.call.Name); err != nil {
 		return nil, err
 	}
-	img, err := s.gce.GetImage(q.ctx(), s.opts.HostProject, q.n.realName(q.call.Name))
+	img, err := s.gce.GetImage(q.ctx(), s.opts.HostProject, q.call.Name)
 	if err != nil || !q.owns(img.Name, img.Labels) {
 		if err == nil || gceapi.IsNotFound(err) {
 			return nil, notFound("projects/" + q.call.Project + "/global/images/" + q.call.Name)

@@ -19,9 +19,11 @@ import (
 // fakeVMs is a ToolVMs that records what it is asked, and fails a
 // create with fail when it is set.
 type fakeVMs struct {
-	mu      sync.Mutex
-	fail    error
-	made    map[string]string // instance real name (silo/instance) to the caller that made it
+	mu   sync.Mutex
+	fail error
+	// made is each tool VM, by its silo's path and its name less the
+	// silo's prefix (silo/agent-<name>), to the caller that made it.
+	made    map[string]string
 	deleted []string
 	script  string
 }
@@ -39,7 +41,7 @@ func (f *fakeVMs) Create(_ context.Context, c fenceapi.Caller, silo *tree.Silo, 
 	if c.Manage != "" {
 		who += " via manage"
 	}
-	f.made[silo.Path+"/"+instance] = who
+	f.made[vmKey(silo, instance)] = who
 	f.script = script
 	return "10.1.16.3", nil
 }
@@ -47,8 +49,18 @@ func (f *fakeVMs) Create(_ context.Context, c fenceapi.Caller, silo *tree.Silo, 
 func (f *fakeVMs) Delete(_ context.Context, _ fenceapi.Caller, silo *tree.Silo, agent, zone, instance string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.deleted = append(f.deleted, silo.Path+"/"+instance)
+	f.deleted = append(f.deleted, vmKey(silo, instance))
 	return nil
+}
+
+// vmKey is the fake's key for silo's tool VM instance: its silo's path
+// and its name less the silo's prefix, which the name must carry.
+func vmKey(silo *tree.Silo, instance string) string {
+	rest, ok := strings.CutPrefix(instance, silo.ID+"-")
+	if !ok {
+		rest = "unprefixed:" + instance
+	}
+	return silo.Path + "/" + rest
 }
 
 func (f *fakeVMs) setFail(err error) {
@@ -181,7 +193,7 @@ func TestAgentLifecycle(t *testing.T) {
 	}
 	a := e.ok(e.root, "GET", "/silo/v1/silos/team/agents/fixer", nil)
 	id := a["id"].(string)
-	if a["state"] != "PROVISIONING" || get(a, "tool_vm", "instance") != "agent-fixer" || get(a, "tool_vm", "tool_server") != "PENDING" ||
+	if a["state"] != "PROVISIONING" || get(a, "tool_vm", "instance") != e.team+"-agent-fixer" || get(a, "tool_vm", "tool_server") != "PENDING" ||
 		get(a, "tool_vm", "ip") != "10.1.16.3" || get(a, "harness", "version") != agents.Adapters["claude-code"].Version ||
 		get(a, "budget", "usd") != "40.00" || get(a, "budget", "spent_usd") != "0.00" || a["silo_path"] != "/team" || a["owner"] != nil ||
 		get(a, "tool_vm", "machine_type") != fenceapi.DefaultToolMachineType || get(a, "labels", "task") != "1945" {

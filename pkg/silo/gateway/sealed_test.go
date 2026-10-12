@@ -171,7 +171,7 @@ func TestSealedAgentToolChannel(t *testing.T) {
 	})
 	e.ok(e.root, "POST", "/silo/v1/silos/sealed/agents", obj{"name": "op", "harness": obj{"adapter": "claude-code", "credential": "anthropic-api"},
 		"model": "claude-sonnet-5-5", "budget": obj{"usd": "10"}, "lease": obj{"ttl": "2h"},
-		"tool_vm": obj{"zone": "us-central1-a", "subnet": "web", "machine_type": "e2-standard-2"}})
+		"tool_vm": obj{"zone": "us-central1-a", "subnet": e.sealed + "-web", "machine_type": "e2-standard-2"}})
 	e.fakeGCE.RunOperations()
 	a := e.ok(e.root, "GET", "/silo/v1/silos/sealed/agents/op", nil)
 	id := a["id"].(string)
@@ -224,7 +224,7 @@ func TestSealedChildAPIPortEachLayer(t *testing.T) {
 				{"GET", "/silo/v1/self", nil},
 				{"POST", "/silo/v1/self/exports", obj{"name": "x", "target": netip.AddrPortFrom(e.ip[inner], 80).String(), "protocol": "http", "to": []string{"/a"}}},
 				{"GET", "/compute/v1/projects/" + host + "/regions/us-central1/subnetworks", nil},
-				{"POST", "/compute/v1/projects/" + host + "/regions/us-central1/subnetworks", obj{"name": "x", "ipCidrRange": e.subnet[inner].String()}},
+				{"POST", "/compute/v1/projects/" + host + "/regions/us-central1/subnetworks", obj{"name": inner + "-x", "ipCidrRange": e.subnet[inner].String()}},
 			} {
 				code, out := e.from(e.ip[inner], c.method, c.path, c.body)
 				reason, msg := gceReason(out)

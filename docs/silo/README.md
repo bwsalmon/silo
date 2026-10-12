@@ -137,7 +137,9 @@ A silo is a node in the tree. It has:
 
 - an **id**: six lowercase base-32 characters, generated, stable and
   globally unique (`k7f3qa`) **(call 1)**. It is what resource-name
-  prefixes, facade project IDs and audit records use;
+  prefixes, facade project IDs and audit records use: every object a
+  tenant makes in the silo is named `k7f3qa-…` by the tenant itself
+  ([`gcp-backend.md`, Naming](gcp-backend.md#naming));
 - a **name**: a DNS label unique among its siblings, and so a **path**
   from the root (`/team-a/ci/job-412`). Paths are for people;
   everything durable uses the id;
@@ -390,7 +392,7 @@ choose a backing per child. v1 implements only `subnet`.
 | | Subnet per silo (v1) | VPC per silo (later) | Project per silo (later) |
 | --- | --- | --- | --- |
 | **Isolation** | Firewall only: one global network firewall policy, owned by silod, evaluated before tenant rules. A bug in the rules is a breach. | A routing boundary: there is no route between VPCs unless silod peers them or connects them through PSC. | A project boundary: IAM, quotas, APIs, metadata, DNS and logs are all separate. Org policies and hierarchical firewall policies are enforced by Google. |
-| **Facade fidelity** | Partial. One virtual network, which is a fiction over a slice of the shared VPC. CIDRs come from allocated blocks. Names are prefixed. No routes. | Good. The tenant gets a real VPC: its own routes and firewall rules, with CIDRs from its blocks. Names inside it need no prefix. | Near pass-through. The tenant's project is real, so almost every `compute/v1` call can be forwarded with a check rather than a rewrite. |
+| **Facade fidelity** | Partial. One virtual network, which is a fiction over a slice of the shared VPC. CIDRs come from allocated blocks. Names carry the silo's prefix. No routes. | Good. The tenant gets a real VPC: its own routes and firewall rules, with CIDRs from its blocks. Names inside it need no prefix. | Near pass-through. The tenant's project is real, so almost every `compute/v1` call can be forwarded with a check rather than a rewrite. |
 | **Gateway reach** | Direct: the gateway is in the same VPC. | Through Private Service Connect or VPC peering to the gateway's VPC. | The same as VPC, across projects. |
 | **Speed to create** | Seconds: a database row and a few firewall rules. | Seconds to a minute. | Minutes. A pool of pre-made projects would help. |
 | **Limits** | Firewall-policy rule size, and subnets per network. Every block adds rule entries ([`allocators.md`](allocators.md#growth)). | 15 VPC networks per project by default, so it needs a quota increase or nesting VPCs across projects. | Needs an organization (folders mirror the tree) and per-project quotas, which have to be requested per project. |
@@ -492,26 +494,30 @@ and a VM:
 silo proxy --listen localhost:8642 &
 gcloud config set api_endpoint_overrides/compute http://localhost:8642/compute/v1/
 gcloud config set project silo-k7f3qa
-gcloud compute networks subnets create build --network default \
+gcloud compute networks subnets create k7f3qa-build --network default \
     --region us-central1 --range 10.1.0.0/24
-gcloud compute instances create builder --zone us-central1-a \
-    --machine-type n2-standard-8 --subnet build \
+gcloud compute instances create k7f3qa-builder --zone us-central1-a \
+    --machine-type n2-standard-8 --subnet k7f3qa-build \
     --image-family debian-12 --image-project debian-cloud \
     --enable-nested-virtualization --no-address
 ```
 
 The facade checks that `10.1.0.0/24` lies inside `/team-a`'s blocks
 and isn't delegated to a child, that `us-central1` is allowed, and
-that 8 vCPU and 32 GiB fit in the team's us-central1 quota. It creates
-the real subnet `k7f3qa-build` and the real instance `k7f3qa-builder`,
-labelled `silo=k7f3qa`, with no service account, no external IP and
-`block-project-ssh-keys` set. It answers with GCE-shaped objects whose
-names, selfLinks and project are the team's.
+that 8 vCPU and 32 GiB fit in the team's us-central1 quota. Every
+name in `/team-a` starts with its id, `k7f3qa-` (`silo describe`
+shows it as `Name prefix:`); a name without it is refused with a 400
+saying so. It creates the subnet `k7f3qa-build` and the instance
+`k7f3qa-builder`, labelled `silo=k7f3qa`, with no service account, no
+external IP and `block-project-ssh-keys` set. It answers with
+GCE-shaped objects whose selfLinks and project are the team's, under
+the same names: the VM's hostname and DNS name are `k7f3qa-builder`
+too.
 
 If bob had left out `--no-address`, the facade would have refused
 with a 403 naming `networkInterfaces[0].accessConfigs`.
 
-**3. The VM calls the cloud with no credentials.** On `builder`,
+**3. The VM calls the cloud with no credentials.** On `k7f3qa-builder`,
 `gcloud` is configured with `auth/disable_credentials` and the
 endpoint `http://silo.internal:8080/compute/v1/`. Its calls reach the
 gateway from `10.1.0.2`. The gateway maps that address to `/team-a`
@@ -656,10 +662,10 @@ These are true of v1 by design.
   won't run on a future Docker or AWS backend.
 - **Facade fidelity is partial.** CIDRs must come from allocated
   blocks. There are no routes, external IPs or NAT, and there is only
-  one network. Names are rewritten, and the real names show through
-  in some places: guest hostnames, internal DNS, the metadata server
-  and the 63-character limit
-  ([`gcp-backend.md`, Where the real names show through](gcp-backend.md#where-the-real-names-show-through)).
+  one network. Every name a tenant gives starts with its silo's id,
+  `<id>-`, and is the real name everywhere, so the tenant's names
+  aren't its own choice entirely
+  ([`gcp-backend.md`, Naming](gcp-backend.md#naming)).
 - **Host-project facts reach every VM.** GCE's metadata server tells
   any VM the host project's ID and its project-wide metadata, and GCE
   internal DNS resolves instance names across the whole VPC. No
@@ -742,9 +748,10 @@ These are true of v1 by design.
 The chat did not decide these. The author made each call, for the
 reason given. A reviewer should check each one.
 
-1. **Silo ids** are six generated base-32 characters. Real resource
-   names are prefixed with `<id>-`, so a tenant name may be up to 56
-   characters, and the facade project ID is `silo-<id>`
+1. **Silo ids** are six generated base-32 characters. Every resource
+   name in a silo starts with `<id>-`, which the tenant writes itself
+   (revised in task 3024: the facade no longer adds it behind the
+   tenant's back), and the facade project ID is `silo-<id>`
    ([`gcp-backend.md`, Naming](gcp-backend.md#naming)). A short prefix
    leaves room under GCE's 63-character limit, and a stable id keeps
    names valid when a silo is renamed.
@@ -1038,10 +1045,11 @@ These calls were made in task 1947, for the sealed-silo addendum:
    enough?
 4. ~~**Ancestor writes into descendants' facades.**~~ Settled in task
    1913 and written up in task 1947: ancestors may write (call 55).
-5. **Guest hostnames.** Should the facade set a custom hostname on
-   each instance (`builder.k7f3qa.silo.internal`, with a DNS record),
-   so that the guest doesn't see its prefixed name? It costs a DNS
-   record per instance and leaves GCE internal DNS unchanged.
+5. ~~**Guest hostnames.**~~ Settled in task 3024: the prefix can't be
+   hidden everywhere (hostnames, GCE internal DNS, the metadata server,
+   logs), so tenants use the real, prefixed names, and the guest's
+   hostname is the name the tenant gave
+   ([`gcp-backend.md`, Naming](gcp-backend.md#naming)).
 6. **Cross-silo name visibility through GCE internal DNS.** Can a DNS
    policy or response policy hide other silos' instances from
    `*.internal` lookups without breaking the tenant's own? If not,

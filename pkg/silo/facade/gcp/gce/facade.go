@@ -443,7 +443,6 @@ func (s *Server) auditTx(ctx context.Context, tx store.Tx, q *request, result st
 	}
 	if name != "" && tenantCollections[q.call.Collection] {
 		fields["name"] = name
-		fields["real_name"] = q.n.realName(name)
 	}
 	if charges == nil {
 		charges = []fenceapi.ChargeLine{}

@@ -625,7 +625,7 @@ func (s *Server) createAgent(q *request, ref string) (any, error) {
 		a = &agentRow{Agent: Agent{ID: id, Name: req.Name, Silo: t.ID, SiloPath: t.Path,
 			Harness: AgentHarness{Adapter: req.Harness.Adapter, Version: agents.Adapters[req.Harness.Adapter].Version, Credential: req.Harness.Credential},
 			Model:   req.Model, Prompt: req.Prompt, State: agents.StateProvisioning, Labels: labels, CreateTime: now,
-			ToolVM: AgentToolVM{ToolVMSpec: vm, Instance: agents.InstanceName(req.Name), ToolServer: agents.ToolServerPending},
+			ToolVM: AgentToolVM{ToolVMSpec: vm, Instance: agents.InstanceName(t.ID, req.Name), ToolServer: agents.ToolServerPending},
 			Budget: AgentBudget{PeriodStart: start}},
 			budget: micros, expire: end, owner: q.caller.Agent}
 		vmj, _ := json.Marshal(a.ToolVM)

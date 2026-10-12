@@ -51,9 +51,9 @@ func TestAdopt(t *testing.T) {
 		op := e.ok(e.a, "POST", cv(host, zone), obj{"name": name, "sizeGb": "10", "type": "zones/us-central1-a/diskTypes/pd-ssd"})
 		return op["name"].(string)
 	}
-	dead := start("dead", "d-dead")
-	alive := start("alive", "d-alive")
-	legacy := start("", "d-legacy")
+	dead := start("dead", e.a+"-d-dead")
+	alive := start("alive", e.a+"-d-alive")
+	legacy := start("", e.a+"-d-legacy")
 	e.facade.Close()
 	if u := used(); u != ledger.Units(30) {
 		t.Fatalf("used %d after three inserts, want 30 GB", u)
