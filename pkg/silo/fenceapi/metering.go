@@ -342,8 +342,12 @@ func (s *Server) WarnLeases(ctx context.Context) (int, error) {
 			text := fmt.Sprintf("silo: this agent's lease ends at %s, in about %s. It is then deleted, with its tool VM. Wrap up now; a person may renew it.",
 				a.expire.UTC().Format(time.RFC3339), formatDuration(left))
 			id := "m-lease-" + a.ID + "-" + fmt.Sprint(store.Millis(a.expire))
-			if _, err := tx.Exec(ctx, `INSERT INTO agent_messages (id, agent, at, direction, text) VALUES (?, ?, ?, ?, ?)`,
-				id, a.ID, store.Millis(now), MessageIn, text); err != nil {
+			seq, err := nextSeq(ctx, tx, "agent_messages", a.ID)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO agent_messages (id, agent, seq, at, direction, text) VALUES (?, ?, ?, ?, ?, ?)`,
+				id, a.ID, seq, store.Millis(now), MessageIn, text); err != nil {
 				return err
 			}
 			if _, err := appendEvent(ctx, tx, a.ID, EventMessage, map[string]any{"id": id, "direction": MessageIn, "text": text}); err != nil {
