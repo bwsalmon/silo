@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bwsalmon/silo/pkg/silo/install"
-	"github.com/bwsalmon/silo/pkg/silo/install/fakecloud"
+	"github.com/bwsalmon/silo/pkg/install"
+	"github.com/bwsalmon/silo/pkg/install/fakecloud"
 )
 
 // withFakeCloud points silo install at an in-memory project.

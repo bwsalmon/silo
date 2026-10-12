@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 func TestCredentialCommands(t *testing.T) {

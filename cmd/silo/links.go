@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 // The link commands (fence-api.md, "Links (L3)", SV-15). Each acts as

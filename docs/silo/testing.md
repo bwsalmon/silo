@@ -18,7 +18,7 @@ weight is on tests. There are two layers:
 
 ## Fake GCE backend {#SV-119}
 
-The fake is a Go package, `pkg/silo/backend/gcp/gce/fake`, that serves
+The fake is a Go package, `pkg/backend/gcp/gce/fake`, that serves
 the `compute/v1` resources silod calls (instances, disks, images,
 snapshots, instance templates and
 regional instance templates, subnetworks, firewalls, firewall policies,

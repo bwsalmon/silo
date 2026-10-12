@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 // The export and import commands (fence-api.md, "Exports (proxied)",

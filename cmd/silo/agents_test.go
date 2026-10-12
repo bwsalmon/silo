@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
-	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/tree"
+	"github.com/bwsalmon/silo/pkg/client"
+	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/tree"
 )
 
 // toolVMs makes every tool VM at once, at one address.

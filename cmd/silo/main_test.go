@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/agents"
-	"github.com/bwsalmon/silo/pkg/silo/client"
-	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/store/sqlite"
+	"github.com/bwsalmon/silo/pkg/agents"
+	"github.com/bwsalmon/silo/pkg/client"
+	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/store/sqlite"
 )
 
 // silod is an in-process silod serving the fence API on SQLite.

@@ -58,9 +58,9 @@ jobs:
           tail -n 200 /tmp/gotest.log
           exit $status
 
-  # ./pkg/silo/store/... is silod's store: the conformance suite, and the
+  # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server
-  # per test (pkg/silo/internal/pgtest). SILO_REQUIRE_POSTGRES makes every
+  # per test (pkg/internal/pgtest). SILO_REQUIRE_POSTGRES makes every
   # "postgres is not available" skip a failure instead, so a server that
   # does not come up is this job's red rather than a quiet `ok`. The `go`
   # job, which has no PostgreSQL, skips those cases.
@@ -97,5 +97,5 @@ jobs:
         # The fence API's TestPostgres runs its cases on Postgres too.
         run: |
           set -e
-          go test -count=1 -timeout 20m ./pkg/silo/store/...
-          go test -count=1 -timeout 10m -run TestPostgres ./pkg/silo/fenceapi/
+          go test -count=1 -timeout 20m ./pkg/store/...
+          go test -count=1 -timeout 10m -run TestPostgres ./pkg/fenceapi/

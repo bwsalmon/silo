@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/silo/store"
-	"github.com/bwsalmon/silo/pkg/silo/store/migrations"
-	"github.com/bwsalmon/silo/pkg/silo/store/sqlite"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/store"
+	"github.com/bwsalmon/silo/pkg/store/migrations"
+	"github.com/bwsalmon/silo/pkg/store/sqlite"
 	compute "google.golang.org/api/compute/v1"
 )
 

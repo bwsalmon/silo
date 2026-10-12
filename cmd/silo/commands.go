@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/client"
+	"github.com/bwsalmon/silo/pkg/client"
 )
 
 func (c *cli) describe(ctx context.Context, args []string) error {

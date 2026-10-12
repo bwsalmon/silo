@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/harness"
-	"github.com/bwsalmon/silo/pkg/silo/leader"
+	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/harness"
+	"github.com/bwsalmon/silo/pkg/leader"
 )
 
 // runSessiond is silod sessiond, the session launcher (package

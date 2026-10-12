@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce/fake"
-	facade "github.com/bwsalmon/silo/pkg/silo/facade/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
-	"github.com/bwsalmon/silo/pkg/silo/frontdoor"
-	"github.com/bwsalmon/silo/pkg/silo/frontdoor/frontdoortest"
-	"github.com/bwsalmon/silo/pkg/silo/store/sqlite"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
+	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/frontdoor"
+	"github.com/bwsalmon/silo/pkg/frontdoor/frontdoortest"
+	"github.com/bwsalmon/silo/pkg/store/sqlite"
 	compute "google.golang.org/api/compute/v1"
 )
 
