@@ -563,6 +563,8 @@ anywhere else. Runtime state (sockets, pids, pinned namespaces) is under
     volumes/<volume id>/          a volume's contents (files owned by the silo's subuids)
     agents/<agent id>/            saved harness sessions (copies; the store is the truth)
     logs/<container id>/          container logs, json-file framing, rotated
+    repos/<repo id>.git/          hosted git repos, bare (part 3, local-git.md)
+  mirror/                         the uber-repo mirror's own repos (part 3); kept, not precious
   cache/                          re-creatable; never data
     containerd/                   content store, snapshots (writable layers), metadata
     buildkit/                     buildkitd's state for granule wraps
@@ -668,6 +670,8 @@ type Ref struct {
 | `silos/<id>/volumes/` | **Yes** | Tenants' data |
 | `silos/<id>/agents/` | Yes, but recoverable | Copies of sessions the store also records. A lost copy ends a session's resume, not the agent. |
 | `silos/<id>/logs/` | Kept, not precious | Lost logs are lost history. A backup may skip them. |
+| `silos/<id>/repos/` | **Yes** | Hosted git repos ([part 3](local-git.md#5-storage-and-quota)). Copied with `git bundle`, not file by file |
+| `mirror/` | Kept, not precious | The submodule index's own history, and the mirror's quarantine. Rebuilt from the store if lost |
 | `cache/containerd/` content and images | **No** | Re-pulled on demand, through the silo's egress policy (call L6) |
 | `cache/containerd/` snapshots: **containers' writable layers** | **No, explicitly** | A container is re-created from its row with a fresh writable layer from its image. Docker's own guidance applies: data that matters goes in a volume. `local-backend.md` §14 gets this as a limitation. |
 | `cache/buildkit/`, wrapped images, `cache/runtimes/` | **No** | Re-wrapped and re-fetched by digest |

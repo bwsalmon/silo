@@ -56,6 +56,7 @@ open are under [Open questions](#open-questions).
 | [`testing.md`](testing.md) | The fake GCE backend and the `silo/v1` conformance suite |
 | [`local-backend.md`](local-backend.md) | A single-machine backend, designed now: granule VMs or gVisor sandboxes behind a Docker Engine API subset, a local network fence, the backend interface under silod, and the facade core's extraction. Its calls and open questions are listed on the page. |
 | [`local-rootless-storage.md`](local-rootless-storage.md) | Part 2 of the local backend: silod fully rootless (a user namespace owning `silo-net`, the namespace holder, gVisor and KVM without root, restarts, the system-install alternative), and one data directory with per-silo subtrees and a storage driver, so backups can be added later. Its calls (L26–L40) and open questions are listed on the page. |
+| [`local-git.md`](local-git.md) | Part 3 of the local backend: git repositories that silos host for their agents (smart HTTP at `silo.internal/git/`, the fence on repos, submodules between them), mirrored outbound into one external "uber repo" as namespaced branches with archive refs, plus a submodule index on its `main`. Its calls (L41–L55) and open questions are listed on the page. |
 | [`custom-allocators.md`](custom-allocators.md) | Custom allocators (`allocator/v1`), in the serve and lend shapes: designed now, built after v1. Also what v1's ledger and fence API must already allow. Its calls and open questions are listed on the page. |
 
 The spec pages are normative. If a spec page and this file disagree,
