@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/gcp"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/fence"
@@ -90,7 +91,7 @@ func newEnv(t *testing.T, opts ...func(*reconcile.Options)) *env {
 	go func() { defer close(done); e.applier.Run(e.ctx, 10*time.Millisecond) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	o := reconcile.Options{Store: db, GCE: f, Project: project, Fence: e.applier, Logf: t.Logf}
+	o := reconcile.Options{Store: db, Inventory: &gcp.Inventory{GCE: f, Project: project}, Fence: gcp.NewFence(e.applier), Logf: t.Logf}
 	for _, fn := range opts {
 		fn(&o)
 	}
@@ -195,7 +196,7 @@ func (e *env) backdate(table, column string, d time.Duration) {
 }
 
 func key(collection, scope, name string) string {
-	return reconcile.Object{Collection: collection, Scope: scope, Name: name}.Key()
+	return reconcile.Object{Kind: collection, Scope: scope, Name: name}.Key()
 }
 
 func sorted(s []string) []string { s = slices.Clone(s); slices.Sort(s); return s }
@@ -358,7 +359,7 @@ func TestReportOnly(t *testing.T) {
 	}
 
 	// The flag still holds this process to report-only.
-	flagged := reconcile.New(reconcile.Options{Store: e.db, GCE: e.gce, Project: project, ReportOnly: true, Logf: t.Logf})
+	flagged := reconcile.New(reconcile.Options{Store: e.db, Inventory: &gcp.Inventory{GCE: e.gce, Project: project}, ReportOnly: true, Logf: t.Logf})
 	if rep, err := flagged.Run(e.ctx); err != nil || !rep.ReportOnly || len(rep.Deleted) != 0 {
 		t.Fatalf("--reconcile=report-only: %+v, %v", rep, err)
 	}

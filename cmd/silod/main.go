@@ -37,6 +37,8 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/agents"
+	"github.com/bwsalmon/silo/pkg/backend"
+	"github.com/bwsalmon/silo/pkg/backend/gcp"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gceclient"
@@ -408,17 +410,11 @@ func serve(ctx context.Context, args []string) error {
 			return err
 		}
 		applier = &fence.Applier{Store: db, GCE: client, Project: *fenceProject, Config: cfg}
-		opts.Fence, opts.Budget = applier, applier
 		if leaderLed {
 			// Only the leader applies; every replica's fence calls wait
 			// on WaitApplied for the leader to record their change.
 			applier.Guard = leader.Guard
 			applier.OnDrift = reconcile.AuditDrift(db, nil)
-			duties = append(duties, leader.Duty{Name: "fence", Run: func(ctx context.Context) error {
-				return applier.Run(ctx, 5*time.Second)
-			}})
-		} else {
-			go runFence(ctx, db, applier)
 		}
 	}
 	if *callerHeader {
@@ -446,11 +442,36 @@ func serve(ctx context.Context, args []string) error {
 		}
 		fc = facade.New(db, fo)
 		defer fc.Close()
-		opts.Instances = instanceResolver(client, *hostProject)
+	}
+	bo := gcp.Options{Store: db, Host: hostClient, Project: *hostProject, Fence: applier, Facade: fc}
+	// A fake (in process, or on --compute-endpoint) reports no quota it
+	// wasn't given, which the refresh would read as no capacity at all.
+	if leaderLed && !*fakeGCE && *computeEndpoint == "" {
+		bo.Capacity = &rootcap.Config{Project: *hostProject, RootMemoryMB: *rootMemory, ImageStorageGB: *imageStorage,
+			SnapshotStorageGB: *snapshotStorage, Guard: leader.Guard}
+	}
+	be := gcp.New(bo)
+	if be.Fence != nil {
+		opts.Fence, opts.Budget = be.Fence, be.Fence
+		if leaderLed {
+			duties = append(duties, leader.Duty{Name: "fence", Run: func(ctx context.Context) error {
+				return be.Fence.Run(ctx, 5*time.Second)
+			}})
+		} else {
+			go runFence(ctx, db, be.Fence)
+		}
+	}
+	opts.Instances = backend.Resolver(be.Targets)
+	if be.Classes != nil {
 		// quota:preview prices a facade request as the facade would.
-		opts.Pricer = fc.Pricer()
+		opts.Pricer = be.Classes
+	}
+	if be.ToolVMs != nil {
 		// Agents' tool VMs are made through the facade (SV-104).
-		opts.ToolVMs = fc.ToolVMs()
+		opts.ToolVMs = be.ToolVMs
+	}
+	if be.Contents != nil {
+		opts.Deleter = be.Contents
 	}
 	if *agentCredentials != "" {
 		creds := agents.StaticCredentials{}
@@ -519,12 +540,7 @@ func serve(ctx context.Context, args []string) error {
 	}
 	if leaderLed {
 		duties = append(duties, leaderDuties(db, leaderConfig{
-			gce: hostClient, project: *hostProject, facade: fc, fence: applier, reportOnly: *reconcileMode == store.ReconcileReportOnly,
-			root: rootcap.Config{Project: *hostProject, RootMemoryMB: *rootMemory, ImageStorageGB: *imageStorage, SnapshotStorageGB: *snapshotStorage},
-			// A fake (in process, or on --compute-endpoint) reports no
-			// quota it wasn't given, which the refresh would read as
-			// no capacity at all.
-			refresh: !*fakeGCE && *computeEndpoint == "",
+			backend: be, facade: fc, reportOnly: *reconcileMode == store.ReconcileReportOnly,
 		})...)
 		if *gatewayReplicas && hostClient != nil && *homeRegion != "" {
 			duties = append(duties, gatewayCertDuty(&gwtls.Issuer{Store: db,
@@ -820,7 +836,7 @@ func runGateway(ctx context.Context, args []string) error {
 
 // runFence applies the fence while this process holds the "fence"
 // lease, so that one replica applies it at a time.
-func runFence(ctx context.Context, db store.Store, a *fence.Applier) {
+func runFence(ctx context.Context, db store.Store, a backend.Fence) {
 	for ctx.Err() == nil {
 		lost, err := db.Lead(ctx, "fence")
 		if err != nil {
@@ -869,21 +885,6 @@ func runManageExpiry(ctx context.Context, db store.Store) {
 			}
 		}
 		t.Stop()
-	}
-}
-
-// instanceResolver resolves an export's instance target to the
-// instance's primary internal IP, by its real name in the host project.
-func instanceResolver(client gce.Client, project string) fenceapi.InstanceResolver {
-	return func(ctx context.Context, silo, zone, name string) (netip.Addr, error) {
-		inst, err := client.GetInstance(ctx, project, zone, silo+"-"+name)
-		if err != nil {
-			return netip.Addr{}, err
-		}
-		if len(inst.NetworkInterfaces) == 0 || inst.NetworkInterfaces[0].NetworkIP == "" {
-			return netip.Addr{}, fmt.Errorf("instance %s has no internal IP yet", name)
-		}
-		return netip.ParseAddr(inst.NetworkInterfaces[0].NetworkIP)
 	}
 }
 
