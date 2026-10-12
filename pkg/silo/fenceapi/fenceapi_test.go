@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/silo/control"
 	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
 	"github.com/bwsalmon/silo/pkg/silo/internal/pgtest"
 	"github.com/bwsalmon/silo/pkg/silo/ledger"
@@ -478,6 +479,52 @@ func TestRootEgressDefaultsToNothing(t *testing.T) {
 	}
 	if got := str(get(root, "egress", "own", "allow")); got != "[]" {
 		t.Errorf("the root's default egress allow is %s, want []", got)
+	}
+}
+
+// A silo may not take a name a fence API path reads as a collection,
+// or one reserved for custom allocators: it could not be addressed by
+// path (/silo/v1/silos/team-a/exports is team-a's exports).
+func TestReservedSiloNames(t *testing.T) {
+	e := newEnv(t, fenceapi.Options{})
+	e.mk(e.root, "-"+e.root, "team-a", obj{"address": obj{"range": "10.0.0.0/16"}})
+	var names []string
+	for name := range control.Collections {
+		names = append(names, name)
+	}
+	for name := range control.AllocatorCollections {
+		names = append(names, name)
+	}
+	n := 0
+	for _, name := range names {
+		if !tree.ValidName(name) {
+			continue
+		}
+		n++
+		er := e.fail(fenceapi.InvalidArgument, e.root, "POST", "/silo/v1/silos/team-a/children", obj{"name": name, "address": obj{"prefix_length": 24}})
+		if msg := str(er["message"]); !strings.Contains(msg, "reserved") || !strings.Contains(msg, name) {
+			t.Errorf("message %q, want it to name %s as reserved", msg, name)
+		}
+	}
+	if n < 12 {
+		t.Errorf("%d reserved names checked, want the 8 DNS-label collections and the 4 allocator names", n)
+	}
+
+	// Nor may the root.
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "silo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Migrate(context.Background(), db.Latest()); err != nil {
+		t.Fatal(err)
+	}
+	api := fenceapi.New(db, fenceapi.Options{})
+	t.Cleanup(func() { api.Close() })
+	w := httptest.NewRecorder()
+	api.ServeHTTP(w, httptest.NewRequest("POST", "/silod/bootstrap", strings.NewReader(`{"name":"children","regions":["us-central1"]}`)))
+	if w.Code != fenceapi.InvalidArgument.Status() || !strings.Contains(w.Body.String(), "reserved") {
+		t.Errorf("bootstrap a root named children: %d %s, want INVALID_ARGUMENT", w.Code, w.Body)
 	}
 }
 
