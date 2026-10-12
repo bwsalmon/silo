@@ -6,31 +6,23 @@ import (
 	"log"
 	"time"
 
-	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/backend"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/leader"
-	"github.com/bwsalmon/silo/pkg/ledger/rootcap"
 	"github.com/bwsalmon/silo/pkg/reconcile"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
 )
 
-// leaderConfig is what the leader's duties work on. Any of gce, facade
-// and fence may be nil, for a silod serving neither the facade nor the
-// fence; the duties that need them are left out.
+// leaderConfig is what the leader's duties work on. The facade and
+// any of the backend's parts may be nil, for a silod serving neither
+// the facade nor the fence; the duties that need them are left out.
 type leaderConfig struct {
-	gce        gce.Client
-	project    string
+	backend    backend.Backend
 	facade     *facade.Server
-	fence      *fence.Applier
 	reportOnly bool
-	// root is the root capacity refresh's config; refresh is whether
-	// to run it (not over the fake GCE, whose quotas a test sets).
-	root    rootcap.Config
-	refresh bool
 }
 
 // How often the leader does each duty (state.md "More than one silod,
@@ -46,8 +38,8 @@ const (
 // the leader epoch (leader.Guard).
 func leaderDuties(db store.Store, c leaderConfig) []leader.Duty {
 	var out []leader.Duty
-	if (c.gce != nil && c.project != "") || c.fence != nil {
-		r := reconcile.New(reconcile.Options{Store: db, GCE: c.gce, Project: c.project, Fence: c.fence, ReportOnly: c.reportOnly})
+	if c.backend.Inventory != nil || c.backend.Fence != nil {
+		r := reconcile.New(reconcile.Options{Store: db, Inventory: c.backend.Inventory, Fence: c.backend.Fence, ReportOnly: c.reportOnly})
 		out = append(out, leader.Duty{Name: "reconcile", Every: reconcile.Every, Run: func(ctx context.Context) error {
 			rep, err := r.Run(ctx)
 			if rep != nil {
@@ -67,12 +59,9 @@ func leaderDuties(db store.Store, c leaderConfig) []leader.Duty {
 			return err
 		}})
 	}
-	if c.gce != nil && c.project != "" && c.refresh {
-		cfg := c.root
-		cfg.Guard = leader.Guard
-		rc := rootcap.New(db, c.gce, cfg)
+	if rc := c.backend.Capacity; rc != nil {
 		out = append(out, leader.Duty{Name: "root capacity", Every: hourlyEvery, Run: func(ctx context.Context) error {
-			_, err := rc.Refresh(ctx)
+			err := rc.Refresh(ctx)
 			if errors.Is(err, tree.ErrNotFound) {
 				return nil // before bootstrap: no root yet
 			}

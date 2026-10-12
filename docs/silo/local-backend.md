@@ -2,10 +2,11 @@
 
 ## Status
 
-Design draft, docs only, written in task 3350 (filed from task 3024).
-No implementation code. **Implementation is on hold**, as for the rest of Silo:
-the tasks in the [staged plan](#15-staged-implementation-plan) are filed
-one by one only after bsalmon approves this page.
+Design written in task 3350 (filed from task 3024). **Implementation
+has started**: task 3402 asked for the local backend to be built as
+this page describes, and the [staged plan](#15-staged-implementation-plan)
+is being built in its order. Step 1, the backend interfaces under
+silod (`pkg/backend`, with GCP's in `pkg/backend/gcp`), is task 3404.
 
 The direction in [§1](#1-settled-direction) was set by bsalmon when the
 task was filed, and this page states it without reopening it. Two
@@ -954,6 +955,17 @@ exports, links, the gateway's origin map (which comes from the address
 ledger, not the backend), agents, the model proxy and audit. `Object`
 uses the backend's own collection names (`instances`, `containers`)
 only as strings for audit.
+
+As built in step 1 (task 3404), the interfaces follow what silod
+calls today rather than the sketch above where the two differ.
+`Inventory.List` takes the root's allowed regions and returns the
+ledger prefixes it listed completely, each `Object` carries the ledger
+object it is charged as, and `Inventory.Pending` stands in for "whether
+a delete is pending" (the facade's operations not yet done). `Fence` is
+the applier's own surface: `WaitApplied`, `CheckBudget`, `Run`, and
+`Repair` for drift. `Capacity` is `Refresh`, which reads and sets the
+root's capacity as `rootcap` does today. `Targets.Resolve` takes a
+scope (a zone on GCP). GCP's `Contents` stays nil until refactor item 5.
 
 ### The refactor
 
