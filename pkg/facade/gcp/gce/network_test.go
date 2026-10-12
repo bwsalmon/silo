@@ -166,7 +166,7 @@ func TestSubnetworks(t *testing.T) {
 		t.Errorf("real subnet: %+v", real)
 	}
 	e.fail(409, "alreadyExists", e.a, "POST", cv(host, coll), obj{"name": e.a + "-web", "ipCidrRange": pods.String()})
-	if msg := e.fail(400, "invalid", e.a, "POST", cv(host, coll), obj{"name": e.a + "-web2", "ipCidrRange": sub(web, 25, 1).String()}); !strings.Contains(msg, "own range subnetworks/us-central1/web") {
+	if msg := e.fail(400, "invalid", e.a, "POST", cv(host, coll), obj{"name": e.a + "-web2", "ipCidrRange": sub(web, 25, 1).String()}); !strings.Contains(msg, "own range subnetworks/us-central1/"+e.a+"-web in") {
 		t.Errorf("over an own range: %q", msg)
 	}
 

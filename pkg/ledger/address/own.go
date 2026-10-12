@@ -52,7 +52,7 @@ func checkOwn(ctx context.Context, tx store.Tx, siloID string, ranges []OwnRange
 			return nil, invalid("an own range needs an object")
 		}
 		if asked[r.Object] {
-			return nil, invalid("object %s is given twice", r.Object)
+			return nil, invalid("object %s is given twice", ObjectName(siloID, r.Object))
 		}
 		asked[r.Object] = true
 	}
@@ -61,26 +61,26 @@ func checkOwn(ctx context.Context, tx store.Tx, siloID string, ranges []OwnRange
 	for i, r := range ranges {
 		sp, err := spanOf(r.Range)
 		if err != nil {
-			return nil, invalid("%s: %v", r.Object, err)
+			return nil, invalid("%s: %v", ObjectName(siloID, r.Object), err)
 		}
 		if sp.bits > SmallestSubnet {
-			return nil, invalid("%s: %s is smaller than a /%d", r.Object, sp, SmallestSubnet)
+			return nil, invalid("%s: %s is smaller than a /%d", ObjectName(siloID, r.Object), sp, SmallestSubnet)
 		}
 		inside := false
 		for _, b := range bs {
 			inside = inside || b.contains(sp)
 		}
 		if !inside {
-			return nil, invalid("%s: %s is not inside the blocks of silo %s; %s", r.Object, sp, s.Path, mapOf())
+			return nil, invalid("%s: %s is not inside the blocks of silo %s; %s", ObjectName(siloID, r.Object), sp, s.Path, mapOf())
 		}
 		for _, o := range occ {
 			if o.overlaps(sp) && !(o.state == StateOwn && asked[o.who]) {
-				return nil, invalid("%s: %s overlaps %s in silo %s; %s", r.Object, sp, describe(ctx, tx, o), s.Path, mapOf())
+				return nil, invalid("%s: %s overlaps %s in silo %s; %s", ObjectName(siloID, r.Object), sp, describe(ctx, tx, o), s.Path, mapOf())
 			}
 		}
 		for j := range i {
 			if out[j].overlaps(sp) {
-				return nil, invalid("%s: %s overlaps %s, given for %s", r.Object, sp, out[j], ranges[j].Object)
+				return nil, invalid("%s: %s overlaps %s, given for %s", ObjectName(siloID, r.Object), sp, out[j], ObjectName(siloID, ranges[j].Object))
 			}
 		}
 		out[i] = sp
@@ -138,7 +138,7 @@ func Own(ctx context.Context, tx store.Tx, siloID, object string) (netip.Prefix,
 	var bits int
 	err := tx.QueryRow(ctx, `SELECT start, bits FROM address_own WHERE silo = ? AND object = ?`, siloID, object).Scan(&start, &bits)
 	if errors.Is(err, sql.ErrNoRows) {
-		return netip.Prefix{}, errorf(ledger.NotFound, "silo %s has no own range %s", name(ctx, tx, siloID), object)
+		return netip.Prefix{}, errorf(ledger.NotFound, "silo %s has no own range %s", name(ctx, tx, siloID), ObjectName(siloID, object))
 	}
 	if err != nil {
 		return netip.Prefix{}, err
@@ -155,11 +155,11 @@ func CheckExpand(ctx context.Context, tx store.Tx, siloID, object string, to net
 	}
 	t, err := spanOf(to)
 	if err != nil {
-		return invalid("%s: %v", object, err)
+		return invalid("%s: %v", ObjectName(siloID, object), err)
 	}
 	c, _ := spanOf(cur)
 	if t.bits >= c.bits || !t.contains(c) {
-		return invalid("%s: %s does not expand %s: it must be a wider range that contains it", object, t, c)
+		return invalid("%s: %s does not expand %s: it must be a wider range that contains it", ObjectName(siloID, object), t, c)
 	}
 	return CheckOwn(ctx, tx, siloID, []OwnRange{{Object: object, Range: to}})
 }
