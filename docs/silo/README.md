@@ -55,6 +55,7 @@ open are under [Open questions](#open-questions).
 | [`agents.md`](agents.md) | Agents as silo resources: the agent object, harnesses on the control VM, tool VMs and the tool server, credentials, model budget, the control surface, and grain's mapping onto it |
 | [`testing.md`](testing.md) | The fake GCE backend and the `silo/v1` conformance suite |
 | [`local-backend.md`](local-backend.md) | A single-machine backend, designed now: granule VMs or gVisor sandboxes behind a Docker Engine API subset, a local network fence, the backend interface under silod, and the facade core's extraction. Its calls and open questions are listed on the page. |
+| [`local-rootless-storage.md`](local-rootless-storage.md) | Part 2 of the local backend: silod fully rootless (a user namespace owning `silo-net`, the namespace holder, gVisor and KVM without root, restarts, the system-install alternative), and one data directory with per-silo subtrees and a storage driver, so backups can be added later. Its calls (L26–L40) and open questions are listed on the page. |
 | [`custom-allocators.md`](custom-allocators.md) | Custom allocators (`allocator/v1`), in the serve and lend shapes: designed now, built after v1. Also what v1's ledger and fence API must already allow. Its calls and open questions are listed on the page. |
 
 The spec pages are normative. If a spec page and this file disagree,
@@ -420,7 +421,8 @@ microVMs where the host has KVM, and gVisor sandboxes where it
 doesn't. Its fence is a bridge per network with anti-spoofing and
 nftables, in a network namespace of its own. The API inside one of
 its silos is a subset of the Docker Engine API. The fence API is the
-same.
+same. silod runs it rootless, with all of its state under one data
+directory ([`local-rootless-storage.md`](local-rootless-storage.md)).
 
 A silod has one backend, `gcp` or `local`. Mixing them in one tree is
 [later](#9-later).

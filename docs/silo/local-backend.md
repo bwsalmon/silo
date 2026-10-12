@@ -19,6 +19,17 @@ on. They have their own numbering, as
 [Calls made on this page](#calls-made-on-this-page). What is still
 undecided is under [Open questions](#open-questions).
 
+**Part 2** of this design is
+[`local-rootless-storage.md`](local-rootless-storage.md) (task 3356).
+It records two later decisions by bsalmon: silod runs **fully
+rootless**, and storage is laid out under **one data directory** so that
+backups can be added later without migrating anything. Where the two
+pages disagree, part 2 wins. The paragraphs of this page it replaces
+(§2's outline, §9's socket note, §11's storage layout, and §12's state,
+privileges, install and restart sections) say so. Its calls are
+L26–L40, its open questions are 13–20, and its staged-plan steps are
+items 14–18 [below](#15-staged-implementation-plan).
+
 ### What was checked, and against what
 
 - **granule**: gke-labs/granule at `9cd65eb` (2026-10-12): its README,
@@ -58,6 +69,7 @@ undecided is under [Open questions](#open-questions).
 15. [Staged implementation plan](#15-staged-implementation-plan)
 16. [Calls made on this page](#calls-made-on-this-page)
 17. [Open questions](#open-questions)
+18. Part 2: [rootless operation and the data directory](local-rootless-storage.md)
 
 ## 1. Settled direction
 
@@ -127,10 +139,20 @@ undecided is under [Open questions](#open-questions).
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+The diagram shows this page's first, rootful draft. In the rootless
+design that replaces it
+([part 2](local-rootless-storage.md#1-rootless-operation)), the same
+pieces run as one unprivileged user. A namespace holder, `silo-nsd`,
+owns a user namespace with `silo-net` in it. containerd runs in the
+holder's namespaces, and silod stays in the host's. The sockets move to
+`$XDG_RUNTIME_DIR/silo/` (or `/run/silo/` for the system install), and
+the state moves under one data directory.
+
 In outline:
 
-- **silod runs as root**, under systemd, with **SQLite** as its store
-  ([§12](#12-state-install-and-operations)).
+- **silod runs rootless**, under systemd user units, with **SQLite** as
+  its store ([part 2](local-rootless-storage.md), replacing "silod
+  runs as root" in [§12](#12-state-install-and-operations)).
 - **A private containerd** that silod alone can reach runs both
   isolation classes and keeps the image store they share
   ([§6](#6-runtime-drivers)).
@@ -1023,7 +1045,11 @@ in that task, not into a Docker-only copy.
   and published-port listeners are silod's sockets, **opened inside
   `silo-net`** (`setns` on a locked OS thread before `socket()`), and
   the egress proxy dials out from the root namespace. The proxies are
-  the only things that carry traffic between the two.
+  the only things that carry traffic between the two. *Rootless:* the
+  locked-thread `setns` works only for a root silod. In part 2, the
+  namespace holder opens these sockets in `silo-net` and passes them to
+  silod, and dials into `silo-net` come from a pool of sockets made
+  there ([call L28](local-rootless-storage.md#sockets-across-the-two-network-namespaces-call-l28)).
 - **Forwarding is on in `silo-net`, and only there.** It is what lets
   traffic go between bridges, through the fence: between networks, to
   the gateway and over links. It never reaches the host or the
@@ -1353,9 +1379,19 @@ running, as a second layer:
 - **Disk:** writable layers are capped by gVisor's overlay size, or by
   granule's overlay size (`-disk-size-mb`). Volumes are capped by
   project quotas. Images are charged and garbage-collected when no
-  silo references them.
+  silo references them. *Rootless:* project quotas need root, so with
+  the default `dir` storage driver, volumes are charged but not
+  enforced. Delegated ZFS enforces them
+  ([call L38](local-rootless-storage.md#storage-when-rootless-and-what-each-option-guarantees-call-l38)).
 
 ### Storage layout (call L21)
+
+*Superseded in its paths* by part 2's
+[one data directory](local-rootless-storage.md#one-data-directory-call-l35)
+(call L35). Everything below moves under `<data-dir>/cache/`, except
+volumes, logs and agents, which move to `<data-dir>/silos/<silo id>/`,
+and the store, which moves to `<data-dir>/state/`. The sharing and the
+snapshot rules below are unchanged.
 
 ```
 /var/lib/silo/
@@ -1411,12 +1447,25 @@ running, as a second layer:
   machine that otherwise has none.
 - **Leadership is trivial.** The leader lease still exists, held by the
   one silod, so the code paths are the same.
-- **Backups** are `silo backup`: SQLite's online backup to a file,
-  with the operator choosing where it goes. After a restore, the
-  reconcile is report-only until an operator clears it, as call 36
-  requires.
+- **Backups:** no backup system in v1 (bsalmon, after this page was
+  written). The store sits at `<data-dir>/state/silo.db` and can be
+  copied consistently while silod runs, with `VACUUM INTO` or SQLite's
+  online backup API. `silo backup` is now [later](local-rootless-storage.md#later).
+  silod detects a restore by itself, and then its reconcile is
+  report-only until an operator clears it, as call 36 requires
+  ([call L40](local-rootless-storage.md#restoring-call-l40)).
 
 ### Privileges and kernel features
+
+*Superseded:* silod runs **rootless**, and the rootful mode described
+in the first bullet below is retired
+([call L26](local-rootless-storage.md#what-rootless-means-here)). Part 2
+lists the [one-time root steps](local-rootless-storage.md#the-one-time-root-steps)
+that replace these privileges. It also lists the extra prerequisite
+checks: unprivileged user namespaces, `newuidmap` and a subuid range,
+`kvm` group membership, lingering, and controller delegation. The
+kernel checks in the table below still apply, and are run inside the
+holder's namespaces.
 
 - **silod runs as root.** It needs:
   - `CAP_NET_ADMIN` for netns, bridges, veths and nftables;
@@ -1447,7 +1496,12 @@ running, as a second layer:
 
 ### Install (call L23)
 
-`silo install --backend local` is a local, idempotent command:
+`silo install --backend local` is a local, idempotent command. *Part
+2 changes steps 3 and 5:* the units are **user units** with lingering,
+and `silo-nsd.service` takes `silo-net.service`'s place. Paths are
+under `--data-dir`. The system install is the rootless design under a
+`silo` system user
+([call L34](local-rootless-storage.md#the-alternative-a-system-install-under-a-silo-user-call-l34)).
 
 1. **Check** the prerequisites above.
 2. **Fetch and verify the runtimes:**
@@ -1478,6 +1532,12 @@ running, as a second layer:
 - removes `/var/lib/silo` only with `--delete-data`.
 
 ### Restart and adoption
+
+Part 2 adds the namespace holder's own restart and adoption, how a
+reboot rebuilds `silo-net` without root, and how the disk maps back to
+the store ([call L33](local-rootless-storage.md#restarts-and-reboots-call-l33)).
+The steps below are unchanged, except that `silo-nsd` takes the place
+of `silo-net.service`.
 
 - **silod restarts** (upgrade or crash) leave workloads running.
   containerd's shims are separate processes. On start, silod:
@@ -1623,11 +1683,25 @@ True of the local backend by design:
   [README §8](README.md#8-limitations) already says. A compose file
   runs on a local silo; a terraform module for the GCP facade doesn't.
 - **IPv4 only.** IPv6 frames are dropped at the bridge.
+- **silod's account is the fence.** silod runs rootless, so escaping
+  into its account doesn't give the host. It does give every silo
+  ([part 2, Security statement](local-rootless-storage.md#security-statement)).
+- **Rootless volumes are charged, not enforced,** with the default
+  `dir` storage driver. One silo can fill the data filesystem
+  ([call L38](local-rootless-storage.md#storage-when-rootless-and-what-each-option-guarantees-call-l38)).
+- **A container's writable layer is not data.** After a restore, or if
+  the cache is lost, a container comes back from its image. Data that
+  matters goes in a volume
+  ([part 2](local-rootless-storage.md#data-and-what-is-not-data)).
 
 ## 15. Staged implementation plan
 
 Each item is a task that can be filed on its own, in this order. Each
-depends on the items it names.
+depends on the items it names. Items 14–18 were added with
+[part 2](local-rootless-storage.md)'s rootless and storage decisions.
+They are numbered after the others so that existing references stay
+valid. Earlier items that now depend on them say so, and none of those
+earlier items is built rootful first.
 
 1. **Backend interfaces and the reconcile on them.**
    - Add `pkg/backend` (`Inventory`, `Fence`, `Capacity`, `Classes`,
@@ -1652,7 +1726,7 @@ depends on the items it names.
    - the property test;
    - the fake driver.
 
-   Depends on 2 and 4.
+   Depends on 2, 4 and 15 (`silo-net` is made by the holder).
 6. **The Docker facade, `pkg/facade/local/docker`**, against the fake
    driver:
    - the endpoint and field tables;
@@ -1662,17 +1736,17 @@ depends on the items it names.
    - networks, volumes and published ports in the gateway;
    - DNS.
 
-   Depends on 3 and 5.
+   Depends on 3, 5 and 14 (volumes through the storage driver).
 7. **The gVisor driver.**
    - `silo-containerd`, `runsc` with systrap, netstack;
    - netns wiring before create;
    - logs, exec, attach, archive, stats and cgroups;
    - adoption on restart.
 
-   Depends on 5. It runs anywhere, CI included.
+   Depends on 5 and 16. It runs anywhere, CI included.
 8. **`silo install --backend local` and `uninstall`.** Covers the
    prerequisite checks, the pinned runtime fetch, the units, the root
-   silo and the docker context. Depends on 7.
+   silo and the docker context. Depends on 7 and 17.
 9. **granule changes, filed against gke-labs/granule:**
    - exec inside the wrapped container's root, with its env and user;
    - the workload's stdout and stderr apart from the console;
@@ -1681,7 +1755,10 @@ depends on the items it names.
    - mounting virtio-fs volumes inside the chroot;
    - per-container entrypoint, cmd, env, user and workdir without
      rewrapping;
-   - a wrap without the docker CLI.
+   - a wrap without the docker CLI;
+   - running unprivileged: container root mapped to a subuid,
+     `/dev/kvm` bind-mounted and reached through the `kvm` group, under
+     crun ([call L31](local-rootless-storage.md#kvm-for-the-vm-class-call-l31)).
 
    Independent of 1–8; it can start at once.
 10. **The granule driver.**
@@ -1691,7 +1768,7 @@ depends on the items it names.
     - virtiofsd per volume;
     - the KVM probe.
 
-    Depends on 7 and 9.
+    Depends on 7, 9 and 16.
 11. **Agents on the local backend.**
     - Ambient harnesses in scopes under the agent user;
     - the `ambient` credential kind and metering by reported usage;
@@ -1711,6 +1788,67 @@ depends on the items it names.
 13. **Compose and testcontainers acceptance:** the flows in [§5](#5-compose-and-testcontainers)
     as scripted cases in `local-conformance`, in both classes.
     Depends on 12.
+14. **The data directory and the storage driver**
+    ([part 2, §2](local-rootless-storage.md#2-storage-laid-out-for-later-backups)):
+    - `--data-dir`, `layout.json` and the `state/`, `keys/`, `silos/`
+      and `cache/` layout, with the store and data-directory ids
+      cross-checked;
+    - `pkg/backend/local/storage`: the `Driver` interface, `Ref`,
+      `Guarantees`, and `Snapshot` returning `ErrSnapshotUnsupported`;
+    - the `dir` driver, with the usage scan, `volume_over_quota` and
+      the 409 on mounting an over-quota volume;
+    - a test that nothing persistent is written outside the data
+      directory (run silod against a temporary one and diff the
+      filesystem).
+
+    Depends on 1. It doesn't need the holder: the `dir` driver runs in
+    silod's process in tests, and through the RPC once 15 lands.
+15. **The namespace holder, `silo-nsd`**
+    ([calls L27–L29](local-rootless-storage.md#namespaces-the-holder-and-silod-call-l27)):
+    - user namespace through `newuidmap`, private mount namespace,
+      `silo-net`, and `gw0`, with the namespace-joining code running
+      before the Go runtime starts;
+    - the typed RPC on `nsd.sock` and its uid check;
+    - listening sockets passed with `SCM_RIGHTS`, and the dial pool;
+    - nested per-container user namespaces with the netns inside, and
+      the recorded uid mapping, checked at start;
+    - the storage driver behind the RPC;
+    - `silo unshare`;
+    - prerequisite probes: unprivileged user namespaces, AppArmor's
+      restriction, `newuidmap`, the subuid range.
+
+    The first step is a spike, run in CI as an unprivileged user, that
+    proves netlink and nftables from silod through passed sockets, and
+    runc and runsc joining a pre-made user namespace and netns. Depends
+    on 14.
+16. **Rootless runtimes:** containerd and buildkitd in the holder's
+    namespaces; gVisor in a caller-configured user namespace with
+    netstack ([call L30](local-rootless-storage.md#gvisor-rootless-call-l30));
+    crun with `keep_original_groups` for the `vm` class
+    ([call L31](local-rootless-storage.md#kvm-for-the-vm-class-call-l31));
+    cgroups through the user manager, with `describe` reporting missing
+    delegation. Depends on 15.
+17. **Units, restarts and the two install modes**
+    ([calls L33 and L34](local-rootless-storage.md#restarts-and-reboots-call-l33)):
+    - systemd user units and lingering;
+    - holder adoption after its own restart;
+    - rebuilding from the store after a reboot;
+    - the one-time root steps table as install's checks;
+    - the system install under a `silo` user.
+
+    Depends on 15 and 16.
+18. **Safe copies and restore detection**
+    ([calls L39 and L40](local-rootless-storage.md#copying-the-state-safely-call-l39)):
+    - the object sequence and its labels (`dev.silo.seq`, `.silo-seq`);
+    - report-only mode on a detected rollback, `restore_detected`, and
+      `silod --after-restore`;
+    - re-creating rows without records, and `volume_missing`;
+    - a test that copies the store with `VACUUM INTO` under write load,
+      restores it over a running data directory, and checks that later
+      objects are reported as orphans, fenced off and not deleted.
+
+    Depends on 7 and 14. No backup command: that is
+    [later](local-rootless-storage.md#later).
 
 ## Calls made on this page
 
@@ -1790,7 +1928,8 @@ L20. **Root capacity is `(host − reserve) × overcommit`,** with CPU
      overcommitted. The cgroup tree mirrors the silo tree.
 
 L21. **One storage layout under `/var/lib/silo`,** with blobs shared
-     between classes and wrapped images derived from them.
+     between classes and wrapped images derived from them. *Its paths
+     are superseded by L35*: everything is now under one `--data-dir`.
 
 L22. **SQLite is the production store on this backend.**
 
@@ -1805,6 +1944,11 @@ L24. **The conformance suite splits** into backend-neutral fence
 L25. **A fake runtime and an nftables evaluator** give fast fence
      tests on every push. The real `sandbox` conformance also runs on
      every push.
+
+L26–L40 are in part 2, under
+[Calls made on that page](local-rootless-storage.md#calls-made-on-this-page).
+They cover rootless operation (L26–L34) and the data directory,
+storage driver, safe copies and restore (L35–L40).
 
 ## Open questions
 
@@ -1850,6 +1994,13 @@ L25. **A fake runtime and an nftables evaluator** give fast fence
     or does the local backend need a TCP front door with its own
     authentication?
 
+Open questions 13–20 are in
+[part 2](local-rootless-storage.md#open-questions). They cover
+`CAP_NET_ADMIN` in the system install, the rootless front door for
+other users, hard volume quotas without root, the subuid range, ZFS
+mounting, the default account, crun for the `vm` class, and whether
+logs are data.
+
 ## Later
 
 - Mixed nesting ([README §9](README.md#9-later)).
@@ -1858,3 +2009,6 @@ L25. **A fake runtime and an nftables evaluator** give fast fence
   anything else.
 - Snapshots and warm pools for agents' tool VMs.
 - A Kubernetes facade over the same local backend.
+- Backups: a per-silo backup policy, WAL streaming of the store,
+  off-host snapshot shipping, and `silo backup`/`silo restore`
+  ([part 2, Later](local-rootless-storage.md#later)).
