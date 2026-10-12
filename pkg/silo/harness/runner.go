@@ -1,10 +1,13 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +38,14 @@ type Control interface {
 	SessionRestarted(ctx context.Context, agent, host string) ([]fenceapi.ToolCall, error)
 }
 
+// Logins are the credentials sessions run on, and subscriptions'
+// login files (*fenceapi.Server; agents.md, §6, SV-108).
+type Logins interface {
+	SessionCredential(ctx context.Context, name string) (agents.Credential, error)
+	CredentialFiles(ctx context.Context, name string) (map[string][]byte, error)
+	StoreCredentialFiles(ctx context.Context, name string, files map[string][]byte) error
+}
+
 // Sockets opens and closes sessions' sockets (package session's
 // Sockets).
 type Sockets interface {
@@ -58,8 +69,13 @@ type Runner struct {
 	Runtime Runtime
 	Control Control
 	Sockets Sockets
-	Layout  Layout
-	Limits  Limits
+	// Logins, if set, says which sessions are subscriptions: they get
+	// their login files and the egress proxy, and a login the harness
+	// refreshes is written back. Without it every session is an
+	// API-key one.
+	Logins Logins
+	Layout Layout
+	Limits Limits
 	// Adapters are the adapters it runs; Adapters if nil.
 	Adapters map[string]Adapter
 	// SyncEvery is how often it looks for sessions to start; 5s if 0.
@@ -89,6 +105,10 @@ type live struct {
 	notice string
 	// carry is a prompt a failed start didn't deliver.
 	carry string
+	// given are the login files a subscription session's last turn
+	// was given, and unsaved a refreshed login that couldn't be
+	// written back yet, which its next turn is given instead.
+	given, unsaved map[string][]byte
 }
 
 func (r *Runner) adapter(name string) (Adapter, bool) {
@@ -272,6 +292,15 @@ func (r *Runner) Stop(ctx context.Context, agent string) error {
 		case <-l.done:
 		case <-time.After(30 * time.Second):
 		}
+		// A turn cut short by the stop didn't return its login: read
+		// what the harness left before its directory goes.
+		if l.given != nil {
+			files, err := r.Runtime.Login(ctx, agent, slices.Collect(maps.Keys(l.given)))
+			if err != nil {
+				log.Printf("harness: %s: reading its login back: %v", agent, err)
+			}
+			r.writeBack(ctx, l, files)
+		}
 	}
 	err := r.Runtime.Remove(ctx, agent)
 	if r.Sockets != nil {
@@ -383,7 +412,16 @@ func (r *Runner) turn(ctx context.Context, l *live) (bool, error) {
 	if !launch.Resume {
 		launch.SessionID = a.NewSessionID()
 	}
+	cred, files, err := r.login(ctx, l)
+	if err != nil {
+		r.event(ctx, agent, fenceapi.EventError, map[string]any{"message": "the session's login: " + err.Error()})
+		return false, err
+	}
+	launch.Subscription = files != nil
 	spec := NewSpec(r.Layout, agent, l.slot, a, a.Command(launch), r.Limits)
+	if files != nil {
+		spec.Subscribe(r.Layout, cred.Provider, files)
+	}
 	if l.restore && len(saved.State) > 0 {
 		spec.Restore = saved.State
 	}
@@ -415,6 +453,7 @@ func (r *Runner) turn(ctx context.Context, l *live) (bool, error) {
 		return true, nil
 	}
 	l.carry, l.notice, l.restore = "", "", false
+	r.writeBack(ctx, l, res.Login)
 	if err := r.Control.SessionStarted(ctx, agent); err != nil {
 		log.Printf("harness: %s: %v", agent, err)
 	}
@@ -431,6 +470,67 @@ func (r *Runner) turn(ctx context.Context, l *live) (bool, error) {
 		}
 	}
 	return r.Control.EndTurn(ctx, agent)
+}
+
+// login is the credential of l's session and, for a subscription, the
+// login files its turn is given: a refreshed login not yet written
+// back if there is one, else the stored files, which another session
+// on the same login may have refreshed since. nil files is an API-key
+// session.
+func (r *Runner) login(ctx context.Context, l *live) (agents.Credential, map[string][]byte, error) {
+	if r.Logins == nil || l.s.Credential == "" {
+		return agents.Credential{}, nil, nil
+	}
+	cred, err := r.Logins.SessionCredential(ctx, l.s.Credential)
+	if err != nil || cred.Kind != agents.CredentialSubscription {
+		return cred, nil, err
+	}
+	if l.unsaved != nil {
+		if err := r.Logins.StoreCredentialFiles(ctx, cred.Name, l.unsaved); err != nil {
+			log.Printf("harness: %s: writing back %s's login: %v", l.s.Agent, cred.Name, err)
+			l.given = l.unsaved
+			return cred, l.given, nil
+		}
+		l.unsaved = nil
+	}
+	files, err := r.Logins.CredentialFiles(ctx, cred.Name)
+	if err != nil {
+		return cred, nil, err
+	}
+	if len(files) == 0 {
+		return cred, nil, fmt.Errorf("subscription %s has no login files", cred.Name)
+	}
+	l.given = files
+	return cred, files, nil
+}
+
+// writeBack stores a subscription's login files if the harness changed
+// them (refreshed its login), so the next session on the login, on any
+// control VM, gets them (agents.md, §6, SV-108). Only the paths it was
+// given are compared and stored; one the harness removed keeps what it
+// was.
+func (r *Runner) writeBack(ctx context.Context, l *live, now map[string][]byte) {
+	if l.given == nil || len(now) == 0 {
+		return
+	}
+	merged := maps.Clone(l.given)
+	changed := false
+	for p, b := range now {
+		old, ok := l.given[p]
+		if !ok || len(b) == 0 || bytes.Equal(old, b) {
+			continue
+		}
+		merged[p], changed = b, true
+	}
+	if !changed {
+		return
+	}
+	if err := r.Logins.StoreCredentialFiles(context.WithoutCancel(ctx), l.s.Credential, merged); err != nil {
+		r.event(ctx, l.s.Agent, fenceapi.EventError, map[string]any{"message": "writing back the refreshed login: " + err.Error()})
+		l.unsaved = merged
+		return
+	}
+	l.given, l.unsaved = merged, nil
 }
 
 func (r *Runner) event(ctx context.Context, agent, kind string, data map[string]any) {

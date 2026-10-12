@@ -32,12 +32,13 @@ func runSessiond(ctx context.Context, args []string) error {
 	sockets := fs.String("session-dir", harness.DefaultLayout.SocketDir, "silod's --session-dir")
 	state := fs.String("session-state-dir", harness.DefaultLayout.StateDir, "where each session's private directory is made")
 	links := fs.String("link-dir", harness.DefaultLayout.LinkDir, "sessiond's own directory, on the same mount as --session-dir, for its links to the sessions' sockets")
+	logins := fs.String("login-dir", harness.DefaultLayout.LoginDir, "sessiond's own directory, on a tmpfs, for subscription sessions' login files")
 	fs.Parse(args)
 	if *image == "" || *owner < 0 {
 		return errors.New("give --harness-image and --owner")
 	}
 	d := &harness.Sessiond{Engine: &harness.Docker{Socket: *docker}, Image: *image, Owner: *owner,
-		Layout: harness.Layout{SocketDir: *sockets, StateDir: *state, LinkDir: *links}}
+		Layout: harness.Layout{SocketDir: *sockets, StateDir: *state, LinkDir: *links, LoginDir: *logins}}
 	if err := d.Reset(ctx); err != nil {
 		return fmt.Errorf("removing leftover session containers: %w", err)
 	}
@@ -62,8 +63,9 @@ func harnessInit(ctx context.Context, args []string) (int, error) {
 	fs := flag.NewFlagSet("harness-init", flag.ExitOnError)
 	socket := fs.String("socket", harness.SocketPath, "the session socket")
 	listen := fs.String("listen", strings.TrimPrefix(harness.Endpoint, "http://"), "the loopback address to forward from")
+	login := fs.String("login", "", "a subscription session's read-only login directory, copied into the home before the command runs")
 	fs.Parse(args)
-	return harness.HarnessInit(ctx, *socket, *listen, fs.Args())
+	return harness.HarnessInit(ctx, *socket, *listen, *login, harness.Home, fs.Args())
 }
 
 // machineSize is this VM's vCPUs and memory in MiB, which its session

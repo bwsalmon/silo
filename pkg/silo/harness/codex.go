@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"slices"
 	"strconv"
 )
 
@@ -25,12 +26,18 @@ func (Codex) StatePaths() []string      { return []string{".codex/sessions"} }
 func (Codex) NewSessionID() string      { return "" }
 func (Codex) Parser() Parser            { return &codexParser{} }
 
+// codexProxyConfig are the -c overrides of an API-key session: its
+// model provider is the model proxy. A subscription session uses its
+// ChatGPT login with codex's own provider, through the egress proxy.
+var codexProxyConfig = []string{
+	`model_provider="silo"`,
+	`model_providers.silo={name="silo",base_url=` + strconv.Quote(modelBase("openai")+"/v1") + `,env_key="OPENAI_API_KEY",wire_api="responses"}`,
+}
+
 // codexConfig are the -c overrides every turn runs with.
 var codexConfig = []string{
 	`mcp_servers.` + mcpServer + `.url=` + strconv.Quote(Endpoint+"/mcp"),
 	`experimental_use_rmcp_client=true`,
-	`model_provider="silo"`,
-	`model_providers.silo={name="silo",base_url=` + strconv.Quote(modelBase("openai")+"/v1") + `,env_key="OPENAI_API_KEY",wire_api="responses"}`,
 	`approval_policy="never"`,
 	`sandbox_mode="read-only"`,
 	`features.shell_tool=false`,
@@ -45,19 +52,26 @@ var codexConfig = []string{
 func (Codex) Command(l Launch) Command {
 	argv := []string{"codex", "exec", "--json", "--skip-git-repo-check",
 		"--cd", WorkDir, "--model", l.Model, "--sandbox", "read-only"}
-	for _, c := range codexConfig {
+	config := codexConfig
+	if !l.Subscription {
+		config = append(slices.Clone(codexProxyConfig), codexConfig...)
+	}
+	for _, c := range config {
 		argv = append(argv, "-c", c)
 	}
 	if l.Resume {
 		argv = append(argv, "resume", l.SessionID)
 	}
 	argv = append(argv, "--", l.Prompt)
-	return Command{Argv: argv, Env: []string{
+	env := []string{
 		"HOME=" + Home,
 		"CODEX_HOME=" + Home + "/.codex",
-		"OPENAI_API_KEY=" + ProxyKey,
 		"NO_COLOR=1",
-	}}
+	}
+	if !l.Subscription {
+		env = append(env, "OPENAI_API_KEY="+ProxyKey)
+	}
+	return Command{Argv: argv, Env: env}
 }
 
 type codexParser struct{}

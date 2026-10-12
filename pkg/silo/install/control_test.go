@@ -277,11 +277,14 @@ func TestControlRunsTheSessionLauncher(t *testing.T) {
 		return rest
 	}
 	sd := at("exec docker run --rm --name silo-sessiond")
-	for _, want := range []string{"--network none", "--cap-drop ALL", "--cap-add CHOWN", "no-new-privileges",
+	for _, want := range []string{"--network host", "--cap-drop ALL", "--cap-add CHOWN", "no-new-privileges",
 		"-v /var/run/docker.sock:/var/run/docker.sock", "--socket /run/silo/sessiond.sock", "--owner 2001", `--harness-image "$harness"`} {
 		if !strings.Contains(sd, want) {
 			t.Errorf("sessiond's container lacks %s: %s", want, sd)
 		}
+	}
+	if !strings.Contains(ud, "iptables -w -A INPUT -i silo-egress -p tcp --dport 3128 -j ACCEPT") {
+		t.Errorf("the egress proxy's port isn't open to the egress bridge")
 	}
 	if !strings.Contains(ud, "harness='"+p.HarnessImage+"'") {
 		t.Errorf("the harness image isn't the deployed one")

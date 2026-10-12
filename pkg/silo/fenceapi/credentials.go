@@ -419,6 +419,21 @@ func (s *Server) CredentialSecret(ctx context.Context, name string) (agents.Cred
 	return cred, key, err
 }
 
+// SessionCredential is the credential a session runs on, by name, for
+// the harness Runner: its provider and kind, never its secret.
+func (s *Server) SessionCredential(ctx context.Context, name string) (agents.Credential, error) {
+	var cred agents.Credential
+	err := s.st.Tx(ctx, func(tx store.Tx) error {
+		c, ok, err := s.credential(ctx, tx, name)
+		if err == nil && !ok {
+			err = errorf(NotFound, "no credential %s", name)
+		}
+		cred = c
+		return err
+	})
+	return cred, err
+}
+
 // CredentialFiles are a subscription credential's login files, by path
 // under the harness's home: what the session runner decrypts into a
 // session's private directory when it starts.

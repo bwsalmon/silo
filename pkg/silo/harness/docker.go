@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -95,9 +96,11 @@ func HarnessContainer(s *Spec, image string) Container {
 	return c
 }
 
-// NetContainer holds s's network namespace: network none, so only a
-// loopback, as s's uid and as locked down as the harness. It runs
-// silod pause.
+// NetContainer holds s's network namespace, as s's uid and as locked
+// down as the harness. It runs silod pause. An API-key session's has
+// network none, so only a loopback; a subscription session's is on
+// EgressNetwork, where its firewall lets it reach the egress proxy
+// alone.
 func NetContainer(s *Spec, image string) Container {
 	user := strconv.Itoa(s.UID)
 	c := Container{
@@ -105,24 +108,46 @@ func NetContainer(s *Spec, image string) Container {
 		User: user + ":" + user, Labels: map[string]string{LabelSession: s.Agent}, NetworkDisabled: true,
 		HostConfig: HostConfig{NetworkMode: "none"},
 	}
+	if s.Network == NetworkEgress {
+		c.NetworkDisabled, c.HostConfig.NetworkMode = false, EgressNetwork
+	}
 	lockdown(&c.HostConfig)
 	c.HostConfig.Memory, c.HostConfig.MemorySwap, c.HostConfig.PidsLimit = 16<<20, 16<<20, 4
 	return c
 }
 
-// FirewallScript is what FirewallContainer runs: drop the metadata
-// server, and check that the rule is there.
+// FirewallScript is what FirewallContainer runs for an API-key
+// session: drop the metadata server, and check that the rule is there.
 const FirewallScript = "iptables -w -A OUTPUT -d " + MetadataServer + " -j DROP && " +
 	"iptables -w -C OUTPUT -d " + MetadataServer + " -j DROP && " +
 	"{ ip6tables -w -A OUTPUT -d " + MetadataServerV6 + " -j DROP 2>/dev/null || true; }"
 
-// FirewallContainer is the one-shot container that puts the metadata
-// rule in s's namespace before the harness first runs. It alone has
-// NET_ADMIN, and nothing but the rules runs in it; the harness, with
-// no capability, can't remove them.
-func FirewallContainer(s *Spec, image string) Container {
+// EgressFirewallScript is what FirewallContainer runs for a
+// subscription session whose egress proxy is at proxy (ip:port): the
+// metadata rule, then the loopback and the proxy allowed and
+// everything else dropped, checked; and no IPv6 out at all.
+func EgressFirewallScript(proxy netip.AddrPort) string {
+	ip, port := proxy.Addr().String(), strconv.Itoa(int(proxy.Port()))
+	return FirewallScript + " && " +
+		"iptables -w -A OUTPUT -o lo -j ACCEPT && " +
+		"iptables -w -A OUTPUT -p tcp -d " + ip + " --dport " + port + " -j ACCEPT && " +
+		"iptables -w -A OUTPUT -j DROP && " +
+		"iptables -w -C OUTPUT -j DROP && " +
+		"{ ip6tables -w -A OUTPUT -o lo -j ACCEPT 2>/dev/null; ip6tables -w -A OUTPUT -j DROP 2>/dev/null || true; }"
+}
+
+// FirewallContainer is the one-shot container that puts the rules in
+// s's namespace before the harness first runs: FirewallScript, or with
+// proxy set (a subscription session) EgressFirewallScript. It alone
+// has NET_ADMIN, and nothing but the rules runs in it; the harness,
+// with no capability, can't remove them.
+func FirewallContainer(s *Spec, image string, proxy netip.AddrPort) Container {
+	script := FirewallScript
+	if proxy.IsValid() {
+		script = EgressFirewallScript(proxy)
+	}
 	c := Container{
-		Name: FirewallName(s.Agent), Image: image, Entrypoint: []string{"/bin/sh"}, Cmd: []string{"-c", FirewallScript},
+		Name: FirewallName(s.Agent), Image: image, Entrypoint: []string{"/bin/sh"}, Cmd: []string{"-c", script},
 		User: "0:0", Labels: map[string]string{LabelSession: s.Agent},
 		// iptables takes its lock in /run, which the read-only root
 		// doesn't give it.
@@ -207,6 +232,55 @@ func (d *Docker) Wait(ctx context.Context, name string) (int, error) {
 	var out struct{ StatusCode int }
 	err := d.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/wait", nil, &out)
 	return out.StatusCode, err
+}
+
+// EgressNetwork makes name, if it isn't there, as an internal bridge
+// (no route off the VM) of the same name, with no traffic between its
+// containers, and returns its gateway: the VM's own address on it,
+// where sessiond serves the egress proxy (install opens EgressPort on
+// that bridge alone).
+func (d *Docker) EgressNetwork(ctx context.Context, name string) (netip.Addr, error) {
+	var nw struct {
+		IPAM struct{ Config []struct{ Gateway string } }
+	}
+	err := d.do(ctx, http.MethodGet, "/networks/"+url.PathEscape(name), nil, &nw)
+	var de *DockerError
+	if errors.As(err, &de) && de.Status == http.StatusNotFound {
+		err = d.do(ctx, http.MethodPost, "/networks/create", map[string]any{
+			"Name": name, "Driver": "bridge", "Internal": true, "CheckDuplicate": true,
+			"Options": map[string]string{"com.docker.network.bridge.enable_icc": "false", "com.docker.network.bridge.name": name},
+			"Labels":  map[string]string{LabelSession: ""},
+		}, nil)
+		if err == nil {
+			err = d.do(ctx, http.MethodGet, "/networks/"+url.PathEscape(name), nil, &nw)
+		}
+	}
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	for _, c := range nw.IPAM.Config {
+		if a, err := netip.ParseAddr(c.Gateway); err == nil && a.Is4() {
+			return a, nil
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("network %s has no IPv4 gateway", name)
+}
+
+// Address is container name's address in network.
+func (d *Docker) Address(ctx context.Context, name, network string) (netip.Addr, error) {
+	var out struct {
+		NetworkSettings struct {
+			Networks map[string]struct{ IPAddress string }
+		}
+	}
+	if err := d.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, &out); err != nil {
+		return netip.Addr{}, err
+	}
+	n, ok := out.NetworkSettings.Networks[network]
+	if !ok {
+		return netip.Addr{}, fmt.Errorf("%s is not on %s", name, network)
+	}
+	return netip.ParseAddr(n.IPAddress)
 }
 
 // Remove removes name, running or not; one that is gone is not an

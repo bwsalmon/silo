@@ -637,11 +637,15 @@ func ControlUserData(p ControlParams) string {
 // boot configuration, with --agent-sessions (agents.md, "Isolation on
 // the control VM", SV-118). silo-sessiond.service runs silod sessiond
 // as root, the one container on the VM with the container runtime's
-// socket, with no network and only the capabilities it needs to hand
-// sessions their own socket and private directory (CHOWN, FOWNER,
+// socket, with only the capabilities it needs to hand sessions their
+// own socket, private directory and login files (CHOWN, FOWNER,
 // DAC_OVERRIDE). It serves silod alone, on a socket of mode 0600
 // owned by silod's uid, and refuses any session spec that loosens a
-// session's isolation (package harness). silod itself still runs
+// session's isolation (package harness). It is on the VM's network,
+// as it serves subscription sessions' egress proxy on the silo-egress
+// bridge (harness.EgressProxy), which the INPUT rule opens to that
+// bridge alone; the runtime's socket is root on the VM already, so the
+// network adds nothing to what it holds. silod itself still runs
 // without the runtime's socket, as its own user.
 const sessiondUserData = `- path: /etc/silo/sessiond.sh
   permissions: "0644"
@@ -649,10 +653,12 @@ const sessiondUserData = `- path: /etc/silo/sessiond.sh
     . /etc/silo/common.sh
     mkdir -p /run/silo /var/lib/silo/sessions
     chmod 0711 /var/lib/silo/sessions
+    iptables -w -C INPUT -i silo-egress -p tcp --dport 3128 -j ACCEPT 2>/dev/null ||
+      iptables -w -A INPUT -i silo-egress -p tcp --dport 3128 -j ACCEPT
     harness=@HARNESS_IMAGE@
     docker pull "$harness" >/dev/null
     docker rm -f silo-sessiond >/dev/null 2>&1 || true
-    exec docker run --rm --name silo-sessiond --network none --user 0:0 \
+    exec docker run --rm --name silo-sessiond --network host --user 0:0 \
       --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE \
       --security-opt no-new-privileges \
       -v /var/run/docker.sock:/var/run/docker.sock \

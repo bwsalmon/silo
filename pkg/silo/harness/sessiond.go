@@ -11,8 +11,11 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,12 +36,20 @@ type Runtime interface {
 	Remove(ctx context.Context, agent string) error
 	// List lists the agents with session containers on this VM.
 	List(ctx context.Context) ([]string, error)
+	// Login reads a subscription session's login files at paths under
+	// its private directory, as its harness left them, for silod to
+	// write back when the session stops. A path with no file is left
+	// out.
+	Login(ctx context.Context, agent string, paths []string) (map[string][]byte, error)
 }
 
 // Result is how a turn ended.
 type Result struct {
 	Exit  int    `json:"exit"`
 	State []byte `json:"state,omitempty"`
+	// Login are a subscription session's login files after the turn,
+	// at the paths of Spec.Login, as the harness left them.
+	Login map[string][]byte `json:"login,omitempty"`
 }
 
 // Engine is what Sessiond needs of the container runtime; *Docker is
@@ -51,6 +62,11 @@ type Engine interface {
 	Running(ctx context.Context, name string) (bool, error)
 	Labelled(ctx context.Context, label string) (map[string]string, error)
 	Logs(ctx context.Context, name string, line func([]byte)) error
+	// EgressNetwork makes the subscription sessions' network if it
+	// isn't there, and returns its gateway address.
+	EgressNetwork(ctx context.Context, name string) (netip.Addr, error)
+	// Address is a container's address in a network.
+	Address(ctx context.Context, name, network string) (netip.Addr, error)
 }
 
 // Sessiond is the session launcher (silod sessiond): the only process
@@ -63,10 +79,13 @@ type Engine interface {
 // first runs, and takes nothing in silod's socket directory on trust
 // (socket). So silod never holds the runtime's socket, which is root on
 // the VM, and whatever silod asks for, a session's container has no
-// capability, no network, the default seccomp profile, a read-only
-// root, its limits, a session uid, and no mount but a socket silod made
-// and its own private directory. What runs inside it (argv, env) is
-// silod's to say: that is the session, not more authority.
+// capability, the default seccomp profile, a read-only root, its
+// limits, a session uid, and no mount but a socket silod made and its
+// own private directory, and no network but, for a subscription
+// session, a route to the egress proxy sessiond serves, for its
+// provider's hosts, with its login files mounted read-only. What runs
+// inside it (argv, env, login files) is silod's to say: that is the
+// session, not more authority.
 type Sessiond struct {
 	Engine Engine
 	// Image is the harness image, the only one it runs.
@@ -77,9 +96,21 @@ type Sessiond struct {
 	// Owner is silod's uid: a session socket must be a socket silod
 	// made. -1 skips the check (tests that run as one user).
 	Owner int
+	// ListenEgress listens for the egress proxy at addr; net.Listen if
+	// nil.
+	ListenEgress func(addr netip.AddrPort) (net.Listener, error)
+	// Proxy is the subscription sessions' egress proxy, which sessiond
+	// serves on EgressNetwork's gateway once a subscription session
+	// starts; a new one if nil.
+	Proxy *EgressProxy
 
 	mu   sync.Mutex
 	uids map[string]int
+	// nets are the network modes of the sessions' namespaces, and
+	// addrs the subscription sessions' addresses, admitted to Proxy.
+	nets     map[string]string
+	addrs    map[string]netip.Addr
+	egressAt netip.AddrPort
 }
 
 func (d *Sessiond) chown(path string, uid int) error {
@@ -123,6 +154,11 @@ func (d *Sessiond) Turn(ctx context.Context, spec Spec, line func([]byte)) (Resu
 	if err := d.private(&spec); err != nil {
 		return Result{}, fmt.Errorf("the private directory: %w", err)
 	}
+	if spec.Network == NetworkEgress {
+		if err := d.login(&spec); err != nil {
+			return Result{}, fmt.Errorf("the login files: %w", err)
+		}
+	}
 	link, err := d.socket(&spec)
 	if err != nil {
 		return Result{}, fmt.Errorf("the session socket: %w", err)
@@ -137,6 +173,12 @@ func (d *Sessiond) Turn(ctx context.Context, spec Spec, line func([]byte)) (Resu
 	}
 	if err := d.namespace(ctx, &spec); err != nil {
 		return Result{}, fmt.Errorf("the session's network namespace: %w", err)
+	}
+	if spec.Network == NetworkEgress {
+		// The CLIs reach their provider through the proxy; the session's
+		// own endpoint, on the loopback, stays direct.
+		proxy := "http://" + d.egressAddr().String()
+		spec.Env = append(slices.Clone(spec.Env), "HTTPS_PROXY="+proxy, "https_proxy="+proxy, "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost")
 	}
 	name := ContainerName(spec.Agent)
 	if err := d.Engine.Remove(ctx, name); err != nil {
@@ -165,7 +207,99 @@ func (d *Sessiond) Turn(ctx context.Context, spec Spec, line func([]byte)) (Resu
 	if err != nil {
 		return Result{Exit: code}, fmt.Errorf("saving the session's state: %w", err)
 	}
-	return Result{Exit: code, State: st}, nil
+	res := Result{Exit: code, State: st}
+	if spec.Network == NetworkEgress {
+		if res.Login, err = d.Login(ctx, spec.Agent, slices.Collect(maps.Keys(spec.Login))); err != nil {
+			return res, fmt.Errorf("reading the login files back: %w", err)
+		}
+	}
+	return res, nil
+}
+
+// maxLoginFile is the largest login file sessiond reads back.
+const maxLoginFile = 1 << 20
+
+// login puts spec's login files in its login directory, fresh, owned
+// by its uid: the directory sessiond mounts read-only at LoginPath.
+// It is sessiond's own (LoginDir, root's), so, unlike the private
+// directory, nothing in it is the harness's to have planted; the
+// harness's copy in its home is made by harness-init, as the
+// session's uid.
+func (d *Sessiond) login(spec *Spec) error {
+	if d.Layout.LoginDir == "" {
+		return errors.New("no login directory")
+	}
+	if err := os.MkdirAll(d.Layout.LoginDir, 0o711); err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(d.Layout.LoginDir); err != nil || !fi.IsDir() || fileOwner(fi) != os.Geteuid() || fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is not sessiond's own directory", d.Layout.LoginDir)
+	}
+	dir := d.Layout.Login(spec.Agent)
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return err
+	}
+	for rel, b := range spec.Login {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL|noFollow, 0o600)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(b)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return d.chown(p, spec.UID)
+	})
+}
+
+// Login implements Runtime: the files at paths in agent's private
+// directory, reached through real directories only and not through a
+// symlink, so the harness can't have sessiond read anything else.
+func (d *Sessiond) Login(_ context.Context, agent string, paths []string) (map[string][]byte, error) {
+	if !ValidAgent(agent) {
+		return nil, fmt.Errorf("bad agent %q", agent)
+	}
+	out := map[string][]byte{}
+	for _, rel := range paths {
+		if !ValidLoginPath(rel) {
+			return nil, fmt.Errorf("login file %q must be relative, under the home", rel)
+		}
+		p, ok := underDir(d.Layout.Private(agent), rel)
+		if !ok {
+			continue
+		}
+		f, err := os.OpenFile(p, os.O_RDONLY|noFollow, 0)
+		if err != nil {
+			continue
+		}
+		fi, err := f.Stat()
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxLoginFile {
+			f.Close()
+			continue
+		}
+		b, err := io.ReadAll(io.LimitReader(f, maxLoginFile))
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		out[rel] = b
+	}
+	return out, nil
 }
 
 // socket hands spec's session socket to its uid, safely against silod.
@@ -290,16 +424,29 @@ func (d *Sessiond) private(spec *Spec) error {
 	})
 }
 
-// namespace starts spec's namespace container, if it isn't running,
-// and has the firewall container put the metadata rule in it.
+// namespace starts spec's namespace container, if it isn't running
+// in spec's network mode, and has the firewall container put its rules
+// in it. A subscription session's is on EgressNetwork, admitted to the
+// egress proxy for its provider.
 func (d *Sessiond) namespace(ctx context.Context, spec *Spec) error {
 	netName := NetName(spec.Agent)
-	if up, err := d.Engine.Running(ctx, netName); err != nil || up {
+	d.mu.Lock()
+	mode := d.nets[spec.Agent]
+	d.mu.Unlock()
+	if up, err := d.Engine.Running(ctx, netName); err != nil || up && mode == spec.Network {
 		return err
 	}
+	d.forget(spec.Agent)
 	for _, n := range []string{ContainerName(spec.Agent), FirewallName(spec.Agent), netName} {
 		if err := d.Engine.Remove(ctx, n); err != nil {
 			return err
+		}
+	}
+	var proxy netip.AddrPort
+	if spec.Network == NetworkEgress {
+		var err error
+		if proxy, err = d.egress(ctx); err != nil {
+			return fmt.Errorf("the egress proxy: %w", err)
 		}
 	}
 	if err := d.Engine.Create(ctx, NetContainer(spec, d.Image)); err != nil {
@@ -309,7 +456,7 @@ func (d *Sessiond) namespace(ctx context.Context, spec *Spec) error {
 		return err
 	}
 	fw := FirewallName(spec.Agent)
-	if err := d.Engine.Create(ctx, FirewallContainer(spec, d.Image)); err != nil {
+	if err := d.Engine.Create(ctx, FirewallContainer(spec, d.Image, proxy)); err != nil {
 		return err
 	}
 	defer d.Engine.Remove(context.WithoutCancel(ctx), fw)
@@ -318,13 +465,90 @@ func (d *Sessiond) namespace(ctx context.Context, spec *Spec) error {
 	}
 	code, err := d.Engine.Wait(ctx, fw)
 	if err == nil && code != 0 {
-		err = fmt.Errorf("the metadata server rule wasn't put in place (exit %d)", code)
+		err = fmt.Errorf("the firewall rules weren't put in place (exit %d)", code)
+	}
+	if err == nil && spec.Network == NetworkEgress {
+		var addr netip.Addr
+		if addr, err = d.Engine.Address(ctx, netName, EgressNetwork); err == nil {
+			d.mu.Lock()
+			if d.addrs == nil {
+				d.addrs = map[string]netip.Addr{}
+			}
+			d.addrs[spec.Agent] = addr
+			d.mu.Unlock()
+			d.Proxy.Admit(addr, spec.Provider)
+		}
 	}
 	if err != nil {
-		// No namespace without the rule: the harness doesn't run.
+		// No namespace without the rules: the harness doesn't run.
 		d.Engine.Remove(context.WithoutCancel(ctx), netName)
+		return err
 	}
-	return err
+	d.mu.Lock()
+	if d.nets == nil {
+		d.nets = map[string]string{}
+	}
+	d.nets[spec.Agent] = spec.Network
+	d.mu.Unlock()
+	return nil
+}
+
+// egress makes EgressNetwork and serves the egress proxy on its
+// gateway, once, and returns the proxy's address.
+func (d *Sessiond) egress(ctx context.Context) (netip.AddrPort, error) {
+	d.mu.Lock()
+	at := d.egressAt
+	d.mu.Unlock()
+	if at.IsValid() {
+		return at, nil
+	}
+	gw, err := d.Engine.EgressNetwork(ctx, EgressNetwork)
+	if err != nil {
+		return at, err
+	}
+	at = netip.AddrPortFrom(gw, EgressPort)
+	listen := d.ListenEgress
+	if listen == nil {
+		listen = func(a netip.AddrPort) (net.Listener, error) { return net.Listen("tcp", a.String()) }
+	}
+	l, err := listen(at)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.egressAt.IsValid() {
+		l.Close()
+		return d.egressAt, nil
+	}
+	if d.Proxy == nil {
+		d.Proxy = &EgressProxy{}
+	}
+	d.egressAt = at
+	go func() {
+		if err := d.Proxy.Serve(l); err != nil {
+			log.Printf("sessiond: the egress proxy: %v", err)
+		}
+	}()
+	return at, nil
+}
+
+func (d *Sessiond) egressAddr() netip.AddrPort {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.egressAt
+}
+
+// forget stops admitting agent's session to the egress proxy.
+func (d *Sessiond) forget(agent string) {
+	d.mu.Lock()
+	addr, ok := d.addrs[agent]
+	delete(d.addrs, agent)
+	delete(d.nets, agent)
+	d.mu.Unlock()
+	if ok && d.Proxy != nil {
+		d.Proxy.Forget(addr)
+	}
 }
 
 // Remove implements Runtime.
@@ -337,9 +561,15 @@ func (d *Sessiond) Remove(ctx context.Context, agent string) error {
 			return err
 		}
 	}
+	d.forget(agent)
 	d.mu.Lock()
 	delete(d.uids, agent)
 	d.mu.Unlock()
+	if d.Layout.LoginDir != "" {
+		if err := os.RemoveAll(d.Layout.Login(agent)); err != nil {
+			return err
+		}
+	}
 	if d.Layout.LinkDir != "" {
 		if err := os.Remove(d.Layout.Link(agent)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
@@ -547,6 +777,15 @@ func (d *Sessiond) Handler() http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("GET /v1/login", func(w http.ResponseWriter, r *http.Request) {
+		files, err := d.Login(r.Context(), r.URL.Query().Get("agent"), r.URL.Query()["path"])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"files": files})
+	})
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		list, err := d.List(r.Context())
 		if err != nil {
@@ -663,6 +902,29 @@ func (c *Client) Remove(ctx context.Context, agent string) error {
 		return fmt.Errorf("sessiond: removing %s: %s: %s", agent, resp.Status, bytes.TrimSpace(b))
 	}
 	return nil
+}
+
+// Login implements Runtime.
+func (c *Client) Login(ctx context.Context, agent string, paths []string) (map[string][]byte, error) {
+	q := url.Values{"agent": {agent}, "path": paths}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://sessiond/v1/login?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sessiond: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("sessiond: reading %s's login: %s: %s", agent, resp.Status, bytes.TrimSpace(b))
+	}
+	var out struct {
+		Files map[string][]byte `json:"files"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&out)
+	return out.Files, err
 }
 
 // List implements Runtime.

@@ -58,7 +58,7 @@
           "us-central1-f"
         ],
         "control": {
-          "template": "silo-control-4b8a815a03"
+          "template": "silo-control-ccaec8e021"
         },
         "gateway": {},
         "record": "10.255.255.2",

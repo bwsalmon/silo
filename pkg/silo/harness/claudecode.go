@@ -40,15 +40,19 @@ func (ClaudeCode) Command(l Launch) Command {
 	}
 	// The prompt after --, so that no option takes it for a value.
 	argv = append(argv, "--", l.Prompt)
-	return Command{Argv: argv, Env: []string{
+	env := []string{
 		"HOME=" + Home,
-		"ANTHROPIC_BASE_URL=" + modelBase("anthropic"),
-		"ANTHROPIC_API_KEY=" + ProxyKey,
 		"DISABLE_AUTOUPDATER=1",
 		"DISABLE_TELEMETRY=1",
 		"DISABLE_ERROR_REPORTING=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	}}
+	}
+	if !l.Subscription {
+		// An API key would win over the login, so a subscription
+		// session gets neither.
+		env = append(env, "ANTHROPIC_BASE_URL="+modelBase("anthropic"), "ANTHROPIC_API_KEY="+ProxyKey)
+	}
+	return Command{Argv: argv, Env: env}
 }
 
 var claudeMCPConfig = func() string {
