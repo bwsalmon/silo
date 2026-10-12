@@ -24,10 +24,13 @@ func injectDiskInsert(t *testing.T) {
 	realInsert, realFields := handlers["disks.insert"], requestFields["disks.insert"]
 	handlers["disks.insert"] = func(s *Server, q *request) (any, error) {
 		name, _ := q.body["name"].(string)
+		if err := q.n.checkName(name); err != nil {
+			return nil, err
+		}
 		size, _ := q.body["sizeGb"].(string)
 		var gb int64
 		fmt.Sscan(size, &gb)
-		object := "disk:" + q.call.Zone + "/" + q.n.realName(name)
+		object := "disk:" + q.call.Zone + "/" + name
 		amount := []ledger.Amount{{Key: ledger.Key{Kind: "gce", Class: "ssd_disk_gb", Region: gceapi.ZoneRegion(q.call.Zone)}, Amount: ledger.Units(gb)}}
 		err := s.st.Tx(q.ctx(), func(tx store.Tx) error {
 			return ledger.Charge(q.ctx(), tx, ledger.ChargeRequest{Object: object, Silo: q.target.ID, Via: q.via(), Amounts: amount})
@@ -35,7 +38,7 @@ func injectDiskInsert(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		op, err := s.gce.InsertDisk(q.ctx(), s.opts.HostProject, q.call.Zone, &compute.Disk{Name: q.n.realName(name), SizeGb: gb,
+		op, err := s.gce.InsertDisk(q.ctx(), s.opts.HostProject, q.call.Zone, &compute.Disk{Name: name, SizeGb: gb,
 			Type: "zones/" + q.call.Zone + "/diskTypes/pd-ssd", Labels: map[string]string{"silo": q.target.ID, "silo-managed": "true"}})
 		if err != nil {
 			return nil, err
@@ -126,7 +129,15 @@ func TestManageGrant(t *testing.T) {
 
 	// It creates a disk in silo-<team-a>: team-a's, charged to team-a,
 	// audited under team-a with via=manage:<team-b>.
-	op := e.ok(e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": "d1", "sizeGb": "10"})
+	op := e.ok(e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": e.a + "-d1", "sizeGb": "10"})
+	// The objects are team-a's, so carry team-a's prefix: the holder's
+	// own, or a bare name, is refused naming team-a's.
+	for _, name := range []string{e.b + "-d1", "d1"} {
+		msg := e.fail(400, "invalid", e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": name, "sizeGb": "10"})
+		if !strings.Contains(msg, `must start with "`+e.a+`-"`) {
+			t.Errorf("%s through the grant: %q", name, msg)
+		}
+	}
 	if used() != 10 {
 		t.Errorf("team-a used %v after the holder's insert", used())
 	}
@@ -154,7 +165,7 @@ func TestManageGrant(t *testing.T) {
 		{"POST", "global/firewalls"},
 		{"GET", "global/firewalls"},
 	} {
-		msg := e.fail(403, "forbidden", e.b, c.method, cv("silo-"+e.a, c.path), obj{"name": "x"})
+		msg := e.fail(403, "forbidden", e.b, c.method, cv("silo-"+e.a, c.path), obj{"name": e.a + "-x"})
 		if !strings.Contains(msg, `"rollout"`) || !strings.Contains(msg, id) {
 			t.Errorf("%s %s: %q doesn't name the grant", c.method, c.path, msg)
 		}
@@ -190,14 +201,14 @@ func TestManageGrant(t *testing.T) {
 	// Revoking: an in-flight apply from /team-b gets 403 on its next
 	// call, and nothing it hadn't started appears. The operation it had
 	// started runs to completion, and silod finishes its bookkeeping.
-	op2 := e.ok(e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": "d2", "sizeGb": "10"})
+	op2 := e.ok(e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": e.a + "-d2", "sizeGb": "10"})
 	op2Path := "zones/us-central1-a/operations/" + op2["name"].(string)
 	rv := e.ok(e.root, "DELETE", "/silo/v1/silos/team-a/manageGrants/rollout", nil)
 	if rv["state"] != "REVOKED" {
 		t.Errorf("revoke: %v", rv)
 	}
 	e.fail(403, "forbidden", e.b, "GET", cv("silo-"+e.a, op2Path), nil)
-	e.fail(403, "forbidden", e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": "d3", "sizeGb": "10"})
+	e.fail(403, "forbidden", e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": e.a + "-d3", "sizeGb": "10"})
 	e.fenceFail(fenceapi.NotFound, e.b, "GET", "/silo/v1/silos/team-a", nil)
 	if _, err := e.gce.GetDisk(ctx, host, "us-central1-a", e.a+"-d3"); err == nil {
 		t.Error("d3 appeared after the revoke")
@@ -367,7 +378,7 @@ func TestManageSealedHolder(t *testing.T) {
 	// Under read, it reads and can't write.
 	e.ok(e.root, "PATCH", "/silo/v1/silos/team-b", obj{"control": "read"})
 	e.ok(e.b, "GET", cv("silo-"+e.a, "zones"), nil)
-	e.fail(403, "forbidden", e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": "d"})
+	e.fail(403, "forbidden", e.b, "POST", cv("silo-"+e.a, "zones/us-central1-a/disks"), obj{"name": e.a + "-d"})
 	// A read grant can't write either, whatever the holder's policy.
 	e.ok(e.root, "PATCH", "/silo/v1/silos/team-b", obj{"control": "full"})
 	r := e.offer("team-a/ci", "look", "/team-b", obj{"facade": obj{"resources": []string{"*"}, "access": "read"}}, obj{"ttl": "60s"})
@@ -377,7 +388,7 @@ func TestManageSealedHolder(t *testing.T) {
 	e.ok(e.b, "DELETE", "/silo/v1/self/manageGrants/"+g["id"].(string), nil)
 	e.ok(e.b, "GET", cv("silo-"+e.ci, "zones"), nil)
 	e.ok(e.b, "GET", cv("silo-"+e.ci, "global/networks"), nil)
-	msg := e.fail(403, "forbidden", e.b, "POST", cv("silo-"+e.ci, "zones/us-central1-a/disks"), obj{"name": "d"})
+	msg := e.fail(403, "forbidden", e.b, "POST", cv("silo-"+e.ci, "zones/us-central1-a/disks"), obj{"name": e.ci + "-d"})
 	if !strings.Contains(msg, `"look"`) {
 		t.Errorf("read grant refusal: %q", msg)
 	}

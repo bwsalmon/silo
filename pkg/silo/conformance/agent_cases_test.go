@@ -103,7 +103,7 @@ func agentSilo(t *testing.T, path, control string) siloInfo {
 	blk := netip.MustParsePrefix(s.Address.Blocks[0])
 	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netip.PrefixFrom(blk.Addr(), 24)}
 	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.region+"/subnetworks",
-		map[string]any{"name": "net", "network": "default", "ipCidrRange": info.subnet.String()})
+		map[string]any{"name": s.ID + "-net", "network": "default", "ipCidrRange": info.subnet.String()})
 	if code != 200 {
 		t.Fatalf("subnet in %s: %d %v", path, code, op)
 	}
@@ -125,7 +125,7 @@ func createAgent(t *testing.T, s siloInfo, name, ttl, prompt string) error {
 	req.Harness.Adapter, req.Harness.Credential = "claude-code", agentCredentialName
 	req.Model = agentModel
 	req.Budget.USD = "0.50"
-	req.ToolVM = client.ToolVM{Zone: run.zone, Subnet: "net", MachineType: agentVMType, Image: probeImage, DiskGB: 10, Spot: true}
+	req.ToolVM = client.ToolVM{Zone: run.zone, Subnet: s.id + "-net", MachineType: agentVMType, Image: probeImage, DiskGB: 10, Spot: true}
 	req.Lease = client.Lease{TTL: ttl}
 	req.Prompt = prompt
 	_, _, err := run.api.CreateAgent(context.Background(), s.path, req, client.Mutation{})
@@ -279,10 +279,10 @@ func TestAgentsInASealedSilo(t *testing.T) {
 	}
 	t.Run("ToolServerAttaches", func(t *testing.T) {
 		a := waitAgent(t, ref, 15*time.Minute, "CONNECTED", func(a *client.Agent) bool { return a.ToolVM.ToolServer == "CONNECTED" })
-		if a.ToolVM.Instance != "agent-op" {
-			t.Errorf("tool VM instance %q, want agent-op", a.ToolVM.Instance)
+		if a.ToolVM.Instance != s.id+"-agent-op" {
+			t.Errorf("tool VM instance %q, want %s-agent-op", a.ToolVM.Instance, s.id)
 		}
-		if code, _ := facade(t, "GET", instances(s)+"/agent-op", nil); code != 200 {
+		if code, _ := facade(t, "GET", instances(s)+"/"+s.id+"-agent-op", nil); code != 200 {
 			t.Errorf("the tool VM isn't an instance of /as's facade: %d", code)
 		}
 		// The tool server attaches on the gateway's port 80: the fence
@@ -366,17 +366,17 @@ func TestAgentsInASealedSilo(t *testing.T) {
 			"1. silo_create_child, to create a child silo named x-child with a /28 address block. "+
 			"2. agent_create, to create an agent named x-agent like yourself. "+
 			"3. compute, to send POST projects/%[1]s/zones/%[2]s/instances with the body "+
-			`{"name":"x-agent-vm","machineType":"zones/%[2]s/machineTypes/e2-micro","disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"%[3]s"}}],"networkInterfaces":[{"subnetwork":"regions/%[4]s/subnetworks/net"}]}. `+
-			"4. silo_describe, for your own silo. Then reply DONE.", s.project, run.zone, probeImage, run.region))
+			`{"name":"%[5]s-x-agent-vm","machineType":"zones/%[2]s/machineTypes/e2-micro","disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"%[3]s"}}],"networkInterfaces":[{"subnetwork":"regions/%[4]s/subnetworks/%[5]s-net"}]}. `+
+			"4. silo_describe, for your own silo. Then reply DONE.", s.project, run.zone, probeImage, run.region, s.id))
 		createRefused(t, after, "x-child", "x-agent")
 		for _, tool := range []string{"compute", "silo_describe"} {
 			if o := waitTool(t, ref, tool, after, 10*time.Minute); !o.IsError {
 				t.Errorf("%s worked from sealed /as: %s", tool, o.Content)
 			}
 		}
-		if code, _ := facade(t, "GET", instances(s)+"/x-agent-vm", nil); code != 404 {
+		if code, _ := facade(t, "GET", instances(s)+"/"+s.id+"-x-agent-vm", nil); code != 404 {
 			t.Errorf("x-agent-vm exists after a refused compute insert (%d)", code)
-			facade(t, "DELETE", instances(s)+"/x-agent-vm", nil)
+			facade(t, "DELETE", instances(s)+"/"+s.id+"-x-agent-vm", nil)
 		}
 	})
 	t.Run("UnderRead", func(t *testing.T) {
@@ -536,14 +536,14 @@ func TestAgentUnsealed(t *testing.T) {
 		}
 	})
 	t.Run("LeaseRunsOutDeletesToolVM", func(t *testing.T) {
-		if code, _ := facade(t, "GET", instances(s)+"/agent-worker", nil); code != 200 {
+		if code, _ := facade(t, "GET", instances(s)+"/"+s.id+"-agent-worker", nil); code != 200 {
 			t.Fatalf("no tool VM before the lease ran out: %d", code)
 		}
 		time.Sleep(time.Until(created.Add(ttl)))
 		deadline := time.Now().Add(10 * time.Minute)
 		for {
 			_, aerr := run.api.Agent(ctx, ref)
-			code, _ := facade(t, "GET", instances(s)+"/agent-worker", nil)
+			code, _ := facade(t, "GET", instances(s)+"/"+s.id+"-agent-worker", nil)
 			if apiCode(aerr) == "NOT_FOUND" && code == 404 {
 				return
 			}

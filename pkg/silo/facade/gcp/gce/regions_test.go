@@ -120,7 +120,7 @@ func TestAllowedRegions(t *testing.T) {
 			t.Errorf("team-a's %s in %s: limit %v usage %v (%v), want 0", m, east, lim, use, ok)
 		}
 	}
-	e.fail(403, "quotaExceeded", e.a, "POST", cv(host, "zones/us-east1-b/disks"), obj{"name": "d", "sizeGb": "10", "type": "zones/us-east1-b/diskTypes/pd-standard"})
+	e.fail(403, "quotaExceeded", e.a, "POST", cv(host, "zones/us-east1-b/disks"), obj{"name": e.a + "-d", "sizeGb": "10", "type": "zones/us-east1-b/diskTypes/pd-standard"})
 	// Holding nothing there, it can be taken away again.
 	e.ok(e.root, "PATCH", "/silo/v1/silos/team-a", obj{"regions": []string{central}})
 	e.fail(403, "regionNotAllowed", e.a, "GET", cv(host, "regions/"+east), nil)
@@ -152,10 +152,10 @@ func TestAllowedRegions(t *testing.T) {
 
 	// Objects pin a region too: a disk of team-b's in us-east1.
 	e.ok(e.root, "PATCH", "/silo/v1/silos/team-b", obj{"quota": obj{east: obj{"vcpu": 0, "standard_disk_gb": 10}}})
-	e.ok(e.b, "POST", cv(host, "zones/us-east1-b/disks"), obj{"name": "d", "sizeGb": "10", "type": "zones/us-east1-b/diskTypes/pd-standard"})
+	e.ok(e.b, "POST", cv(host, "zones/us-east1-b/disks"), obj{"name": e.b + "-d", "sizeGb": "10", "type": "zones/us-east1-b/diskTypes/pd-standard"})
 	e.run()
 	fenceFail("FAILED_PRECONDITION", e.root, "PATCH", "/silo/v1/silos/team-b", obj{"regions": []string{central}, "quota": obj{east: obj{"standard_disk_gb": 0}}})
-	e.ok(e.b, "GET", cv(host, "zones/us-east1-b/disks/d"), nil)
+	e.ok(e.b, "GET", cv(host, "zones/us-east1-b/disks/"+e.b+"-d"), nil)
 	// So does a subnet, though it is charged to a global count: while
 	// team-b has one in us-east1, us-east1 can't be taken away, or the
 	// subnet could no longer be deleted and its range would be stranded.
@@ -164,43 +164,43 @@ func TestAllowedRegions(t *testing.T) {
 	for _, r := range e.own(e.b) {
 		taken = append(taken, netip.MustParsePrefix(r))
 	}
-	e.ok(e.b, "POST", cv(host, "regions/us-east1/subnetworks"), obj{"name": "web", "ipCidrRange": freeIn(e.blocks(e.b)[0], 24, taken...).String()})
+	e.ok(e.b, "POST", cv(host, "regions/us-east1/subnetworks"), obj{"name": e.b + "-web", "ipCidrRange": freeIn(e.blocks(e.b)[0], 24, taken...).String()})
 	e.run()
 
 	// Storage locations: an allowed region, or the multi-region that
 	// contains one (call 25); for team-b, us-east1 now too.
-	e.ok(e.a, "POST", cv(host, "global/images"), obj{"name": "us", "sourceImage": debian, "storageLocations": []string{"us"}})
-	e.ok(e.a, "POST", cv(host, "global/images"), obj{"name": "c1", "sourceImage": debian, "storageLocations": []string{central}})
-	e.ok(e.b, "POST", cv(host, "global/images"), obj{"name": "e1", "sourceImage": debian, "storageLocations": []string{east}})
+	e.ok(e.a, "POST", cv(host, "global/images"), obj{"name": e.a + "-us", "sourceImage": debian, "storageLocations": []string{"us"}})
+	e.ok(e.a, "POST", cv(host, "global/images"), obj{"name": e.a + "-c1", "sourceImage": debian, "storageLocations": []string{central}})
+	e.ok(e.b, "POST", cv(host, "global/images"), obj{"name": e.b + "-e1", "sourceImage": debian, "storageLocations": []string{east}})
 	for _, locs := range [][]string{{east}, {"eu"}, {"asia"}, {central, "eu"}, {"us", "europe-west4"}} {
-		e.fail(403, "regionNotAllowed", e.a, "POST", cv(host, "global/images"), obj{"name": "x", "sourceImage": debian, "storageLocations": locs})
+		e.fail(403, "regionNotAllowed", e.a, "POST", cv(host, "global/images"), obj{"name": e.a + "-x", "sourceImage": debian, "storageLocations": locs})
 	}
-	e.ok(e.a, "POST", cv(host, "zones/"+zoneA+"/disks"), obj{"name": "src", "sizeGb": "10", "type": "zones/" + zoneA + "/diskTypes/pd-standard"})
+	e.ok(e.a, "POST", cv(host, "zones/"+zoneA+"/disks"), obj{"name": e.a + "-src", "sizeGb": "10", "type": "zones/" + zoneA + "/diskTypes/pd-standard"})
 	e.run()
-	e.ok(e.a, "POST", cv(host, "zones/"+zoneA+"/disks/src/createSnapshot"), obj{"name": "s-us", "storageLocations": []string{"us"}})
+	e.ok(e.a, "POST", cv(host, "zones/"+zoneA+"/disks/"+e.a+"-src/createSnapshot"), obj{"name": e.a + "-s-us", "storageLocations": []string{"us"}})
 	for _, locs := range [][]string{{east}, {"eu"}} {
-		e.fail(403, "regionNotAllowed", e.a, "POST", cv(host, "zones/"+zoneA+"/disks/src/createSnapshot"), obj{"name": "x", "storageLocations": locs})
+		e.fail(403, "regionNotAllowed", e.a, "POST", cv(host, "zones/"+zoneA+"/disks/"+e.a+"-src/createSnapshot"), obj{"name": e.a + "-x", "storageLocations": locs})
 	}
 	e.run()
 
 	// A template whose region is later removed is refused at instance
 	// insert, through the fence API's PATCH: team-b's regional template
 	// in us-east1, and its global one naming nothing.
-	e.ok(e.b, "POST", cv(host, "regions/us-east1/instanceTemplates"), tpl("east", "e2-medium", obj{"networkInterfaces": []obj{{}}}))
-	e.ok(e.b, "POST", cv(host, templatesPath), tpl("g", "e2-medium", obj{"networkInterfaces": []obj{{}}}))
+	e.ok(e.b, "POST", cv(host, "regions/us-east1/instanceTemplates"), tpl(e.b+"-east", "e2-medium", obj{"networkInterfaces": []obj{{}}}))
+	e.ok(e.b, "POST", cv(host, templatesPath), tpl(e.b+"-g", "e2-medium", obj{"networkInterfaces": []obj{{}}}))
 	e.run()
-	e.ok(e.b, "DELETE", cv(host, "zones/us-east1-b/disks/d"), nil)
+	e.ok(e.b, "DELETE", cv(host, "zones/us-east1-b/disks/"+e.b+"-d"), nil)
 	e.run()
 	fenceFail("FAILED_PRECONDITION", e.root, "PATCH", "/silo/v1/silos/team-b", obj{"regions": []string{central}, "quota": obj{east: obj{"standard_disk_gb": 0}}})
-	e.ok(e.b, "DELETE", cv(host, "regions/us-east1/subnetworks/web"), nil)
+	e.ok(e.b, "DELETE", cv(host, "regions/us-east1/subnetworks/"+e.b+"-web"), nil)
 	e.run()
 	e.ok(e.root, "PATCH", "/silo/v1/silos/team-b", obj{"regions": []string{central}, "quota": obj{east: obj{"standard_disk_gb": 0}}})
 	if got := regions(e.b, "self"); got != "[us-central1]" {
 		t.Errorf("team-b's regions after removing: %s", got)
 	}
-	e.fail(403, "regionNotAllowed", e.b, "POST", cv(host, "zones/us-east1-b/instances?sourceInstanceTemplate=regions/us-east1/instanceTemplates/east"), obj{"name": "x"})
-	e.fail(403, "regionNotAllowed", e.b, "POST", cv(host, "zones/us-east1-b/instances?sourceInstanceTemplate=global/instanceTemplates/g"), obj{"name": "x"})
-	e.fail(403, "regionNotAllowed", e.b, "POST", cv(host, "global/images"), obj{"name": "e2", "sourceImage": debian, "storageLocations": []string{east}})
+	e.fail(403, "regionNotAllowed", e.b, "POST", cv(host, "zones/us-east1-b/instances?sourceInstanceTemplate=regions/us-east1/instanceTemplates/"+e.b+"-east"), obj{"name": e.b + "-x"})
+	e.fail(403, "regionNotAllowed", e.b, "POST", cv(host, "zones/us-east1-b/instances?sourceInstanceTemplate=global/instanceTemplates/"+e.b+"-g"), obj{"name": e.b + "-x"})
+	e.fail(403, "regionNotAllowed", e.b, "POST", cv(host, "global/images"), obj{"name": e.b + "-e2", "sourceImage": debian, "storageLocations": []string{east}})
 	if got := e.used(e.b, "instances", east); got != 0 {
 		t.Errorf("team-b charged %d instances in %s", got, east)
 	}

@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/bwsalmon/silo/pkg/silo/agents"
 	gceapi "github.com/bwsalmon/silo/pkg/silo/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/silo/fenceapi"
+	"github.com/bwsalmon/silo/pkg/silo/ids"
 	"github.com/bwsalmon/silo/pkg/silo/store"
 	"github.com/bwsalmon/silo/pkg/silo/tree"
 )
@@ -41,6 +43,17 @@ func agentCall(ctx context.Context) string {
 func (s *Server) ToolVMs() fenceapi.ToolVMs { return toolVMs{s} }
 
 type toolVMs struct{ s *Server }
+
+// toolVMName is the name of a tool VM an agent record names: an agent
+// made before tenants used real names (gcp-backend.md, "Naming",
+// SV-76) recorded agent-<name>, without the silo's prefix its VM
+// carries.
+func toolVMName(silo *tree.Silo, instance string) string {
+	if p := ids.NamePrefix(silo.ID); !strings.HasPrefix(instance, p) {
+		return p + instance
+	}
+	return instance
+}
 
 // Create implements fenceapi.ToolVMs.
 func (v toolVMs) Create(ctx context.Context, caller fenceapi.Caller, silo *tree.Silo, agent, instance string, spec fenceapi.ToolVMSpec, script string) (string, error) {
@@ -90,6 +103,7 @@ func (v toolVMs) Create(ctx context.Context, caller fenceapi.Caller, silo *tree.
 // id and its address now, read through the facade as caller like any
 // other call of silod's for the agent.
 func (v toolVMs) Identify(ctx context.Context, caller fenceapi.Caller, silo *tree.Silo, agent, zone, instance string) (string, string, error) {
+	instance = toolVMName(silo, instance)
 	out, err := v.call(ctx, caller, agent, http.MethodGet, "projects/silo-"+silo.ID+"/zones/"+zone+"/instances/"+instance, nil)
 	if err != nil {
 		return "", "", err
@@ -112,6 +126,7 @@ func (v toolVMs) Identify(ctx context.Context, caller fenceapi.Caller, silo *tre
 
 // Delete implements fenceapi.ToolVMs.
 func (v toolVMs) Delete(ctx context.Context, caller fenceapi.Caller, silo *tree.Silo, agent, zone, instance string) error {
+	instance = toolVMName(silo, instance)
 	_, err := v.call(ctx, caller, agent, http.MethodDelete, "projects/silo-"+silo.ID+"/zones/"+zone+"/instances/"+instance, nil)
 	var e *fenceapi.Error
 	if err != nil && asFence(err, &e) && e.Code == fenceapi.NotFound {
@@ -189,10 +204,10 @@ var instanceReads = map[string]bool{"insert": true, "get": true, "list": true, "
 // own call for that agent: a 403 naming the agent (call 40).
 func (s *Server) refuseToolVM(q *request) error {
 	c := q.call
-	if c.Resource != "instances" || instanceReads[c.Method] || c.Name == "" || checkName(c.Name) != nil {
+	if c.Resource != "instances" || instanceReads[c.Method] || c.Name == "" || q.n.checkName(c.Name) != nil {
 		return nil
 	}
-	inst, err := s.gce.GetInstance(q.ctx(), s.opts.HostProject, c.Zone, q.n.realName(c.Name))
+	inst, err := s.gce.GetInstance(q.ctx(), s.opts.HostProject, c.Zone, c.Name)
 	if err != nil || !q.owns(inst.Name, inst.Labels) {
 		return nil // the handler says 404, or whatever GCE says
 	}

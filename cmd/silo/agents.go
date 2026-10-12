@@ -23,7 +23,7 @@ func (c *cli) agentCreate(ctx context.Context, args []string) error {
 	fs.StringVar(&req.Model, "model", "", "the model, which must have a price")
 	fs.StringVar(&req.Budget.USD, "budget", "", "dollars of model use per budget period, reserved from the silo's")
 	fs.StringVar(&req.ToolVM.Zone, "tool-zone", "", "the tool VM's zone")
-	fs.StringVar(&req.ToolVM.Subnet, "tool-subnet", "", "the tool VM's subnet: one of the silo's")
+	fs.StringVar(&req.ToolVM.Subnet, "tool-subnet", "", "the tool VM's subnet: one of the silo's, by its name, which starts with the silo's id (k7f3qa-work)")
 	fs.StringVar(&req.ToolVM.MachineType, "machine-type", "", "the tool VM's machine type (default e2-standard-2)")
 	fs.StringVar(&req.ToolVM.Image, "image", "", "the tool VM's image (default Debian 12)")
 	fs.Int64Var(&req.ToolVM.DiskGB, "disk-gb", 0, "the tool VM's boot disk, in GB (default 20)")

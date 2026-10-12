@@ -5,15 +5,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/bwsalmon/silo/pkg/silo/ids"
 )
 
-// MaxTenantName is the longest name a tenant may give an object: the
-// real name, <id>-<name>, must fit GCE's 63 (gcp-backend.md, "Naming",
-// SV-76).
-const MaxTenantName = 56
-
 // tenantCollections are the collections whose objects the tenant
-// names, so whose real names carry the <id>- prefix.
+// names, so whose names must carry the silo's <id>- prefix.
 var tenantCollections = map[string]bool{
 	"instances": true, "disks": true, "images": true, "snapshots": true, "firewalls": true,
 	"subnetworks": true, "instanceTemplates": true,
@@ -26,7 +23,9 @@ const facadeNetwork = "default"
 // to /compute/v1/.
 var linkHost = regexp.MustCompile(`^https?://(silo\.internal(:[0-9]+)?|www\.googleapis\.com|compute\.googleapis\.com)/compute/v1/`)
 
-// namer maps names between a silo's facade and the host project.
+// namer checks the names a silo's facade is given, and maps projects
+// and links between the facade and the host project. It doesn't map
+// names: a tenant names each object by its real name, <id>-<rest>.
 type namer struct {
 	silo    string // the silo whose facade it is
 	host    string // the host project
@@ -38,26 +37,35 @@ type namer struct {
 
 func (n *namer) project() string { return "silo-" + n.silo }
 
-func (n *namer) prefix() string { return n.silo + "-" }
+// prefix is what every name in the silo starts with.
+func (n *namer) prefix() string { return ids.NamePrefix(n.silo) }
 
-// realName is the host project's name for the tenant's name.
-func (n *namer) realName(name string) string { return n.prefix() + name }
+// ours reports whether name carries the silo's prefix.
+func (n *namer) ours(name string) bool { return strings.HasPrefix(name, n.prefix()) }
 
-// tenantName is the tenant's name for a real name, and whether the real
-// name is the silo's at all.
-func (n *namer) tenantName(real string) (string, bool) {
-	return strings.CutPrefix(real, n.prefix())
-}
+// key is name less the silo's prefix. The records silod keeps by an
+// object's name, firewall originals and a subnet's ranges in the
+// space map, are keyed by it: it was the tenant's name before tenants
+// named objects by their real names (SV-76), so records written then
+// are still found.
+func (n *namer) key(name string) string { return strings.TrimPrefix(name, n.prefix()) }
 
-var tenantNameRE = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+// gceNameRE is GCE's own name syntax, at most 63 characters. The limit
+// is the tenant's whole, since the prefix is part of its name.
+var gceNameRE = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
-// checkName refuses a tenant's name its real name couldn't carry.
-func checkName(name string) error {
-	if len(name) > MaxTenantName {
-		return invalid("Invalid value for field 'name': '%s'. silo: names are at most %d characters, because the real name carries the silo's prefix", name, MaxTenantName)
+// checkName refuses a name GCE would refuse, and one without the
+// silo's prefix: a bare name, or another silo's (gcp-backend.md,
+// "Naming", SV-76). The message says what the prefix must be.
+func (n *namer) checkName(name string) error { return n.checkField("name", name) }
+
+// checkField is checkName for the request field field.
+func (n *namer) checkField(field, name string) error {
+	if !gceNameRE.MatchString(name) {
+		return invalid("Invalid value for field '%s': '%s'. Must be a match of regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)'", field, name)
 	}
-	if !tenantNameRE.MatchString(name) {
-		return invalid("Invalid value for field 'name': '%s'. Must be a match of regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)'", name)
+	if !n.ours(name) {
+		return invalid("Invalid value for field '%s': '%s'. silo: names in this silo must start with %q", field, name, n.prefix())
 	}
 	return nil
 }
@@ -111,9 +119,9 @@ func splitLink(s string) (head string, segs []string, ok bool) {
 }
 
 // outLink rewrites a link GCE wrote into the facade's: the host
-// project is the silo's, tenant objects lose their prefix, the shared
-// VPC is default, and a full URL is on the facade. A link that isn't
-// one is returned unchanged.
+// project is the silo's, the shared VPC is default, and a full URL is
+// on the facade. Names are left as they are. A link that isn't one is
+// returned unchanged.
 func (n *namer) outLink(s string) string {
 	head, segs, ok := splitLink(s)
 	if !ok {
@@ -130,11 +138,6 @@ func (n *namer) outLink(s string) string {
 			if coll == "networks" && name == n.network {
 				return facadeNetwork, true
 			}
-			if tenantCollections[coll] {
-				if t, ok := n.tenantName(name); ok {
-					return t, true
-				}
-			}
 			return name, true
 		})
 	path := strings.Join(out, "/")
@@ -149,8 +152,9 @@ func (n *namer) outLink(s string) string {
 // compute.googleapis.com, into the
 // host project's. coll is the collection a bare name is in. A link to
 // another project is refused, except a public image project's, which
-// passes through; one naming a tenant object by a name too long is
-// 400 invalid.
+// passes through. Names are checked, not rewritten: one naming a
+// tenant object by a name without the silo's prefix, or one GCE
+// wouldn't take, is 400 invalid.
 func (n *namer) inLink(s, coll string) (string, error) {
 	if n.base != "" && !linkHost.MatchString(s) && strings.HasPrefix(s, n.base) {
 		// The facade's own selfLinks, on whatever endpoint it serves:
@@ -169,18 +173,20 @@ func (n *namer) inLink(s, coll string) (string, error) {
 		if !tenantCollections[coll] {
 			return s, nil
 		}
-		if err := checkName(s); err != nil {
+		if err := n.checkName(s); err != nil {
 			return "", err
 		}
-		return n.realName(s), nil
+		return s, nil
 	}
 	var bad error
+	public := false
 	out, ok := mapPath(segs,
 		func(p string) (string, bool) {
 			switch {
 			case p == n.project() || p == n.host:
 				return n.host, true
 			case n.public[p]:
+				public = true
 				return p, true
 			}
 			bad = forbidden("silo: %s names project %s, which this call can't reach", s, p)
@@ -194,21 +200,17 @@ func (n *namer) inLink(s, coll string) (string, error) {
 					return "", false
 				}
 				return n.network, true
-			case tenantCollections[c]:
-				if err := checkName(name); err != nil {
+			case tenantCollections[c] && !public:
+				if err := n.checkName(name); err != nil {
 					bad = err
 					return "", false
 				}
-				return n.realName(name), true
+				return name, true
 			}
 			return name, true
 		})
 	if !ok {
 		return "", bad
-	}
-	if len(segs) > 1 && segs[0] == "projects" && n.public[segs[1]] {
-		// A public image keeps its own project and name.
-		out = segs
 	}
 	path := strings.Join(out, "/")
 	if head == "" {
@@ -230,8 +232,9 @@ func isLink(s string) bool {
 // gceLink is any compute/v1 URL GCE writes.
 var gceLink = regexp.MustCompile(`^https?://[^/]+/compute/v1/`)
 
-// out rewrites a decoded GCE object for the tenant, in place: names and
-// links mapped back, and the facade's own labels and tags gone.
+// out rewrites a decoded GCE object for the tenant, in place: links and
+// the shared VPC's name mapped back, and the facade's own labels and
+// tags gone.
 func (n *namer) out(v any, key string) any {
 	switch x := v.(type) {
 	case map[string]any:
@@ -266,9 +269,6 @@ func (n *namer) out(v any, key string) any {
 	case string:
 		switch {
 		case key == "name":
-			if t, ok := n.tenantName(x); ok {
-				return t
-			}
 			if x == n.network {
 				return facadeNetwork
 			}
@@ -288,19 +288,18 @@ func (n *namer) out(v any, key string) any {
 }
 
 // outText rewrites free text GCE wrote, a message or a description:
-// the host project becomes the silo's project, and real names the
-// tenant's.
+// the host project becomes the silo's project, and the shared VPC
+// default.
 func (n *namer) outText(s string) string {
 	if n.host != "" {
 		s = strings.ReplaceAll(s, "projects/"+n.host+"/", "projects/"+n.project()+"/")
 		s = strings.ReplaceAll(s, "'"+n.host+"'", "'"+n.project()+"'")
 	}
-	s = strings.ReplaceAll(s, "networks/"+n.network+"'", "networks/"+facadeNetwork+"'")
-	return strings.ReplaceAll(s, n.prefix(), "")
+	return strings.ReplaceAll(s, "networks/"+n.network+"'", "networks/"+facadeNetwork+"'")
 }
 
-// outTags drops the facade's own tag, the silo id, and the prefix the
-// facade gave the tenant's.
+// outTags drops the facade's own tags: the silo id, and any other
+// starting with silo.
 func (n *namer) outTags(v any) any {
 	l, ok := v.([]any)
 	if !ok {
@@ -312,9 +311,7 @@ func (n *namer) outTags(v any) any {
 		if s == n.silo {
 			continue
 		}
-		if t, ok := n.tenantName(s); ok {
-			out = append(out, t)
-		} else if !reservedLabel(s) {
+		if !reservedLabel(s) {
 			out = append(out, s)
 		}
 	}

@@ -69,7 +69,7 @@ func mkSilo(t *testing.T, path string, prefix int, control string, egress *clien
 	blk := netip.MustParsePrefix(s.Address.Blocks[0])
 	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netip.PrefixFrom(blk.Addr(), 24)}
 	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.region+"/subnetworks",
-		map[string]any{"name": "net", "network": "default", "ipCidrRange": info.subnet.String()})
+		map[string]any{"name": s.ID + "-net", "network": "default", "ipCidrRange": info.subnet.String()})
 	if code != 200 {
 		t.Fatalf("subnet in %s: %d %v", path, code, op)
 	}
@@ -85,11 +85,12 @@ type vm struct {
 	stopped bool
 }
 
-// startProbe makes a probe VM in s, at ip if not "", running checks, and
+// startProbe makes a probe VM, s's prefix and name, in s, at ip if not "", running checks, and
 // returns at once. wait reads its report and deletes it.
 func startProbe(t *testing.T, s siloInfo, name, ip string, checks []Check) *vm {
 	t.Helper()
 	run.vms <- struct{}{}
+	name = s.id + "-" + name
 	body := instanceBody(name, s, func(m map[string]any) {
 		m["metadata"] = map[string]any{"items": []any{map[string]any{"key": "startup-script", "value": ProbeScript(checks)}}}
 		if ip != "" {
@@ -206,7 +207,7 @@ func refusedFromProbe(t *testing.T, res map[string]ProbeResult, id string) {
 func allowAll(t *testing.T, s siloInfo) {
 	t.Helper()
 	for _, dir := range []string{"INGRESS", "EGRESS"} {
-		body := map[string]any{"name": "allow-all-" + strings.ToLower(dir), "network": "default", "direction": dir,
+		body := map[string]any{"name": s.id + "-allow-all-" + strings.ToLower(dir), "network": "default", "direction": dir,
 			"priority": 100, "allowed": []any{map[string]any{"IPProtocol": "all"}}}
 		if dir == "INGRESS" {
 			body["sourceRanges"] = []string{"0.0.0.0/0"}
@@ -304,7 +305,7 @@ EOF`, spoof, lis)}})
 		expect(t, sres, "sent", true)
 		lres := listener.wait()
 		expect(t, lres, "got", false)
-		refused(t, 400, "POST", instances(a), instanceBody("forwarder", a, func(m map[string]any) { m["canIpForward"] = true }), instances(a)+"/forwarder")
+		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-forwarder", a, func(m map[string]any) { m["canIpForward"] = true }), instances(a)+"/"+a.id+"-forwarder")
 	})
 	t.Run("JustAfterChildDeleted", func(t *testing.T) {
 		d := mkSilo(t, "/a/d", 26, "", nil)
@@ -315,12 +316,12 @@ EOF`, spoof, lis)}})
 		// /a/d's block is /a's again: a subnet of /a's over it, and a
 		// probe at the address /a/d's VM would have had, acts as /a.
 		p := "projects/" + a.project + "/regions/" + run.region + "/subnetworks"
-		code, op := facade(t, "POST", p, map[string]any{"name": "was-d", "network": "default", "ipCidrRange": d.subnet.String()})
+		code, op := facade(t, "POST", p, map[string]any{"name": a.id + "-was-d", "network": "default", "ipCidrRange": d.subnet.String()})
 		if code != 200 {
 			t.Fatalf("a subnet over /a/d's old block: %d %v", code, op)
 		}
 		waitOp(t, a.project, op)
-		t.Cleanup(func() { _, op := facade(t, "DELETE", p+"/was-d", nil); waitOp(t, a.project, op) })
+		t.Cleanup(func() { _, op := facade(t, "DELETE", p+"/"+a.id+"-was-d", nil); waitOp(t, a.project, op) })
 		v := startProbe(t, a, "probe-was-d", ip, []Check{{ID: "self", Kind: "http", URL: api + "/silo/v1/self"}})
 		res := v.wait()
 		expectStatus(t, res, "self", 200, `"path":"/a"`)
@@ -635,7 +636,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 			"subnetworks.insert": {"POST", rp + "/regions/" + run.region + "/subnetworks"},
 			"firewalls.insert":   {"POST", rp + "/global/firewalls"},
 			"images.insert":      {"POST", rp + "/global/images"},
-			"subnetworks.delete": {"DELETE", rp + "/regions/" + run.region + "/subnetworks/net"},
+			"subnetworks.delete": {"DELETE", rp + "/regions/" + run.region + "/subnetworks/" + r.id + "-net"},
 			"fence.create":       {"POST", "/silo/v1/self/children"},
 			"fence.patch":        {"PATCH", "/silo/v1/self"},
 			"fence.grow":         {"POST", "/silo/v1/self:grow"},
@@ -646,12 +647,12 @@ func TestSealedAndReadSilos(t *testing.T) {
 			"control.none":       {"PATCH", "/silo/v1/self"},
 		}
 		bodies := map[string]string{
-			"instances.insert": `{"name":"x"}`, "disks.insert": `{"name":"x","sizeGb":"10"}`,
-			"subnetworks.insert": `{"name":"x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(r.block, 128), 28).String() + `"}`,
-			"firewalls.insert":   `{"name":"x","network":"default","allowed":[{"IPProtocol":"tcp"}]}`, "images.insert": `{"name":"x"}`,
-			"fence.create": `{"name":"x","address":{"prefix_length":28}}`, "fence.patch": `{"labels":{"x":"y"}}`,
-			"fence.grow": `{"to_prefix_length":25}`, "fence.exportOffer": `{"name":"x","target":"` + addrIn(r, 5) + `:80","protocol":"http","to":["/a"]}`,
-			"fence.linkPropose": `{"name":"x","peer":"/a","direction":"both","rules":[{"protocol":"tcp","ports":["22"]}]}`,
+			"instances.insert": `{"name":"` + r.id + `-x"}`, "disks.insert": `{"name":"` + r.id + `-x","sizeGb":"10"}`,
+			"subnetworks.insert": `{"name":"` + r.id + `-x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(r.block, 128), 28).String() + `"}`,
+			"firewalls.insert":   `{"name":"` + r.id + `-x","network":"default","allowed":[{"IPProtocol":"tcp"}]}`, "images.insert": `{"name":"` + r.id + `-x"}`,
+			"fence.create": `{"name":x","address":{"prefix_length":28}}`, "fence.patch": `{"labels":{"x":"y"}}`,
+			"fence.grow": `{"to_prefix_length":25}`, "fence.exportOffer": `{"name":x","target":"` + addrIn(r, 5) + `:80","protocol":"http","to":["/a"]}`,
+			"fence.linkPropose": `{"name":x","peer":"/a","direction":"both","rules":[{"protocol":"tcp","ports":["22"]}]}`,
 			"control.full":      `{"control":"full"}`, "control.none": `{"control":"none"}`,
 		}
 		checks := []Check{
@@ -677,8 +678,8 @@ func TestSealedAndReadSilos(t *testing.T) {
 			}
 			refusedFromProbe(t, res, id)
 		}
-		for _, p := range []string{rp + "/zones/" + run.zone + "/instances/x", rp + "/zones/" + run.zone + "/disks/x",
-			rp + "/regions/" + run.region + "/subnetworks/x", rp + "/global/firewalls/x", rp + "/global/images/x"} {
+		for _, p := range []string{rp + "/zones/" + run.zone + "/instances/" + r.id + "-x", rp + "/zones/" + run.zone + "/disks/" + r.id + "-x",
+			rp + "/regions/" + run.region + "/subnetworks/" + r.id + "-x", rp + "/global/firewalls/" + r.id + "-x", rp + "/global/images/" + r.id + "-x"} {
 			if code, _ := facade(t, "GET", strings.TrimPrefix(p, "/compute/v1/"), nil); code != 404 {
 				t.Errorf("%s exists after a refused write (%d)", p, code)
 			}
@@ -693,14 +694,14 @@ func TestSealedAndReadSilos(t *testing.T) {
 	t.Run("AncestorWritesAndAllocations", func(t *testing.T) {
 		for _, x := range []siloInfo{s, r} {
 			p := "projects/" + x.project + "/regions/" + run.region + "/subnetworks"
-			code, op := facade(t, "POST", p, map[string]any{"name": "from-root", "network": "default",
+			code, op := facade(t, "POST", p, map[string]any{"name": x.id + "-from-root", "network": "default",
 				"ipCidrRange": netip.PrefixFrom(addrOf(x.block, 128), 28).String()})
 			if code != 200 {
 				t.Errorf("the root writing %s's facade: %d %v", x.path, code, op)
 				continue
 			}
 			waitOp(t, x.project, op)
-			_, op = facade(t, "DELETE", p+"/from-root", nil)
+			_, op = facade(t, "DELETE", p+"/"+x.id+"-from-root", nil)
 			waitOp(t, x.project, op)
 			if _, err := run.api.Patch(ctx, x.path, client.Patch{"quota": client.QuotaMap{run.region: {"vcpu": num(3)}}}, client.Mutation{}); err != nil {
 				t.Errorf("the root changing %s's allocation: %v", x.path, err)
@@ -819,15 +820,15 @@ func TestManageGrants(t *testing.T) {
 	sp := "/compute/v1/projects/" + s.project
 	sInstances := api + sp + "/zones/" + run.zone + "/instances"
 	inst := func(name string) string {
-		return `{"name":"` + name + `","machineType":"zones/` + run.zone + `/machineTypes/e2-micro","scheduling":{"provisioningModel":"SPOT","instanceTerminationAction":"DELETE"},"disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"` + probeImage + `","diskSizeGb":"10"}}],"networkInterfaces":[{"subnetwork":"regions/` + run.region + `/subnetworks/net"}]}`
+		return `{"name":"` + name + `","machineType":"zones/` + run.zone + `/machineTypes/e2-micro","scheduling":{"provisioningModel":"SPOT","instanceTerminationAction":"DELETE"},"disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"` + probeImage + `","diskSizeGb":"10"}}],"networkInterfaces":[{"subnetwork":"regions/` + run.region + `/subnetworks/` + s.id + `-net"}]}`
 	}
 	res := probe(t, p, "probe-holder", []Check{
 		{ID: "pending-get", Kind: "http", URL: api + "/silo/v1/silos/" + strings.TrimPrefix(s.path, "/")},
 		{ID: "pending-facade", Kind: "http", URL: sInstances},
 		{ID: "accept", Kind: "http", Method: "POST", URL: api + "/silo/v1/self/manageGrants/" + id + ":accept"},
-		{ID: "insert", Kind: "http", Method: "POST", URL: sInstances, Body: inst("held")},
-		{ID: "subnet", Kind: "http", Method: "POST", URL: api + sp + "/regions/" + run.region + "/subnetworks", Body: `{"name":"x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 32), 28).String() + `"}`},
-		{ID: "firewall", Kind: "http", Method: "POST", URL: api + sp + "/global/firewalls", Body: `{"name":"x","network":"default","allowed":[{"IPProtocol":"tcp"}]}`},
+		{ID: "insert", Kind: "http", Method: "POST", URL: sInstances, Body: inst(s.id + "-held")},
+		{ID: "subnet", Kind: "http", Method: "POST", URL: api + sp + "/regions/" + run.region + "/subnetworks", Body: `{"name":"` + s.id + `-x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 32), 28).String() + `"}`},
+		{ID: "firewall", Kind: "http", Method: "POST", URL: api + sp + "/global/firewalls", Body: `{"name":"` + s.id + `-x","network":"default","allowed":[{"IPProtocol":"tcp"}]}`},
 		{ID: "quota", Kind: "http", Method: "PATCH", URL: api + "/silo/v1/silos/ms", Body: `{"quota":{"` + run.region + `":{"vcpu":"1"}}}`},
 		{ID: "child", Kind: "http", Method: "POST", URL: api + "/silo/v1/silos/ms/children", Body: `{"name":"x","address":{"prefix_length":28}}`},
 		{ID: "member", Kind: "http", Method: "PUT", URL: api + "/silo/v1/silos/ms/members/user:x@example.com", Body: `{}`},
@@ -841,7 +842,7 @@ func TestManageGrants(t *testing.T) {
 	t.Run("AfterAccept", func(t *testing.T) {
 		expectStatus(t, res, "accept", 200)
 		expectStatus(t, res, "insert", 200)
-		code, _ := facade(t, "GET", "projects/"+s.project+"/zones/"+run.zone+"/instances/held", nil)
+		code, _ := facade(t, "GET", "projects/"+s.project+"/zones/"+run.zone+"/instances/"+s.id+"-held", nil)
 		if code != 200 {
 			t.Errorf("the holder's instance isn't /ms's: %d", code)
 		}
@@ -858,7 +859,7 @@ func TestManageGrants(t *testing.T) {
 		if !found {
 			t.Errorf("no audit record of /ms's with via=manage:%s", p.id)
 		}
-		_, op := facade(t, "DELETE", "projects/"+s.project+"/zones/"+run.zone+"/instances/held", nil)
+		_, op := facade(t, "DELETE", "projects/"+s.project+"/zones/"+run.zone+"/instances/"+s.id+"-held", nil)
 		waitOp(t, s.project, op)
 	})
 	t.Run("OutOfScope", func(t *testing.T) {

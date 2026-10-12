@@ -315,7 +315,8 @@ func ownToolList() []map[string]any {
 		t("agent_delete", "Delete an agent (DELETE /silo/v1/{silo}/agents/{agent}).", in(map[string]any{"silo": silo, "agent": s}, "agent")),
 		t("agent_message", "Send an agent a message (POST /silo/v1/{silo}/agents/{agent}/messages): an idle agent starts a turn with it.",
 			in(map[string]any{"silo": silo, "agent": s, "text": s}, "agent", "text")),
-		t("compute", "Send one request to the compute/v1 facade, as gcloud would: method (GET by default), path (projects/... under /compute/v1/, with any query), and a JSON body.",
+		t("compute", "Send one request to the compute/v1 facade, as gcloud would: method (GET by default), path (projects/... under /compute/v1/, with any query), and a JSON body. "+
+			"Every name you give an object must start with its silo's prefix, its id and a dash (facade.name_prefix in silo_describe, such as k7f3qa-); the facade refuses others.",
 			in(map[string]any{"method": s, "path": s, "body": obj}, "path")),
 		t("ask", "Ask the people watching you a question, and wait for their answer. You are WAITING until it comes.",
 			in(map[string]any{"question": s}, "question")),

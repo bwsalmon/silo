@@ -265,10 +265,10 @@ func (q *request) checkSubnetFields(in *compute.Subnetwork) error {
 // ownSubnet is the silo's real subnet the call names, or GCE's 404.
 func (s *Server) ownSubnet(q *request) (*compute.Subnetwork, error) {
 	nf := notFound("projects/" + q.call.Project + "/regions/" + q.call.Region + "/subnetworks/" + q.call.Name)
-	if checkName(q.call.Name) != nil {
-		return nil, nf
+	if err := q.n.checkName(q.call.Name); err != nil {
+		return nil, err
 	}
-	sn, err := s.gce.GetSubnetwork(q.ctx(), s.opts.HostProject, q.call.Region, q.n.realName(q.call.Name))
+	sn, err := s.gce.GetSubnetwork(q.ctx(), s.opts.HostProject, q.call.Region, q.call.Name)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
 			return nil, nf
@@ -282,7 +282,7 @@ func (s *Server) ownSubnet(q *request) (*compute.Subnetwork, error) {
 }
 
 func (q *request) ownsSubnet(sn *compute.Subnetwork) bool {
-	_, named := q.n.tenantName(sn.Name)
+	named := q.n.ours(sn.Name)
 	_, described := q.tenantDescription(sn.Description)
 	return named && described && gceapi.LastSegment(sn.Network) == q.n.network
 }
@@ -300,21 +300,21 @@ func (s *Server) insertSubnetwork(q *request) (any, error) {
 	if err := decode(q.body, &in); err != nil {
 		return nil, s.refuse(q, err)
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return nil, s.refuse(q, err)
 	}
 	if err := q.checkSubnetFields(&in); err != nil {
 		return nil, s.refuse(q, err)
 	}
 	region := q.call.Region
-	ranges, err := subnetOwn(region, in.Name, in.IpCidrRange, in.SecondaryIpRanges)
+	ranges, err := subnetOwn(region, q.n.key(in.Name), in.IpCidrRange, in.SecondaryIpRanges)
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}
-	real := q.n.realName(in.Name)
+	real := in.Name
 	object := subnetObject(region, real)
 	err = s.st.Tx(ctx, func(tx store.Tx) error {
-		if _, err := address.Own(ctx, tx, q.target.ID, ownObject(region, in.Name, "")); err == nil {
+		if _, err := address.Own(ctx, tx, q.target.ID, ownObject(region, q.n.key(in.Name), "")); err == nil {
 			return errorf(http.StatusConflict, ReasonAlreadyExists, "The resource 'projects/%s/regions/%s/subnetworks/%s' already exists", q.call.Project, region, in.Name)
 		} else if ledger.CodeOf(err) != ledger.NotFound {
 			return err
@@ -334,7 +334,7 @@ func (s *Server) insertSubnetwork(q *request) (any, error) {
 	})
 	if err != nil {
 		_ = s.st.Tx(ctx, func(tx store.Tx) error {
-			if err := removeSubnetOwn(ctx, tx, q.target.ID, region, in.Name); err != nil {
+			if err := removeSubnetOwn(ctx, tx, q.target.ID, region, q.n.key(in.Name)); err != nil {
 				return err
 			}
 			_, err := ledger.Refund(ctx, tx, object, nil)
@@ -461,7 +461,7 @@ func (s *Server) patchSubnetwork(q *request) (any, error) {
 	if in.IpCidrRange != "" && in.IpCidrRange != cur.IpCidrRange {
 		return nil, s.refuse(q, invalid("Invalid value for field 'resource.ipCidrRange': '%s'. Use expandIpCidrRange to change a subnetwork's range", in.IpCidrRange))
 	}
-	region, name := q.call.Region, q.call.Name
+	region, name := q.call.Region, q.n.key(q.call.Name)
 	patch := &compute.Subnetwork{Fingerprint: in.Fingerprint, LogConfig: in.LogConfig}
 	if _, ok := q.body["description"]; ok {
 		patch.Description = q.describe(in.Description)
@@ -515,7 +515,7 @@ func (s *Server) expandSubnetwork(q *request) (any, error) {
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}
-	region, name := q.call.Region, q.call.Name
+	region, name := q.call.Region, q.n.key(q.call.Name)
 	err = s.st.Tx(ctx, func(tx store.Tx) error {
 		return address.Expand(ctx, tx, q.target.ID, ownObject(region, name, ""), p)
 	})

@@ -86,7 +86,7 @@ func makeTree(t *testing.T) error {
 	}
 	for _, s := range []siloInfo{a, b, c} {
 		code, op := facade(t, "POST", "projects/"+s.project+"/regions/"+run.region+"/subnetworks",
-			map[string]any{"name": "net", "network": "default", "ipCidrRange": s.subnet.String()})
+			map[string]any{"name": s.id + "-net", "network": "default", "ipCidrRange": s.subnet.String()})
 		if code != 200 {
 			return fmt.Errorf("subnet in %s: %d %v", s.path, code, op)
 		}
@@ -132,7 +132,7 @@ func instanceBody(name string, s siloInfo, mutate func(map[string]any)) map[stri
 		"scheduling":  map[string]any{"provisioningModel": "SPOT", "instanceTerminationAction": "DELETE"},
 		"disks": []any{map[string]any{"boot": true, "autoDelete": true,
 			"initializeParams": map[string]any{"sourceImage": probeImage, "diskSizeGb": "10", "diskType": "zones/" + run.zone + "/diskTypes/pd-standard"}}},
-		"networkInterfaces": []any{map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/net"}},
+		"networkInterfaces": []any{map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/" + s.id + "-net"}},
 	}
 	if mutate != nil {
 		mutate(body)
@@ -144,12 +144,13 @@ func instances(s siloInfo) string {
 	return "projects/" + s.project + "/zones/" + run.zone + "/instances"
 }
 
-// probe makes a probe VM in s that runs checks, waits for its report on
+// probe makes a probe VM, s's prefix and name, in s that runs checks, waits for its report on
 // the serial console, and deletes it. At most MaxVMs exist at once.
 func probe(t *testing.T, s siloInfo, name string, checks []Check) map[string]ProbeResult {
 	t.Helper()
 	run.vms <- struct{}{}
 	defer func() { <-run.vms }()
+	name = s.id + "-" + name
 	body := instanceBody(name, s, func(m map[string]any) {
 		m["metadata"] = map[string]any{"items": []any{map[string]any{"key": "startup-script", "value": ProbeScript(checks)}}}
 	})
@@ -180,27 +181,27 @@ func probe(t *testing.T, s siloInfo, name string, checks []Check) map[string]Pro
 func TestAttachingOutsideTheSilo(t *testing.T) {
 	tree(t)
 	forms := map[string]string{
-		"SubnetByFullURL":      "https://www.googleapis.com/compute/v1/projects/" + b.project + "/regions/" + run.region + "/subnetworks/net",
+		"SubnetByFullURL":      "https://www.googleapis.com/compute/v1/projects/" + b.project + "/regions/" + run.region + "/subnetworks/" + b.id + "-net",
 		"SubnetByRealName":     "projects/" + run.project + "/regions/" + run.region + "/subnetworks/" + b.id + "-net",
-		"SubnetByOtherProject": "projects/" + b.project + "/regions/" + run.region + "/subnetworks/net",
+		"SubnetByOtherProject": "projects/" + b.project + "/regions/" + run.region + "/subnetworks/" + b.id + "-net",
 	}
 	for name, ref := range forms {
 		t.Run(name, func(t *testing.T) {
-			refused(t, 403, "POST", instances(a), instanceBody("x-attach", a, func(m map[string]any) {
+			refused(t, 403, "POST", instances(a), instanceBody(a.id+"-x-attach", a, func(m map[string]any) {
 				m["networkInterfaces"] = []any{map[string]any{"subnetwork": ref}}
-			}), instances(a)+"/x-attach")
+			}), instances(a)+"/"+a.id+"-x-attach")
 		})
 	}
 	t.Run("NetworkIPOutsideSubnet", func(t *testing.T) {
-		refused(t, 400, "POST", instances(a), instanceBody("x-ip", a, func(m map[string]any) {
-			m["networkInterfaces"] = []any{map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/net", "networkIP": b.subnet.Addr().Next().String()}}
-		}), instances(a)+"/x-ip")
+		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-x-ip", a, func(m map[string]any) {
+			m["networkInterfaces"] = []any{map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/" + a.id + "-net", "networkIP": b.subnet.Addr().Next().String()}}
+		}), instances(a)+"/"+a.id+"-x-ip")
 	})
 	t.Run("AliasRangeOutsideSubnet", func(t *testing.T) {
-		refused(t, 400, "POST", instances(a), instanceBody("x-alias", a, func(m map[string]any) {
-			m["networkInterfaces"] = []any{map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/net",
+		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-x-alias", a, func(m map[string]any) {
+			m["networkInterfaces"] = []any{map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/" + a.id + "-net",
 				"aliasIpRanges": []any{map[string]any{"ipCidrRange": b.subnet.String()}}}}
-		}), instances(a)+"/x-alias")
+		}), instances(a)+"/"+a.id+"-x-alias")
 	})
 }
 
@@ -217,15 +218,15 @@ func TestSubnets(t *testing.T) {
 	}
 	for name, cidr := range cases {
 		t.Run(name, func(t *testing.T) {
-			refused(t, 400, "POST", sub, map[string]any{"name": "x-sub", "network": "default", "ipCidrRange": cidr}, sub+"/x-sub")
+			refused(t, 400, "POST", sub, map[string]any{"name": a.id + "-x-sub", "network": "default", "ipCidrRange": cidr}, sub+"/"+a.id+"-x-sub")
 		})
 	}
 	t.Run("RegionNotAllowed", func(t *testing.T) {
 		p := "projects/" + a.project + "/regions/europe-west4/subnetworks"
-		refused(t, 403, "POST", p, map[string]any{"name": "x-sub", "network": "default", "ipCidrRange": netip.PrefixFrom(a.block.Addr().Next(), 24).String()}, "")
+		refused(t, 403, "POST", p, map[string]any{"name": a.id + "-x-sub", "network": "default", "ipCidrRange": netip.PrefixFrom(a.block.Addr().Next(), 24).String()}, "")
 	})
 	t.Run("ZoneNotAllowed", func(t *testing.T) {
-		refused(t, 403, "POST", "projects/"+a.project+"/zones/europe-west4-a/instances", instanceBody("x-zone", a, nil), "")
+		refused(t, 403, "POST", "projects/"+a.project+"/zones/europe-west4-a/instances", instanceBody(a.id+"-x-zone", a, nil), "")
 	})
 }
 
@@ -256,7 +257,7 @@ func TestListAndGetLeaks(t *testing.T) {
 		}
 	})
 	t.Run("NoSiloLabelsOrHostLinks", func(t *testing.T) {
-		_, out := facade(t, "GET", "projects/"+a.project+"/regions/"+run.region+"/subnetworks/net", nil)
+		_, out := facade(t, "GET", "projects/"+a.project+"/regions/"+run.region+"/subnetworks/"+a.id+"-net", nil)
 		s := fmt.Sprint(out)
 		for _, leak := range []string{run.project, a.id + "-net", "silo-install"} {
 			if strings.Contains(s, leak) {
@@ -280,12 +281,12 @@ func TestListAndGetLeaks(t *testing.T) {
 		p := "projects/" + c.project + "/regions/" + run.region + "/subnetworks"
 		// c's net is its block's first /24; the next one is free.
 		next := netip.PrefixFrom(netip.AddrFrom4([4]byte{c.subnet.Addr().As4()[0], c.subnet.Addr().As4()[1], c.subnet.Addr().As4()[2] + 1, 0}), 24)
-		code, op := facade(t, "POST", p, map[string]any{"name": "from-a", "network": "default", "ipCidrRange": next.String()})
+		code, op := facade(t, "POST", p, map[string]any{"name": c.id + "-from-a", "network": "default", "ipCidrRange": next.String()})
 		if code != 200 {
 			t.Fatalf("ancestor write to /a/c: %d %v", code, op)
 		}
 		waitOp(t, c.project, op)
-		_, op = facade(t, "DELETE", p+"/from-a", nil)
+		_, op = facade(t, "DELETE", p+"/"+c.id+"-from-a", nil)
 		waitOp(t, c.project, op)
 	})
 }
@@ -296,36 +297,49 @@ func TestNameCollisions(t *testing.T) {
 	tree(t)
 	t.Run("SameNameInTwoSilos", func(t *testing.T) {
 		for _, s := range []siloInfo{a, b} {
-			code, _ := facade(t, "GET", "projects/"+s.project+"/regions/"+run.region+"/subnetworks/net", nil)
+			code, _ := facade(t, "GET", "projects/"+s.project+"/regions/"+run.region+"/subnetworks/"+s.id+"-net", nil)
 			if code != 200 {
 				t.Errorf("%s's own net: %d", s.path, code)
 			}
 		}
 	})
-	t.Run("Name56Allowed57Refused", func(t *testing.T) {
+	t.Run("Name63Allowed64Refused", func(t *testing.T) {
+		// The whole name is the tenant's: GCE's 63, the prefix included.
 		p := "projects/" + a.project + "/global/firewalls"
-		n57 := strings.Repeat("x", 57)
-		refused(t, 400, "POST", p, map[string]any{"name": n57, "network": "global/networks/default",
-			"allowed": []any{map[string]any{"IPProtocol": "tcp", "ports": []string{"22"}}}, "sourceRanges": []string{a.subnet.String()}}, p+"/"+n57)
-		n56 := strings.Repeat("y", 56)
-		code, op := facade(t, "POST", p, map[string]any{"name": n56, "network": "global/networks/default",
-			"allowed": []any{map[string]any{"IPProtocol": "tcp", "ports": []string{"22"}}}, "sourceRanges": []string{a.subnet.String()}})
+		fw := func(name string) map[string]any {
+			return map[string]any{"name": name, "network": "global/networks/default",
+				"allowed": []any{map[string]any{"IPProtocol": "tcp", "ports": []string{"22"}}}, "sourceRanges": []string{a.subnet.String()}}
+		}
+		refused(t, 400, "POST", p, fw(a.id+"-"+strings.Repeat("x", 57)), "")
+		n63 := a.id + "-" + strings.Repeat("y", 56)
+		code, op := facade(t, "POST", p, fw(n63))
 		if code != 200 {
-			t.Fatalf("56 characters: %d %v", code, op)
+			t.Fatalf("63 characters: %d %v", code, op)
 		}
 		waitOp(t, a.project, op)
-		_, op = facade(t, "DELETE", p+"/"+n56, nil)
+		_, op = facade(t, "DELETE", p+"/"+n63, nil)
 		waitOp(t, a.project, op)
 	})
+	t.Run("NameWithoutThePrefixRefused", func(t *testing.T) {
+		// A bare name, or another silo's prefix, is 400 naming the prefix.
+		p := "projects/" + a.project + "/global/firewalls"
+		for _, name := range []string{"x-bare", b.id + "-x-other"} {
+			code, out := facade(t, "POST", p, map[string]any{"name": name, "network": "global/networks/default",
+				"allowed": []any{map[string]any{"IPProtocol": "tcp", "ports": []string{"22"}}}, "sourceRanges": []string{a.subnet.String()}})
+			if code != 400 || !strings.Contains(fmt.Sprint(out), `must start with "`+a.id+`-"`) {
+				t.Errorf("%s: %d %v, want 400 naming the prefix %s-", name, code, out, a.id)
+			}
+		}
+	})
 	t.Run("SiloLabelRefused", func(t *testing.T) {
-		refused(t, 400, "POST", instances(a), instanceBody("x-label", a, func(m map[string]any) {
+		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-x-label", a, func(m map[string]any) {
 			m["labels"] = map[string]string{"silo-x": "y"}
-		}), instances(a)+"/x-label")
+		}), instances(a)+"/"+a.id+"-x-label")
 	})
 	t.Run("SiloTagRefused", func(t *testing.T) {
-		refused(t, 400, "POST", instances(a), instanceBody("x-tag", a, func(m map[string]any) {
+		refused(t, 400, "POST", instances(a), instanceBody(a.id+"-x-tag", a, func(m map[string]any) {
 			m["tags"] = map[string]any{"items": []string{"silo-gw"}}
-		}), instances(a)+"/x-tag")
+		}), instances(a)+"/"+a.id+"-x-tag")
 	})
 }
 
@@ -340,7 +354,7 @@ func TestRefusedFieldsAndMethods(t *testing.T) {
 	}
 	nic := func(extra map[string]any) func(map[string]any) {
 		return func(m map[string]any) {
-			n := map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/net"}
+			n := map[string]any{"subnetwork": "regions/" + run.region + "/subnetworks/" + a.id + "-net"}
 			for k, v := range extra {
 				n[k] = v
 			}
@@ -377,7 +391,7 @@ func TestRefusedFieldsAndMethods(t *testing.T) {
 		{"NetworksPatch", "PATCH", "global/networks/default"},
 		{"NetworksAddPeering", "POST", "global/networks/default/addPeering"},
 		{"NetworksSwitchToCustomMode", "POST", "global/networks/default/switchToCustomMode"},
-		{"SubnetSetPrivateIpGoogleAccess", "POST", "regions/" + run.region + "/subnetworks/net/setPrivateIpGoogleAccess"},
+		{"SubnetSetPrivateIpGoogleAccess", "POST", "regions/" + run.region + "/subnetworks/" + a.id + "-net/setPrivateIpGoogleAccess"},
 		{"ReservationsInsert", "POST", "zones/" + run.zone + "/reservations"},
 		{"NodeGroupsInsert", "POST", "zones/" + run.zone + "/nodeGroups"},
 		{"NodeTemplatesInsert", "POST", "regions/" + run.region + "/nodeTemplates"},
@@ -390,18 +404,18 @@ func TestRefusedFieldsAndMethods(t *testing.T) {
 	}
 	for _, m := range methods {
 		t.Run(m.name, func(t *testing.T) {
-			refused(t, 403, m.method, "projects/"+a.project+"/"+m.path, map[string]any{"name": "x-refused"}, "")
+			refused(t, 403, m.method, "projects/"+a.project+"/"+m.path, map[string]any{"name": a.id + "-x-refused"}, "")
 		})
 	}
 	t.Run("SubnetPrivateGoogleAccess", func(t *testing.T) {
 		p := "projects/" + a.project + "/regions/" + run.region + "/subnetworks"
-		refused(t, 403, "POST", p, map[string]any{"name": "x-pga", "network": "default", "privateIpGoogleAccess": true,
-			"ipCidrRange": netip.PrefixFrom(a.block.Addr(), 20).String()}, p+"/x-pga")
+		refused(t, 403, "POST", p, map[string]any{"name": a.id + "-x-pga", "network": "default", "privateIpGoogleAccess": true,
+			"ipCidrRange": netip.PrefixFrom(a.block.Addr(), 20).String()}, p+"/"+a.id+"-x-pga")
 	})
 	t.Run("FirewallServiceAccounts", func(t *testing.T) {
 		p := "projects/" + a.project + "/global/firewalls"
-		refused(t, 403, "POST", p, map[string]any{"name": "x-fwsa", "network": "global/networks/default",
-			"allowed": []any{map[string]any{"IPProtocol": "tcp"}}, "targetServiceAccounts": []string{"x@y.iam.gserviceaccount.com"}}, p+"/x-fwsa")
+		refused(t, 403, "POST", p, map[string]any{"name": a.id + "-x-fwsa", "network": "global/networks/default",
+			"allowed": []any{map[string]any{"IPProtocol": "tcp"}}, "targetServiceAccounts": []string{"x@y.iam.gserviceaccount.com"}}, p+"/"+a.id+"-x-fwsa")
 	})
 	t.Run("DiscoveryDrift", func(t *testing.T) {
 		resp, err := http.Get("https://compute.googleapis.com/$discovery/rest?version=v1")
@@ -419,12 +433,12 @@ func TestRefusedFieldsAndMethods(t *testing.T) {
 		}
 		for _, f := range drift {
 			t.Run(f, func(t *testing.T) {
-				code, out := facade(t, "POST", instances(a), instanceBody("x-drift", a, func(m map[string]any) { m[f] = map[string]any{} }))
+				code, out := facade(t, "POST", instances(a), instanceBody(a.id+"-x-drift", a, func(m map[string]any) { m[f] = map[string]any{} }))
 				if code != 403 || !strings.Contains(fmt.Sprint(out), f) {
 					t.Errorf("%s: got %d %v, want 403 naming the field", f, code, out)
 					if code == 200 {
 						waitOp(t, a.project, out)
-						facade(t, "DELETE", instances(a)+"/x-drift", nil)
+						facade(t, "DELETE", instances(a)+"/"+a.id+"-x-drift", nil)
 					}
 				}
 			})
@@ -440,13 +454,13 @@ func TestQuota(t *testing.T) {
 	ctx := context.Background()
 	t.Run("InstancePastVCPU", func(t *testing.T) {
 		// /a/c has 1 vCPU; e2-standard-4 is 4.
-		refused(t, 403, "POST", instances(c), instanceBody("x-big", c, func(m map[string]any) {
+		refused(t, 403, "POST", instances(c), instanceBody(c.id+"-x-big", c, func(m map[string]any) {
 			m["machineType"] = "zones/" + run.zone + "/machineTypes/e2-standard-4"
-		}), instances(c)+"/x-big")
+		}), instances(c)+"/"+c.id+"-x-big")
 	})
 	t.Run("DiskPastSSDGrant", func(t *testing.T) {
 		p := "projects/" + c.project + "/zones/" + run.zone + "/disks"
-		refused(t, 403, "POST", p, map[string]any{"name": "x-ssd", "sizeGb": "500", "type": "zones/" + run.zone + "/diskTypes/pd-ssd"}, p+"/x-ssd")
+		refused(t, 403, "POST", p, map[string]any{"name": c.id + "-x-ssd", "sizeGb": "500", "type": "zones/" + run.zone + "/diskTypes/pd-ssd"}, p+"/"+c.id+"-x-ssd")
 	})
 	t.Run("ChildGrantPastParentFree", func(t *testing.T) {
 		_, err := run.api.Create(ctx, "/a/greedy", client.CreateRequest{Regions: []string{run.region},
@@ -457,7 +471,7 @@ func TestQuota(t *testing.T) {
 		}
 	})
 	t.Run("GPU", func(t *testing.T) {
-		body := instanceBody("x-gpu", a, func(m map[string]any) {
+		body := instanceBody(a.id+"-x-gpu", a, func(m map[string]any) {
 			m["machineType"] = "zones/" + run.zone + "/machineTypes/n1-standard-1"
 			m["guestAccelerators"] = []any{map[string]any{"acceleratorType": "zones/" + run.zone + "/acceleratorTypes/nvidia-tesla-t4", "acceleratorCount": 1}}
 			m["scheduling"] = map[string]any{"provisioningModel": "SPOT", "onHostMaintenance": "TERMINATE"}
@@ -472,11 +486,11 @@ func TestQuota(t *testing.T) {
 			t.Errorf("a Spot T4's preview doesn't charge a Spot GPU class: %v", preview)
 		}
 		t.Run("WithoutTerminateRefused", func(t *testing.T) {
-			bad := instanceBody("x-gpu2", a, func(m map[string]any) {
+			bad := instanceBody(a.id+"-x-gpu2", a, func(m map[string]any) {
 				m["machineType"] = "zones/" + run.zone + "/machineTypes/n1-standard-1"
 				m["guestAccelerators"] = body["guestAccelerators"]
 			})
-			refused(t, 400, "POST", instances(a), bad, instances(a)+"/x-gpu2")
+			refused(t, 400, "POST", instances(a), bad, instances(a)+"/"+a.id+"-x-gpu2")
 		})
 		t.Run("RealGPUInstance", func(t *testing.T) {
 			r, err := run.compute.Regions.Get(run.project, run.region).Do()
@@ -505,32 +519,32 @@ func TestInstanceTemplates(t *testing.T) {
 		return body
 	}
 	t.Run("OthersSubnetRefused", func(t *testing.T) {
-		refused(t, 403, "POST", tpl(a), map[string]any{"name": "x-t1", "properties": props("projects/" + b.project + "/regions/" + run.region + "/subnetworks/net")}, tpl(a)+"/x-t1")
+		refused(t, 403, "POST", tpl(a), map[string]any{"name": a.id + "-x-t1", "properties": props("projects/" + b.project + "/regions/" + run.region + "/subnetworks/" + b.id + "-net")}, tpl(a)+"/"+a.id+"-x-t1")
 	})
 	t.Run("RefusedFieldRefused", func(t *testing.T) {
-		p := props("regions/" + run.region + "/subnetworks/net")
+		p := props("regions/" + run.region + "/subnetworks/" + a.id + "-net")
 		p["canIpForward"] = true
-		refused(t, 403, "POST", tpl(a), map[string]any{"name": "x-t2", "properties": p}, tpl(a)+"/x-t2")
+		refused(t, 403, "POST", tpl(a), map[string]any{"name": a.id + "-x-t2", "properties": p}, tpl(a)+"/"+a.id+"-x-t2")
 	})
 	t.Run("SourceInstanceRefused", func(t *testing.T) {
-		refused(t, 403, "POST", tpl(a), map[string]any{"name": "x-t3", "sourceInstance": "zones/" + run.zone + "/instances/x"}, tpl(a)+"/x-t3")
+		refused(t, 403, "POST", tpl(a), map[string]any{"name": a.id + "-x-t3", "sourceInstance": "zones/" + run.zone + "/instances/" + a.id + "-x"}, tpl(a)+"/"+a.id+"-x-t3")
 	})
 	t.Run("OtherSiloCantUseOrSee", func(t *testing.T) {
-		code, op := facade(t, "POST", tpl(a), map[string]any{"name": "tmpl", "properties": props("regions/" + run.region + "/subnetworks/net")})
+		code, op := facade(t, "POST", tpl(a), map[string]any{"name": a.id + "-tmpl", "properties": props("regions/" + run.region + "/subnetworks/" + a.id + "-net")})
 		if code != 200 {
 			t.Fatalf("a valid template in /a: %d %v", code, op)
 		}
 		waitOp(t, a.project, op)
-		defer func() { _, op := facade(t, "DELETE", tpl(a)+"/tmpl", nil); waitOp(t, a.project, op) }()
+		defer func() { _, op := facade(t, "DELETE", tpl(a)+"/"+a.id+"-tmpl", nil); waitOp(t, a.project, op) }()
 		_, l := facade(t, "GET", tpl(b), nil)
 		if items, _ := l["items"].([]any); len(items) > 0 {
 			t.Errorf("/b lists templates: %v", items)
 		}
-		refused(t, 403, "POST", instances(b)+"?sourceInstanceTemplate=projects/"+a.project+"/global/instanceTemplates/tmpl",
-			map[string]any{"name": "x-from-a"}, instances(b)+"/x-from-a")
+		refused(t, 403, "POST", instances(b)+"?sourceInstanceTemplate=projects/"+a.project+"/global/instanceTemplates/"+a.id+"-tmpl",
+			map[string]any{"name": b.id + "-x-from-a"}, instances(b)+"/"+b.id+"-x-from-a")
 		t.Run("InsertAddingRefusedField", func(t *testing.T) {
-			refused(t, 403, "POST", instances(a)+"?sourceInstanceTemplate=global/instanceTemplates/tmpl",
-				map[string]any{"name": "x-tf", "canIpForward": true}, instances(a)+"/x-tf")
+			refused(t, 403, "POST", instances(a)+"?sourceInstanceTemplate=global/instanceTemplates/"+a.id+"-tmpl",
+				map[string]any{"name": a.id + "-x-tf", "canIpForward": true}, instances(a)+"/"+a.id+"-x-tf")
 		})
 	})
 }
@@ -541,17 +555,17 @@ func TestStillRefused(t *testing.T) {
 	tree(t)
 	t.Run("DiskInStoragePool", func(t *testing.T) {
 		p := "projects/" + a.project + "/zones/" + run.zone + "/disks"
-		refused(t, 403, "POST", p, map[string]any{"name": "x-pool", "sizeGb": "10", "storagePool": "zones/" + run.zone + "/storagePools/p"}, p+"/x-pool")
+		refused(t, 403, "POST", p, map[string]any{"name": a.id + "-x-pool", "sizeGb": "10", "storagePool": "zones/" + run.zone + "/storagePools/p"}, p+"/"+a.id+"-x-pool")
 	})
 	t.Run("ReservationAffinity", func(t *testing.T) {
-		refused(t, 403, "POST", instances(a), instanceBody("x-res", a, func(m map[string]any) {
+		refused(t, 403, "POST", instances(a), instanceBody(a.id+"-x-res", a, func(m map[string]any) {
 			m["reservationAffinity"] = map[string]any{"consumeReservationType": "ANY_RESERVATION"}
-		}), instances(a)+"/x-res")
+		}), instances(a)+"/"+a.id+"-x-res")
 	})
 	t.Run("NodeAffinities", func(t *testing.T) {
-		refused(t, 403, "POST", instances(a), instanceBody("x-node", a, func(m map[string]any) {
+		refused(t, 403, "POST", instances(a), instanceBody(a.id+"-x-node", a, func(m map[string]any) {
 			m["scheduling"] = map[string]any{"nodeAffinities": []any{map[string]any{"key": "compute.googleapis.com/node-group-name", "operator": "IN", "values": []string{"g"}}}}
-		}), instances(a)+"/x-node")
+		}), instances(a)+"/"+a.id+"-x-node")
 	})
 }
 
@@ -626,7 +640,7 @@ func TestDatabase(t *testing.T) {
 	}
 	t.Run("TenantSubnetOverControlRangeRefused", func(t *testing.T) {
 		p := "projects/" + a.project + "/regions/" + run.region + "/subnetworks"
-		refused(t, 400, "POST", p, map[string]any{"name": "x-ctl", "network": "default", "ipCidrRange": run.control.String()}, p+"/x-ctl")
+		refused(t, 400, "POST", p, map[string]any{"name": a.id + "-x-ctl", "network": "default", "ipCidrRange": run.control.String()}, p+"/"+a.id+"-x-ctl")
 	})
 	t.Run("SilodHealthyThroughout", func(t *testing.T) {
 		select {

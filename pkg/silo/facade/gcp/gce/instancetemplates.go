@@ -72,7 +72,7 @@ func (s *Server) planTemplate(q *request) (*compute.InstanceTemplate, error) {
 	if err := decode(q.body, &in); err != nil {
 		return nil, err
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return nil, err
 	}
 	region := q.call.Region
@@ -96,7 +96,7 @@ func (s *Server) planTemplate(q *request) (*compute.InstanceTemplate, error) {
 	if err := decode(m, &inst); err != nil {
 		return nil, err
 	}
-	inst.Name = "template"
+	inst.Name = q.n.prefix() + "template"
 	// The template passes if an instance of it would in one of its
 	// zones; GPUs and machine types are offered per zone.
 	var first error
@@ -224,11 +224,11 @@ func (q *request) realTemplate(in *compute.InstanceTemplate, inst *compute.Insta
 		}
 		out.Disks = append(out.Disks, &d)
 	}
-	return &compute.InstanceTemplate{Name: q.n.realName(in.Name), Description: q.describe(in.Description), Properties: out}, nil
+	return &compute.InstanceTemplate{Name: in.Name, Description: q.describe(in.Description), Properties: out}, nil
 }
 
 func (q *request) ownsTemplate(t *compute.InstanceTemplate) bool {
-	_, named := q.n.tenantName(t.Name)
+	named := q.n.ours(t.Name)
 	_, described := q.tenantDescription(t.Description)
 	return named && described
 }
@@ -245,10 +245,10 @@ func (q *request) template(t *compute.InstanceTemplate) (map[string]any, error) 
 func (s *Server) ownTemplate(q *request) (*compute.InstanceTemplate, error) {
 	region := q.call.Region
 	nf := notFound(q.templatePath(region, q.call.Name))
-	if checkName(q.call.Name) != nil {
-		return nil, nf
+	if err := q.n.checkName(q.call.Name); err != nil {
+		return nil, err
 	}
-	t, err := s.gce.GetInstanceTemplate(q.ctx(), s.opts.HostProject, region, q.n.realName(q.call.Name))
+	t, err := s.gce.GetInstanceTemplate(q.ctx(), s.opts.HostProject, region, q.call.Name)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
 			return nil, nf
@@ -280,7 +280,7 @@ func (s *Server) sourceTemplate(q *request, src, zone string) (*compute.Instance
 	if r.Project != "" && r.Project != s.opts.HostProject {
 		return nil, notFound(src)
 	}
-	name, _ := q.n.tenantName(r.Name)
+	name := r.Name
 	nf := notFound(q.templatePath(r.Region, name))
 	if r.Region != "" && r.Region != gceapi.ZoneRegion(zone) {
 		if !q.regions[r.Region] {
@@ -370,7 +370,7 @@ func (s *Server) insertTemplate(q *request) (any, error) {
 	}
 	region := q.call.Region
 	if _, err := s.gce.GetInstanceTemplate(ctx, s.opts.HostProject, region, t.Name); err == nil {
-		name, _ := q.n.tenantName(t.Name)
+		name := t.Name
 		return nil, s.refuse(q, errorf(http.StatusConflict, ReasonAlreadyExists, "The resource '%s' already exists", q.templatePath(region, name)))
 	} else if !gceapi.IsNotFound(err) {
 		return nil, s.refuse(q, err)

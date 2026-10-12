@@ -75,13 +75,17 @@ var firewallsCharge = []ledger.Amount{{Key: ledger.Key{Kind: "gce", Class: "fire
 // firewallObject is the ledger's object for a real rule.
 func firewallObject(real string) string { return "firewall:" + real }
 
-// firewallOfObject is the tenant's name of the rule rec's object names.
+// firewallOfObject is the originals' key for the rule rec's object
+// names.
 func firewallOfObject(rec Operation) string {
 	real := strings.TrimPrefix(rec.Object, "firewall:")
 	return strings.TrimPrefix(real, rec.Silo+"-")
 }
 
 // ---- Originals ----
+
+// Originals are keyed by the rule's name less the silo's prefix
+// (namer.key).
 
 // original is the rule as the tenant wrote it, and whether one is kept.
 func original(ctx context.Context, tx store.Tx, silo, name string) (map[string]any, bool, error) {
@@ -244,7 +248,7 @@ func (s *Server) pin(q *request, orig map[string]any, own []netip.Prefix) (*comp
 	if err := decode(orig, &in); err != nil {
 		return nil, err
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return nil, err
 	}
 	if in.Network != "" {
@@ -260,21 +264,27 @@ func (s *Server) pin(q *request, orig map[string]any, own []netip.Prefix) (*comp
 		return nil, invalid("Invalid value for field 'resource.direction': '%s'. Must be INGRESS or EGRESS.", in.Direction)
 	}
 	real := &compute.Firewall{
-		Name: q.n.realName(in.Name), Description: q.describe(in.Description), Network: s.networkLink(),
+		Name: in.Name, Description: q.describe(in.Description), Network: s.networkLink(),
 		Direction: dir, Priority: in.Priority, Allowed: in.Allowed, Denied: in.Denied,
 		Disabled: in.Disabled, LogConfig: in.LogConfig,
 	}
 	if _, ok := orig["priority"]; ok {
 		real.ForceSendFields = append(real.ForceSendFields, "Priority")
 	}
-	for _, t := range in.TargetTags {
-		real.TargetTags = append(real.TargetTags, q.n.realName(t))
+	for i, t := range in.TargetTags {
+		if err := q.n.checkField("resource.targetTags["+itoa(i)+"]", t); err != nil {
+			return nil, err
+		}
+		real.TargetTags = append(real.TargetTags, t)
 	}
 	if len(real.TargetTags) == 0 {
 		real.TargetTags = []string{q.target.ID}
 	}
-	for _, t := range in.SourceTags {
-		real.SourceTags = append(real.SourceTags, q.n.realName(t))
+	for i, t := range in.SourceTags {
+		if err := q.n.checkField("resource.sourceTags["+itoa(i)+"]", t); err != nil {
+			return nil, err
+		}
+		real.SourceTags = append(real.SourceTags, t)
 	}
 	if len(own) == 0 {
 		return nil, invalid("silo: silo %s has no address space of its own for a firewall rule to apply to: it has delegated all of its blocks", q.target.Path)
@@ -324,13 +334,14 @@ func (s *Server) pinTx(ctx context.Context, tx store.Tx, q *request, orig map[st
 
 // ---- Handlers ----
 
-// ownFirewall is the silo's real rule the call names, or GCE's 404.
+// ownFirewall is the silo's real rule the call names, or GCE's 404. A
+// name without the silo's prefix is 400.
 func (s *Server) ownFirewall(q *request, name string) (*compute.Firewall, error) {
 	nf := notFound("projects/" + q.call.Project + "/global/firewalls/" + name)
-	if checkName(name) != nil {
-		return nil, nf
+	if err := q.n.checkName(name); err != nil {
+		return nil, err
 	}
-	fw, err := s.gce.GetFirewall(q.ctx(), s.opts.HostProject, q.n.realName(name))
+	fw, err := s.gce.GetFirewall(q.ctx(), s.opts.HostProject, name)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
 			return nil, nf
@@ -344,14 +355,14 @@ func (s *Server) ownFirewall(q *request, name string) (*compute.Firewall, error)
 }
 
 func (q *request) ownsFirewall(fw *compute.Firewall) bool {
-	_, named := q.n.tenantName(fw.Name)
 	_, described := q.tenantDescription(fw.Description)
-	return named && described && gceapi.LastSegment(fw.Network) == q.n.network
+	return q.n.ours(fw.Name) && described && gceapi.LastSegment(fw.Network) == q.n.network
 }
 
 // tenantFirewallFields are what get shows of the original rather than
-// of the real rule.
-var tenantFirewallFields = []string{"description", "sourceRanges", "destinationRanges", "sourceTags", "targetTags"}
+// of the real rule. The tags are the real rule's: they are the
+// tenant's own, less the silo's <id> tag, which outTags drops.
+var tenantFirewallFields = []string{"description", "sourceRanges", "destinationRanges"}
 
 // firewall is fw as the tenant sees it: the real rule's own fields
 // (id, selfLink, the defaults GCE filled in), with what the tenant
@@ -360,8 +371,17 @@ func (q *request) firewall(fw *compute.Firewall, orig map[string]any) (map[strin
 	c := *fw
 	c.Description, _ = q.tenantDescription(fw.Description)
 	m, err := q.shape("compute#firewall", &c)
-	if err != nil || orig == nil {
-		return m, err
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range []string{"targetTags", "sourceTags"} {
+		// The silo's own <id> target, dropped, leaves none.
+		if l, ok := m[k].([]any); ok && len(l) == 0 {
+			delete(m, k)
+		}
+	}
+	if orig == nil {
+		return m, nil
 	}
 	for _, k := range tenantFirewallFields {
 		if v, ok := orig[k]; ok && !isDefault(v) {
@@ -376,10 +396,10 @@ func (q *request) firewall(fw *compute.Firewall, orig map[string]any) (map[strin
 func (s *Server) insertFirewall(q *request) (any, error) {
 	ctx := q.ctx()
 	name, _ := q.body["name"].(string)
-	if err := checkName(name); err != nil {
+	if err := q.n.checkName(name); err != nil {
 		return nil, s.refuse(q, err)
 	}
-	real := q.n.realName(name)
+	real := name
 	if _, err := s.gce.GetFirewall(ctx, s.opts.HostProject, real); err == nil {
 		return nil, s.refuse(q, errorf(http.StatusConflict, ReasonAlreadyExists, "The resource 'projects/%s/global/firewalls/%s' already exists", q.call.Project, name))
 	} else if !gceapi.IsNotFound(err) {
@@ -395,7 +415,7 @@ func (s *Server) insertFirewall(q *request) (any, error) {
 		if err := ledger.Charge(ctx, tx, ledger.ChargeRequest{Object: object, Silo: q.target.ID, Via: q.via(), Amounts: firewallsCharge}); err != nil {
 			return err
 		}
-		return putOriginal(ctx, tx, q.target.ID, name, q.body, false)
+		return putOriginal(ctx, tx, q.target.ID, q.n.key(name), q.body, false)
 	})
 	if err != nil {
 		return nil, s.refuse(q, err)
@@ -403,7 +423,7 @@ func (s *Server) insertFirewall(q *request) (any, error) {
 	op, err := s.gce.InsertFirewall(ctx, s.opts.HostProject, fw)
 	if err != nil {
 		_ = s.st.Tx(ctx, func(tx store.Tx) error {
-			if err := dropOriginal(ctx, tx, q.target.ID, name); err != nil {
+			if err := dropOriginal(ctx, tx, q.target.ID, q.n.key(name)); err != nil {
 				return err
 			}
 			_, err := ledger.Refund(ctx, tx, object, nil)
@@ -429,7 +449,7 @@ func (s *Server) getFirewall(q *request) (any, error) {
 	var orig map[string]any
 	err = s.st.Tx(q.ctx(), func(tx store.Tx) error {
 		var err error
-		orig, _, err = original(q.ctx(), tx, q.target.ID, q.call.Name)
+		orig, _, err = original(q.ctx(), tx, q.target.ID, q.n.key(q.call.Name))
 		return err
 	})
 	if err != nil {
@@ -458,8 +478,7 @@ func (s *Server) listFirewalls(q *request) (any, error) {
 		if !q.ownsFirewall(fw) {
 			continue
 		}
-		name, _ := q.n.tenantName(fw.Name)
-		m, err := q.firewall(fw, origs[name])
+		m, err := q.firewall(fw, origs[q.n.key(fw.Name)])
 		if err != nil {
 			return nil, err
 		}
@@ -500,19 +519,28 @@ func (s *Server) replaceFirewall(q *request) (any, error) {
 	err = s.st.Tx(ctx, func(tx store.Tx) error {
 		orig := map[string]any{}
 		if q.call.Method == "patch" {
-			old, ok, err := original(ctx, tx, q.target.ID, name)
+			old, ok, err := original(ctx, tx, q.target.ID, q.n.key(name))
+			if err != nil {
+				return err
+			}
+			shown, err := q.firewall(cur, nil)
 			if err != nil {
 				return err
 			}
 			if !ok {
 				// No original kept: the real rule as the tenant would see it.
-				if old, err = q.firewall(cur, nil); err != nil {
-					return err
-				}
+				old = shown
 			}
 			for k, v := range old {
 				if k == "name" || k == "description" || k == "network" || k == "priority" || k == "direction" ||
 					k == "allowed" || k == "denied" || k == "disabled" || k == "logConfig" || contains(tenantFirewallFields, k) {
+					orig[k] = v
+				}
+			}
+			// The tags are the real rule's, which an original kept
+			// before tenants used real names has without the prefix.
+			for _, k := range []string{"targetTags", "sourceTags"} {
+				if v, ok := shown[k]; ok && !isDefault(v) {
 					orig[k] = v
 				}
 			}
@@ -533,14 +561,14 @@ func (s *Server) replaceFirewall(q *request) (any, error) {
 		if fw, err = s.pinTx(ctx, tx, q, orig); err != nil {
 			return err
 		}
-		return putOriginal(ctx, tx, q.target.ID, name, orig, true)
+		return putOriginal(ctx, tx, q.target.ID, q.n.key(name), orig, true)
 	})
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}
 	op, err := s.gce.UpdateFirewall(ctx, s.opts.HostProject, cur.Name, fw)
 	if err != nil {
-		_ = s.st.Tx(ctx, func(tx store.Tx) error { return settleOriginal(ctx, tx, q.target.ID, name, true) })
+		_ = s.st.Tx(ctx, func(tx store.Tx) error { return settleOriginal(ctx, tx, q.target.ID, q.n.key(name), true) })
 		return nil, s.refuse(q, err)
 	}
 	s.audit(q, "OK", pinnedFields(fw), nil)

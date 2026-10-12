@@ -228,8 +228,10 @@ from a probe VM.
 
 **Name collisions**
 
-- `/a` and `/b` both create `builder`; each sees its own.
-- A 56-character name works, and a 57-character one is refused.
+- `/a` names its objects `<a's id>-…`; a name without the prefix, or
+  with `/b`'s, is refused (400) with a message naming `/a`'s prefix.
+- A 63-character name, prefix included, works, and a 64-character one
+  is refused.
 - A tenant tag or label starting with `silo` is refused.
 
 **Refused fields and methods**

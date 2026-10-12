@@ -60,6 +60,10 @@ type Options struct {
 	Proxy string
 	// NoProxy is NO_PROXY: what exec's commands reach directly.
 	NoProxy string
+	// NamePrefix is the prefix every name in the silo's facade must
+	// carry, <id>- (gcp-backend.md, "Naming", SV-76), set as
+	// SILO_NAME_PREFIX in exec's environment. Empty sets nothing.
+	NamePrefix string
 	// Dir is the working directory exec uses when a call names none;
 	// the user's home if empty.
 	Dir string
@@ -170,9 +174,13 @@ func (s *Server) Call(ctx context.Context, name string, args map[string]any) Res
 	return Result{Text: "no such tool: " + name, IsError: true}
 }
 
+// NamePrefixEnv is the variable exec's commands find the silo's name
+// prefix in.
+const NamePrefixEnv = "SILO_NAME_PREFIX"
+
 // Env is the environment exec gives a command: a fixed PATH, the
-// user's HOME, USER and LOGNAME, and the egress proxy's variables in
-// both cases.
+// user's HOME, USER and LOGNAME, the egress proxy's variables in
+// both cases, and SILO_NAME_PREFIX.
 func (s *Server) Env() []string {
 	user := s.opts.User
 	if s.cred == nil {
@@ -189,6 +197,9 @@ func (s *Server) Env() []string {
 	}
 	if s.opts.NoProxy != "" {
 		env = append(env, "NO_PROXY="+s.opts.NoProxy, "no_proxy="+s.opts.NoProxy)
+	}
+	if s.opts.NamePrefix != "" {
+		env = append(env, NamePrefixEnv+"="+s.opts.NamePrefix)
 	}
 	return env
 }
@@ -609,7 +620,7 @@ func (s *Server) handle(ctx context.Context, req Request) Response {
 // checks "silo-tools --version" against before fetching it again,
 // agents.ToolsVersion (a test holds them equal; importing package
 // agents would build silod's store into this binary).
-var Version = "v1.0.0"
+var Version = "v1.1.0"
 
 // Request is a JSON-RPC request or notification.
 type Request struct {

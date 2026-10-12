@@ -179,8 +179,7 @@ func (q *request) globalPath(coll, name string) string {
 // ownDisk is the silo's disk real in zone; another silo's, or none, is
 // 404.
 func (s *Server) ownDisk(q *request, zone, real string) (*compute.Disk, error) {
-	name, _ := q.n.tenantName(real)
-	nf := notFound(q.zonalPath(zone, "disks", name))
+	nf := notFound(q.zonalPath(zone, "disks", real))
 	d, err := s.gce.GetDisk(q.ctx(), s.opts.HostProject, zone, real)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
@@ -196,16 +195,15 @@ func (s *Server) ownDisk(q *request, zone, real string) (*compute.Disk, error) {
 
 // callDisk is the disk the call names.
 func (s *Server) callDisk(q *request) (*compute.Disk, error) {
-	if checkName(q.call.Name) != nil {
-		return nil, notFound(q.zonalPath(q.call.Zone, "disks", q.call.Name))
+	if err := q.n.checkName(q.call.Name); err != nil {
+		return nil, err
 	}
-	return s.ownDisk(q, q.call.Zone, q.n.realName(q.call.Name))
+	return s.ownDisk(q, q.call.Zone, q.call.Name)
 }
 
 // ownImage is the silo's image real.
 func (s *Server) ownImage(q *request, real string) (*compute.Image, error) {
-	name, _ := q.n.tenantName(real)
-	nf := notFound(q.globalPath("images", name))
+	nf := notFound(q.globalPath("images", real))
 	img, err := s.gce.GetImage(q.ctx(), s.opts.HostProject, real)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
@@ -221,8 +219,7 @@ func (s *Server) ownImage(q *request, real string) (*compute.Image, error) {
 
 // ownSnapshot is the silo's snapshot real.
 func (s *Server) ownSnapshot(q *request, real string) (*compute.Snapshot, error) {
-	name, _ := q.n.tenantName(real)
-	nf := notFound(q.globalPath("snapshots", name))
+	nf := notFound(q.globalPath("snapshots", real))
 	snap, err := s.gce.GetSnapshot(q.ctx(), s.opts.HostProject, real)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
@@ -355,7 +352,7 @@ func (s *Server) planDisk(q *request) (diskPlan, error) {
 	if err := decode(q.body, &in); err != nil {
 		return diskPlan{}, err
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return diskPlan{}, err
 	}
 	zone := q.call.Zone
@@ -384,7 +381,7 @@ func (s *Server) planDisk(q *request) (diskPlan, error) {
 	}
 	// GCE fills in the performance the tenant didn't give; the disk is
 	// charged its default, and shows what GCE set.
-	real := &compute.Disk{Name: q.n.realName(in.Name), Description: in.Description, SizeGb: size,
+	real := &compute.Disk{Name: in.Name, Description: in.Description, SizeGb: size,
 		Type: s.diskTypeLink(zone, typ), Labels: q.siloLabels(in.Labels),
 		ProvisionedIops: in.ProvisionedIops, ProvisionedThroughput: in.ProvisionedThroughput, AccessMode: in.AccessMode}
 	if img != nil {
@@ -724,7 +721,7 @@ func (s *Server) planSnapshot(q *request) (snapshotPlan, error) {
 	if err := decode(q.body, &in); err != nil {
 		return snapshotPlan{}, err
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return snapshotPlan{}, err
 	}
 	d, err := s.callDisk(q)
@@ -735,7 +732,7 @@ func (s *Server) planSnapshot(q *request) (snapshotPlan, error) {
 	if err != nil {
 		return snapshotPlan{}, err
 	}
-	real := &compute.Snapshot{Name: q.n.realName(in.Name), Description: in.Description, Labels: q.siloLabels(in.Labels), StorageLocations: locs}
+	real := &compute.Snapshot{Name: in.Name, Description: in.Description, Labels: q.siloLabels(in.Labels), StorageLocations: locs}
 	return snapshotPlan{bill: bill{priceStored(resSnapshot, snapshotObject(real.Name), d.SizeGb<<30)}, disk: d, real: real}, nil
 }
 
@@ -759,10 +756,10 @@ func (s *Server) createSnapshot(q *request) (any, error) {
 }
 
 func (s *Server) callSnapshot(q *request) (*compute.Snapshot, error) {
-	if checkName(q.call.Name) != nil {
-		return nil, notFound(q.globalPath("snapshots", q.call.Name))
+	if err := q.n.checkName(q.call.Name); err != nil {
+		return nil, err
 	}
-	return s.ownSnapshot(q, q.n.realName(q.call.Name))
+	return s.ownSnapshot(q, q.call.Name)
 }
 
 func (s *Server) getSnapshot(q *request) (any, error) {
@@ -840,7 +837,7 @@ func (s *Server) planImage(q *request) (imagePlan, error) {
 	if err := decode(q.body, &in); err != nil {
 		return imagePlan{}, err
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return imagePlan{}, err
 	}
 	n := 0
@@ -852,7 +849,7 @@ func (s *Server) planImage(q *request) (imagePlan, error) {
 	if n != 1 {
 		return imagePlan{}, invalid("Invalid value for field 'resource': silo: an image needs exactly one of sourceDisk, sourceImage and sourceSnapshot")
 	}
-	real := &compute.Image{Name: q.n.realName(in.Name), Description: in.Description, Family: in.Family,
+	real := &compute.Image{Name: in.Name, Description: in.Description, Family: in.Family,
 		Labels: q.siloLabels(in.Labels), GuestOsFeatures: in.GuestOsFeatures, Architecture: in.Architecture}
 	var bytes int64
 	near := ""
@@ -910,10 +907,10 @@ func (s *Server) insertImage(q *request) (any, error) {
 }
 
 func (s *Server) callImage(q *request) (*compute.Image, error) {
-	if checkName(q.call.Name) != nil {
-		return nil, notFound(q.globalPath("images", q.call.Name))
+	if err := q.n.checkName(q.call.Name); err != nil {
+		return nil, err
 	}
-	return s.ownImage(q, q.n.realName(q.call.Name))
+	return s.ownImage(q, q.call.Name)
 }
 
 func (s *Server) deleteImage(q *request) (any, error) {

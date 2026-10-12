@@ -101,7 +101,7 @@ the target is: a sealed ancestor can't change its descendants either.
   "parent": "k7f3qa",
   "depth": 2,
   "backing": {"kind": "subnet"},
-  "facade": {"kind": "gce", "project": "silo-p2m8xd", "endpoint": "http://silo.internal:8080/compute/v1/"},
+  "facade": {"kind": "gce", "project": "silo-p2m8xd", "endpoint": "http://silo.internal:8080/compute/v1/", "name_prefix": "p2m8xd-"},
   "regions": ["us-central1"],
   "quota": {
     "us-central1": {
@@ -118,7 +118,7 @@ the target is: a sealed ancestor can't change its descendants either.
     "blocks": ["10.1.16.0/20"],
     "max_blocks": 4,
     "delegated": [{"range": "10.1.20.0/22", "child": "/team-a/ci/job-412"}],
-    "own_ranges": [{"range": "10.1.16.0/24", "subnet": "build", "region": "us-central1"}]
+    "own_ranges": [{"range": "10.1.16.0/24", "subnet": "subnetworks/us-central1/p2m8xd-build", "region": "us-central1"}]
   },
   "egress": {"own": {"allow": [], "deny": []}, "effective": {"allow": ["*.debian.org"], "deny": []}},
   "grant_policy": {"own": {"exports": "allow", "links": "deny"}, "effective": {"exports": "allow", "links": "deny"}},
@@ -644,7 +644,9 @@ Checks on create: the adapter, credential and model are in the silo's
 effective agent policy, and the model has a price; the lease is within
 `max_lease`; `budget.usd` fits in the silo's free model budget; the silo
 has an `agent_sessions` slot free; the tool VM passes the facade's
-checks and fits the silo's quota; `tool_vm.subnet` is the silo's.
+checks and fits the silo's quota; `tool_vm.subnet` is one of the
+silo's subnets, by its name, which starts with the silo's id
+([`gcp-backend.md`, Naming](gcp-backend.md#naming)).
 Failures use the codes above: `QUOTA_EXCEEDED` (with `class`
 `model_usd`, `agent_sessions` or a quota class), `PERMISSION_DENIED`
 for a policy refusal, `INVALID_ARGUMENT` for an unpriced model, and
@@ -704,8 +706,8 @@ Kinds:
   credential, tokens by kind, the dollars charged, and whether it was
   proxied or reported by the harness ([`agents.md`, Metering](agents.md#metering));
 - `credential.add`, `credential.remove`;
-- `facade.call`: every facade write, with the method, the tenant's
-  object name, the real name, the charge (with its `payer`, `home` and
+- `facade.call`: every facade write, with the method, the object's
+  name (the real one, carrying the silo's prefix), the charge (with its `payer`, `home` and
   `via`: [Room for custom allocators](#room-for-custom-allocators)) and
   the result. Reads are not
   audited by default (call 28: they are many, and they reveal

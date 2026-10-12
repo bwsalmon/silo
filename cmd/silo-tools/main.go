@@ -8,7 +8,10 @@
 // redirect to the gateway of the control VM hosting the agent's
 // session, and serves its tools -- exec, read_file, write_file,
 // edit_file and list_dir -- down that channel, attaching again with
-// backoff whenever it drops. Commands run as the user agent.
+// backoff whenever it drops. Commands run as the user agent, with
+// SILO_NAME_PREFIX set to the prefix every name in the silo's facade
+// must carry, which the facade put in the VM's metadata as
+// silo-name-prefix.
 //
 // It is built static, for amd64 and arm64:
 //
@@ -22,10 +25,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwsalmon/silo/pkg/silo/toolchan"
 	"github.com/bwsalmon/silo/pkg/silo/tools"
@@ -36,13 +43,17 @@ func main() {
 	user := flag.String("user", "agent", "the user commands run as, when silo-tools runs as root")
 	proxy := flag.String("proxy", "http://silo.internal:3128", "the egress proxy, set as HTTPS_PROXY and HTTP_PROXY for commands")
 	noProxy := flag.String("no-proxy", "localhost,127.0.0.1,::1,silo.internal,metadata.google.internal,169.254.169.254", "NO_PROXY for commands")
+	prefix := flag.String("name-prefix", "", "SILO_NAME_PREFIX for commands; the instance metadata's silo-name-prefix if empty")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *version {
 		fmt.Println(tools.Version)
 		return
 	}
-	srv, err := tools.New(tools.Options{User: *user, Proxy: *proxy, NoProxy: *noProxy})
+	if *prefix == "" {
+		*prefix = metadataNamePrefix()
+	}
+	srv, err := tools.New(tools.Options{User: *user, Proxy: *proxy, NoProxy: *noProxy, NamePrefix: *prefix})
 	if err != nil {
 		log.Fatalf("silo-tools: %v", err)
 	}
@@ -52,4 +63,32 @@ func main() {
 		log.Printf("silo-tools %s: the tool channel is up, at %s", tools.Version, u)
 	}}
 	c.Run(ctx)
+}
+
+// metadataURL is the metadata server's silo-name-prefix, which the
+// facade sets on every instance.
+var metadataURL = "http://metadata.google.internal/computeMetadata/v1/instance/attributes/silo-name-prefix"
+
+// metadataNamePrefix reads the silo's name prefix from the metadata
+// server, or "" if it can't.
+func metadataNamePrefix() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("silo-tools: no silo-name-prefix from the metadata server: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("silo-tools: no silo-name-prefix from the metadata server: %s", resp.Status)
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }

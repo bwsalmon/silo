@@ -45,6 +45,9 @@ type Facade struct {
 	Kind     string `json:"kind"`
 	Project  string `json:"project"`
 	Endpoint string `json:"endpoint"`
+	// NamePrefix is what every name in the facade must start with,
+	// <id>- (gcp-backend.md, "Naming", SV-76).
+	NamePrefix string `json:"name_prefix"`
 }
 
 // QuotaAmount is one class in one region of a silo's quota.

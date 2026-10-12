@@ -126,12 +126,12 @@ an operator agent inside it, is walked through in
   "budget": {"usd": "40.00", "spent_usd": "12.31", "period_start": "2026-10-01T00:00:00Z"},
   "tool_vm": {
     "zone": "us-central1-a",
-    "subnet": "work",
+    "subnet": "p2m8xd-work",
     "machine_type": "e2-standard-4",
     "image": "projects/debian-cloud/global/images/family/debian-12",
     "disk_gb": 50,
     "spot": false,
-    "instance": "agent-fixer",
+    "instance": "p2m8xd-agent-fixer",
     "ip": "10.1.16.3",
     "tool_server": "CONNECTED"
   },
@@ -249,7 +249,12 @@ When an agent is created, silod makes its tool VM through the facade,
 as the agent's silo. The facade's checks, charges and rewrites all
 apply ([`gcp-backend.md`, Instances](gcp-backend.md#instances)), so a
 tool VM that wouldn't fit in the silo's quota fails the create with
-`QUOTA_EXCEEDED`. The instance is named `agent-<name>`.
+`QUOTA_EXCEEDED`. The instance is named `<id>-agent-<name>`, carrying
+the silo's prefix as every name in its facade does
+([`gcp-backend.md`, Naming](gcp-backend.md#naming)), and
+`tool_vm.subnet` is the real name of one of the silo's subnets, such
+as `p2m8xd-work`. An agent made before task 3024 recorded
+`agent-<name>`; silod adds the prefix when it reaches that VM.
 
 - **It shows in the facade** like any instance: listed, described and
   charged. silod marks it with the hidden label `silo-agent=<agent id>`.
@@ -283,8 +288,12 @@ Commands run as the unprivileged user `agent`, which has passwordless
 fence, not the user. `exec` sets `HTTPS_PROXY`, `HTTP_PROXY` and
 `NO_PROXY` for the gateway's egress proxy in the command's
 environment (call 41), since an agent's tools expect the internet and
-the proxy is the only way out. The tenant's own VMs are still left
-alone, as [`gateway.md`](gateway.md#egress-proxy) says.
+the proxy is the only way out. It also sets `SILO_NAME_PREFIX` to the
+prefix every name in the silo's facade must carry (`<id>-`), which
+`silo-tools` reads from the instance metadata key `silo-name-prefix`
+the facade sets ([`gcp-backend.md`, Naming](gcp-backend.md#naming)).
+The tenant's own VMs are still left alone, as
+[`gateway.md`](gateway.md#egress-proxy) says.
 
 ### The tool channel {#SV-106}
 

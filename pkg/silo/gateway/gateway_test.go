@@ -249,7 +249,7 @@ func (e *env) mkSubnet(silo string, ownOnly bool) {
 			return address.SetOwn(ctx, tx, silo, []address.OwnRange{{Object: "subnetworks/us-central1/web", Range: p}})
 		})
 	} else {
-		e.ok(silo, "POST", "/compute/v1/projects/"+host+"/regions/us-central1/subnetworks", obj{"name": "web", "ipCidrRange": p.String()})
+		e.ok(silo, "POST", "/compute/v1/projects/"+host+"/regions/us-central1/subnetworks", obj{"name": silo + "-web", "ipCidrRange": p.String()})
 	}
 	e.subnet[silo] = p
 	e.ip[silo] = nth(p, 10)
@@ -661,15 +661,15 @@ func TestControl(t *testing.T) {
 				{e.sealed, "POST", "/silo/v1/quota:preview", obj{}, true},
 				{e.sealed, "GET", cv + "regions/us-central1/subnetworks", nil, true},
 				{e.sealed, "POST", cv + "zones/us-central1-a/operations/x/wait", nil, true},
-				{e.sealed, "POST", cv + "regions/us-central1/subnetworks", obj{"name": "x", "ipCidrRange": "10.0.0.0/26"}, true},
+				{e.sealed, "POST", cv + "regions/us-central1/subnetworks", obj{"name": e.sealed + "-x", "ipCidrRange": "10.0.0.0/26"}, true},
 				// read: mutations, and anything the table doesn't know.
 				{e.ro, "POST", "/silo/v1/silos/ro/children", obj{"name": "c", "address": obj{"prefix_length": 24}}, true},
 				{e.ro, "PATCH", "/silo/v1/self", obj{"labels": obj{"x": "y"}}, true},
 				{e.ro, "POST", "/silo/v1/self:frobnicate", obj{}, true},
 				{e.ro, "POST", "/silo/v1/self/exports", obj{}, true},
-				{e.ro, "POST", cv + "regions/us-central1/subnetworks", obj{"name": "x", "ipCidrRange": e.subnet[e.ro].String()}, true},
-				{e.ro, "DELETE", cv + "regions/us-central1/subnetworks/web", nil, true},
-				{e.ro, "POST", cv + "zones/us-central1-a/instances/vm:frobnicate", obj{}, true},
+				{e.ro, "POST", cv + "regions/us-central1/subnetworks", obj{"name": e.ro + "-x", "ipCidrRange": e.subnet[e.ro].String()}, true},
+				{e.ro, "DELETE", cv + "regions/us-central1/subnetworks/" + e.ro + "-web", nil, true},
+				{e.ro, "POST", cv + "zones/us-central1-a/instances/" + e.ro + "-vm:frobnicate", obj{}, true},
 				// read: reads, by method and not verb, go through.
 				{e.ro, "GET", "/silo/v1/self", nil, false},
 				{e.ro, "POST", "/silo/v1/quota:preview", obj{}, false},

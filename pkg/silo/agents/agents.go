@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/bwsalmon/silo/pkg/silo/ids"
 )
 
 // The agent states (agents.md, "The agent object", SV-101).
@@ -156,20 +158,22 @@ func (s StaticCredentials) Names(context.Context) ([]string, error) {
 var dnsLabel = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 // ValidName reports whether name is a DNS label, as an agent's name
-// must be. The tool VM is agent-<name>, so the name leaves room for
-// the prefix within GCE's 63 characters once the silo's id is added.
+// must be. The tool VM is <id>-agent-<name>, so the name leaves room
+// for the silo's prefix within GCE's 63 characters.
 func ValidName(name string) error {
 	if !dnsLabel.MatchString(name) {
 		return fmt.Errorf("agent name %q: want a DNS label (lower-case letters, digits and -, starting with a letter)", name)
 	}
-	if len(InstanceName(name)) > 56 {
-		return fmt.Errorf("agent name %q: too long; its tool VM, %s, must fit a GCE name with the silo's prefix", name, InstanceName(name))
+	if vm := InstanceName(strings.Repeat("x", ids.Len), name); len(vm) > 63 {
+		return fmt.Errorf("agent name %q: too long; its tool VM, %s, must fit a GCE name with the silo's prefix", name, InstanceName("<id>", name))
 	}
 	return nil
 }
 
-// InstanceName is the facade name of an agent's tool VM.
-func InstanceName(agent string) string { return "agent-" + agent }
+// InstanceName is the name of the tool VM of silo's agent agent:
+// <id>-agent-<name>, carrying the silo's prefix as every name in its
+// facade must (gcp-backend.md, "Naming", SV-76).
+func InstanceName(silo, agent string) string { return ids.NamePrefix(silo) + "agent-" + agent }
 
 // LabelAgent is the hidden label silod puts on a tool VM, with the
 // agent's id as its value. The facade hides labels starting with silo
@@ -177,7 +181,7 @@ func InstanceName(agent string) string { return "agent-" + agent }
 const LabelAgent = "silo-agent"
 
 // ToolsVersion is the silo-tools release a tool VM runs.
-const ToolsVersion = "v1.0.0"
+const ToolsVersion = "v1.1.0"
 
 // ToolsBinaryURL is where a tool VM fetches silo-tools from: the
 // gateway's port 80, which the fence lets every silo reach.

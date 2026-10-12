@@ -76,9 +76,16 @@ var refusedMetadata = map[string]bool{"enable-oslogin": true, "enable-oslogin-2f
 // instance.
 const blockProjectKeys = "block-project-ssh-keys"
 
-// checkMetadata refuses the OS Login keys, and block-project-ssh-keys
-// set to anything but true.
-func checkMetadata(md *compute.Metadata) error {
+// NamePrefixKey is the metadata key the facade sets on every instance
+// to the prefix the names in its silo must carry, such as k7f3qa-
+// (gcp-backend.md, "Naming", SV-76), so that a guest can learn it
+// from the metadata server.
+const NamePrefixKey = "silo-name-prefix"
+
+// checkMetadata refuses the OS Login keys, block-project-ssh-keys set
+// to anything but true, and silo-name-prefix set to anything but
+// prefix.
+func checkMetadata(md *compute.Metadata, prefix string) error {
 	if md == nil {
 		return nil
 	}
@@ -93,37 +100,46 @@ func checkMetadata(md *compute.Metadata) error {
 		if k == blockProjectKeys && (it.Value == nil || !strings.EqualFold(*it.Value, "true")) {
 			return forbidden("silo: metadata key %s may only be true", it.Key)
 		}
+		if k == NamePrefixKey && (it.Value == nil || *it.Value != prefix) {
+			return forbidden("silo: metadata key %s is the facade's own; it may only be %s", it.Key, prefix)
+		}
 	}
 	return nil
 }
 
-// realMetadata is md with block-project-ssh-keys: true.
-func realMetadata(md *compute.Metadata) *compute.Metadata {
+// realMetadata is md with block-project-ssh-keys: true and
+// silo-name-prefix: prefix.
+func realMetadata(md *compute.Metadata, prefix string) *compute.Metadata {
 	out := &compute.Metadata{}
 	if md != nil {
 		out.Fingerprint = md.Fingerprint
 		for _, it := range md.Items {
-			if it != nil && strings.ToLower(it.Key) != blockProjectKeys {
+			if it != nil && strings.ToLower(it.Key) != blockProjectKeys && strings.ToLower(it.Key) != NamePrefixKey {
 				out.Items = append(out.Items, it)
 			}
 		}
 	}
 	t := "true"
-	out.Items = append(out.Items, &compute.MetadataItems{Key: blockProjectKeys, Value: &t})
+	out.Items = append(out.Items, &compute.MetadataItems{Key: blockProjectKeys, Value: &t},
+		&compute.MetadataItems{Key: NamePrefixKey, Value: &prefix})
 	return out
 }
 
-// realTags are the tenant's tags prefixed, with the silo's own <id>
-// tag added.
-func (q *request) realTags(tags *compute.Tags) *compute.Tags {
+// realTags are the tenant's tags, which must carry the silo's prefix
+// as names do, with the silo's own <id> tag added. field is the
+// request field they are in.
+func (q *request) realTags(tags *compute.Tags, field string) (*compute.Tags, error) {
 	out := &compute.Tags{Items: []string{q.target.ID}}
 	if tags != nil {
 		out.Fingerprint = tags.Fingerprint
-		for _, t := range tags.Items {
-			out.Items = append(out.Items, q.n.realName(t))
+		for i, t := range tags.Items {
+			if err := q.n.checkField(field+"["+itoa(i)+"]", t); err != nil {
+				return nil, err
+			}
+			out.Items = append(out.Items, t)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // checkReservation refuses any reservationAffinity but NO_RESERVATION.
@@ -196,8 +212,7 @@ func (s *Server) nics(q *request, zone string, in []*compute.NetworkInterface, t
 			if r.Region != "" && r.Region != region {
 				return nil, invalid("Invalid value for field 'resource.%s.subnetwork': '%s'. The subnetwork must be in region %s", field, nic.Subnetwork, region)
 			}
-			name, _ := q.n.tenantName(r.Name)
-			nf := notFound("projects/" + q.call.Project + "/regions/" + region + "/subnetworks/" + name)
+			nf := notFound("projects/" + q.call.Project + "/regions/" + region + "/subnetworks/" + r.Name)
 			sn, err = s.gce.GetSubnetwork(q.ctx(), s.opts.HostProject, region, r.Name)
 			if err != nil {
 				if gceapi.IsNotFound(err) {
@@ -347,10 +362,10 @@ func (s *Server) planDisks(q *request, zone, instance string, in []*compute.Atta
 				if !ad.Boot {
 					name = instance + "-" + itoa(first+i)
 				}
-				if err := checkName(name); err != nil {
+				if err := q.n.checkName(name); err != nil {
 					return p, invalid("Invalid value for field 'resource.%s': '%s'. silo: name the disk with diskName; its default name is too long", at("initializeParams.diskName"), name)
 				}
-			} else if err := checkName(name); err != nil {
+			} else if err := q.n.checkField("resource."+at("initializeParams.diskName"), name); err != nil {
 				return p, err
 			}
 			typ, err := diskTypeIn(ip.DiskType, zone, "resource."+at("initializeParams.diskType"))
@@ -369,7 +384,7 @@ func (s *Server) planDisks(q *request, zone, instance string, in []*compute.Atta
 			if err != nil {
 				return p, err
 			}
-			realName := q.n.realName(name)
+			realName := name
 			if seen[realName] {
 				return p, errorf(409, ReasonAlreadyExists, "The resource '%s' already exists", q.zonalPath(zone, "disks", name))
 			}
@@ -502,7 +517,7 @@ func (s *Server) planInstance(q *request) (instancePlan, error) {
 	if err := decode(body, &in); err != nil {
 		return instancePlan{}, err
 	}
-	if err := checkName(in.Name); err != nil {
+	if err := q.n.checkName(in.Name); err != nil {
 		return instancePlan{}, err
 	}
 	zone := q.call.Zone
@@ -530,7 +545,7 @@ func (s *Server) planInstanceIn(q *request, zone string, in *compute.Instance, t
 	if err != nil {
 		return instancePlan{}, err
 	}
-	real := q.n.realName(in.Name)
+	real := in.Name
 	gpus, realGPUs, err := s.planGPUs(q, zone, in.GuestAccelerators)
 	if err != nil {
 		return instancePlan{}, err
@@ -552,7 +567,11 @@ func (s *Server) planInstanceIn(q *request, zone string, in *compute.Instance, t
 	b := bill{s.priceInstance(zone, real, mt, gpuExtras(gpus, len(dp.scratch)), instanceVariant(in.Scheduling), false)}
 	// 6. The allowlist has refused the fields outside it; these are the
 	// values it can't judge.
-	if err := checkMetadata(in.Metadata); err != nil {
+	if err := checkMetadata(in.Metadata, q.n.prefix()); err != nil {
+		return instancePlan{}, err
+	}
+	tags, err := q.realTags(in.Tags, "resource.tags.items")
+	if err != nil {
 		return instancePlan{}, err
 	}
 	if err := checkReservation(in.ReservationAffinity); err != nil {
@@ -561,7 +580,7 @@ func (s *Server) planInstanceIn(q *request, zone string, in *compute.Instance, t
 	// 7. The real instance.
 	inst := &compute.Instance{
 		Name: real, Description: in.Description, MachineType: s.machineTypeLink(zone, mt.Name),
-		Labels: q.siloLabels(in.Labels), Tags: q.realTags(in.Tags), Metadata: realMetadata(in.Metadata),
+		Labels: q.siloLabels(in.Labels), Tags: tags, Metadata: realMetadata(in.Metadata, q.n.prefix()),
 		NetworkInterfaces: nics, Disks: dp.disks, Scheduling: in.Scheduling, GuestAccelerators: realGPUs,
 		ServiceAccounts:         []*compute.ServiceAccount{},
 		ReservationAffinity:     &compute.ReservationAffinity{ConsumeReservationType: "NO_RESERVATION"},
@@ -616,13 +635,13 @@ func (q *request) instance(inst *compute.Instance) (map[string]any, error) {
 }
 
 // callInstance is the silo's instance the call names; another silo's,
-// or none, is 404.
+// or none, is 404, and a name without the silo's prefix 400.
 func (s *Server) callInstance(q *request) (*compute.Instance, error) {
 	nf := notFound(q.zonalPath(q.call.Zone, "instances", q.call.Name))
-	if checkName(q.call.Name) != nil {
-		return nil, nf
+	if err := q.n.checkName(q.call.Name); err != nil {
+		return nil, err
 	}
-	inst, err := s.gce.GetInstance(q.ctx(), s.opts.HostProject, q.call.Zone, q.n.realName(q.call.Name))
+	inst, err := s.gce.GetInstance(q.ctx(), s.opts.HostProject, q.call.Zone, q.call.Name)
 	if err != nil {
 		if gceapi.IsNotFound(err) {
 			return nil, nf
@@ -1049,14 +1068,14 @@ func (s *Server) setInstanceMetadata(q *request) (any, error) {
 	if err := decode(q.body, &in); err != nil {
 		return nil, s.refuse(q, err)
 	}
-	if err := checkMetadata(&in); err != nil {
+	if err := checkMetadata(&in, q.n.prefix()); err != nil {
 		return nil, s.refuse(q, err)
 	}
 	inst, err := s.callInstance(q)
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}
-	op, err := s.gce.SetInstanceMetadata(q.ctx(), s.opts.HostProject, q.call.Zone, inst.Name, realMetadata(&in))
+	op, err := s.gce.SetInstanceMetadata(q.ctx(), s.opts.HostProject, q.call.Zone, inst.Name, realMetadata(&in, q.n.prefix()))
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}
@@ -1076,7 +1095,11 @@ func (s *Server) setInstanceTags(q *request) (any, error) {
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}
-	op, err := s.gce.SetInstanceTags(q.ctx(), s.opts.HostProject, q.call.Zone, inst.Name, q.realTags(&in))
+	tags, err := q.realTags(&in, "items")
+	if err != nil {
+		return nil, s.refuse(q, err)
+	}
+	op, err := s.gce.SetInstanceTags(q.ctx(), s.opts.HostProject, q.call.Zone, inst.Name, tags)
 	if err != nil {
 		return nil, s.refuse(q, err)
 	}

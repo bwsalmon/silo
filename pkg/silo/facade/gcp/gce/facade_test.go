@@ -422,7 +422,7 @@ func TestControlPolicy(t *testing.T) {
 	e := newEnv(t)
 	// Under read, reads work and writes are refused, in any project.
 	e.ok(e.ro, "GET", cv(host, "zones"), nil)
-	msg := e.fail(403, "forbidden", e.ro, "POST", cv(host, "zones/us-central1-a/disks"), obj{"name": "d"})
+	msg := e.fail(403, "forbidden", e.ro, "POST", cv(host, "zones/us-central1-a/disks"), obj{"name": e.ro + "-d"})
 	if msg != "silo: control-plane calls from /ro are refused (control=read)" {
 		t.Errorf("read: %q", msg)
 	}
@@ -462,24 +462,28 @@ func TestImages(t *testing.T) {
 		Labels: map[string]string{"silo": e.a, "silo-managed": "true", "env": "dev"}})
 	e.gce.AddImage(host, &compute.Image{Name: e.b + "-theirs", Labels: map[string]string{"silo": e.b, "silo-managed": "true"}})
 	own := items(e.ok(e.a, "GET", cv(host, "global/images"), nil))
-	if fmt.Sprint(names(own)) != "[mine]" {
+	if fmt.Sprint(names(own)) != "["+e.a+"-mine]" {
 		t.Fatalf("own images: %v", names(own))
 	}
 	if fmt.Sprint(own[0]["labels"]) != "map[env:dev]" {
 		t.Errorf("labels shown: %v", own[0]["labels"])
 	}
-	if own[0]["selfLink"] != DefaultEndpoint+"projects/silo-"+e.a+"/global/images/mine" {
+	if own[0]["selfLink"] != DefaultEndpoint+"projects/silo-"+e.a+"/global/images/"+e.a+"-mine" {
 		t.Errorf("selfLink %v", own[0]["selfLink"])
 	}
-	if got := e.ok(e.a, "GET", cv("silo-"+e.a, "global/images/family/app"), nil); got["name"] != "mine" {
+	if got := e.ok(e.a, "GET", cv("silo-"+e.a, "global/images/family/app"), nil); got["name"] != e.a+"-mine" {
 		t.Errorf("own getFromFamily: %v", got)
 	}
-	e.fail(404, "notFound", e.a, "GET", cv(host, "global/images/theirs"), nil)
-	// b's real name, given as a's tenant name, is still a's prefix.
-	e.fail(404, "notFound", e.a, "GET", cv(host, "global/images/"+e.b+"-theirs"), nil)
-	e.fail(400, "invalid", e.a, "GET", cv(host, "global/images/"+strings.Repeat("x", 57)), nil)
+	e.fail(404, "notFound", e.a, "GET", cv(host, "global/images/"+e.a+"-theirs"), nil)
+	// b's name carries b's prefix, which isn't a's; a bare name none.
+	msg := e.fail(400, "invalid", e.a, "GET", cv(host, "global/images/"+e.b+"-theirs"), nil)
+	if !strings.Contains(msg, `names in this silo must start with "`+e.a+`-"`) {
+		t.Errorf("another silo's prefix: %q", msg)
+	}
+	e.fail(400, "invalid", e.a, "GET", cv(host, "global/images/mine"), nil)
+	e.fail(400, "invalid", e.a, "GET", cv(host, "global/images/"+e.a+"-"+strings.Repeat("x", 57)), nil)
 	// The root, an ancestor, reads team-a's image in team-a's project.
-	if got := e.ok(e.root, "GET", cv("silo-"+e.a, "global/images/mine"), nil); got["name"] != "mine" {
+	if got := e.ok(e.root, "GET", cv("silo-"+e.a, "global/images/"+e.a+"-mine"), nil); got["name"] != e.a+"-mine" {
 		t.Errorf("ancestor images.get: %v", got)
 	}
 }
@@ -499,24 +503,33 @@ func TestListFilters(t *testing.T) {
 		return names(items(e.ok(e.a, "GET", cv(host, "global/images?"+query), nil)))
 	}
 	q := func(k, v string) string { return k + "=" + url.QueryEscape(v) }
+	// Names are the real ones, prefixed: a filter on a name is on it.
+	p := e.a + "-"
+	in := func(l ...string) string {
+		for i := range l {
+			l[i] = p + l[i]
+		}
+		return fmt.Sprint(l)
+	}
 	for _, c := range []struct{ query, want string }{
-		{"", "[app-2 base mine]"},
-		{q("filter", "labels.env = dev"), "[base mine]"},
-		{q("filter", `name eq ".*\bmine\b.*"`), "[mine]"},
-		{q("filter", "labels.env:* AND (name eq \"a.*\")"), "[app-2]"},
-		{q("filter", "diskSizeGb > 15 OR name = mine"), "[app-2 base mine]"},
-		{q("filter", "NOT diskSizeGb > 15"), "[mine]"},
+		{"", in("app-2", "base", "mine")},
+		{q("filter", "labels.env = dev"), in("base", "mine")},
+		{q("filter", `name eq ".*\bmine\b.*"`), in("mine")},
+		{q("filter", "labels.env:* AND (name eq \""+p+"a.*\")"), in("app-2")},
+		{q("filter", "diskSizeGb > 15 OR name = "+p+"mine"), in("app-2", "base", "mine")},
+		{q("filter", "NOT diskSizeGb > 15"), in("mine")},
+		{q("filter", "name = "+p+"mine"), in("mine")},
+		// A bare name is no object's.
+		{q("filter", "name = mine"), "[]"},
 		// Another silo's objects are never there to match.
 		{q("filter", "name = theirs OR name = "+e.b+"-theirs"), "[]"},
-		// The real, prefixed name and the hidden labels match nothing.
-		{q("filter", "name = "+e.a+"-mine"), "[]"},
-		{q("filter", `name eq ".*\b`+e.a+`\-mine\b.*"`), "[]"},
+		// The hidden labels match nothing.
 		{q("filter", "labels.silo = "+e.a), "[]"},
 		{q("filter", "labels.silo-managed:*"), "[]"},
 		{q("filter", "labels:silo"), "[]"},
-		{q("orderBy", "creationTimestamp desc"), "[mine app-2 base]"},
-		{q("orderBy", "diskSizeGb desc"), "[base app-2 mine]"},
-		{q("filter", "labels.env = dev") + "&" + q("orderBy", "diskSizeGb desc"), "[base mine]"},
+		{q("orderBy", "creationTimestamp desc"), in("mine", "app-2", "base")},
+		{q("orderBy", "diskSizeGb desc"), in("base", "app-2", "mine")},
+		{q("filter", "labels.env = dev") + "&" + q("orderBy", "diskSizeGb desc"), in("base", "mine")},
 	} {
 		if got := fmt.Sprint(list(c.query)); got != c.want {
 			t.Errorf("images.list?%s: %s, want %s", c.query, got, c.want)
@@ -526,14 +539,14 @@ func TestListFilters(t *testing.T) {
 	var paged []string
 	tok := ""
 	for i := 0; i < 5; i++ {
-		l := e.ok(e.a, "GET", cv(host, "global/images?maxResults=1&"+q("orderBy", "name desc")+"&"+q("filter", "name != base")+"&pageToken="+tok), nil)
+		l := e.ok(e.a, "GET", cv(host, "global/images?maxResults=1&"+q("orderBy", "name desc")+"&"+q("filter", "name != "+p+"base")+"&pageToken="+tok), nil)
 		paged = append(paged, names(items(l))...)
 		tok, _ = l["nextPageToken"].(string)
 		if tok == "" {
 			break
 		}
 	}
-	if fmt.Sprint(paged) != "[mine app-2]" {
+	if fmt.Sprint(paged) != in("mine", "app-2") {
 		t.Errorf("paged: %v", paged)
 	}
 	// Outside the grammar is 400 invalid.
@@ -588,7 +601,7 @@ func TestNetworks(t *testing.T) {
 	if fmt.Sprint(n["siloAddressBlocks"]) != fmt.Sprint(blocks) || !strings.Contains(n["description"].(string), blocks[0].(string)) {
 		t.Errorf("blocks: %v / %v, want %v", n["siloAddressBlocks"], n["description"], blocks)
 	}
-	if fmt.Sprint(n["subnetworks"]) != "["+DefaultEndpoint+"projects/silo-"+e.a+"/regions/us-central1/subnetworks/sub1]" {
+	if fmt.Sprint(n["subnetworks"]) != "["+DefaultEndpoint+"projects/silo-"+e.a+"/regions/us-central1/subnetworks/"+e.a+"-sub1]" {
 		t.Errorf("subnetworks: %v", n["subnetworks"])
 	}
 	if l := items(e.ok(e.a, "GET", cv(host, "global/networks"), nil)); fmt.Sprint(names(l)) != "[default]" {
@@ -602,7 +615,7 @@ func TestResponseAllowlist(t *testing.T) {
 	e.gce.AddImage(host, &compute.Image{Name: e.a + "-leaky", Labels: map[string]string{"silo": e.a},
 		RawDisk: &compute.ImageRawDisk{Source: "gs://host-bucket/secret.tar.gz"}, SatisfiesPzs: true,
 		ShieldedInstanceInitialState: &compute.InitialStateConfig{Pk: &compute.FileContentBuffer{Content: "c2VjcmV0"}}})
-	img := e.ok(e.a, "GET", cv(host, "global/images/leaky"), nil)
+	img := e.ok(e.a, "GET", cv(host, "global/images/"+e.a+"-leaky"), nil)
 	allowed := map[string]bool{}
 	for _, f := range responseFields["compute#image"] {
 		allowed[f] = true
@@ -624,47 +637,64 @@ func TestResponseAllowlist(t *testing.T) {
 
 func TestNaming(t *testing.T) {
 	n := &namer{silo: "k7f3qa", host: host, base: DefaultEndpoint, network: "silo", public: map[string]bool{"debian-cloud": true}}
+	// In: names pass unchanged, only the project and the shared VPC are
+	// mapped.
 	for _, c := range []struct{ in, coll, want string }{
-		{"builder", "instances", "k7f3qa-builder"},
+		{"k7f3qa-builder", "instances", "k7f3qa-builder"},
 		{"default", "networks", "silo"},
 		{"n2-standard-8", "machineTypes", "n2-standard-8"},
-		{"zones/us-central1-a/disks/data", "disks", "zones/us-central1-a/disks/k7f3qa-data"},
-		{"projects/silo-k7f3qa/zones/us-central1-a/instances/builder", "", "projects/" + host + "/zones/us-central1-a/instances/k7f3qa-builder"},
+		{"zones/us-central1-a/disks/k7f3qa-data", "disks", "zones/us-central1-a/disks/k7f3qa-data"},
+		{"projects/silo-k7f3qa/zones/us-central1-a/instances/k7f3qa-builder", "", "projects/" + host + "/zones/us-central1-a/instances/k7f3qa-builder"},
 		{"projects/" + host + "/global/networks/default", "", "projects/" + host + "/global/networks/silo"},
-		{"global/images/base", "", "global/images/k7f3qa-base"},
-		{"http://silo.internal:8080/compute/v1/projects/silo-k7f3qa/zones/us-central1-a/instances/builder", "",
+		{"global/images/k7f3qa-base", "", "global/images/k7f3qa-base"},
+		{"http://silo.internal:8080/compute/v1/projects/silo-k7f3qa/zones/us-central1-a/instances/k7f3qa-builder", "",
 			gceapi.SelfLinkBase + "projects/" + host + "/zones/us-central1-a/instances/k7f3qa-builder"},
-		{"https://www.googleapis.com/compute/v1/projects/silo-k7f3qa/global/images/base", "",
+		{"https://www.googleapis.com/compute/v1/projects/silo-k7f3qa/global/images/k7f3qa-base", "",
 			gceapi.SelfLinkBase + "projects/" + host + "/global/images/k7f3qa-base"},
-		{"https://compute.googleapis.com/compute/v1/projects/silo-k7f3qa/regions/us-central1/subnetworks/sub1", "",
+		{"https://compute.googleapis.com/compute/v1/projects/silo-k7f3qa/regions/us-central1/subnetworks/k7f3qa-sub1", "",
 			gceapi.SelfLinkBase + "projects/" + host + "/regions/us-central1/subnetworks/k7f3qa-sub1"},
 		{"projects/silo-k7f3qa/zones/us-central1-a/machineTypes/n2-standard-8", "",
 			"projects/" + host + "/zones/us-central1-a/machineTypes/n2-standard-8"},
 		{"projects/debian-cloud/global/images/family/debian-12", "", "projects/debian-cloud/global/images/family/debian-12"},
 		{"https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-x", "",
 			gceapi.SelfLinkBase + "projects/debian-cloud/global/images/debian-12-x"},
+		{"k7f3qa-" + strings.Repeat("a", 56), "instances", "k7f3qa-" + strings.Repeat("a", 56)},
 	} {
 		got, err := n.inLink(c.in, c.coll)
 		if err != nil || got != c.want {
 			t.Errorf("inLink(%q, %q) = %q, %v; want %q", c.in, c.coll, got, err, c.want)
 		}
 	}
+	const hint = `silo: names in this silo must start with "k7f3qa-"`
 	for _, c := range []struct {
 		in, coll string
 		code     int
 		reason   string
+		message  string
 	}{
-		{strings.Repeat("a", 57), "instances", 400, "invalid"},
-		{"zones/z/instances/" + strings.Repeat("a", 57), "", 400, "invalid"},
-		{"projects/silo-other/zones/z/instances/x", "", 403, "forbidden"},
-		{"https://www.googleapis.com/compute/v1/projects/elsewhere/global/images/x", "", 403, "forbidden"},
-		{"projects/silo-k7f3qa/global/networks/other", "", 404, "notFound"},
-		{"other", "networks", 404, "notFound"},
+		// A bare name, as tenants gave them before SV-76 was revised,
+		// in every form.
+		{"builder", "instances", 400, "invalid", hint},
+		{"zones/z/disks/data", "", 400, "invalid", hint},
+		{"projects/silo-k7f3qa/global/images/base", "", 400, "invalid", hint},
+		{DefaultEndpoint + "projects/silo-k7f3qa/zones/z/instances/builder", "", 400, "invalid", hint},
+		// Another silo's prefix, in this silo's project.
+		{"b2c4de-builder", "instances", 400, "invalid", hint},
+		{"zones/z/instances/b2c4de-builder", "", 400, "invalid", hint},
+		// The prefix alone, and GCE's own limits.
+		{"k7f3qa-", "instances", 400, "invalid", "Must be a match of regex"},
+		{"k7f3qa-" + strings.Repeat("a", 57), "instances", 400, "invalid", "Must be a match of regex"},
+		{"zones/z/instances/k7f3qa-" + strings.Repeat("a", 57), "", 400, "invalid", "Must be a match of regex"},
+		{"k7f3qa-Builder", "instances", 400, "invalid", "Must be a match of regex"},
+		{"projects/silo-other/zones/z/instances/other-x", "", 403, "forbidden", ""},
+		{"https://www.googleapis.com/compute/v1/projects/elsewhere/global/images/x", "", 403, "forbidden", ""},
+		{"projects/silo-k7f3qa/global/networks/other", "", 404, "notFound", ""},
+		{"other", "networks", 404, "notFound", ""},
 	} {
 		_, err := n.inLink(c.in, c.coll)
 		e := asError(err, nil)
-		if err == nil || e.Code != c.code || e.Reason != c.reason {
-			t.Errorf("inLink(%q) = %v, want %d %s", c.in, err, c.code, c.reason)
+		if err == nil || e.Code != c.code || e.Reason != c.reason || !strings.Contains(e.Message, c.message) {
+			t.Errorf("inLink(%q) = %v, want %d %s %q", c.in, err, c.code, c.reason, c.message)
 		}
 	}
 	// A facade on another endpoint (--facade-endpoint, silo proxy)
@@ -674,19 +704,21 @@ func TestNaming(t *testing.T) {
 	local.base = "http://127.0.0.1:8642/compute/v1/"
 	for _, c := range []struct{ in, want string }{
 		{local.base + "projects/silo-k7f3qa/global/networks/default", gceapi.SelfLinkBase + "projects/" + host + "/global/networks/silo"},
-		{local.base + "projects/silo-k7f3qa/regions/us-central1/subnetworks/sub1", gceapi.SelfLinkBase + "projects/" + host + "/regions/us-central1/subnetworks/k7f3qa-sub1"},
+		{local.base + "projects/silo-k7f3qa/regions/us-central1/subnetworks/k7f3qa-sub1", gceapi.SelfLinkBase + "projects/" + host + "/regions/us-central1/subnetworks/k7f3qa-sub1"},
 	} {
 		if got, err := local.inLink(c.in, ""); err != nil || got != c.want {
 			t.Errorf("on %s, inLink(%q) = %q, %v; want %q", local.base, c.in, got, err, c.want)
 		}
 	}
-	if _, err := local.inLink(local.base+"projects/silo-other/zones/z/instances/x", ""); asError(err, nil).Code != 403 {
+	if _, err := local.inLink(local.base+"projects/silo-other/zones/z/instances/other-x", ""); asError(err, nil).Code != 403 {
 		t.Errorf("on %s, another silo's link: %v, want 403", local.base, err)
 	}
-	if err := checkName(strings.Repeat("a", 56)); err != nil {
-		t.Errorf("a 56-character name: %v", err)
+	// 63 characters, GCE's own limit, prefix included.
+	if err := n.checkName("k7f3qa-" + strings.Repeat("a", 56)); err != nil {
+		t.Errorf("a 63-character name: %v", err)
 	}
-	// Out: every form, and in every field.
+	// Out: names unchanged in every form and field; the project and the
+	// shared VPC mapped, links on the facade.
 	inst := obj{
 		"name":     "k7f3qa-builder",
 		"selfLink": gceapi.SelfLinkBase + "projects/" + host + "/zones/us-central1-a/instances/k7f3qa-builder",
@@ -705,27 +737,32 @@ func TestNaming(t *testing.T) {
 	n.out(inst, "")
 	base := DefaultEndpoint + "projects/silo-k7f3qa/"
 	for path, want := range map[string]any{
-		"name": "builder", "selfLink": base + "zones/us-central1-a/instances/builder",
+		"name": "k7f3qa-builder", "selfLink": base + "zones/us-central1-a/instances/k7f3qa-builder",
 		"zone":        base + "zones/us-central1-a",
 		"sourceImage": DefaultEndpoint + "projects/debian-cloud/global/images/debian-12-x",
-		"description": "made by builder in projects/silo-k7f3qa/zones/z",
+		"description": "made by k7f3qa-builder in projects/silo-k7f3qa/zones/z",
 	} {
 		if inst[path] != want {
 			t.Errorf("out %s = %v, want %v", path, inst[path], want)
 		}
 	}
-	if got := inst["disks"].([]any)[0].(obj)["source"]; got != base+"zones/us-central1-a/disks/boot" {
+	if got := inst["disks"].([]any)[0].(obj)["source"]; got != base+"zones/us-central1-a/disks/k7f3qa-boot" {
 		t.Errorf("disks[].source = %v", got)
 	}
 	ni := inst["networkInterfaces"].([]any)[0].(obj)
-	if ni["network"] != base+"global/networks/default" || ni["subnetwork"] != "projects/silo-k7f3qa/regions/us-central1/subnetworks/sub1" {
+	if ni["network"] != base+"global/networks/default" || ni["subnetwork"] != "projects/silo-k7f3qa/regions/us-central1/subnetworks/k7f3qa-sub1" {
 		t.Errorf("networkInterfaces: %v", ni)
 	}
-	if fmt.Sprint(inst["users"]) != "["+base+"zones/us-central1-a/instances/a]" {
+	if fmt.Sprint(inst["users"]) != "["+base+"zones/us-central1-a/instances/k7f3qa-a]" {
 		t.Errorf("users = %v", inst["users"])
 	}
-	if fmt.Sprint(inst["labels"]) != "map[team:x]" || fmt.Sprint(inst["tags"].(obj)["items"]) != "[web]" {
+	// The facade's own label and tag go; the tenant's prefixed tag stays.
+	if fmt.Sprint(inst["labels"]) != "map[team:x]" || fmt.Sprint(inst["tags"].(obj)["items"]) != "[k7f3qa-web]" {
 		t.Errorf("labels %v tags %v", inst["labels"], inst["tags"])
+	}
+	// Free text keeps names as GCE wrote them.
+	if got := n.outText("The resource 'projects/" + host + "/zones/z/instances/k7f3qa-builder' already exists"); got != "The resource 'projects/silo-k7f3qa/zones/z/instances/k7f3qa-builder' already exists" {
+		t.Errorf("outText = %q", got)
 	}
 }
 
@@ -809,13 +846,13 @@ func TestWritesAndOperations(t *testing.T) {
 	realInsert, realFields := handlers["disks.insert"], requestFields["disks.insert"]
 	handlers["disks.insert"] = func(s *Server, q *request) (any, error) {
 		name, _ := q.body["name"].(string)
-		if err := checkName(name); err != nil {
+		if err := q.n.checkName(name); err != nil {
 			return nil, err
 		}
 		size, _ := q.body["sizeGb"].(string)
 		var gb int64
 		fmt.Sscan(size, &gb)
-		object := "disk:" + q.call.Zone + "/" + q.n.realName(name)
+		object := "disk:" + q.call.Zone + "/" + name
 		amount := []ledger.Amount{{Key: ledger.Key{Kind: "gce", Class: "ssd_disk_gb", Region: gceapi.ZoneRegion(q.call.Zone)}, Amount: ledger.Units(gb)}}
 		err := s.st.Tx(q.ctx(), func(tx store.Tx) error {
 			return ledger.Charge(q.ctx(), tx, ledger.ChargeRequest{Object: object, Silo: q.target.ID, Via: q.via(), Amounts: amount})
@@ -824,7 +861,7 @@ func TestWritesAndOperations(t *testing.T) {
 			s.audit(q, asError(err, nil).Reason, nil, nil)
 			return nil, err
 		}
-		op, err := s.gce.InsertDisk(q.ctx(), s.opts.HostProject, q.call.Zone, &compute.Disk{Name: q.n.realName(name), SizeGb: gb,
+		op, err := s.gce.InsertDisk(q.ctx(), s.opts.HostProject, q.call.Zone, &compute.Disk{Name: name, SizeGb: gb,
 			Type: "zones/" + q.call.Zone + "/diskTypes/pd-ssd", Labels: map[string]string{"silo": q.target.ID, "silo-managed": "true"}})
 		if err != nil {
 			s.st.Tx(q.ctx(), func(tx store.Tx) error { _, err := ledger.Refund(q.ctx(), tx, object, nil); return err })
@@ -843,19 +880,19 @@ func TestWritesAndOperations(t *testing.T) {
 		return u
 	}
 	zone := "zones/us-central1-a/disks"
-	msg := e.fail(403, "forbidden", e.a, "POST", cv(host, zone), obj{"name": "d1", "sizeGb": "10", "storagePool": "p"})
+	msg := e.fail(403, "forbidden", e.a, "POST", cv(host, zone), obj{"name": e.a + "-d1", "sizeGb": "10", "storagePool": "p"})
 	if msg != "silo: field storagePool is not allowed" {
 		t.Errorf("field refusal: %q", msg)
 	}
-	e.fail(403, "forbidden", e.a, "POST", cv(host, zone), obj{"name": "d1", "labels": obj{"silo": "x"}})
-	e.fail(400, "invalid", e.a, "POST", cv(host, zone), obj{"name": strings.Repeat("d", 57), "sizeGb": "1"})
-	e.fail(403, "regionNotAllowed", e.a, "POST", cv(host, "zones/us-east1-b/disks"), obj{"name": "d1"})
-	e.fail(403, "quotaExceeded", e.a, "POST", cv(host, zone), obj{"name": "big", "sizeGb": "1000"})
+	e.fail(403, "forbidden", e.a, "POST", cv(host, zone), obj{"name": e.a + "-d1", "labels": obj{"silo": "x"}})
+	e.fail(400, "invalid", e.a, "POST", cv(host, zone), obj{"name": e.a + "-" + strings.Repeat("d", 57), "sizeGb": "1"})
+	e.fail(403, "regionNotAllowed", e.a, "POST", cv(host, "zones/us-east1-b/disks"), obj{"name": e.a + "-d1"})
+	e.fail(403, "quotaExceeded", e.a, "POST", cv(host, zone), obj{"name": e.a + "-big", "sizeGb": "1000"})
 
-	op := e.ok(e.a, "POST", cv(host, zone+"?requestId=r1"), obj{"name": "d1", "sizeGb": "10", "labels": obj{"env": "x"}})
+	op := e.ok(e.a, "POST", cv(host, zone+"?requestId=r1"), obj{"name": e.a + "-d1", "sizeGb": "10", "labels": obj{"env": "x"}})
 	opPath := "zones/us-central1-a/operations/" + op["name"].(string)
 	base := DefaultEndpoint + "projects/silo-" + e.a + "/"
-	if op["user"] != "silo:"+e.a || op["targetLink"] != base+"zones/us-central1-a/disks/d1" ||
+	if op["user"] != "silo:"+e.a || op["targetLink"] != base+"zones/us-central1-a/disks/"+e.a+"-d1" ||
 		op["selfLink"] != base+opPath || op["zone"] != base+"zones/us-central1-a" {
 		t.Errorf("operation: %v", op)
 	}
@@ -865,7 +902,7 @@ func TestWritesAndOperations(t *testing.T) {
 	recs := e.audit(e.a, KindFacadeCall)
 	last := recs[len(recs)-1]
 	f := last["fields"].(obj)
-	if last["result"] != "OK" || f["name"] != "d1" || f["real_name"] != e.a+"-d1" || f["method"] != "compute.disks.insert" ||
+	if last["result"] != "OK" || f["name"] != e.a+"-d1" || f["method"] != "compute.disks.insert" ||
 		last["via"] != nil || last["request_id"] != "r1" {
 		t.Errorf("audit: %v", last)
 	}
@@ -895,7 +932,7 @@ func TestWritesAndOperations(t *testing.T) {
 	// An ancestor writes into team-a: team-a's object and quota, audited
 	// as via=ancestor:<root>, the operation's user the root.
 	e.gce.FailOperation(fake.Failure{Method: "disks.insert", Kind: fake.FailQuota})
-	op2 := e.ok(e.root, "POST", cv("silo-"+e.a, zone), obj{"name": "d2", "sizeGb": "20"})
+	op2 := e.ok(e.root, "POST", cv("silo-"+e.a, zone), obj{"name": e.a + "-d2", "sizeGb": "20"})
 	if op2["user"] != "silo:"+e.root {
 		t.Errorf("ancestor's operation user: %v", op2["user"])
 	}

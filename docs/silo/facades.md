@@ -87,11 +87,12 @@ top of `facade.go`:
    refused, and so is a label or tag in silo's reserved namespace
    (SV-63, SV-76).
 6. **Call the backend** for the silo's own objects only, and **build
-   the response** from allowlisted fields, with real names and links
-   mapped back to the tenant's (SV-76).
+   the response** from allowlisted fields, with links mapped back to
+   the tenant's project. Names are checked, not mapped: the tenant uses
+   the real ones (SV-76).
 7. **Audit.** Every write, accepted or refused once its silo is known,
    is a `facade.call` record in the target silo's audit log, with the
-   via, the method, the tenant's and real names, and the charges.
+   via, the method, the object's name, and the charges.
 
 Steps 1, 2 and 7 are the same for any service: they depend on the
 silo tree, grants and the audit log, not on the API. Steps 3 to 6 have
