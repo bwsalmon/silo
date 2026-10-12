@@ -44,3 +44,23 @@ packages have since been flattened: commits and test reports from
 before then (including grain's, and `docs/test-runs/`) cite
 `pkg/silo/<x>`, which now lives at `pkg/<x>`. Its earlier history is
 grain's.
+
+For spec verification of the `SV-N` ids in `docs/silo`, which needs
+grain's history as well as this repository's (grain's classification
+is `docs/test-runs/2026-10-12-silo-sv-classification.md` there):
+
+- Commit 97e94df here moved Silo out of grain at grain `c2044e70f`.
+  The `Design-Item: docs/silo/...` trailers for 115 of the 123 ids are
+  in grain: `git log c2044e70f --grep='Design-Item: docs/silo/'`. Only
+  SV-96, SV-97, SV-108, SV-110, SV-113, SV-114, SV-121 and SV-122 have
+  trailers in this repository.
+- Every implementing commit cites
+  `Design-Rev: 33a3b9ef35042788edacccde067fa790fb9d07e8`, a grain
+  commit from before the ids were added in grain `604dd85aa`. That
+  commit changes only heading id markers, so read `604dd85aa` in
+  `33a3b9e`'s place; otherwise `designdoc.Classify` reports all 123
+  ids as "changed, done".
+- Three commits edited `docs/silo` sections together with code but
+  carry no `Design-Item` trailers: 22f863e (SV-37), 17a84d1 (SV-108,
+  SV-118) and 7027ed7 (SV-4, 24, 26, 56, 65, 66, 70, 71, 72, 75, 76,
+  101, 104, 105, 122).
