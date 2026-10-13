@@ -108,6 +108,47 @@ jobs:
           SILO_NSD_RUNSC: /tmp/gvisor/runsc
         run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./cmd/silo/
 
+  # The registry for local image repos (docs/silo/local-registry.md §13,
+  # step 27) against real clients: the OCI distribution-spec
+  # conformance suite, crane, skopeo and oras, each against the
+  # registry in process on a loopback port. The `go` job skips these
+  # cases, having none of the clients; SILO_REQUIRE_REGISTRY_CLIENTS
+  # makes a missing one a failure here.
+  registry:
+    name: registry
+    paths-ignore: *not-read-by-the-go-program
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 30
+    steps:
+      # Downloads, so `infrastructure:`. The suite, crane and oras are
+      # pinned Go modules, built outside this module (GOFLAGS cleared:
+      # -mod=readonly means nothing there); skopeo is Debian's.
+      - name: Install the conformance suite, crane, skopeo and oras
+        infrastructure: true
+        env:
+          GOFLAGS: ""
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq skopeo >/dev/null
+          skopeo --version
+          go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+          go install oras.land/oras/cmd/oras@v1.3.4
+          tmp=$(mktemp -d) && cd "$tmp" && go mod init conformance-build >/dev/null 2>&1
+          go get github.com/opencontainers/distribution-spec/conformance@v0.0.0-20260831232431-97274622c111
+          cp -r "$(go list -m -f '{{.Dir}}' github.com/opencontainers/distribution-spec/conformance)" suite
+          chmod -R u+w suite && cd suite && go test -c -o /tmp/oci-conformance.test .
+
+      - name: Test
+        env:
+          SILO_REQUIRE_REGISTRY_CLIENTS: "1"
+          SILO_OCI_CONFORMANCE: /tmp/oci-conformance.test
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          go test -count=1 -timeout 10m -v -run 'TestDistributionSpec|TestCraneCLI|TestSkopeo|TestOras' ./pkg/registry/
+
   # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server
   # per test (pkg/internal/pgtest). SILO_REQUIRE_POSTGRES makes every

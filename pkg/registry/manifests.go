@@ -28,6 +28,14 @@ const (
 
 func isIndex(mt string) bool { return mt == MediaOCIIndex || mt == MediaDockerList }
 
+// nonDistributable reports whether a layer's media type says its bytes
+// are fetched from its urls rather than pushed, so that a manifest may
+// name it without the repo holding it.
+func nonDistributable(mt string) bool {
+	return strings.HasPrefix(mt, "application/vnd.oci.image.layer.nondistributable.") ||
+		mt == "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"
+}
+
 type platform struct {
 	Architecture string   `json:"architecture"`
 	OS           string   `json:"os"`
@@ -49,7 +57,8 @@ type descriptor struct {
 }
 
 // manifest is an image manifest or an index, as the registry parses
-// either: strictly, every field known.
+// either. Fields it doesn't know are kept in the stored bytes, as the
+// distribution spec's custom fields are.
 type manifest struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	MediaType     string            `json:"mediaType,omitempty"`
@@ -65,7 +74,6 @@ type manifest struct {
 // schema version, the media type it names, and the fields its type has.
 func parseManifest(b []byte, mt string) (*manifest, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
 	var m manifest
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("not a manifest: %v", err)
@@ -274,6 +282,9 @@ func (s *Service) putManifest(q *request, ref string) {
 					return err
 				}
 			}
+			if !ok && nonDistributable(d.MediaType) {
+				continue // not here, and not charged
+			}
 			if !ok {
 				return rerr(http.StatusBadRequest, codeManifestUnknownBl, "blob unknown to registry: %s", d.Digest)
 			}
@@ -392,8 +403,14 @@ func (s *Service) referrers(q *request, digest string) {
 	}
 	var ms []*imagerepos.Manifest
 	err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
+		ms = nil
 		t, err := s.access(ctx, tx, q, false)
 		if err != nil {
+			// A repo the caller would create by pushing refers to
+			// nothing yet: the caller learns only of its own silo.
+			if w, werr := s.opts.API.RegistryAccess(ctx, tx, q.caller, q.name, true); werr == nil && w.Repo == nil {
+				return nil
+			}
 			return err
 		}
 		ms, err = imagerepos.Manifests(ctx, tx, t.Repo.ID)
