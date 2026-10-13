@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/control"
 	"github.com/bwsalmon/silo/pkg/ids"
+	"github.com/bwsalmon/silo/pkg/imagerepos"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -117,6 +118,11 @@ func (s *Server) delete(q *request, ref string) {
 			if !force {
 				if len(sub) > 1 {
 					return errorf(FailedPrecondition, "%s has children; delete them first, or delete with force", t.Path).with("silo", t.Path)
+				}
+				if n, err := imagerepos.Count(ctx, tx, t.ID); err != nil {
+					return err
+				} else if n > 0 {
+					return errorf(FailedPrecondition, "%s has %d image repos; delete them first, or delete with force", t.Path, n).with("silo", t.Path)
 				}
 				var n int
 				if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM charges WHERE payer = ? OR home = ?`, t.ID, t.ID).Scan(&n); err != nil {
@@ -259,6 +265,10 @@ func (s *Server) runDelete(ctx context.Context, opID string) {
 			fail(leaf.ID, asError(ctx, nil, err).with("silo", leaf.Path))
 			return
 		}
+		if err := s.deleteImageReposIn(ctx, leaf, op.caller); err != nil {
+			fail(leaf.ID, asError(ctx, nil, err).with("silo", leaf.Path))
+			return
+		}
 		if s.opts.Deleter != nil {
 			if err := s.opts.Deleter.DeleteContents(ctx, leaf); err != nil {
 				fail(leaf.ID, errorf(FailedPrecondition, "deleting what %s holds: %v", leaf.Path, err).with("silo", leaf.Path))
@@ -381,7 +391,8 @@ func (s *Server) getOperation(q *request, id string) {
 // accepted only while there is no root. Backing is the tree's, subnet
 // unless given; a local tree's regions default to local, its only one.
 // Isolation defaults to every class, ingress to host and repos to
-// mirrored; the root's repos capacity, unless given, is unlimited.
+// mirrored; the root's repos and image_repos capacities, unless given,
+// are unlimited.
 type BootstrapRequest struct {
 	Name           string            `json:"name"`
 	AddressSpace   string            `json:"address_space"`
@@ -492,8 +503,10 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if _, ok := req.Capacity[ledger.Global][ReposClass.Class]; !ok {
-			capacity = append(capacity, ledger.Amount{Key: ReposClass, Amount: ledger.Unlimited})
+		for _, k := range []ledger.Key{ReposClass, ImageReposClass} {
+			if _, ok := req.Capacity[ledger.Global][k.Class]; !ok {
+				capacity = append(capacity, ledger.Amount{Key: k, Amount: ledger.Unlimited})
+			}
 		}
 		if req.ModelBudgetUSD != "" {
 			m, err := ledger.ParseAmount(req.ModelBudgetUSD)

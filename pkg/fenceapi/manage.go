@@ -93,10 +93,14 @@ var manageNeed = map[Op]struct {
 	// grants: the repos resource type").
 	opReposRead:  {manage.Repos, false},
 	opReposWrite: {manage.Repos, false},
+	// Image repos, by the registry resource type (local-registry.md,
+	// "Manage grants: the registry resource type").
+	opRegistryRead:  {manage.Registry, false},
+	opRegistryWrite: {manage.Registry, false},
 }
 
 // manageRead are the ops that need their resource type only at read.
-var manageRead = map[Op]bool{opReposRead: true}
+var manageRead = map[Op]bool{opReposRead: true, opRegistryRead: true}
 
 // Covers implements ManageChecker.
 func (ManageGrants) Covers(ctx context.Context, tx store.Tx, caller string, target *tree.Silo, op Op) (string, error) {

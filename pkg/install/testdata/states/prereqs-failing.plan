@@ -94,7 +94,7 @@ silo install: project silo-test-project
   db-endpoint       create  silo-db-psc (address) internal, in silo-ctl
                             silo-db-psc (forwarding rule) to the instance's service attachment
                             silo-db private zone for the instance's PSC DNS name, A silo-db-psc
-  migrate           apply   schema 0 -> 22
+  migrate           apply   schema 0 -> 23
   control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
                             (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
                             silo-control-lb-ip internal, in silo-gateway
