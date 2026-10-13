@@ -26,7 +26,9 @@
 package harness
 
 import (
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +36,9 @@ import (
 const (
 	KindAPIKey       = "api_key"
 	KindSubscription = "subscription"
+	// KindAmbient is the agent user's own login, on the local
+	// backend's host (local-backend.md §10).
+	KindAmbient = "ambient"
 )
 
 // Paths inside a session's container.
@@ -74,9 +79,23 @@ type Launch struct {
 	// its own login, through the egress proxy, not the model proxy
 	// (agents.md, §6, SV-108).
 	Subscription bool
+	// Ambient is set for an ambient session (local-backend.md §10,
+	// call L17): the CLI runs on silod's host as the agent user, with
+	// that user's own HOME, environment and login, and no model proxy.
+	// Its one MCP server is MCP, a stdio server it starts itself, so
+	// that the connection to the session socket comes from inside the
+	// session's own scope; the socket checks that (call L18).
+	Ambient bool
+	// MCP is an ambient session's MCP server command (silod mcp-stdio
+	// with the session socket).
+	MCP []string
+	// WorkDir is an ambient session's working directory; a container's
+	// is WorkDir.
+	WorkDir string
 }
 
-// Command is what a container runs for one turn.
+// Command is what a container runs for one turn. An ambient session's
+// Env is added to the agent user's own environment.
 type Command struct {
 	Argv []string
 	Env  []string
@@ -99,6 +118,41 @@ type Adapter interface {
 	NewSessionID() string
 	// CredentialKinds are the kinds of credential it takes.
 	CredentialKinds() []string
+}
+
+// Versioned is an adapter that knows the oldest version of its CLI
+// whose flags it uses. On the local backend the CLI is the host's
+// (local-backend.md §10), and a session refuses to start one older.
+type Versioned interface {
+	// VersionArgv prints the CLI's version.
+	VersionArgv() []string
+	// MinVersion is the oldest version it runs, x.y.z.
+	MinVersion() string
+}
+
+var versionRE = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
+
+// ParseVersion is the first x.y.z in a CLI's --version output: "2.1.4
+// (Claude Code)" or "codex-cli 0.46.0".
+func ParseVersion(out string) (string, bool) {
+	m := versionRE.FindString(out)
+	return m, m != ""
+}
+
+// OlderVersion reports whether x.y.z version a is older than b.
+func OlderVersion(a, b string) bool {
+	pa, pb := versionRE.FindStringSubmatch(a), versionRE.FindStringSubmatch(b)
+	if pa == nil || pb == nil {
+		return pa == nil && pb != nil
+	}
+	for i := 1; i <= 3; i++ {
+		x, _ := strconv.Atoi(pa[i])
+		y, _ := strconv.Atoi(pb[i])
+		if x != y {
+			return x < y
+		}
+	}
+	return false
 }
 
 // Parser turns a CLI's output lines into events.

@@ -151,6 +151,12 @@ type Options struct {
 	// API keys with no cap (silod's --agent-credentials, for
 	// development); nil has none.
 	Credentials agents.Credentials
+	// Ambient is set when agents' harnesses run on silod's own host with
+	// the agent user's ambient permissions (local-backend.md §10, call
+	// L17): every provider then has an ambient credential,
+	// ambient-<provider>, which holds no secret and is metered by the
+	// usage its harness reports.
+	Ambient bool
 	// CredentialKey is silo-credential-key, the AES-256 key the stored
 	// credentials are sealed with; without it none can be added or used.
 	CredentialKey []byte
