@@ -9,7 +9,8 @@ Task 3450 landed the first part of step 25: image repos in the store
 and the fence API, the `image_repos` class, the `registry` scope type
 and `silo registry` ([§13](#13-staged-implementation-plan) says what of
 step 25 is left). Task 3480 landed step 27's registry handler over a
-fake content store; containerd's half is step 27b.
+fake content store; containerd's half is step 27b. Task 3483 landed
+step 30's facade endpoints over the same fake.
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -1451,6 +1452,21 @@ earlier depends on them. Each can be filed on its own, in this order.
 28. **Grants on the registry:** exports and imports in the access path,
     manage-grant scopes, and closing connections within a second on
     revocation and expiry. Depends on 27.
+
+    *Landed in task 3481.* Step 27's `RegistryAccess` already gave
+    imports their pulls and manage grants their scopes; a grant whose
+    scope leaves out `registry` now answers the same 404 as no grant
+    (it was a 500). The gateway's tables carry `RegistryImports`, the
+    ACTIVE imports of registry exports, and when one leaves them
+    (withdrawn, suspended, or its silo gone) the gateway cuts off the
+    importer's port 80 registry calls to the exporter's repos, whose
+    names it parses with `imagerepos.SplitPath`; calls to other silos'
+    repos go on. A manage grant that ends cuts off its holder's port 80
+    calls, git's and the registry's, as git's did. silod looks for
+    expired grants every 500ms, not every 10s, so that expiry is
+    within the second too. The §12 cases for exports and manage grants
+    are in `pkg/registry` and, through the gateway, in
+    `pkg/gateway/registrygrants_test.go`.
 29. **The host front door for registry clients:** the loopback listener,
     the `inet_diag` uid lookup and its verification across kernels, and
     `--registry-host-port`. Depends on 27.
@@ -1479,6 +1495,34 @@ earlier depends on them. Each can be filed on its own, in this order.
     - the updated refusals.
 
     Depends on 6, 7 and 27.
+
+    *Landed in task 3483, against the fake driver and `registry.Memory`:*
+    the facade's `imagePush`, `imageSave`, `imageLoad`, `commit` and
+    `auth` (`pkg/facade/local/docker/registry.go` and `archive.go`), and
+    pulls of `registry.silo.internal` names through the registry rather
+    than `Options.Images`. The registry gained `Service.PushHeld` and
+    `Service.Pull`, which serve the facade's push and pull in process as
+    the caller, as a client's manifest PUT and GET are served, except
+    that a facade push proves possession by the caller's image record:
+    each blob is checked in the content store, not through
+    `Service.blob`. Image records now carry their manifest's digest and
+    media type. `load` commits no ingest until the whole archive has
+    been read and its manifests checked, so a refused load leaves
+    nothing in the content store. `commit` reads the writable layer
+    through `runtime.Committer` and turns overlayfs whiteouts (a 0/0
+    character device) and opaque directories (`trusted.overlay.opaque`)
+    into OCI's `.wh.` entries, refusing devices and paths outside the
+    root. The cases of [§12](#12-conformance-cases)'s facade list run
+    as the facade package's tests (`registry_test.go`), but for the
+    private upstream ones, which need step 32.
+
+    *Left:* the gVisor driver's `RootfsUpper` (`runsc tar rootfs-upper`
+    through `silod runsc`) and the run that settles this page's
+    *unverified* whiteout claim against real runsc; silod's wiring of
+    the facade's `Content`, `Registry` and `Login` (with step 27b's
+    containerd `registry.Content`); and moving the facade cases into
+    `pkg/conformance/docker`, so that step 36 runs them against
+    `local/sandbox` too.
 31. **The pull-through cache, public content:**
     - the upstream configuration and `silo registry cache`;
     - path and `ns` addressing, Docker Hub normalisation;

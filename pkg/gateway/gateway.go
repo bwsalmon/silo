@@ -227,6 +227,7 @@ func (g *Gateway) SetTables(t *Tables) bool {
 	if old != nil {
 		g.closeTightened(old, t)
 		g.closeGit(old, t)
+		g.closeRegistry(old, t)
 	}
 	g.closeNarrowed(t)
 	g.revokeExports(t)

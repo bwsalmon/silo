@@ -42,6 +42,7 @@ type container struct {
 	exit    *runtime.ExitStatus
 	done    chan struct{}
 	files   map[string][]byte // regular files by path; dirs are "path/"
+	deleted map[string]bool   // the image's files Remove deleted
 	stdout  bytes.Buffer
 	stderr  bytes.Buffer
 	stdin   bytes.Buffer
@@ -410,8 +411,72 @@ func (d *Driver) CopyIn(_ context.Context, id, dir string, r io.Reader) error {
 	}
 	for p, b := range files {
 		c.files[p] = b
+		delete(c.deleted, strings.TrimSuffix(p, "/"))
 	}
 	return nil
+}
+
+// Remove deletes p from the container's root, as its workload would: a
+// file of its own goes, and a file of the image's becomes a deletion
+// in its writable layer.
+func (d *Driver) Remove(id, p string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, err := d.get(id)
+	if err != nil {
+		return err
+	}
+	p = path.Clean(p)
+	delete(c.files, p)
+	delete(c.files, p+"/")
+	if c.deleted == nil {
+		c.deleted = map[string]bool{}
+	}
+	c.deleted[p] = true
+	return nil
+}
+
+var _ runtime.Committer = (*Driver)(nil)
+
+// RootfsUpper implements runtime.Committer: the files CopyIn wrote, and
+// Remove's deletions as overlayfs whiteouts (0/0 character devices),
+// which is what the caller has to convert.
+func (d *Driver) RootfsUpper(_ context.Context, id string) (io.ReadCloser, error) {
+	d.mu.Lock()
+	c, err := d.get(id)
+	var names []string
+	files := map[string][]byte{}
+	if err == nil {
+		for f, b := range c.files {
+			names = append(names, f)
+			files[f] = b
+		}
+		for f := range c.deleted {
+			names = append(names, f+"\x00")
+		}
+	}
+	d.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, f := range names {
+		switch {
+		case strings.HasSuffix(f, "\x00"):
+			tw.WriteHeader(&tar.Header{Name: strings.TrimPrefix(strings.TrimSuffix(f, "\x00"), "/"), Typeflag: tar.TypeChar, Mode: 0o600})
+		case strings.HasSuffix(f, "/"):
+			tw.WriteHeader(&tar.Header{Name: strings.TrimPrefix(f, "/"), Typeflag: tar.TypeDir, Mode: 0o755})
+		default:
+			tw.WriteHeader(&tar.Header{Name: strings.TrimPrefix(f, "/"), Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(files[f]))})
+			tw.Write(files[f])
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return io.NopCloser(&buf), nil
 }
 
 // CopyOut implements runtime.Driver.

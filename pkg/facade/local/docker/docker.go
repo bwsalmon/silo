@@ -53,6 +53,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/control"
 	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/registry"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
 )
@@ -82,6 +83,17 @@ type Options struct {
 	Meter   *storage.Meter
 	// Images pulls images. Nil refuses pulls.
 	Images Images
+	// Content is silo-containerd's content store, which save reads, and
+	// load and commit write. Nil refuses them.
+	Content registry.Content
+	// Registry is the local registry, which push writes and pulls of
+	// registry.silo.internal names read, as the caller. Nil refuses
+	// them.
+	Registry LocalRegistry
+	// Login validates an upstream credential for docker login, through
+	// the egress proxy as silo, and stores nothing. Nil refuses logins
+	// to upstreams.
+	Login func(ctx context.Context, silo, server, username, password string) error
 	// Wire makes and wires a container's network namespace before the
 	// driver creates it, and returns its path. Nil gives a path under
 	// /run/silo/netns that nothing made, which only a fake driver
@@ -242,7 +254,7 @@ func (s *Server) serve(q *request) error {
 	if err := s.resolve(q); err != nil {
 		return err
 	}
-	if q.route.class() == control.Mutation {
+	if q.route.class() == control.Mutation && !q.route.stream {
 		if err := s.readBody(q); err != nil {
 			return s.refuse(q, err)
 		}

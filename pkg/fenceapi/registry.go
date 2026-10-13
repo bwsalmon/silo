@@ -70,8 +70,10 @@ func (s *Server) RegistryAccess(ctx context.Context, tx store.Tx, c Caller, n im
 	c.Manage = ""
 	rc := c
 	chain, rel, err := s.resolve(ctx, tx, &rc, ref, opRegistryRead)
+	// A manage grant that doesn't cover the registry (PERMISSION_DENIED
+	// on the fence API) gives nothing here, and is the same 404.
 	var e *Error
-	if errors.As(err, &e) && e.Code == NotFound {
+	if errors.As(err, &e) && (e.Code == NotFound || e.Code == PermissionDenied) {
 		return s.registryImport(ctx, tx, c, ref, n, write)
 	}
 	if err != nil {
