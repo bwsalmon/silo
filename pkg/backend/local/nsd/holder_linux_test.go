@@ -441,3 +441,48 @@ func TestHolder(t *testing.T) {
 		}
 	})
 }
+
+// TestUnreachable checks the holder's startup check on its pin
+// directory: the first directory above it that others can't search.
+func TestUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	open, closed := filepath.Join(dir, "open"), filepath.Join(dir, "closed")
+	for _, d := range []string{dir, filepath.Dir(dir)} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{filepath.Join(open, "pins"), filepath.Join(closed, "pins")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("closed/pins", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	// filepath.EvalSymlinks: TMPDIR may itself be under a symlink.
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		path, want string
+		mode       os.FileMode
+	}{
+		{filepath.Join(open, "pins"), "", 0},
+		{filepath.Join(closed, "pins"), filepath.Join(real, "closed"), 0o700},
+		{filepath.Join(dir, "link"), filepath.Join(real, "closed"), 0o700},
+		{closed, filepath.Join(real, "closed"), 0o700},
+	} {
+		got, mode, err := Unreachable(c.path)
+		if err != nil || got != c.want || mode != c.mode {
+			t.Errorf("Unreachable(%s) = %q, %04o, %v; want %q, %04o", c.path, got, mode, err, c.want, c.mode)
+		}
+	}
+	if _, _, err := Unreachable(filepath.Join(dir, "missing")); err == nil {
+		t.Error("Unreachable of a missing path: no error")
+	}
+}
