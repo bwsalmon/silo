@@ -18,7 +18,6 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
-	"github.com/bwsalmon/silo/pkg/backend/local/runtime/fake"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/conformance"
 	"github.com/bwsalmon/silo/pkg/egress"
@@ -53,6 +52,10 @@ type fakeRegistry struct {
 	regSrv  *httptest.Server
 	dockSrv *httptest.Server
 	root    string
+	// The facade and its drivers, which the fake shell's nc resolves
+	// and connects through (fakeshell.go).
+	facade  *docker.Server
+	drivers []runtime.Driver
 
 	// With a fence (newFake's withFence): the applier and the ruleset
 	// it last loaded.
@@ -129,9 +132,8 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 	f.reg = registry.New(registry.Options{Store: db, API: f.api, Content: f.content, Egress: f, Now: f.now})
 	f.api.SetRegistry(f.reg)
 	vols := t.TempDir()
-	vm, sbx := fake.New(runtime.VM), fake.New(runtime.Sandbox)
-	vm.Volumes, sbx.Volumes = vols, vols
-	dopts := docker.Options{Drivers: []runtime.Driver{vm, sbx}, Storage: &storage.Dir{Root: vols},
+	f.drivers = []runtime.Driver{newShellDriver(f, runtime.VM, vols), newShellDriver(f, runtime.Sandbox, vols)}
+	dopts := docker.Options{Drivers: f.drivers, Storage: &storage.Dir{Root: vols},
 		Fetcher: f.reg, Content: f.content, Registry: f.reg, Login: f.login, Caller: byHeader(fenceapi.ViaInternal), Version: "conformance"}
 	if withFence {
 		// Probes' images come from probeImages, not through the cache,
@@ -139,6 +141,7 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 		dopts.Fetcher, dopts.Images = nil, probeImages{}
 	}
 	facade := docker.New(db, dopts)
+	f.facade = facade
 	f.apiSrv = httptest.NewServer(&f.apiH)
 	f.regSrv = httptest.NewServer(f.asCaller(f.reg))
 	f.dockSrv = httptest.NewServer(facade)
