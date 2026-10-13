@@ -55,12 +55,15 @@ type ImageTag struct {
 }
 
 // ImageManifest is one manifest a repo holds, with the tags on it and
-// its charged size: its own and its references', each once.
+// its charged size: its own and its references', each once. Referenced
+// is set when another manifest of the repo references it, as an index
+// does its children, which `silo registry prune` leaves to their index.
 type ImageManifest struct {
 	Digest       string    `json:"digest"`
 	MediaType    string    `json:"media_type"`
 	ChargedBytes int64     `json:"charged_bytes"`
 	Tags         []string  `json:"tags"`
+	Referenced   bool      `json:"referenced"`
 	CreateTime   time.Time `json:"create_time"`
 }
 
@@ -279,10 +282,16 @@ func (s *Server) imageRepoTags(q *request, ref, name string) {
 			ts = append(ts, ImageTag{Tag: t.Tag, Digest: t.Digest})
 			on[t.Digest] = append(on[t.Digest], t.Tag)
 		}
+		referenced := map[string]bool{}
+		for _, m := range ms {
+			for _, r := range m.Refs {
+				referenced[r.Digest] = true
+			}
+		}
 		mo := []ImageManifest{}
 		for _, m := range ms {
 			mo = append(mo, ImageManifest{Digest: m.Digest, MediaType: m.MediaType, ChargedBytes: imagerepos.SizeOf(m),
-				Tags: append([]string{}, on[m.Digest]...), CreateTime: m.Created})
+				Tags: append([]string{}, on[m.Digest]...), Referenced: referenced[m.Digest], CreateTime: m.Created})
 		}
 		out["tags"], out["manifests"] = ts, mo
 		return nil
