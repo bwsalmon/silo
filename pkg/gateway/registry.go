@@ -37,5 +37,11 @@ func (g *Gateway) serveRegistry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "silo: "+imagerepos.Host+" serves the OCI distribution API under /v2/ only", http.StatusNotFound)
 		return
 	}
-	g.forwardPort80(w, r, g.regProxy)
+	var repo *imagerepos.Name
+	if name, _, ok := imagerepos.SplitPath(r.URL.Path); ok {
+		if n, ok := imagerepos.ParseName(name, r.URL.Query().Get("ns")); ok && n.Local() {
+			repo = &n
+		}
+	}
+	g.forwardPort80(w, r, g.regProxy, repo)
 }

@@ -609,3 +609,167 @@ func TestImport(t *testing.T) {
 		t.Fatalf("pull: %v", p)
 	}
 }
+
+// An export offered but not accepted gives nothing; accepted, it gives
+// pulls and never pushes or deletes; a prefix covers a repo created
+// after the accept; and once withdrawn the importer pulls nothing more
+// (local-registry.md §12, "exports").
+func TestExportGrants(t *testing.T) {
+	e := newEnv(t, nil)
+	a := e.mk(e.root, "-"+e.root, "team-a", nil)
+	b := e.mk(e.root, "-"+e.root, "team-b", nil)
+	e.pushImage(a, "team-a/base-go", "1", "go")
+	e.ok(a, "POST", "/silo/v1/self/exports", obj{"name": "imgs", "protocol": "registry", "repos": []string{"base-*"}, "to": []string{"/team-b"}})
+	if r := e.req(b, "GET", "/v2/team-a/base-go/manifests/1", "", nil); r.code != 404 || r.errCode() != "NAME_UNKNOWN" {
+		t.Fatalf("offered, not accepted: %d %s", r.code, r.body)
+	}
+	if r := e.req(b, "GET", "/v2/_catalog", "", nil); string(r.body) != `{"repositories":[]}` && string(r.body) != `{"repositories":null}` {
+		t.Fatalf("catalog before the accept: %s", r.body)
+	}
+	e.ok(b, "POST", "/silo/v1/self/imports", obj{"export": "/team-a/imgs"})
+	if r := e.req(b, "GET", "/v2/team-a/base-go/manifests/1", "", nil); r.code != 200 {
+		t.Fatalf("accepted: %d %s", r.code, r.body)
+	}
+	for _, c := range []struct{ method, path string }{
+		{"POST", "/blobs/uploads/"},
+		{"PUT", "/manifests/2"},
+		{"DELETE", "/manifests/1"},
+	} {
+		if r := e.req(b, c.method, "/v2/team-a/base-go"+c.path, registry.MediaOCIManifest, []byte("{}")); r.code != 404 || r.errCode() != "NAME_UNKNOWN" {
+			t.Errorf("importer %s %s: %d %s", c.method, c.path, r.code, r.body)
+		}
+	}
+	// Nor create one in the exporter by pushing, under the prefix.
+	if r := e.req(b, "POST", "/v2/team-a/base-new/blobs/uploads/", "", nil); r.code != 404 {
+		t.Fatalf("importer first push: %d", r.code)
+	}
+	// A repo the prefix covers, created after the accept, is pulled;
+	// one it doesn't cover isn't.
+	layer, _ := e.pushImage(a, "team-a/base-py", "1", "py")
+	e.pushImage(a, "team-a/secret", "1", "s")
+	if r := e.req(b, "GET", "/v2/team-a/base-py/blobs/"+layer, "", nil); r.code != 200 || string(r.body) != "py" {
+		t.Fatalf("a repo created after the accept: %d %s", r.code, r.body)
+	}
+	if r := e.req(b, "GET", "/v2/team-a/secret/manifests/1", "", nil); r.code != 404 {
+		t.Fatalf("a repo the export doesn't cover: %d", r.code)
+	}
+	if r := e.req(b, "GET", "/v2/_catalog", "", nil); string(r.body) != `{"repositories":["team-a/base-go","team-a/base-py"]}` {
+		t.Fatalf("b's catalog: %s", r.body)
+	}
+	// Withdrawn, the next pull is refused.
+	e.ok(a, "DELETE", "/silo/v1/self/exports/imgs", nil)
+	if r := e.req(b, "GET", "/v2/team-a/base-go/manifests/1", "", nil); r.code != 404 {
+		t.Fatalf("after withdrawal: %d", r.code)
+	}
+}
+
+// A manage grant with registry at read pulls the target's repos and its
+// descendants' and can't push; at write it pushes, untags, deletes and
+// creates by pushing, charged to the target and audited under it
+// via=manage:<holder>; and once revoked, nothing (local-registry.md §12,
+// "manage grants").
+func TestManageGrant(t *testing.T) {
+	e := newEnv(t, nil)
+	prod := e.mk(e.root, "-"+e.root, "prod", nil)
+	web := e.mk(e.root, "prod", "web", nil)
+	deploy := e.mk(e.root, "-"+e.root, "deploy", nil)
+	e.pushImage(prod, "prod/app", "1", "app")
+	e.pushImage(web, "prod/web/site", "1", "site")
+	grant := func(name, access string, resources ...string) {
+		g := e.ok(e.root, "POST", "/silo/v1/silos/prod/manageGrants", obj{"name": name, "holder": "/deploy",
+			"scope": obj{"facade": obj{"resources": resources, "access": access}}, "lease": obj{"ttl": "3600s"}})
+		e.ok(deploy, "POST", "/silo/v1/self/manageGrants/"+g["id"].(string)+":accept", nil)
+	}
+	pushRefused := func(what string) {
+		t.Helper()
+		for _, c := range []struct{ method, path string }{
+			{"POST", "/v2/prod/app/blobs/uploads/"},
+			{"PUT", "/v2/prod/app/manifests/2"},
+			{"DELETE", "/v2/prod/app/manifests/1"},
+			{"POST", "/v2/prod/new/blobs/uploads/"},
+		} {
+			if r := e.req(deploy, c.method, c.path, registry.MediaOCIManifest, []byte("{}")); r.code != 404 || r.errCode() != "NAME_UNKNOWN" {
+				t.Errorf("%s: %s %s: %d %s", what, c.method, c.path, r.code, r.body)
+			}
+		}
+	}
+
+	pushRefused("no grant")
+	if r := e.req(deploy, "GET", "/v2/prod/app/manifests/1", "", nil); r.code != 404 {
+		t.Fatalf("no grant pull: %d", r.code)
+	}
+	// A grant without registry in its scope gives nothing here.
+	grant("code", "write", "repos")
+	if r := e.req(deploy, "GET", "/v2/prod/app/manifests/1", "", nil); r.code != 404 {
+		t.Fatalf("repos grant pull: %d", r.code)
+	}
+	e.ok(e.root, "DELETE", "/silo/v1/silos/prod/manageGrants/code", nil)
+
+	grant("pull", "read", "registry")
+	for _, p := range []string{"/v2/prod/app/manifests/1", "/v2/prod/web/site/manifests/1"} {
+		if r := e.req(deploy, "GET", p, "", nil); r.code != 200 {
+			t.Fatalf("read grant %s: %d %s", p, r.code, r.body)
+		}
+	}
+	pushRefused("read grant")
+	if p := e.audit(fenceapi.KindRegistryPull); len(p) == 0 || p[len(p)-1]["_silo"] != web || p[len(p)-1]["_actor"] != deploy {
+		t.Fatalf("pull records: %v", p)
+	}
+	e.ok(e.root, "DELETE", "/silo/v1/silos/prod/manageGrants/pull", nil)
+	if r := e.req(deploy, "GET", "/v2/prod/app/manifests/1", "", nil); r.code != 404 {
+		t.Fatalf("after revocation: %d", r.code)
+	}
+
+	grant("rollout", "write", "registry")
+	before, mine := used(t, e, prod), used(t, e, deploy)
+	e.pushImage(deploy, "prod/app", "2", strings.Repeat("x", 4000))
+	e.pushImage(deploy, "prod/fresh", "1", "created by the holder")
+	if used(t, e, prod) <= before || used(t, e, deploy) != mine {
+		t.Fatalf("charges: prod %d -> %d, deploy %d -> %d", before, used(t, e, prod), mine, used(t, e, deploy))
+	}
+	if r := e.req(deploy, "DELETE", "/v2/prod/app/manifests/1", "", nil); r.code != 202 {
+		t.Fatalf("holder untag: %d %s", r.code, r.body)
+	}
+	if r := e.req(prod, "GET", "/v2/prod/fresh/manifests/1", "", nil); r.code != 200 {
+		t.Fatalf("the repo the holder created: %d", r.code)
+	}
+	var via string
+	err := e.db.Tx(ctx, func(tx store.Tx) error {
+		return tx.QueryRow(ctx, `SELECT via FROM charges WHERE payer = ? AND class = 'disk_gb' AND via != 'facade' LIMIT 1`, prod).Scan(&via)
+	})
+	if err != nil || !strings.HasPrefix(via, "manage:") {
+		t.Fatalf("the charge's via: %q %v", via, err)
+	}
+	for _, kind := range []string{fenceapi.KindRegistryPush, fenceapi.KindRegistryDelete} {
+		l := e.audit(kind)
+		if len(l) == 0 {
+			t.Fatalf("no %s records", kind)
+		}
+		last := l[len(l)-1]
+		if last["_silo"] != prod || last["_actor"] != deploy {
+			t.Errorf("%s: %v", kind, last)
+		}
+	}
+	var vias []string
+	err = e.db.Tx(ctx, func(tx store.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT via FROM audit WHERE actor = ? AND kind IN (?, ?)`, deploy, fenceapi.KindRegistryPush, fenceapi.KindRegistryDelete)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var v string
+			rows.Scan(&v)
+			vias = append(vias, v)
+		}
+		return rows.Err()
+	})
+	if err != nil || len(vias) == 0 {
+		t.Fatalf("vias: %v %v", vias, err)
+	}
+	for _, v := range vias {
+		if v != "manage:"+deploy {
+			t.Errorf("via %q, want manage:%s", v, deploy)
+		}
+	}
+}
