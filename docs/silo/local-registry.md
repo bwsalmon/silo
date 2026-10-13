@@ -1353,6 +1353,24 @@ earlier depends on them. Each can be filed on its own, in this order.
     `disk_gb` charge itself is made by step 27's push path, which has
     the bytes. *Left:* registry exports and their imports, and the
     `images.sharing` policy, filed as step 25b.
+
+    *Landed in step 25b (task 3478):* registry exports, `protocol:
+    "registry"` with `repos` and no target, stored in `exports.repos`
+    (migration 0024), offered, accepted, suspended and withdrawn as
+    every export is, and left alone by the fence and the gateway, which
+    carry nothing for them; `silo export offer --protocol registry
+    --repos`. The registry's questions are
+    `fenceapi.MayReadImported` (and `ImportOfImageRepo`, for the audit
+    record's import) and `fenceapi.ImportedImageRepos`, which step 27's
+    `GET /v2/_catalog` lists beside the caller's own and descendants'
+    repos. The fence API's `GET .../imageRepos` stays per silo, as
+    [Listing](#listing) puts imports in the catalog only. And
+    `images.sharing`, `{"sharing": "shared"|"isolated"}` on create,
+    PATCH and bootstrap, shown own and effective with
+    `effective_from`, the sharing domain step 31's cache index is
+    keyed by; `--images-sharing` on `silo create` and `silo patch`. A
+    new silo's own value is `shared`, so it is in its parent's domain
+    until it isolates itself.
 26. **containerd's root out of `cache/`** (call L60): layout 2,
     `containerd/` and `cache/snapshots/`, the migration from layout 1,
     and the data table. Depends on 14. Best landed before 7, so that

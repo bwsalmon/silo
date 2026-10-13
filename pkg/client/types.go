@@ -30,6 +30,7 @@ type Silo struct {
 	Isolation     Owned[Isolation]                  `json:"isolation"`
 	Ingress       Owned[string]                     `json:"ingress"`
 	Repos         ReposOwned                        `json:"repos"`
+	Images        ImagesOwned                       `json:"images"`
 	OwnerAgent    *string                           `json:"owner_agent"`
 	State         string                            `json:"state"`
 	OverCommitted []OverCommit                      `json:"over_committed"`
@@ -130,6 +131,23 @@ type ReposOwned struct {
 	EffectiveFrom string      `json:"effective_from"`
 }
 
+// ImagesPolicy is the images policy: whether the silo shares the
+// pull-through cache's hits with the rest of the host ("shared") or
+// keeps them to its own subtree ("isolated") (local-registry.md, call
+// L73).
+type ImagesPolicy struct {
+	Sharing string `json:"sharing"`
+}
+
+// ImagesOwned is the images policy as the silo set it and as it is in
+// effect, with the silo its effective value comes from: the silo's
+// sharing domain.
+type ImagesOwned struct {
+	Own           ImagesPolicy `json:"own"`
+	Effective     ImagesPolicy `json:"effective"`
+	EffectiveFrom string       `json:"effective_from"`
+}
+
 // Control is the control policy, with the silo its effective value
 // comes from.
 type Control struct {
@@ -172,6 +190,7 @@ type CreateRequest struct {
 	Isolation      *Isolation        `json:"isolation,omitempty"`
 	Ingress        string            `json:"ingress,omitempty"`
 	Repos          *ReposPolicy      `json:"repos,omitempty"`
+	Images         *ImagesPolicy     `json:"images,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`
 }
 

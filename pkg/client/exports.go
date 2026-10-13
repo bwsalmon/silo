@@ -20,6 +20,7 @@ type Export struct {
 	Target        any        `json:"target"` // "ip:port", or {instance, zone, port}
 	AddressIP     string     `json:"address_ip,omitempty"`
 	ProxyProtocol bool       `json:"proxy_protocol"`
+	Repos         []string   `json:"repos,omitempty"` // a registry export's repo names and prefixes
 	To            []ExportTo `json:"to"`
 	CreateTime    time.Time  `json:"create_time"`
 }
@@ -35,17 +36,18 @@ type ExportTo struct {
 // Import is an accepted export, as its importer sees it, or an offer
 // not yet accepted (State PENDING, no ID).
 type Import struct {
-	ID            string `json:"id,omitempty"`
-	Export        string `json:"export"` // the exporter's path and the export's name
-	ExportID      string `json:"export_id"`
-	Exporter      string `json:"exporter"`
-	Importer      string `json:"importer"`
-	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	ProxyProtocol bool   `json:"proxy_protocol"`
-	State         string `json:"state"`
-	Address       string `json:"address,omitempty"`
-	Port          int    `json:"port,omitempty"`
+	ID            string   `json:"id,omitempty"`
+	Export        string   `json:"export"` // the exporter's path and the export's name
+	ExportID      string   `json:"export_id"`
+	Exporter      string   `json:"exporter"`
+	Importer      string   `json:"importer"`
+	Name          string   `json:"name"`
+	Protocol      string   `json:"protocol"`
+	ProxyProtocol bool     `json:"proxy_protocol"`
+	State         string   `json:"state"`
+	Address       string   `json:"address,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	Repos         []string `json:"repos,omitempty"` // a registry import's names to pull by
 }
 
 // ExportTarget is an instance target.
@@ -56,13 +58,14 @@ type ExportTarget struct {
 }
 
 // OfferRequest is POST .../exports. Target is "ip:port" or an
-// ExportTarget.
+// ExportTarget; a registry export has none, and names Repos instead.
 type OfferRequest struct {
 	Name          string   `json:"name"`
-	Target        any      `json:"target"`
+	Target        any      `json:"target,omitempty"`
 	Protocol      string   `json:"protocol"`
 	To            []string `json:"to"`
 	ProxyProtocol bool     `json:"proxy_protocol,omitempty"`
+	Repos         []string `json:"repos,omitempty"`
 }
 
 // OfferExport offers an export from ref's silo: the caller's own

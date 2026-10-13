@@ -20,15 +20,23 @@ func (c *cli) exportOffer(ctx context.Context, args []string) error {
 	instance := fs.String("target-instance", "", "the target instance, instead of --target: its primary IP, followed if it changes")
 	zone := fs.String("target-zone", "", "the target instance's zone")
 	port := fs.Int("target-port", 0, "the target instance's port")
-	protocol := fs.String("protocol", "http", "http or tcp")
+	protocol := fs.String("protocol", "http", "http, tcp or registry")
+	repos := fs.String("repos", "", "registry: comma-separated image repos of the exporting silo, by name or a prefix ending in *")
 	to := fs.String("to", "", "comma-separated paths of the silos it is offered to")
 	proxyProtocol := fs.Bool("proxy-protocol", false, "send a PROXY protocol v2 header naming the caller (tcp only)")
-	pos, err := c.parse(fs, args, 1, 1, "<name> --target ip:port|--target-instance i --target-zone z --target-port p --to /silo,... [--protocol http|tcp]")
+	pos, err := c.parse(fs, args, 1, 1, "<name> --target ip:port|--target-instance i --target-zone z --target-port p --to /silo,... [--protocol http|tcp] | --protocol registry --repos r,p* --to /silo,...")
 	if err != nil {
 		return err
 	}
-	req := client.OfferRequest{Name: pos[0], Protocol: *protocol, To: parseList(*to), ProxyProtocol: *proxyProtocol}
+	req := client.OfferRequest{Name: pos[0], Protocol: *protocol, To: parseList(*to), ProxyProtocol: *proxyProtocol, Repos: parseList(*repos)}
 	switch {
+	case *protocol == "registry":
+		if *target != "" || *instance != "" {
+			return usagef("a registry export has no target; --repos names what it exports")
+		}
+		if len(req.Repos) == 0 {
+			return usagef("--repos is required for a registry export")
+		}
 	case *target != "" && *instance != "":
 		return usagef("give --target or --target-instance, not both")
 	case *target != "":
@@ -116,7 +124,11 @@ func (c *cli) importAccept(ctx context.Context, args []string) error {
 			fmt.Fprintf(w, "validate only: %s would be accepted; nothing changed\n", pos[0])
 			return
 		}
-		fmt.Fprintf(w, "accepted %s (%s): %s\n", im.Export, im.State, im.Address)
+		addr := im.Address
+		if len(im.Repos) > 0 {
+			addr = strings.Join(im.Repos, ", ")
+		}
+		fmt.Fprintf(w, "accepted %s (%s): %s\n", im.Export, im.State, addr)
 	})
 }
 
@@ -174,7 +186,9 @@ func writeExports(w *tw, es []*client.Export) {
 	w.row("NAME", "PROTOCOL", "TARGET", "TO", "STATE", "ADDRESS")
 	for _, e := range es {
 		target := fmt.Sprint(e.Target)
-		if t, ok := e.Target.(map[string]any); ok {
+		if len(e.Repos) > 0 {
+			target = "repos " + strings.Join(e.Repos, ",")
+		} else if t, ok := e.Target.(map[string]any); ok {
 			target = fmt.Sprintf("%v:%v (%v)", t["instance"], t["port"], dash(e.AddressIP))
 		}
 		if len(e.To) == 0 {
@@ -193,6 +207,10 @@ func writeImports(w *tw, ims []*client.Import) {
 	}
 	w.row("EXPORT", "PROTOCOL", "STATE", "ADDRESS", "ID")
 	for _, im := range ims {
-		w.row(im.Export, im.Protocol, im.State, dash(im.Address), dash(im.ID))
+		addr := im.Address
+		if len(im.Repos) > 0 {
+			addr = strings.Join(im.Repos, ",")
+		}
+		w.row(im.Export, im.Protocol, im.State, dash(addr), dash(im.ID))
 	}
 }

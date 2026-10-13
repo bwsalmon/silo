@@ -35,6 +35,7 @@ type Silo struct {
 	Isolation     Owned[Isolation]                  `json:"isolation"`
 	Ingress       Owned[string]                     `json:"ingress"`
 	Repos         Repos                             `json:"repos"`
+	Images        Images                            `json:"images"`
 	OwnerAgent    *string                           `json:"owner_agent"`
 	State         string                            `json:"state"`
 	OverCommitted []OverCommit                      `json:"over_committed"`
@@ -106,6 +107,15 @@ type Repos struct {
 	Own           ReposPolicy `json:"own"`
 	Effective     ReposPolicy `json:"effective"`
 	EffectiveFrom string      `json:"effective_from"`
+}
+
+// Images is the images policy, with where its effective value comes
+// from: the silo's sharing domain, the nearest silo up the tree that
+// isolates itself, or the root.
+type Images struct {
+	Own           ImagesPolicy `json:"own"`
+	Effective     ImagesPolicy `json:"effective"`
+	EffectiveFrom string       `json:"effective_from"`
 }
 
 // Control is the control policy, with where its effective value comes
@@ -208,6 +218,7 @@ func (s *Server) object(ctx context.Context, tx store.Tx, chain []*tree.Silo) (*
 	out.Isolation = Owned[Isolation]{Own: own.Isolation, Effective: eff.Isolation}
 	out.Ingress = Owned[string]{Own: own.Ingress, Effective: eff.Ingress}
 	out.Repos = Repos{Own: own.Repos, Effective: eff.Repos, EffectiveFrom: eff.ReposFrom}
+	out.Images = Images{Own: own.Images, Effective: eff.Images, EffectiveFrom: eff.ImagesFrom}
 	return out, nil
 }
 

@@ -30,6 +30,7 @@ type CreateRequest struct {
 	Isolation      *Isolation        `json:"isolation"`
 	Ingress        string            `json:"ingress"`
 	Repos          *ReposPolicy      `json:"repos"`
+	Images         *ImagesPolicy     `json:"images"`
 	Labels         map[string]string `json:"labels"`
 }
 
@@ -149,7 +150,8 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 			return err
 		}
 		own := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Agent: peff.Agent, Control: peff.Control,
-			Isolation: peff.Isolation, Ingress: IngressNone, Repos: peff.Repos}
+			Isolation: peff.Isolation, Ingress: IngressNone, Repos: peff.Repos,
+			Images: ImagesPolicy{Sharing: SharingShared}}
 		for k, v := range peff.Grant {
 			own.Grant[k] = v
 		}
@@ -179,10 +181,21 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		if req.Repos != nil {
 			own.Repos = *req.Repos
 		}
+		// A new silo's own images sharing is shared unless it says
+		// otherwise, so it is in its parent's sharing domain rather than
+		// one of its own; only a shared it asks for is held to the
+		// parent's.
+		chk := *own
+		if req.Images != nil {
+			own.Images = *req.Images
+			chk.Images = own.Images
+		} else {
+			chk.Images = ImagesPolicy{Sharing: SharingIsolated}
+		}
 		if err := checkPolicies(own); err != nil {
 			return err
 		}
-		if err := looser(peff, own); err != nil {
+		if err := looser(peff, &chk); err != nil {
 			return err
 		}
 		quota, err := amounts(ctx, tx, req.Quota)
@@ -324,6 +337,9 @@ func checkPolicies(p *policies) error {
 	if err := checkIngress(p.Ingress); err != nil {
 		return err
 	}
+	if err := checkImages(p.Images); err != nil {
+		return err
+	}
 	return checkControl(p.Control)
 }
 
@@ -384,9 +400,11 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 		if rel == relSelf {
 			chk := *next
 			if t.IsRoot() {
-				// The root has no ancestor to widen its repos policy, so
-				// it may turn mirroring back on itself.
+				// The root has no ancestor to widen its repos or images
+				// policy, so it may turn mirroring and sharing back on
+				// itself.
 				chk.Repos = old.Repos
+				chk.Images = old.Images
 			}
 			if err := narrower(old, &chk); err != nil {
 				return err
@@ -403,7 +421,8 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			if has("control") && !controlSet {
 				next.Control = peff.Control
 			}
-			// A control, isolation, ingress or repos policy left alone is
+			// A control, isolation, ingress, repos or images policy left
+			// alone is
 			// not held to the parent's: an ancestor tightening keeps the
 			// descendants' own settings, so they come back when it
 			// loosens again.
@@ -419,6 +438,9 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			}
 			if !has("repos") {
 				chk.Repos = ReposPolicy{}
+			}
+			if !has("images") {
+				chk.Images = ImagesPolicy{Sharing: SharingIsolated}
 			}
 			if err := looser(peff, &chk); err != nil {
 				return err
@@ -521,7 +543,7 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			changed["labels"] = l
 		}
 		policyChanged := false
-		for _, f := range []string{"egress", "grant_policy", "agent_policy", "isolation", "ingress", "repos"} {
+		for _, f := range []string{"egress", "grant_policy", "agent_policy", "isolation", "ingress", "repos", "images"} {
 			if has(f) {
 				policyChanged = true
 				changed[f] = true
@@ -608,6 +630,7 @@ func patchPolicies(old *policies, body map[string]json.RawMessage) (*policies, e
 		Isolation: Isolation{Allowed: append([]string{}, old.Isolation.Allowed...), Default: old.Isolation.Default},
 		Ingress:   old.Ingress,
 		Repos:     old.Repos,
+		Images:    old.Images,
 	}
 	for k, v := range old.Grant {
 		next.Grant[k] = v
@@ -714,6 +737,17 @@ func patchPolicies(old *policies, body map[string]json.RawMessage) (*policies, e
 		}
 		if r.Mirror != nil {
 			next.Repos.Mirror = *r.Mirror
+		}
+	}
+	if raw, ok := body["images"]; ok {
+		var i struct {
+			Sharing *string `json:"sharing"`
+		}
+		if err := json.Unmarshal(raw, &i); err != nil {
+			return nil, bad("images", err)
+		}
+		if i.Sharing != nil {
+			next.Images.Sharing = *i.Sharing
 		}
 	}
 	return next, nil
