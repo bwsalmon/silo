@@ -60,6 +60,12 @@ type RepoHost interface {
 	SetHead(ctx context.Context, silo, id, branch string) error
 	// Delete removes a repo; one that is gone is not an error.
 	Delete(ctx context.Context, silo, id string) error
+	// Archives lists a repo's local archive refs.
+	Archives(ctx context.Context, silo, id string) ([]repos.Archive, error)
+	// RestoreRef makes a new branch at an archive ref's commit, and
+	// returns the commit: repos.ErrNoArchive if there is no such
+	// archive, repos.ErrRefExists if the branch exists.
+	RestoreRef(ctx context.Context, silo, id, archive, branch string) (string, error)
 }
 
 // RepoObject is a repo, as the API shows it (local-git.md, "The

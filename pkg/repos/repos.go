@@ -28,6 +28,13 @@ const DefaultBranch = "main"
 // Seq.
 const ChangeKind = "repo"
 
+// PushChangeKind is the change-log kind that marks a repo dirty: its
+// refs changed, by a push or a restore, at that sequence number. Its
+// key is the repo's id. The mirror pushes a repo whose newest such
+// change it has not mirrored (local-git.md, "How a request is served",
+// step 7).
+const PushChangeKind = "repo.push"
+
 // Errors from the table's operations, which the fence API turns into
 // its codes.
 var (
@@ -218,4 +225,51 @@ func Delete(ctx context.Context, tx store.Tx, id string) error {
 		return ErrNotFound
 	}
 	return err
+}
+
+// Archive is one local archive ref (local-git.md, "Local archive
+// refs", call L48): the tip a force-push or a deletion would have
+// orphaned.
+type Archive struct {
+	// Name is the ref's name under refs/silo-archive/: <UTC ts>-<seq>/heads/<branch>
+	// or <UTC ts>-<seq>/tags/<tag>.
+	Name string `json:"name"`
+	// Ref is the ref it archived, such as refs/heads/main.
+	Ref    string    `json:"ref"`
+	Commit string    `json:"commit"`
+	Time   time.Time `json:"time"`
+}
+
+// ArchiveTime is the layout of an archive ref's timestamp.
+const ArchiveTime = "20060102T150405Z"
+
+// ParseArchive splits an archive ref's name under refs/silo-archive/ into the
+// time it was made and the ref it archived.
+func ParseArchive(name string) (time.Time, string, bool) {
+	stamp, ref, ok := strings.Cut(name, "/")
+	if !ok || !(strings.HasPrefix(ref, "heads/") || strings.HasPrefix(ref, "tags/")) {
+		return time.Time{}, "", false
+	}
+	ts, _, ok := strings.Cut(stamp, "-")
+	if !ok {
+		return time.Time{}, "", false
+	}
+	t, err := time.Parse(ArchiveTime, ts)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	return t, "refs/" + ref, true
+}
+
+// ErrRefExists is a restore's refusal of a branch that exists.
+var ErrRefExists = errors.New("repos: the branch exists")
+
+// ErrNoArchive is a restore's refusal of an archive that doesn't.
+var ErrNoArchive = errors.New("repos: no such archive ref")
+
+// MarkDirty records that repo r's refs changed, and returns the
+// change's sequence number.
+func MarkDirty(ctx context.Context, tx store.Tx, r *Repo) (uint64, error) {
+	data := fmt.Sprintf(`{"silo":%q}`, r.Silo)
+	return tx.Append(ctx, PushChangeKind, r.ID, data)
 }
