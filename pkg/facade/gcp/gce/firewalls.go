@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	gceapi "github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
@@ -384,7 +385,7 @@ func (q *request) firewall(fw *compute.Firewall, orig map[string]any) (map[strin
 		return m, nil
 	}
 	for _, k := range tenantFirewallFields {
-		if v, ok := orig[k]; ok && !isDefault(v) {
+		if v, ok := orig[k]; ok && !facade.IsDefault(v) {
 			m[k] = v
 		} else {
 			delete(m, k)
@@ -540,7 +541,7 @@ func (s *Server) replaceFirewall(q *request) (any, error) {
 			// The tags are the real rule's, which an original kept
 			// before tenants used real names has without the prefix.
 			for _, k := range []string{"targetTags", "sourceTags"} {
-				if v, ok := shown[k]; ok && !isDefault(v) {
+				if v, ok := shown[k]; ok && !facade.IsDefault(v) {
 					orig[k] = v
 				}
 			}
