@@ -188,6 +188,16 @@ func serveContent(w http.ResponseWriter, r *http.Request, ra io.ReaderAt, n int6
 // holds, or it is MANIFEST_BLOB_UNKNOWN; its subject may be absent.
 func (s *Service) putManifest(q *request, ref string) {
 	ctx := q.ctx()
+	// The access check comes first, so that a caller who may not push
+	// learns nothing from how its manifest is judged.
+	err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
+		_, err := s.access(ctx, tx, q, true)
+		return err
+	})
+	if err = s.refused(q, err); err != nil {
+		writeErr(q.w, q.r, err)
+		return
+	}
 	b, err := io.ReadAll(io.LimitReader(q.r.Body, s.opts.MaxManifest+1))
 	if err != nil {
 		writeErr(q.w, q.r, rerr(http.StatusBadRequest, codeManifestInvalid, "silo: reading the manifest: %v", err))
