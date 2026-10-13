@@ -617,6 +617,34 @@ func TestExportsAndImports(t *testing.T) {
 	if r.code != 2 {
 		t.Errorf("offer without a target: exit %d %s", r.code, r.stderr)
 	}
+
+	// A registry export names image repos, and its import the names to
+	// pull by.
+	out = d.ok(a.ID, "export", "offer", "base-images", "--protocol", "registry", "--repos", "builder,base-*", "--to", "/team-b")
+	contains(t, "registry export offer", out, "offered base-images (registry) to /team-b", "repos base-*,builder", "PENDING")
+	out = d.ok(b.ID, "import", "accept", "/team-a/base-images")
+	contains(t, "registry import accept", out, "accepted /team-a/base-images (ACTIVE): registry.silo.internal/team-a/base-*, registry.silo.internal/team-a/builder")
+	r = d.silo(a.ID, "export", "offer", "y", "--protocol", "registry", "--to", "/team-b")
+	if r.code != 2 {
+		t.Errorf("registry offer without repos: exit %d %s", r.code, r.stderr)
+	}
+}
+
+// --images-sharing sets the images policy on create and patch, and
+// describe shows where its effective value comes from.
+func TestImagesSharingFlag(t *testing.T) {
+	d := startSilod(t)
+	var a, x client.Silo
+	d.json(d.root, &a, "create", "/team-a", "--address", "/16", "--images-sharing", "isolated")
+	d.json(d.root, &x, "create", "/team-a/x", "--address", "/24")
+	if x.Images.Own.Sharing != "shared" || x.Images.Effective.Sharing != "isolated" || x.Images.EffectiveFrom != "/team-a" {
+		t.Errorf("x's images policy: %+v", x.Images)
+	}
+	contains(t, "describe", d.ok(d.root, "describe", "/team-a/x"), "Images sharing:", "isolated, from /team-a (own: shared)")
+	r := d.silo(d.root, "patch", "/team-a/x", "--images-sharing", "shared")
+	contains(t, "loosening", r.stderr, "LOOSER_THAN_PARENT")
+	d.ok(d.root, "patch", "/team-a", "--images-sharing", "shared")
+	contains(t, "describe after", d.ok(d.root, "describe", "/team-a/x"), "shared, from / (own: shared)")
 }
 
 func TestLinks(t *testing.T) {

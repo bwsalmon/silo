@@ -409,6 +409,7 @@ type BootstrapRequest struct {
 	Isolation      *Isolation        `json:"isolation"`
 	Ingress        string            `json:"ingress"`
 	Repos          *ReposPolicy      `json:"repos"`
+	Images         *ImagesPolicy     `json:"images"`
 	Admins         []string          `json:"admins"`
 	Labels         map[string]string `json:"labels"`
 }
@@ -521,7 +522,8 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		// The root's egress is install's --egress-allow, and empty, which
 		// allows nothing, by default (gateway.md, "Policy", SV-86).
 		p := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull,
-			Isolation: RootIsolation(), Ingress: IngressHost, Repos: ReposPolicy{Mirror: true}}
+			Isolation: RootIsolation(), Ingress: IngressHost, Repos: ReposPolicy{Mirror: true},
+			Images: ImagesPolicy{Sharing: SharingShared}}
 		for k, v := range RootGrantPolicy {
 			p.Grant[k] = v
 		}
@@ -542,6 +544,9 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Repos != nil {
 			p.Repos = *req.Repos
+		}
+		if req.Images != nil {
+			p.Images = *req.Images
 		}
 		if err := checkPolicies(p); err != nil {
 			return err

@@ -99,10 +99,10 @@ func TestExports(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if want := *a; *got != want {
+		if want := *a; !reflect.DeepEqual(*got, want) {
 			t.Errorf("Get(e1) = %+v, want %+v", got, want)
 		}
-		if got, err := exports.Get(ctx, tx, "e2"); err != nil || *got != *b {
+		if got, err := exports.Get(ctx, tx, "e2"); err != nil || !reflect.DeepEqual(got, b) {
 			t.Errorf("Get(e2) = %+v, %v; want %+v", got, err, b)
 		}
 		if _, err := exports.Get(ctx, tx, "nope"); !errors.Is(err, exports.ErrNotFound) {
@@ -309,6 +309,41 @@ func TestPorts(t *testing.T) {
 		// An http import still goes in.
 		if _, err := imp(tx, "h2", false); err != nil {
 			t.Errorf("http import with every port taken: %v", err)
+		}
+		return nil
+	})
+}
+
+func TestRegistryExports(t *testing.T) {
+	e := &exports.Export{ID: "e1", Exporter: "s1", Name: "base-images", Owner: exports.OwnerTenant,
+		Protocol: exports.Registry, Repos: []string{"builder", "base-*"}}
+	for repo, want := range map[string]bool{
+		"builder": true, "builder2": false, "base-": true, "base-alpine": true, "base": false, "app": false,
+	} {
+		if got := e.Covers(repo); got != want {
+			t.Errorf("Covers(%q) = %v, want %v", repo, got, want)
+		}
+	}
+	if all := (&exports.Export{Protocol: exports.Registry, Repos: []string{"*"}}); !all.Covers("anything") {
+		t.Error(`"*" doesn't cover every repo`)
+	}
+	if h := (&exports.Export{Protocol: exports.HTTP, Repos: []string{"*"}}); h.Covers("app") {
+		t.Error("an http export covers an image repo")
+	}
+	if got := exports.Address(e, &exports.Import{}); got != "" {
+		t.Errorf("registry Address = %q, want none", got)
+	}
+
+	ctx := context.Background()
+	db := open(t)
+	tx(t, db, func(tx store.Tx) error { return exports.Create(ctx, tx, e) })
+	tx(t, db, func(tx store.Tx) error {
+		got, err := exports.Get(ctx, tx, "e1")
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(got.Repos, e.Repos) || got.Target().IsValid() {
+			t.Errorf("Get(e1) = %+v, want repos %v and no target", got, e.Repos)
 		}
 		return nil
 	})
