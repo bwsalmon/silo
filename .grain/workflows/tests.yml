@@ -153,16 +153,21 @@ jobs:
           go test -count=1 -timeout 10m -v -run 'TestDistributionSpec|TestCraneCLI|TestSkopeo|TestOras' ./pkg/registry/
 
   # The local backend's conformance (docs/silo/local-backend.md §13, "How
-  # CI runs them"): the backend-neutral cases of pkg/conformance/fence,
-  # the Docker facade's of pkg/conformance/docker and the local-only
-  # structural ones of pkg/conformance/local, against every
-  # conformance.Target. Today they are the registry and cache cases
-  # (docs/silo/local-registry.md §12, step 36), and the target that runs
-  # is "local/fake", in process; "gcp" reports them not offered, and
-  # "local/sandbox" and "local/vm" not runnable until silod serves the
-  # registry and this job installs the local backend (local-backend.md
-  # item 12). The `go` job runs the same packages, without the
-  # distribution-spec suite, which this job requires.
+  # CI runs them", and "As built in step 12"), on every push: the
+  # backend-neutral cases of pkg/conformance/fence (the fence's, behind
+  # conformance.Target's Fence, and the registry's), the Docker
+  # facade's of pkg/conformance/docker and the local-only structural
+  # ones of pkg/conformance/local, against every conformance.Target.
+  # "local/fake" runs them in process, judging probes' packets with the
+  # nftables evaluator; "gcp" reports them not offered or not runnable
+  # here (its own forms run nightly in silo-conformance); "local/sandbox"
+  # and "local/vm" report themselves not runnable until silod serves the
+  # registry and the Docker facade's host sockets, which this job needs
+  # to install the local backend and make probe containers. The summary
+  # at the end of Test names every target that wasn't tested, and
+  # whether /dev/kvm works here for the vm class. The `go` job runs the
+  # same packages, without the distribution-spec suite, which this job
+  # requires.
   local-conformance:
     name: local-conformance
     paths-ignore: *not-read-by-the-go-program
@@ -188,7 +193,20 @@ jobs:
         env:
           SILO_REQUIRE_REGISTRY_CLIENTS: "1"
           SILO_OCI_CONFORMANCE: /tmp/oci-conformance.test
-        run: go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/
+        run: |
+          set +e
+          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ > /tmp/conformance.log 2>&1
+          status=$?
+          cat /tmp/conformance.log
+          set -e
+          echo "=== targets not tested on this runner ==="
+          grep -oE '(gcp|local/[a-z]+): not (runnable here|offered)[^"]*' /tmp/conformance.log | sort | uniq -c || true
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "/dev/kvm: usable here"
+          else
+            echo "/dev/kvm: not usable here; the vm class is not tested on this runner"
+          fi
+          exit $status
 
   # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server

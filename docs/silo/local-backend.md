@@ -2079,6 +2079,63 @@ as two targets, and against `gcp`.
 - **The GCP conformance** stays nightly, unchanged in what it covers,
   running the neutral cases with the GCP target.
 
+### As built in step 12
+
+Task 3420 built the split as far as silod's wiring allows:
+
+- **`conformance.Target` has `Fence`.** It is an install's fence API
+  and Docker facade, called as a silo, and `Probe`s made in its silos.
+  A probe runs `Check`s and reports them, and can `Spoof` a source
+  address. A local target can also send from a port with no pin
+  (`conformance.Unpinned`). A check kind a target can't run is
+  reported `unsupported`, and the case skips it. It never passes.
+- **The neutral cases** are in `pkg/conformance/fence/fence_test.go`:
+  - isolation of `/a`, `/a/c` and `/b` on TCP, UDP and ICMP, with two
+    probes of one silo as the control;
+  - origin spoofing;
+  - never-looser for egress, links, isolation, ingress and control;
+  - a link proposed by one side, then both, then deleted;
+  - egress through the proxy, and nothing past it;
+  - sealed and `read` silos at both layers.
+
+  Revocation closing an open connection, and exports, need a real
+  gateway and so the installed targets.
+- **The Docker cases** are in `pkg/conformance/docker/facade_test.go`.
+  They cover every refusal in [Refused](#refused), 404s across silos
+  by name and id prefix (the same answer as for a reference that
+  matches nothing), and `/info` without host facts.
+- **The structural cases** are in `pkg/conformance/local/fence_test.go`:
+  - no route from a probe to the metadata server, the host's
+    addresses, or a service on the host's `0.0.0.0`;
+  - gw0 answering only its own services;
+  - nothing through an unpinned port.
+
+  Adoption across a restart, and the `Host`-header, socket, published
+  port, DNS and image-record cases, wait for the installed targets.
+- **"local/fake" runs all of them on every push** (call L25). Its
+  `Fence` is silod in process: the fake drivers, and the local fence's
+  applier loading `netfence.Fake`. Each check's packet goes through
+  the evaluator as silo-net's kernel would take it:
+  1. the bridge pins of the port it leaves by;
+  2. if it isn't switched on its own bridge, `inet` prerouting;
+  3. then input (for gw0) or forward.
+
+  A check reaches its destination only if a probe, a gw0 service or
+  the uplink holds the address. The egress proxy's verdict is
+  `egress.Allowed` and `egress.Internal`.
+- **"gcp" is unchanged.** Its fence cases are still the harness's own,
+  in `pkg/conformance` behind `silo_conformance`, run nightly by
+  `silo-conformance`. From the new packages its `Fence` reports itself
+  not runnable. Moving that harness behind `Fence` (an e2-micro probe
+  per `Probe`, the checks run by `ProbeScript`) is a follow-up.
+- **"local/sandbox" and "local/vm" report themselves not runnable.**
+  silod doesn't serve the Docker facade's host sockets yet (step 6's
+  "left to wiring"), so no probe container can be made. The `vm` class
+  also waits on step 10's `runtime.Driver`. `local-conformance` prints
+  the targets it didn't test in its log, and says whether `/dev/kvm`
+  works on the runner. Once a target can run, a not-runnable target
+  should fail the job, as above.
+
 ## 14. Limitations
 
 True of the local backend by design:
@@ -2219,7 +2276,11 @@ before item 7.
     - write the Docker and local-structural cases;
     - add `.grain/workflows` job `local-conformance`.
 
-    Depends on 6, 7 and 10 (its `vm` half on 10).
+    Depends on 6, 7 and 10 (its `vm` half on 10). Built against
+    "local/fake" in task 3420, as recorded under
+    [As built in step 12](#as-built-in-step-12). Installing the local
+    targets in the job waits on silod serving the facade's host
+    sockets.
 13. **Compose and testcontainers acceptance:** the flows in [§5](#5-compose-and-testcontainers)
     as scripted cases in `local-conformance`, in both classes.
     Depends on 12.
