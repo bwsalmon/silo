@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -461,6 +463,44 @@ func TestWhiteoutLayer(t *testing.T) {
 		if err := whiteoutLayer(io.Discard, bytes.NewReader(mk(h))); err == nil {
 			t.Errorf("%s was not refused", h.Name)
 		}
+	}
+}
+
+// What runsc release-20261005 wrote for a container that removed
+// /etc/motd and /etc/os-release, replaced /etc/apk/keys, and made /new
+// owned by 1234 (testdata/rootfs-upper.tar, from `runsc tar rootfs-upper`;
+// local-registry.md §13, step 35): the second whiteout is a hard link to
+// the first, and comes out as a whiteout of its own.
+func TestWhiteoutLayerRunsc(t *testing.T) {
+	in, err := os.ReadFile("testdata/rootfs-upper.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := whiteoutLayer(&out, bytes.NewReader(in)); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	tr := tar.NewReader(&out)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		got = append(got, fmt.Sprintf("%c %d:%d %s", h.Typeflag, h.Uid, h.Gid, h.Name))
+	}
+	want := []string{
+		"5 0:0 etc/",
+		"0 0:0 etc/.wh.motd",
+		"5 0:0 etc/apk/",
+		"5 0:0 etc/apk/keys/",
+		"0 0:0 etc/apk/keys/.wh..wh..opq",
+		"0 0:0 etc/apk/keys/mine",
+		"0 0:0 etc/.wh.os-release",
+		"0 1234:1234 new",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
