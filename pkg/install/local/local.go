@@ -32,6 +32,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/units"
+	"github.com/bwsalmon/silo/pkg/hostdoor"
 	"github.com/bwsalmon/silo/pkg/install"
 )
 
@@ -54,11 +55,11 @@ type Config struct {
 	RegistryHostPort int
 }
 
-// DefaultRegistryHostPort is --registry-host-port's default. Whether the
-// host port is on by default is local-registry.md's open question 37;
-// until it is answered, it is off, and install opens it only when
-// asked (hostdoor.Port is the port the design names).
-const DefaultRegistryHostPort = 0
+// DefaultRegistryHostPort is --registry-host-port's default: on, at
+// hostdoor.Port (local-registry.md's open question 37, answered on), so
+// crane, skopeo and oras reach localhost:5115 after install with no
+// flag. A uid mapped to no silo gets nothing from it.
+const DefaultRegistryHostPort = hostdoor.Port
 
 // Runner runs a command and returns its combined output. Tests replace
 // it.

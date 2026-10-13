@@ -562,8 +562,8 @@ The split is git's ([call L44](local-git.md#sealed-and-read-silos-call-l44)):
     wrong, so the answer's state is checked, as are its addresses and
     ports.
   - The port is set at install (`--registry-host-port`, `0` turns it
-    off). Whether it should be on by default is
-    [open question 37](#open-questions).
+    off), and is on by default, at 5115
+    ([open question 37](#open-questions), answered).
 - **No registry credential is ever needed for a local repo**, inside or
   outside. `docker login registry.silo.internal` succeeds and stores
   nothing silod uses ([§7](#7-the-docker-facade)).
@@ -1479,8 +1479,8 @@ earlier depends on them. Each can be filed on its own, in this order.
     mapping. silod serves it with `--registry-host-listen` (loopback
     addresses only, local backend only), and `silo install --backend
     local --registry-host-port <port>` puts that on silod's unit.
-    `--registry-host-port` defaults to 0, off, until open question 37
-    is answered. Until step 27b wires the registry service into
+    `--registry-host-port` defaults to 5115, on, as open question 37
+    was answered. Until step 27b wires the registry service into
     silod, the host port maps its callers and answers 404 to a
     mapped one. Nothing maps the installing user's uid to the root
     yet; that is the local install's root-silo step (local-backend.md
@@ -1722,6 +1722,8 @@ L76. **containerd's collector is the only one.** silod removes roots
     speed, and timing padding is hard to get right.
 37. **The host registry port.** Should `127.0.0.1:5115` be on by default?
     `docker push` through the facade's socket needs no port at all.
+    *Answered in task 3482: on.* Install opens it unless given
+    `--registry-host-port 0`; a uid mapped to no silo gets 403 from it.
 38. **Retention.** Should a repo have a policy that deletes untagged
     manifests after a time, or keeps only the last N tags? v1 keeps
     everything until deleted.
