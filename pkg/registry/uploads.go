@@ -503,7 +503,6 @@ func (s *Service) mount(q *request, digest, from string) bool {
 		return false
 	}
 	ctx := q.ctx()
-	var size int64
 	mounted := false
 	err := s.push(q, func(tx store.Tx, t *fenceapi.RegistryTarget) error {
 		mounted = false
@@ -519,7 +518,7 @@ func (s *Service) mount(q *request, digest, from string) bool {
 		if err != nil || !ok {
 			return err
 		}
-		size, mounted = n, true
+		mounted = true
 		s.mu.Lock()
 		if s.grace[t.Repo.ID] == nil {
 			s.grace[t.Repo.ID] = map[string]graceBlob{}
@@ -550,7 +549,6 @@ func (s *Service) mount(q *request, digest, from string) bool {
 	if !mounted {
 		return false
 	}
-	_ = size
 	q.w.Header().Set("Location", "/v2/"+q.name.String()+"/blobs/"+digest)
 	q.w.Header().Set("Docker-Content-Digest", digest)
 	q.w.Header().Set("Content-Length", "0")

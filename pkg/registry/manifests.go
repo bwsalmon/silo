@@ -260,6 +260,7 @@ func (s *Service) putManifest(q *request, ref string) {
 		return
 	}
 	var repo *imagerepos.Repo
+	var refs []string
 	var seq uint64
 	err = s.push(q, func(tx store.Tx, t *fenceapi.RegistryTarget) error {
 		row := &imagerepos.Manifest{Repo: t.Repo.ID, Digest: digest, MediaType: mt, Size: int64(len(b))}
@@ -293,6 +294,10 @@ func (s *Service) putManifest(q *request, ref string) {
 			}
 			row.Refs = append(row.Refs, imagerepos.Blob{Digest: d.Digest, Size: size})
 		}
+		refs = nil
+		for _, r := range row.Refs {
+			refs = append(refs, r.Digest)
+		}
 		if err := imagerepos.PutManifest(ctx, tx, row); err != nil {
 			return err
 		}
@@ -319,7 +324,7 @@ func (s *Service) putManifest(q *request, ref string) {
 	}
 	// The repo's record keeps the manifest, and through its references
 	// the config, layers and child manifests, from containerd's GC.
-	img := Image{Name: repo.ID + "@" + digest, Digest: digest, MediaType: mt, Size: int64(len(b)),
+	img := Image{Name: repo.ID + "@" + digest, Digest: digest, MediaType: mt, Size: int64(len(b)), Refs: refs,
 		Labels: map[string]string{SeqLabel: strconv.FormatUint(seq, 10)}}
 	if err := s.opts.Content.PutImage(context.WithoutCancel(ctx), img); err != nil {
 		log.Printf("registry: recording %s in %s: %v", img.Name, Namespace, err)
@@ -354,21 +359,13 @@ func (s *Service) deleteManifest(q *request, ref string) {
 				return err
 			}
 		} else {
-			before, err := imagerepos.Manifests(ctx, tx, t.Repo.ID)
-			if err != nil {
-				return err
-			}
+			var err error
 			gone, err = imagerepos.DeleteManifest(ctx, tx, t.Repo.ID, ref)
 			if errors.Is(err, imagerepos.ErrManifestNotFound) {
 				return rerr(http.StatusNotFound, codeManifestUnknown, "manifest unknown to registry")
 			} else if err != nil {
 				return err
 			}
-			after, err := imagerepos.Manifests(ctx, tx, t.Repo.ID)
-			if err != nil {
-				return err
-			}
-			_ = imagerepos.Charged(before) - imagerepos.Charged(after)
 		}
 		delta, err := s.charge(ctx, tx, t)
 		if err != nil {

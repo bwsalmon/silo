@@ -322,6 +322,15 @@ func TestSiblingNotFound(t *testing.T) {
 			answers = append(answers, fmt.Sprintf("%s %s %d %s", c.method, c.path, r.code, r.body))
 		}
 	}
+	// Authorization identifies nobody: credentials change nothing.
+	req, _ := http.NewRequest("GET", e.srv.URL+"/v2/team-a/app/manifests/1", nil)
+	req.Header.Set("Silo-Caller", b)
+	req.SetBasicAuth(a, "anything")
+	if res, err := http.DefaultClient.Do(req); err != nil || res.StatusCode != 404 {
+		t.Fatalf("with Authorization: %v %v", res, err)
+	} else {
+		res.Body.Close()
+	}
 	// Identical whatever exists.
 	n := len(answers) / 6
 	for i := 1; i < 6; i++ {

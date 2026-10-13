@@ -68,12 +68,16 @@ type Ingest interface {
 }
 
 // Image is one silo-registry record: <repo id>@<digest>, whose target
-// is the manifest, and whose labels carry dev.silo.seq.
+// is the manifest, and whose labels carry dev.silo.seq. Refs are the
+// digests the manifest references, which containerd's implementation
+// labels the manifest's content with (containerd.io/gc.ref.content.*),
+// so that GC keeps exactly what some repo references.
 type Image struct {
 	Name      string
 	Digest    string
 	MediaType string
 	Size      int64
+	Refs      []string
 	Labels    map[string]string
 }
 
