@@ -16,6 +16,8 @@ test upstream ([§13](#13-staged-implementation-plan) says what is left).
 Task 3486 landed step 33's cache index per sharing domain.
 Task 3488 ran step 35's builders in `sandbox` and wrote what they
 showed into [§9](#9-building-images); the `vm` half is step 35b.
+Task 3489 landed step 36's cases behind `conformance.Target`, run
+against `local/fake` until silod serves the registry.
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -1822,6 +1824,40 @@ earlier depends on them. Each can be filed on its own, in this order.
 36. **Registry and cache conformance cases** in `local-conformance`,
     as listed in [§12](#12-conformance-cases). Depends on 12 and on
     28 to 35.
+
+    *Landed in task 3489, ahead of item 12, against `local/fake`:*
+    `conformance.Target` with `Registry`, which a backend answers
+    with `ErrNotOffered` (the `gcp` target: a skip reading "not
+    offered", never a pass) or `*NotRunnable`, and
+    `conformance.Structural` for the local-only cases.
+    `pkg/conformance/targets` has `gcp`, `local/sandbox`, `local/vm`
+    and `local/fake`, which is silod's store, fence API, registry,
+    cache and Docker facade in process over the fake drivers and
+    `registry.Memory`, with the egress policy check in front of
+    `conformance.Upstream`, a token-auth upstream with a CDN redirect
+    and a private repo behind canary credentials. The cases are in
+    `pkg/conformance/fence` (access, no global answers, exports,
+    manage grants, sealed and `read` silos, never-looser, egress
+    through the cache, private upstream images, isolation, audit,
+    quota and the distribution-spec suite), `pkg/conformance/docker`
+    (push, pull and run from the silo and an importer, a push
+    elsewhere, a local pull without egress, `save` and `load` and a
+    tampered `load`, `commit` of a `vm` container and `build`, `login`,
+    and a private pull with and without `X-Registry-Auth`) and
+    `pkg/conformance/local` (the cache budget's LRU and a repo's
+    references, and collection after a repo delete). The `go` job runs
+    them on every push; the new `local-conformance` job runs them with
+    the distribution-spec suite required. *Left:* `local/sandbox` and
+    `local/vm` report themselves not runnable until step 27b wires
+    the registry into silod and item 12 makes `local-conformance`
+    install the local backend (and item 10 for `vm`); the local-only
+    cases that need a real data directory, store restore, uids or
+    gVisor (wiping `cache/`, the restored orphan, the host front door,
+    the builders) are still in their steps' packages; and of the
+    facade cases, `commit` of a `sandbox` container's three changes
+    and `load`'s path-traversal and over-disk refusals are still only
+    in `pkg/facade/local/docker`, as the Engine API gives a probe no
+    way to change a fake container's files.
 
 Plan item 9's granule list gains one entry: **the diff of a wrapped
 container's root, as a tar**, for `docker commit` in the `vm` class.

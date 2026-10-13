@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/fake"
@@ -49,6 +51,10 @@ type fakeRegistry struct {
 	regSrv  *httptest.Server
 	dockSrv *httptest.Server
 	root    string
+
+	mu sync.Mutex
+	// skew is how far Advance has moved the clock on from time.Now.
+	skew time.Duration
 }
 
 var (
@@ -79,7 +85,8 @@ func (Fake) Registry(t testing.TB) (conformance.Registry, error) {
 		}
 	}
 	f.api = fenceapi.New(db, fenceapi.Options{Caller: byHeader(fenceapi.ViaOrigin)})
-	f.reg = registry.New(registry.Options{Store: db, API: f.api, Content: f.content, Egress: f})
+	f.content.Now = f.now
+	f.reg = registry.New(registry.Options{Store: db, API: f.api, Content: f.content, Egress: f, Now: f.now})
 	f.api.SetRegistry(f.reg)
 	vols := t.TempDir()
 	vm, sbx := fake.New(runtime.VM), fake.New(runtime.Sandbox)
@@ -199,6 +206,18 @@ func (f *fakeRegistry) Audit(kind string) []map[string]any {
 }
 
 func (f *fakeRegistry) HasBlob(digest string) bool { return f.content.Has(digest) }
+
+func (f *fakeRegistry) now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return time.Now().Add(f.skew)
+}
+
+func (f *fakeRegistry) Advance(d time.Duration) {
+	f.mu.Lock()
+	f.skew += d
+	f.mu.Unlock()
+}
 
 func (f *fakeRegistry) CacheBytes() int64 {
 	f.t.Helper()

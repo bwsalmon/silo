@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // A Target is one backend the backend-neutral cases run against
@@ -72,6 +73,9 @@ type Structural interface {
 	// CacheBytes is the bytes the cache holds that no record outside
 	// it references: what its budget counts.
 	CacheBytes() int64
+	// Advance moves the registry's clock on by d, past the grace hour an
+	// upload's blobs are kept unreferenced for.
+	Advance(d time.Duration)
 }
 
 // RegistryOf is target's registry for t, or t skipped: "not offered"

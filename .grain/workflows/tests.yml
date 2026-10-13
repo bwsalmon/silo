@@ -152,6 +152,44 @@ jobs:
           export PATH="$PATH:$(go env GOPATH)/bin"
           go test -count=1 -timeout 10m -v -run 'TestDistributionSpec|TestCraneCLI|TestSkopeo|TestOras' ./pkg/registry/
 
+  # The local backend's conformance (docs/silo/local-backend.md §13, "How
+  # CI runs them"): the backend-neutral cases of pkg/conformance/fence,
+  # the Docker facade's of pkg/conformance/docker and the local-only
+  # structural ones of pkg/conformance/local, against every
+  # conformance.Target. Today they are the registry and cache cases
+  # (docs/silo/local-registry.md §12, step 36), and the target that runs
+  # is "local/fake", in process; "gcp" reports them not offered, and
+  # "local/sandbox" and "local/vm" not runnable until silod serves the
+  # registry and this job installs the local backend (local-backend.md
+  # item 12). The `go` job runs the same packages, without the
+  # distribution-spec suite, which this job requires.
+  local-conformance:
+    name: local-conformance
+    paths-ignore: *not-read-by-the-go-program
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 30
+    steps:
+      # A download, so `infrastructure:`; the same pinned suite as the
+      # registry job's.
+      - name: Install the distribution-spec conformance suite
+        infrastructure: true
+        env:
+          GOFLAGS: ""
+        run: |
+          set -e
+          tmp=$(mktemp -d) && cd "$tmp" && go mod init conformance-build >/dev/null 2>&1
+          go get github.com/opencontainers/distribution-spec/conformance@v0.0.0-20260831232431-97274622c111
+          cp -r "$(go list -m -f '{{.Dir}}' github.com/opencontainers/distribution-spec/conformance)" suite
+          chmod -R u+w suite && cd suite && go test -c -o /tmp/oci-conformance.test .
+
+      - name: Test
+        env:
+          SILO_REQUIRE_REGISTRY_CLIENTS: "1"
+          SILO_OCI_CONFORMANCE: /tmp/oci-conformance.test
+        run: go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/
+
   # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server
   # per test (pkg/internal/pgtest). SILO_REQUIRE_POSTGRES makes every
