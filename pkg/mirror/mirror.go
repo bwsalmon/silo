@@ -90,6 +90,9 @@ type Options struct {
 	// Poll is how often Run looks for work it wasn't woken for: a
 	// backoff that ran out, or the end of report-only mode.
 	Poll time.Duration
+	// IndexDebounce is how long the submodule index waits after a pass
+	// before it commits (local-git.md, "How it is written").
+	IndexDebounce time.Duration
 	// KeyScan reads an SSH host's keys, to pin them when the mirror is
 	// set; nil runs ssh-keyscan.
 	KeyScan func(ctx context.Context, host, port string) ([]byte, error)
@@ -105,6 +108,14 @@ type Mirror struct {
 	wake   chan struct{}
 	passes sync.Map // repo id -> *sync.Mutex, so passes never overlap
 	seq    atomic.Uint64
+
+	// indexAt is when the index pass is next due (zero: not due), and
+	// indexBackoff how long it waits after a failure. indexMu keeps
+	// index passes from overlapping.
+	indexAt      time.Time
+	indexRunning bool
+	indexBackoff time.Duration
+	indexMu      sync.Mutex
 }
 
 // state is the loop's view of one repo.
@@ -144,6 +155,9 @@ func New(o Options) *Mirror {
 	}
 	if o.Poll <= 0 {
 		o.Poll = time.Second
+	}
+	if o.IndexDebounce <= 0 {
+		o.IndexDebounce = DefaultIndexDebounce
 	}
 	if o.Logf == nil {
 		o.Logf = log.Printf
@@ -228,6 +242,7 @@ func (m *Mirror) Run(ctx context.Context) error {
 	if err := m.markAll(ctx, seq); err != nil {
 		return err
 	}
+	m.indexDue(0)
 	go func() {
 		for c := range changes {
 			switch c.Kind {
@@ -249,6 +264,7 @@ func (m *Mirror) Run(ctx context.Context) error {
 	for {
 		if paused, err := m.paused(ctx); err == nil && paused == "" {
 			m.dispatch(ctx, sem)
+			m.dispatchIndex(ctx)
 		}
 		select {
 		case <-ctx.Done():
@@ -302,6 +318,7 @@ func (m *Mirror) done(id string, seq uint64, err error) {
 	s.running = false
 	if err == nil {
 		s.mirrored, s.backoff, s.next = max(s.mirrored, seq), 0, time.Time{}
+		m.indexDueLocked(m.opts.IndexDebounce)
 		return
 	}
 	if s.backoff == 0 {
@@ -310,6 +327,55 @@ func (m *Mirror) done(id string, seq uint64, err error) {
 		s.backoff = m.opts.MaxBackoff
 	}
 	s.next, s.force = time.Now().Add(s.backoff), true
+}
+
+// indexDue makes the index pass due after wait, unless it is due
+// sooner already.
+func (m *Mirror) indexDue(wait time.Duration) {
+	m.mu.Lock()
+	m.indexDueLocked(wait)
+	m.mu.Unlock()
+	m.poke()
+}
+
+func (m *Mirror) indexDueLocked(wait time.Duration) {
+	at := time.Now().Add(wait)
+	if m.indexAt.IsZero() || at.Before(m.indexAt) {
+		m.indexAt = at
+	}
+}
+
+// dispatchIndex starts the index pass if it is due and no repo pass is
+// running, so that one index commit follows each batch of passes.
+func (m *Mirror) dispatchIndex(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.indexAt.IsZero() || m.indexRunning || time.Now().Before(m.indexAt) {
+		return
+	}
+	for _, s := range m.repos {
+		if s.running {
+			return
+		}
+	}
+	m.indexAt, m.indexRunning = time.Time{}, true
+	go func() {
+		err := m.Index(ctx)
+		m.mu.Lock()
+		m.indexRunning = false
+		if err == nil {
+			m.indexBackoff = 0
+		} else {
+			if m.indexBackoff == 0 {
+				m.indexBackoff = m.opts.MinBackoff
+			} else if m.indexBackoff *= 2; m.indexBackoff > m.opts.MaxBackoff {
+				m.indexBackoff = m.opts.MaxBackoff
+			}
+			m.indexDueLocked(m.indexBackoff)
+		}
+		m.mu.Unlock()
+		m.poke()
+	}()
 }
 
 // paused says why passes don't run, if they don't: report-only mode,

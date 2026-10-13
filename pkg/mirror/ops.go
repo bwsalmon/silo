@@ -157,8 +157,11 @@ func (m *Mirror) Set(ctx context.Context, c fenceapi.Caller, s fenceapi.MirrorSe
 	if cfg.Prefix == "" {
 		cfg.Prefix = DefaultPrefix
 	}
-	if cfg.IndexBranch == "" {
+	if cfg.IndexBranch == "" && !s.NoIndex {
 		cfg.IndexBranch = DefaultIndexBranch
+	}
+	if s.NoIndex {
+		cfg.IndexBranch = ""
 	}
 	kind, err := credentialKind(cfg.URL)
 	if err != nil {
@@ -168,7 +171,7 @@ func (m *Mirror) Set(ctx context.Context, c fenceapi.Caller, s fenceapi.MirrorSe
 	if !tree.ValidName(cfg.Prefix) {
 		return nil, errorf(fenceapi.InvalidArgument, "prefix %q: want a DNS label, as a silo's name", cfg.Prefix)
 	}
-	if !repos.ValidBranch(cfg.IndexBranch) || strings.HasPrefix(cfg.IndexBranch, cfg.Prefix+"/") {
+	if cfg.IndexBranch != "" && (!repos.ValidBranch(cfg.IndexBranch) || strings.HasPrefix(cfg.IndexBranch, cfg.Prefix+"/")) {
 		return nil, errorf(fenceapi.InvalidArgument, "index branch %q: want a branch name outside the prefix", cfg.IndexBranch)
 	}
 	if s.Credential == "" {
@@ -180,6 +183,19 @@ func (m *Mirror) Set(ctx context.Context, c fenceapi.Caller, s fenceapi.MirrorSe
 	}
 	if err := m.probe(ctx, cfg, staged); err != nil {
 		return nil, errorf(fenceapi.FailedPrecondition, "%v", err)
+	}
+	if cfg.IndexBranch != "" {
+		// Silo never takes over a branch people use (local-git.md, "How
+		// it is written").
+		ext, err := m.externalIndex(ctx, cfg, staged, false)
+		if err != nil {
+			return nil, errorf(fenceapi.FailedPrecondition, "reading the index branch %s: %v", cfg.IndexBranch, err)
+		}
+		if ext.SHA != "" && !ext.Ours {
+			return nil, errorf(fenceapi.FailedPrecondition,
+				"the uber repo's %s has commits silod didn't write (its tip %.12s has no %q trailer); pick another --index-branch, or --no-index",
+				cfg.IndexBranch, ext.SHA, IndexTrailer)
+		}
 	}
 	if err := install(staged, m.opts.Keys); err != nil {
 		return nil, err
@@ -200,6 +216,13 @@ func (m *Mirror) Set(ctx context.Context, c fenceapi.Caller, s fenceapi.MirrorSe
 				if _, err := tx.Exec(ctx, q); err != nil {
 					return err
 				}
+			}
+		}
+		// The index starts again from the external tip, which was just
+		// checked to be silod's, or from nothing.
+		for _, name := range []string{settingIndexTip, settingIndexDiverged, settingIndexError} {
+			if err := store.WriteSetting(ctx, tx, name, ""); err != nil {
+				return err
 			}
 		}
 		root, err := tree.Root(ctx, tx)
@@ -223,6 +246,7 @@ func (m *Mirror) Set(ctx context.Context, c fenceapi.Caller, s fenceapi.MirrorSe
 	if err := m.markAll(ctx, seq); err != nil {
 		return nil, err
 	}
+	m.indexDue(0)
 	return m.Status(ctx, false)
 }
 
@@ -248,6 +272,14 @@ func (m *Mirror) Status(ctx context.Context, all bool) (*fenceapi.MirrorStatus, 
 		}
 		if cfg != nil {
 			out.Configured, out.URL, out.Prefix, out.IndexBranch, out.Credential = true, cfg.URL, cfg.Prefix, cfg.IndexBranch, cfg.Credential
+			for _, f := range []struct {
+				name string
+				v    *string
+			}{{settingIndexTip, &out.IndexTip}, {settingIndexDiverged, &out.IndexDiverged}, {settingIndexError, &out.IndexError}} {
+				if *f.v, _, err = store.ReadSetting(ctx, tx, f.name); err != nil {
+					return err
+				}
+			}
 		}
 		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM mirror_refs`).Scan(&out.Refs); err != nil {
 			return err
@@ -366,6 +398,10 @@ func (m *Mirror) Retry(ctx context.Context, id string) (*fenceapi.MirrorStatus, 
 		if err := m.markAll(ctx, seq); err != nil {
 			return nil, err
 		}
+		m.mu.Lock()
+		m.indexBackoff = 0
+		m.mu.Unlock()
+		m.indexDue(0)
 		return m.Status(ctx, false)
 	}
 	m.markDirty(id, seq, false)

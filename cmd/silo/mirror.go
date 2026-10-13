@@ -20,17 +20,21 @@ func (c *cli) mirrorSet(ctx context.Context, args []string) error {
 	cred := fs.String("credential-file", "", "an SSH deploy key with write access, or a file holding an HTTPS token")
 	prefix := fs.String("prefix", "", "the first component of every branch silod pushes (default silo)")
 	index := fs.String("index-branch", "", "the submodule index's branch (default main)")
-	if _, err := c.parse(fs, args, 0, 0, "--url u --credential-file f [--prefix p] [--index-branch b]"); err != nil {
+	noIndex := fs.Bool("no-index", false, "write no submodule index; an existing index branch is left as it is")
+	if _, err := c.parse(fs, args, 0, 0, "--url u --credential-file f [--prefix p] [--index-branch b | --no-index]"); err != nil {
 		return err
 	}
 	if *u == "" || *cred == "" {
 		return usagef("silo mirror set needs --url and --credential-file")
 	}
+	if *noIndex && *index != "" {
+		return usagef("--index-branch and --no-index don't go together")
+	}
 	b, err := os.ReadFile(*cred)
 	if err != nil {
 		return err
 	}
-	st, err := c.api.SetMirror(ctx, client.MirrorSettings{URL: *u, Credential: string(b), Prefix: *prefix, IndexBranch: *index})
+	st, err := c.api.SetMirror(ctx, client.MirrorSettings{URL: *u, Credential: string(b), Prefix: *prefix, IndexBranch: *index, NoIndex: *noIndex})
 	if err != nil {
 		return err
 	}
@@ -118,7 +122,19 @@ func (c *cli) printMirror(st *client.MirrorStatus) error {
 		}
 		w.row("Mirror:", st.URL)
 		w.row("Prefix:", st.Prefix)
-		w.row("Index branch:", st.IndexBranch)
+		switch {
+		case st.IndexBranch == "":
+			w.row("Index branch:", "none")
+		case st.IndexDiverged != "":
+			w.row("Index branch:", st.IndexBranch+" (not updated: "+st.IndexDiverged+"; silo mirror set resumes it)")
+		case st.IndexTip != "":
+			w.row("Index branch:", st.IndexBranch+" at "+short(st.IndexTip))
+		default:
+			w.row("Index branch:", st.IndexBranch)
+		}
+		if st.IndexError != "" {
+			w.row("Index error:", st.IndexError)
+		}
 		w.row("Credential:", st.Credential)
 		if st.Paused != "" {
 			w.row("Paused:", st.Paused)

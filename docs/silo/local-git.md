@@ -1100,6 +1100,54 @@ can be filed on its own, in this order.
     - rulesets.
 
     The run's findings are written back into this page. Depends on 21.
+
+    **The index is built (task 3425),** in `pkg/mirror/index.go`. Where
+    it differs from [§7](#how-it-is-written):
+    - The index's own state is three settings: `mirror.index_tip`, the
+      last commit silod pushed (the lease); `mirror.index_diverged`, why
+      it stopped; and `mirror.index_error`, the last pass's failure. So
+      there is no migration. `silo mirror status` shows all three.
+    - The tree is laid out with a throwaway index file
+      (`update-index --index-info`, then `write-tree`) rather than
+      `mktree` per directory. The trees are the same.
+    - The pass runs once the debounce (10 s) has passed since the first
+      repo pass of a batch, and no repo pass is running. It makes no
+      commit if the tree hasn't changed. A failed pass backs off like a
+      repo's.
+    - Turning the index off is `silo mirror set --no-index` (`no_index`
+      in the API). An empty `--index-branch` already means `main`.
+    - A diverged index stays stopped until `silo mirror set` runs
+      again. `set` makes the same check as on first contact: the branch
+      must be absent, or its tip must carry `Silo-Index: 1`. So after a
+      human's commit, the operator picks another `--index-branch`,
+      passes `--no-index`, or puts back a silod commit by hand. That is
+      this page's provisional answer to
+      [open question 26](#open-questions).
+    - `set` reads the tip of a branch it may not own by fetching only
+      that commit (`--depth=1`) into a throwaway repo. Only a tip that
+      carries the trailer is fetched into `mirror/index.git`.
+    - A repo whose default branch is diverged keeps the gitlink of what
+      silod last pushed there.
+    - The gitlinks are relative to the uber repo's default branch
+      (`HEAD`). silod can't set it. For `git clone` without `-b` to
+      check out the index, the uber repo's default branch has to be the
+      index branch. On GitHub that is a repository setting.
+
+    **The GitHub check hasn't been run.** Task 3425's sandbox had no
+    GitHub access: no `github-sandbox` credential, and no route to
+    github.com. Every *verify* item on this page is still open:
+    - how GitHub shows and links a `url = ./` submodule (§7);
+    - fetching a gitlinked SHA that only `refs/silo-archive/...` or a
+      non-default branch reaches, with `--single-branch` (§6, §8);
+    - whether GitHub accepts a push to a custom `refs/<prefix>-archive/`
+      namespace (§8, [open question 25](#open-questions));
+    - the 100 MB file, 2 GB push and repository-size limits, and the
+      3-tag / 5,000-branch event thresholds;
+    - code search not descending into submodules, and how large a
+      directory listing can get before it is truncated;
+    - whether a ruleset that forbids force-pushes or deletions fails the
+      `_silo-probe` steps in a way `silo mirror set` reports.
+    Until it is run, nothing new should depend on these claims.
 23. **Mapping back.** `silo repo external`, `silo repo which`, and
     `silo repo external-clone` with the submodule-URL fix-up. Depends on
     21, and on 22 for the index line.

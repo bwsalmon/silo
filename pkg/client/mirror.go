@@ -13,6 +13,7 @@ type MirrorSettings struct {
 	Credential  string `json:"credential,omitempty"`
 	Prefix      string `json:"prefix,omitempty"`
 	IndexBranch string `json:"index_branch,omitempty"`
+	NoIndex     bool   `json:"no_index,omitempty"`
 }
 
 // MirrorStatus is the outbound mirror's configuration and the repos
@@ -23,6 +24,9 @@ type MirrorStatus struct {
 	Prefix         string       `json:"prefix,omitempty"`
 	IndexBranch    string       `json:"index_branch,omitempty"`
 	Credential     string       `json:"credential,omitempty"`
+	IndexTip       string       `json:"index_tip,omitempty"`
+	IndexDiverged  string       `json:"index_diverged,omitempty"`
+	IndexError     string       `json:"index_error,omitempty"`
 	Paused         string       `json:"paused,omitempty"`
 	Refs           int          `json:"refs"`
 	EstimatedBytes int64        `json:"estimated_bytes"`
