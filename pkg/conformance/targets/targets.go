@@ -11,13 +11,11 @@
 //     also runs silod's git service, gitstore and mirror, with the
 //     gateway in front (conformance.Git), for the repo cases; an uber
 //     repo is git http-backend, and a restore restarts that part of
-//     silod on a copy of its store and repos. Its containers run a
-//     scripted shell (fakeshell.go) for the compose and testcontainers
-//     cases, not their images, which it says as conformance.Simulated.
+//     silod on a copy of its store and repos.
 //   - "local/sandbox" and "local/vm": silod installed with --backend
 //     local, probes made through the facade in each isolation class.
-//     They report themselves not runnable until silod serves the
-//     registry (local-registry.md step 27b) and the facade's host
+//     They report themselves not runnable until a CI job installs
+//     the local backend and silod serves the facade's host
 //     sockets (local-backend.md §4, "As built in step 6", "left to
 //     wiring"), which local-conformance needs to make probes; the vm
 //     class also waits on step 10's runtime.Driver.
@@ -61,7 +59,7 @@ type Local struct{ Class string }
 func (l Local) Name() string { return "local/" + l.Class }
 
 func (l Local) Registry(testing.TB) (conformance.Registry, error) {
-	why := "silod doesn't serve the registry until local-registry.md step 27b wires it, and no CI job installs the local backend until local-backend.md item 12's local-conformance"
+	why := "no CI job installs the local backend, whose silod serves the registry, until local-backend.md item 12's local-conformance"
 	if l.Class == "vm" {
 		why += "; the vm class also waits on item 10"
 	}

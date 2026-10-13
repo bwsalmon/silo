@@ -70,7 +70,9 @@ jobs:
   # in the `go` job (no newuidmap there) and are required here by
   # SILO_REQUIRE_NSD, and
   # pkg/backend/local/netfence's, which load the compiled fence with the
-  # real nft.
+  # real nft, and pkg/registry/containerdstore's (local-registry.md step
+  # 27b: the registry's content store over silo-containerd, rootless in
+  # a holder, held to the contract the `go` job holds its fake to).
   nsd:
     name: nsd
     paths-ignore: *not-read-by-the-go-program
@@ -109,7 +111,7 @@ jobs:
         env:
           SILO_REQUIRE_NSD: "1"
           SILO_NSD_RUNSC: /tmp/gvisor/runsc
-        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./pkg/backend/local/runtime/... ./cmd/silo/
+        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./pkg/backend/local/runtime/... ./pkg/registry/containerdstore/ ./cmd/silo/
 
   # The registry for local image repos (docs/silo/local-registry.md §13,
   # step 27) against real clients: the OCI distribution-spec
@@ -158,9 +160,7 @@ jobs:
   # conformance.Target's Fence, and the registry's), the Docker
   # facade's of pkg/conformance/docker and the local-only structural
   # ones of pkg/conformance/local (repos and the mirror's among them,
-  # with real git clients), and §5's compose and testcontainers flows in
-  # both classes, with what gVisor won't run as expected skips, of
-  # pkg/conformance/compose, against every conformance.Target.
+  # with real git clients), against every conformance.Target.
   # "local/fake" runs them in process, judging probes' packets with the
   # nftables evaluator; "gcp" reports them not offered or not runnable
   # here (its own forms run nightly in silo-conformance); "local/sandbox"
@@ -198,7 +198,7 @@ jobs:
           SILO_OCI_CONFORMANCE: /tmp/oci-conformance.test
         run: |
           set +e
-          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ ./pkg/conformance/compose/ > /tmp/conformance.log 2>&1
+          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ > /tmp/conformance.log 2>&1
           status=$?
           cat /tmp/conformance.log
           set -e

@@ -432,7 +432,7 @@ func TestWhiteoutLayer(t *testing.T) {
 		return buf.Bytes()
 	}
 	var out bytes.Buffer
-	err := whiteoutLayer(&out, bytes.NewReader(mk(
+	err := WhiteoutLayer(&out, bytes.NewReader(mk(
 		&tar.Header{Name: "./a/gone", Typeflag: tar.TypeChar},
 		&tar.Header{Name: "./opq", Typeflag: tar.TypeDir, Mode: 0o755, PAXRecords: map[string]string{"SCHILY.xattr.trusted.overlay.opaque": "y"}},
 	)))
@@ -460,7 +460,7 @@ func TestWhiteoutLayer(t *testing.T) {
 		{Name: "../escape", Typeflag: tar.TypeReg},
 		{Name: "x", Typeflag: tar.TypeLink, Linkname: "../../etc/shadow"},
 	} {
-		if err := whiteoutLayer(io.Discard, bytes.NewReader(mk(h))); err == nil {
+		if err := WhiteoutLayer(io.Discard, bytes.NewReader(mk(h))); err == nil {
 			t.Errorf("%s was not refused", h.Name)
 		}
 	}
@@ -477,7 +477,7 @@ func TestWhiteoutLayerRunsc(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := whiteoutLayer(&out, bytes.NewReader(in)); err != nil {
+	if err := WhiteoutLayer(&out, bytes.NewReader(in)); err != nil {
 		t.Fatal(err)
 	}
 	var got []string

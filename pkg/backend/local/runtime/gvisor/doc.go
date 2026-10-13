@@ -21,6 +21,9 @@
 //     static busybox bind-mounted read-only at ToolboxPath when the
 //     driver is given one: with --overlay2=root:self the container's
 //     writes live in the sandbox, not on the host.
+//   - RootfsUpper (docker commit) is `runsc tar rootfs-upper`, run by
+//     `silod runsc` in the holder as the shim runs runsc, its tar
+//     streamed through a pipe of its own.
 //   - Stats are the shim's cgroup metrics; a container's cgroup is its
 //     scope in its silo's slice when cgroups are delegated
 //     (rootless.CgroupsPath).

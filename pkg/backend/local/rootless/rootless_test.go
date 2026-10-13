@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -262,5 +263,31 @@ func TestRunscCommandLine(t *testing.T) {
 	}
 	if c := runscCommand([]string{"--root=/r"}); c != "" {
 		t.Errorf("no command: %q", c)
+	}
+}
+
+func TestPrepareTarFile(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	fd := "/proc/self/fd/" + strconv.Itoa(int(w.Fd()))
+	// Giving the pipe to its own owner needs no privilege.
+	if err := prepareTarFile([]string{"--root=/r", "tar", "rootfs-upper", "--file", fd, "c1"}, os.Getuid()); err != nil {
+		t.Errorf("tar --file %s: %v", fd, err)
+	}
+	for _, args := range [][]string{
+		{"--root=/r", "tar", "rootfs-upper", "--file", "/b/upper.tar", "c1"},
+		{"--root=/r", "tar", "rootfs-upper", "c1"},
+		{"--root=/r", "exec", "--file", "/proc/self/fd/x", "c1"},
+	} {
+		if err := prepareTarFile(args, 1); err != nil {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	if err := prepareTarFile([]string{"tar", "rootfs-upper", "--file=/proc/self/fd/x", "c1"}, 1); err == nil {
+		t.Errorf("--file /proc/self/fd/x was accepted")
 	}
 }

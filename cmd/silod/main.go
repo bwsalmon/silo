@@ -71,6 +71,8 @@ import (
 	"github.com/bwsalmon/silo/pkg/mirror"
 	"github.com/bwsalmon/silo/pkg/modelproxy"
 	"github.com/bwsalmon/silo/pkg/reconcile"
+	"github.com/bwsalmon/silo/pkg/registry"
+	"github.com/bwsalmon/silo/pkg/registry/containerdstore"
 	"github.com/bwsalmon/silo/pkg/session"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/store/migrations"
@@ -420,6 +422,7 @@ func serve(ctx context.Context, args []string) error {
 	imageCacheSize := fs.Float64("image-cache-size", 0, "with --backend=local: the registry cache's budget in GiB, from install's --image-cache-size, set if the cache's configuration never was (0 leaves it)")
 	afterRestore := fs.Bool("after-restore", false, "with --backend=local: the data directory was restored, cache included, so start the reconcile report-only whatever the object sequence says")
 	nsdState := fs.String("nsd-state", "", "with --backend=local: the namespace holder's state file (default $XDG_RUNTIME_DIR/silo/nsd.state)")
+	containerdSocket := fs.String("containerd-socket", "", "with --backend=local: silo-containerd's socket, whose content store the registry keeps image repos' blobs in (default containerd.sock beside --nsd-state)")
 	nftPath := fs.String("nft", "nft", "with --backend=local: the nft command, run in silo-net through the holder")
 	ambientAgents := fs.Bool("ambient-agents", false, "with --backend=local: run agents' harnesses on this host as silod's own user, the agent user, each turn in a systemd scope silo-agent-<agent id>.scope, with that user's own login (local-backend.md §10); the ambient-<provider> credentials then exist")
 	localGateway := fs.String("local-gateway", "10.255.255.1,10.255.255.2", "with --backend=local: silo.internal's and docker.silo.internal's addresses on gw0, comma-separated")
@@ -699,6 +702,34 @@ func serve(ctx context.Context, args []string) error {
 	} else {
 		be = gcp.New(bo)
 	}
+	// The registry for local image repos (local-registry.md §13, step
+	// 27b), over silo-containerd's content store, whose containerd
+	// silo-nsd runs. It is given the fence API once there is one.
+	var reg *registry.Service
+	if *backendKind == local.Kind && why == "" {
+		sock := *containerdSocket
+		if sock == "" {
+			state := *nsdState
+			if state == "" {
+				state = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "silo", "nsd.state")
+			}
+			sock = filepath.Join(filepath.Dir(state), "containerd.sock")
+		}
+		// An ingest's spool holds the chunk it may still have to take
+		// back: re-creatable, so in cache/.
+		spool := filepath.Join(dd.Cache(), "registry-spool")
+		if err := os.MkdirAll(spool, 0o700); err != nil {
+			return err
+		}
+		cs, err := containerdstore.New(containerdstore.Options{Address: sock, Spool: spool})
+		if err != nil {
+			return err
+		}
+		defer cs.Close()
+		reg = registry.New(registry.Options{Store: db, Content: cs})
+		opts.Registry = reg
+		log.Printf("serving the registry over silo-containerd's content store at %s", sock)
+	}
 	if be.Fence != nil {
 		opts.Fence, opts.Budget = be.Fence, be.Fence
 		if leaderLed {
@@ -772,6 +803,11 @@ func serve(ctx context.Context, args []string) error {
 		git.SetAPI(api)
 		gitHandler = git
 	}
+	var regHandler http.Handler
+	if reg != nil {
+		reg.SetAPI(api)
+		regHandler = reg
+	}
 	connected := api.ToolServerConnected
 	if runner != nil {
 		runner.Control, runner.Logins = api, api
@@ -817,9 +853,11 @@ func serve(ctx context.Context, args []string) error {
 		}
 	}
 	if leaderLed {
-		duties = append(duties, leaderDuties(db, leaderConfig{
-			backend: be, facade: fc, reportOnly: *reconcileMode == store.ReconcileReportOnly,
-		})...)
+		lc := leaderConfig{backend: be, facade: fc, reportOnly: *reconcileMode == store.ReconcileReportOnly}
+		if reg != nil {
+			lc.registry = reg
+		}
+		duties = append(duties, leaderDuties(db, lc)...)
 		if *gatewayReplicas && hostClient != nil && *homeRegion != "" {
 			duties = append(duties, gatewayCertDuty(&gwtls.Issuer{Store: db,
 				Fleet: &gwtls.GCEFleet{GCE: hostClient, Project: *hostProject, Region: *homeRegion}}))
@@ -869,10 +907,10 @@ func serve(ctx context.Context, args []string) error {
 		go func() { errc <- fsrv.Serve(l) }()
 	}
 	if *registryHostAddr != "" {
-		// The registry service isn't wired into silod yet (step 27b):
-		// until it is, the host port maps its callers and answers 404.
-		var reg http.Handler
-		hs, err := hostdoor.Start(*registryHostAddr, db, reg)
+		// Without a registry (not the local backend, or a store this
+		// release doesn't serve), the host port maps its callers and
+		// answers 404.
+		hs, err := hostdoor.Start(*registryHostAddr, db, regHandler)
 		if err != nil {
 			return err
 		}
@@ -893,7 +931,7 @@ func serve(ctx context.Context, args []string) error {
 			// heartbeat doesn't carry yet.
 			Agent: api.ToolChannelAgent,
 			Hub:   hub,
-		}, ToolVMAgent: api.ToolVMAgentAt, Git: gitHandler})
+		}, ToolVMAgent: api.ToolVMAgentAt, Git: gitHandler, Registry: regHandler})
 	}
 	if *gatewayTLS != "" {
 		// Gateway replicas: only a client whose certificate the leader

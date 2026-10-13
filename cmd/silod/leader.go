@@ -23,6 +23,9 @@ type leaderConfig struct {
 	backend    backend.Backend
 	facade     *facade.Server
 	reportOnly bool
+	// registry is the local registry, whose silo-registry records the
+	// reconcile compares with the store; nil for none.
+	registry reconcile.Registry
 }
 
 // How often the leader does each duty (state.md "More than one silod,
@@ -39,7 +42,8 @@ const (
 func leaderDuties(db store.Store, c leaderConfig) []leader.Duty {
 	var out []leader.Duty
 	if c.backend.Inventory != nil || c.backend.Fence != nil {
-		r := reconcile.New(reconcile.Options{Store: db, Inventory: c.backend.Inventory, Fence: c.backend.Fence, ReportOnly: c.reportOnly})
+		r := reconcile.New(reconcile.Options{Store: db, Inventory: c.backend.Inventory, Fence: c.backend.Fence, ReportOnly: c.reportOnly,
+			Registry: c.registry})
 		out = append(out, leader.Duty{Name: "reconcile", Every: reconcile.Every, Run: func(ctx context.Context) error {
 			rep, err := r.Run(ctx)
 			if rep != nil {

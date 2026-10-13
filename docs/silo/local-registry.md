@@ -9,7 +9,7 @@ Task 3450 landed the first part of step 25: image repos in the store
 and the fence API, the `image_repos` class, the `registry` scope type
 and `silo registry` ([§13](#13-staged-implementation-plan) says what of
 step 25 is left). Task 3480 landed step 27's registry handler over a
-fake content store; containerd's half is step 27b. Task 3483 landed
+fake content store; containerd's half, step 27b, landed in task 3535. Task 3483 landed
 step 30's facade endpoints over the same fake. Task 3484 landed step
 31's pull-through cache for public content, over the same fake and a
 test upstream ([§13](#13-staged-implementation-plan) says what is left).
@@ -793,6 +793,29 @@ The allowlists for the new endpoints live in
   `etc/motd`), because they share one inode. The facade's conversion
   turns all three into OCI's `.wh.` entries. Its test runs on the tar
   runsc wrote (`pkg/facade/local/docker/testdata/rootfs-upper.tar`).
+  The gVisor driver's `RootfsUpper` (task 3575) checks this again on
+  every CI run, through silod's own path, in `gvisor_linux_test`'s
+  `rootfs upper` case. There, a container with silod's runsc flags
+  writes `/created`, appends to the image's `/etc/passwd`, removes
+  `/bin/head` and `/bin/grep`, and remakes `/root`. runsc writes
+  `./bin/head` as a 0/0 character device, `./bin/grep` as a hard link to
+  `./bin/head`, and `./root/` with `SCHILY.xattr.trusted.overlay.opaque=y`.
+  Names start with `./`. `WhiteoutLayer` turns these into
+  `bin/.wh.head`, `bin/.wh.grep` and `root/.wh..wh..opq`, so it needed
+  no change. Two more things showed up. runsc mounts a tmpfs of its own
+  over an image's `/tmp` when that directory is empty and the spec
+  mounts nothing there (`mountTmp` in `runsc/boot/vfs.go`), so writes
+  under `/tmp` aren't in the upper layer and aren't committed, as they
+  would be under runc. runsc's own `/run` shows up as an opaque
+  directory, which is harmless where the image has no `/run`.
+  silod runs `runsc tar rootfs-upper --file /proc/self/fd/3 <id>`
+  through `silod runsc --bundle <the task's bundle>` inside the holder,
+  so runsc runs in the container's user namespace as its root, with
+  `--root` the shim's (`Paths.RunscRoot()`, then the containerd
+  namespace). The tar goes to its own pipe, because runsc also prints a
+  line on stdout. `silod runsc` gives that pipe to the container's root
+  so that runsc can reopen it. A container whose sandbox has exited has
+  no upper layer left, so it is refused as not running.
 - **`vm`: still 501**, `silo: commit of a vm container is not served:
   its writable layer is a guest disk`. The writable layer is granule's
   overlay over a guest disk image, an ext4 filesystem that rootless
@@ -1532,6 +1555,54 @@ earlier depends on them. Each can be filed on its own, in this order.
     variables in containers' environment yet, so there was no
     `NO_PROXY` there to add the name to; whatever adds them names
     `registry.silo.internal` beside `silo.internal`.
+
+    *Step 27b landed in task 3535:* `pkg/registry/containerdstore`,
+    `registry.Content` over silo-containerd's content, leases and
+    images APIs. Uploads and fetches are ingested in `silo-registry`
+    under their leases (`containerd.io/gc.expire`, one per session,
+    extended to the grace hour at commit; containerd can't relabel a
+    lease, so an extension swaps it under a guard lease holding the
+    same resources). A commit names the digest and size, and
+    `AlreadyExists` is success. containerd's writers can truncate
+    only to nothing, so an ingest keeps what was written since it last
+    answered `Offset` in a spool file (the data directory's
+    `cache/registry-spool/`, unlinked as made), which is what lets a
+    chunk refused for disk_gb be taken back; the spool is written to
+    containerd at the next `Offset`, `Digest` or `Commit`, or past
+    twice the largest chunk. containerd verifies sha256 only, so a
+    sha512 blob is refused as `DIGEST_INVALID`. A record of
+    `silo-registry` or `silo-cache` is made after its blobs are linked
+    into that namespace (an ingest naming digest and size, which the
+    shared content policy commits without the bytes), and the
+    manifest's content is labelled `containerd.io/gc.ref.content.<i>`
+    for each of its references. `Size` and `Open` answer from any
+    namespace, `silo-registry` and `silo-cache` first; who may have a
+    blob is still `Service.blob`'s to say. `Collect` is a lease
+    deleted synchronously, which runs containerd's GC. The read lease
+    is `Content.ReadLease`: the handler opens one for every `GET` and
+    `HEAD`, and each blob opened under it is added to it (made at the
+    first, in the blob's namespace) until the request ends, or ten
+    minutes pass. A manifest `PUT` now ingests under a lease of its
+    own until its record holds it. silod, with `--backend=local`,
+    serves the registry over the containerd at `--containerd-socket`
+    (`containerd.sock` beside `--nsd-state` by default) on the
+    gateway's `RegistrySilodPath` and the host port, and gives it to
+    the fence API (`SetRegistry`) and the leader's reconcile; its
+    cache has no `Egress` yet (step 31's), so it serves hits only.
+    `pkg/registry/contenttest` is the contract both implementations
+    keep, run on `Memory` in the `go` job and on silo-containerd,
+    rootless in a holder, in the `nsd` job, with crane pushing,
+    pulling and deleting through the handler there.
+
+    The grace hour's blobs are not kept across a silod restart: their
+    leases are containerd's and expire on their own, so the bytes are
+    safe for the hour; what is lost is silod's list of them, so the
+    repo's next reckoning stops charging them (an undercharge of at
+    most an hour) and a manifest pushed after the restart that names
+    them is `MANIFEST_BLOB_UNKNOWN` until the client pushes them again,
+    which proof of possession makes a re-upload it would do anyway.
+    A silod restart is rare and clients retry a push, so neither is
+    worth persisting the list for.
 28. **Grants on the registry:** exports and imports in the access path,
     manage-grant scopes, and closing connections within a second on
     revocation and expiry. Depends on 27.
@@ -1563,9 +1634,8 @@ earlier depends on them. Each can be filed on its own, in this order.
     addresses only, local backend only), and `silo install --backend
     local --registry-host-port <port>` puts that on silod's unit.
     `--registry-host-port` defaults to 5115, on, as open question 37
-    was answered. Until step 27b wires the registry service into
-    silod, the host port maps its callers and answers 404 to a
-    mapped one. Nothing maps the installing user's uid to the root
+    was answered. Since step 27b it serves the registry; before, it
+    mapped its callers and answered 404 to a mapped one. Nothing maps the installing user's uid to the root
     yet; that is the local install's root-silo step (local-backend.md
     §12, step 4).
 30. **The Docker facade:**
@@ -1599,8 +1669,11 @@ earlier depends on them. Each can be filed on its own, in this order.
     as the facade package's tests (`registry_test.go`), but for the
     private upstream ones, which need step 32.
 
-    *Left:* the gVisor driver's `RootfsUpper` (`runsc tar rootfs-upper`
-    through `silod runsc`); silod's wiring of
+    *Landed in task 3575:* the gVisor driver's `RootfsUpper`
+    (`runsc tar rootfs-upper` through `silod runsc`), checked against the
+    pinned runsc in `gvisor_linux_test`, as [§7](#commit) says.
+
+    *Left:* silod's wiring of
     the facade's `Content`, `Registry` and `Login` (with step 27b's
     containerd `registry.Content`); and moving the facade cases into
     `pkg/conformance/docker`, so that step 36 runs them against
@@ -1793,10 +1866,9 @@ earlier depends on them. Each can be filed on its own, in this order.
     `TestDeleteCollects`, `TestRestoreOrphan`, `TestRegistryDrift`);
     wiping `cache/` is datadir's `TestWipingCacheKeepsContainerd`.
 
-    *Left:* everything waits on step 27b's containerd `registry.Content`
-    and silod's wiring of the registry, which is also what gives the
-    leader's reconcile its `Registry` and the fence API its; until then
-    silod's evict is `FAILED_PRECONDITION`. `local.DetectRestore` doesn't
+    *Left:* step 27b (task 3535) gave the leader's reconcile its
+    `Registry` and the fence API its, so silod's evict works with the
+    local backend. `local.DetectRestore` doesn't
     yet count `silo-registry` labels in the disk's sequence.
 35. **Builders, run for real.** kaniko (from the Chainguard fork) and
     rootless BuildKit, in `sandbox` and in `vm`, each building a
@@ -1848,8 +1920,7 @@ earlier depends on them. Each can be filed on its own, in this order.
     references, and collection after a repo delete). The `go` job runs
     them on every push; the new `local-conformance` job runs them with
     the distribution-spec suite required. *Left:* `local/sandbox` and
-    `local/vm` report themselves not runnable until step 27b wires
-    the registry into silod and item 12 makes `local-conformance`
+    `local/vm` report themselves not runnable until item 12 makes `local-conformance`
     install the local backend (and item 10 for `vm`); the local-only
     cases that need a real data directory, store restore, uids or
     gVisor (wiping `cache/`, the restored orphan, the host front door,
