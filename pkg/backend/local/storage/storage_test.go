@@ -67,6 +67,45 @@ func TestDirLayoutAndIdempotence(t *testing.T) {
 	}
 }
 
+// A repo is kept under its silo's repos/, as <id>.git, and belongs to
+// the process even where the silo's own directories don't
+// (local-git.md, "On disk").
+func TestDirRepos(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	owned := map[string]bool{}
+	d := &storage.Dir{Root: root, Owner: func(silo string) (int, int, bool) {
+		owned[silo] = true
+		return os.Getuid(), os.Getgid(), true
+	}}
+	repo := storage.Ref{Silo: "k7f3qa", Repo: "r-8k2m4q"}
+	if repo.String() != "k7f3qa/repos/r-8k2m4q" {
+		t.Errorf("String = %s", repo)
+	}
+	if _, err := d.Create(ctx, repo, 0); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a repo before its silo's subtree: %v", err)
+	}
+	if _, err := d.Create(ctx, storage.Ref{Silo: "k7f3qa"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	delete(owned, "k7f3qa")
+	for range 2 {
+		p, err := d.Create(ctx, repo, 0)
+		if err != nil || p != filepath.Join(root, "k7f3qa", "repos", "r-8k2m4q.git") {
+			t.Fatalf("Create repo: %q %v", p, err)
+		}
+	}
+	if owned["k7f3qa"] {
+		t.Errorf("Owner was asked about a repo's directories")
+	}
+	if err := d.Delete(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "k7f3qa", "repos", "r-8k2m4q.git")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("repo after Delete: %v", err)
+	}
+}
+
 func TestDirRefusesPathsOutsideItsRoot(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -74,6 +113,7 @@ func TestDirRefusesPathsOutsideItsRoot(t *testing.T) {
 	for _, r := range []storage.Ref{
 		{}, {Silo: ".."}, {Silo: "."}, {Silo: "a/b"}, {Silo: "/etc"},
 		{Silo: "k7f3qa", Volume: ".."}, {Silo: "k7f3qa", Volume: "../../x"}, {Silo: "k7f3qa", Volume: ".hidden"},
+		{Silo: "k7f3qa", Repo: ".."}, {Silo: "k7f3qa", Repo: "a/b"}, {Silo: "k7f3qa", Volume: "v1", Repo: "r-8k2m4q"},
 	} {
 		if _, err := d.Create(ctx, r, 0); err == nil {
 			t.Errorf("Create(%+v) succeeded", r)
@@ -137,7 +177,7 @@ func TestMeterOverQuota(t *testing.T) {
 	}
 	var child *tree.Silo
 	if err := db.Tx(ctx, func(tx store.Tx) error {
-		root, err := tree.CreateRoot(ctx, tx, "root", nil)
+		root, err := tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}

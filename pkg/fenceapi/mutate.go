@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/netip"
+	"slices"
 	"sort"
 
 	"github.com/bwsalmon/silo/pkg/control"
@@ -26,6 +27,9 @@ type CreateRequest struct {
 	GrantPolicy    GrantPolicy       `json:"grant_policy"`
 	Control        string            `json:"control"`
 	AgentPolicy    *AgentPolicy      `json:"agent_policy"`
+	Isolation      *Isolation        `json:"isolation"`
+	Ingress        string            `json:"ingress"`
+	Repos          *ReposPolicy      `json:"repos"`
 	Labels         map[string]string `json:"labels"`
 }
 
@@ -106,11 +110,17 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		if rel == relManage && req.Control != "" {
 			return errorf(PermissionDenied, "a manage grant never carries control").with("field", "control")
 		}
-		if req.Backing != nil && req.Backing.Kind != "" && req.Backing.Kind != tree.BackingSubnet {
-			if req.Backing.Kind == "vpc" || req.Backing.Kind == "project" {
-				return errorf(Unimplemented, "backing %q is not supported in v1", req.Backing.Kind).with("backing", req.Backing.Kind)
+		backing := parent.Backing
+		if req.Backing != nil && req.Backing.Kind != "" {
+			if err := checkBacking(req.Backing.Kind); err != nil {
+				return err
 			}
-			return errorf(InvalidArgument, "backing %q: want subnet", req.Backing.Kind).with("field", "backing")
+			if req.Backing.Kind != parent.Backing {
+				// Mixed nesting comes later (local-backend.md, open
+				// question 10).
+				return errorf(Unimplemented, "backing %q under a %q parent is not supported in v1: a tree has its root's backing throughout",
+					req.Backing.Kind, parent.Backing).with("backing", req.Backing.Kind)
+			}
 		}
 		if !tree.ValidName(req.Name) {
 			return errorf(InvalidArgument, "name %q is not a DNS label", req.Name).with("field", "name")
@@ -138,7 +148,8 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		if err != nil {
 			return err
 		}
-		own := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Agent: peff.Agent, Control: peff.Control}
+		own := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Agent: peff.Agent, Control: peff.Control,
+			Isolation: peff.Isolation, Ingress: IngressNone, Repos: peff.Repos}
 		for k, v := range peff.Grant {
 			own.Grant[k] = v
 		}
@@ -153,6 +164,20 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		}
 		if req.Control != "" {
 			own.Control = req.Control
+		}
+		if req.Isolation != nil {
+			iso := *req.Isolation
+			if iso.Allowed == nil {
+				// Only a default: the parent's classes.
+				iso.Allowed = peff.Isolation.Allowed
+			}
+			own.Isolation = normIsolation(iso)
+		}
+		if req.Ingress != "" {
+			own.Ingress = req.Ingress
+		}
+		if req.Repos != nil {
+			own.Repos = *req.Repos
 		}
 		if err := checkPolicies(own); err != nil {
 			return err
@@ -172,7 +197,7 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 			quota = append(quota, ledger.Amount{Key: ledger.ModelUSD, Amount: m})
 		}
 
-		child, err := tree.CreateChild(ctx, tx, parent.ID, req.Name, tree.BackingSubnet, req.Labels)
+		child, err := tree.CreateChild(ctx, tx, parent.ID, req.Name, backing, req.Labels)
 		if err != nil {
 			return err
 		}
@@ -293,7 +318,25 @@ func checkPolicies(p *policies) error {
 	if err := checkAgent(p.Agent); err != nil {
 		return err
 	}
+	if err := checkIsolation(p.Isolation); err != nil {
+		return err
+	}
+	if err := checkIngress(p.Ingress); err != nil {
+		return err
+	}
 	return checkControl(p.Control)
+}
+
+// checkBacking refuses a backing v1 doesn't implement (fence-api.md,
+// "Backing", SV-5).
+func checkBacking(kind string) error {
+	if tree.ValidBacking(kind) {
+		return nil
+	}
+	if kind == "vpc" || kind == "project" {
+		return errorf(Unimplemented, "backing %q is not supported in v1", kind).with("backing", kind)
+	}
+	return errorf(InvalidArgument, "backing %q: want %s or %s", kind, tree.BackingSubnet, tree.BackingLocal).with("field", "backing")
 }
 
 // patch is PATCH on a silo (fence-api.md, "Changing allocations",
@@ -339,7 +382,13 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			return err
 		}
 		if rel == relSelf {
-			if err := narrower(old, next); err != nil {
+			chk := *next
+			if t.IsRoot() {
+				// The root has no ancestor to widen its repos policy, so
+				// it may turn mirroring back on itself.
+				chk.Repos = old.Repos
+			}
+			if err := narrower(old, &chk); err != nil {
 				return err
 			}
 		}
@@ -354,12 +403,22 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			if has("control") && !controlSet {
 				next.Control = peff.Control
 			}
-			// A control left alone is not held to the parent's: an
-			// ancestor tightening keeps the descendants' own settings,
-			// so they come back when it loosens again.
+			// A control, isolation, ingress or repos policy left alone is
+			// not held to the parent's: an ancestor tightening keeps the
+			// descendants' own settings, so they come back when it
+			// loosens again.
 			chk := *next
 			if !controlSet {
 				chk.Control = ControlNone
+			}
+			if !has("isolation") {
+				chk.Isolation = Isolation{}
+			}
+			if !has("ingress") {
+				chk.Ingress = IngressNone
+			}
+			if !has("repos") {
+				chk.Repos = ReposPolicy{}
 			}
 			if err := looser(peff, &chk); err != nil {
 				return err
@@ -377,7 +436,7 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 		}
 		changed := map[string]any{}
 		if t.IsRoot() {
-			for _, f := range []string{"regions", "quota", "model_budget_usd", "max_blocks"} {
+			for _, f := range []string{"regions", "quota", "model_budget_usd", "max_blocks", "isolation", "ingress"} {
 				if has(f) {
 					return errorf(InvalidArgument, "the root's %s is set at install, not with PATCH", f).with("field", f)
 				}
@@ -462,7 +521,7 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			changed["labels"] = l
 		}
 		policyChanged := false
-		for _, f := range []string{"egress", "grant_policy", "agent_policy"} {
+		for _, f := range []string{"egress", "grant_policy", "agent_policy", "isolation", "ingress", "repos"} {
 			if has(f) {
 				policyChanged = true
 				changed[f] = true
@@ -542,10 +601,13 @@ func sortedKeys(m map[string]any) []string {
 // the fields it names, a null one going back to inheriting.
 func patchPolicies(old *policies, body map[string]json.RawMessage) (*policies, error) {
 	next := &policies{
-		Egress:  Egress{Allow: append([]string{}, old.Egress.Allow...), Deny: append([]string{}, old.Egress.Deny...)},
-		Grant:   GrantPolicy{},
-		Agent:   old.Agent,
-		Control: old.Control,
+		Egress:    Egress{Allow: append([]string{}, old.Egress.Allow...), Deny: append([]string{}, old.Egress.Deny...)},
+		Grant:     GrantPolicy{},
+		Agent:     old.Agent,
+		Control:   old.Control,
+		Isolation: Isolation{Allowed: append([]string{}, old.Isolation.Allowed...), Default: old.Isolation.Default},
+		Ingress:   old.Ingress,
+		Repos:     old.Repos,
 	}
 	for k, v := range old.Grant {
 		next.Grant[k] = v
@@ -615,6 +677,43 @@ func patchPolicies(old *policies, body map[string]json.RawMessage) (*policies, e
 	if raw, ok := body["control"]; ok {
 		if err := json.Unmarshal(raw, &next.Control); err != nil {
 			return nil, bad("control", err)
+		}
+	}
+	if raw, ok := body["isolation"]; ok {
+		var i struct {
+			Allowed *[]string `json:"allowed"`
+			Default *string   `json:"default"`
+		}
+		if err := json.Unmarshal(raw, &i); err != nil {
+			return nil, bad("isolation", err)
+		}
+		if i.Allowed != nil {
+			next.Isolation.Allowed = *i.Allowed
+			// A default the new list drops goes to the strongest class
+			// it keeps.
+			if !slices.Contains(next.Isolation.Allowed, next.Isolation.Default) {
+				next.Isolation.Default = ""
+			}
+		}
+		if i.Default != nil {
+			next.Isolation.Default = *i.Default
+		}
+		next.Isolation = normIsolation(next.Isolation)
+	}
+	if raw, ok := body["ingress"]; ok {
+		if err := json.Unmarshal(raw, &next.Ingress); err != nil {
+			return nil, bad("ingress", err)
+		}
+	}
+	if raw, ok := body["repos"]; ok {
+		var r struct {
+			Mirror *bool `json:"mirror"`
+		}
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, bad("repos", err)
+		}
+		if r.Mirror != nil {
+			next.Repos.Mirror = *r.Mirror
 		}
 	}
 	return next, nil

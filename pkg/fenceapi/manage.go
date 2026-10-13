@@ -52,10 +52,12 @@ func appendManageChange(ctx context.Context, tx store.Tx, g *manage.Grant) error
 // keeps; New uses it unless Options name another.
 type ManageGrants struct{}
 
-// manageNeed is what a fence operation needs of a grant: a fence group,
-// and whether the grant's target itself is out of reach (below), as
-// for the target's own allocations and deleting it. An op not listed
-// is one a grant never carries: members, control, manage grants.
+// manageNeed is what a fence operation needs of a grant: a fence group
+// or a resource type, and whether the grant's target itself is out of
+// reach (below), as for the target's own allocations and deleting it.
+// A resource type is needed with write access unless manageRead lists
+// the op. An op not listed is one a grant never carries: members,
+// control, manage grants.
 var manageNeed = map[Op]struct {
 	group string
 	below bool
@@ -87,7 +89,14 @@ var manageNeed = map[Op]struct {
 	opAgentsMessage:  {manage.GroupAgents, false},
 	opAgentsRequests: {manage.GroupAgents, false},
 	opAgentsAnswer:   {manage.GroupAgents, false},
+	// Repos, by the repos resource type (local-git.md, "Manage
+	// grants: the repos resource type").
+	opReposRead:  {manage.Repos, false},
+	opReposWrite: {manage.Repos, false},
 }
+
+// manageRead are the ops that need their resource type only at read.
+var manageRead = map[Op]bool{opReposRead: true}
 
 // Covers implements ManageChecker.
 func (ManageGrants) Covers(ctx context.Context, tx store.Tx, caller string, target *tree.Silo, op Op) (string, error) {
@@ -100,14 +109,18 @@ func (ManageGrants) Covers(ctx context.Context, tx store.Tx, caller string, targ
 	case need.below:
 		ok = func(g *manage.Grant) bool { return g.Target != target.ID }
 	}
-	g, err := manage.AllowsWhere(ctx, tx, caller, target, need.group, manage.Write, ok)
+	access := manage.Write
+	if manageRead[op] {
+		access = manage.Read
+	}
+	g, err := manage.AllowsWhere(ctx, tx, caller, target, need.group, access, ok)
 	var d *manage.Denied
 	if errors.As(err, &d) {
 		var e *Error
 		switch {
 		case !known:
 			e = errorf(PermissionDenied, "a manage grant never allows %s on %s", op, target.Path)
-		case need.below && d.Grant.Covers(need.group, manage.Write):
+		case need.below && d.Grant.Covers(need.group, access):
 			e = errorf(PermissionDenied, "the manage grant %q on %s allows %s below it, not on %s itself; that is its parent's", d.Grant.Name, d.Grant.TargetPath, op, target.Path)
 		default:
 			e = errorf(PermissionDenied, "%s", d.Error()).with("needs", need.group)

@@ -1202,7 +1202,7 @@ func (s *suite) testLedgerPartition(t *testing.T) {
 	var parent string
 	var kids []string
 	err := db.Tx(ctx(t), func(tx store.Tx) error {
-		root, err := tree.CreateRoot(ctx(t), tx, "root", nil)
+		root, err := tree.CreateRoot(ctx(t), tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}
@@ -1299,7 +1299,7 @@ func (s *suite) testAddressCarving(t *testing.T) {
 	)
 	var kids []string
 	err := db.Tx(ctx(t), func(tx store.Tx) error {
-		root, err := tree.CreateRoot(ctx(t), tx, "root", nil)
+		root, err := tree.CreateRoot(ctx(t), tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}

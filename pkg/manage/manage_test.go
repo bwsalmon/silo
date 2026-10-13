@@ -41,7 +41,7 @@ func TestResourcesAndGroups(t *testing.T) {
 	for _, r := range Resources() {
 		rs[r] = true
 	}
-	for _, r := range []string{"instances", "disks", "subnetworks", "firewalls", "images", "snapshots", "instanceTemplates"} {
+	for _, r := range []string{"instances", "disks", "subnetworks", "firewalls", "images", "snapshots", "instanceTemplates", "repos"} {
 		if !rs[r] {
 			t.Errorf("%s is not a scope resource", r)
 		}

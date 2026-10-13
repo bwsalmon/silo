@@ -45,6 +45,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/rootcap"
 	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
+	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
@@ -407,6 +408,10 @@ func serve(ctx context.Context, args []string) error {
 		log.Printf("schema version %d (contract steps requiring schema %d) is outside what this release runs on (%d to %d, and later expand steps): not serving the API",
 			v, requires, migrations.Oldest, db.Latest())
 	}
+	// repoHost keeps silo repos in the data directory, through its
+	// storage driver (local-git.md, "On disk"); without one, silod
+	// makes no repos.
+	var repoHost fenceapi.RepoHost
 	if dd != nil && why == "" && v >= store.HeartbeatSchema {
 		// The dir driver is the only one; the local backend (step 5 of
 		// local-backend.md §15) takes it from here.
@@ -415,6 +420,7 @@ func serve(ctx context.Context, args []string) error {
 			return err
 		}
 		log.Printf("data directory %s (id %s); storage driver %s: %s", dd.Path, dd.ID, drv.Name(), drv.Guarantees())
+		repoHost = &gitstore.Host{Storage: drv}
 	}
 	replica := store.Replica{ID: replicaID(), Release: release, Latest: db.Latest(), Started: time.Now(), Address: *advertise}
 	if replica.Address == "" {
@@ -453,7 +459,7 @@ func serve(ctx context.Context, args []string) error {
 	// nil but in the conformance build (testswitch_conformance.go).
 	cfg.KeepControlPort = keepControlPortSwitch()
 	go watchTestSwitches(ctx)
-	opts := fenceapi.Options{Ready: func() string { return why }, Budget: gcefence.Budget{Config: cfg}}
+	opts := fenceapi.Options{Ready: func() string { return why }, Budget: gcefence.Budget{Config: cfg}, Repos: repoHost}
 	if *fenceProject != "" {
 		client, err := gceclient.New(ctx, gcpOptions(*computeEndpoint))
 		if err != nil {

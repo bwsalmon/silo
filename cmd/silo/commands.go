@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,9 @@ type allocFlags struct {
 	grantPolicy, control, labels   string
 	maxBlocks                      int
 	agentPolicy                    string
+	backing, ingress               string
+	reposMirror                    string
+	isolation, isolationDefault    string
 }
 
 func addAllocFlags(fs *flag.FlagSet) *allocFlags {
@@ -73,6 +77,11 @@ func addAllocFlags(fs *flag.FlagSet) *allocFlags {
 	fs.StringVar(&a.grantPolicy, "grant-policy", "", "kind=allow|deny,... (exports=allow,links=deny)")
 	fs.StringVar(&a.control, "control", "", "full, read or none (patch: inherit goes back to the parent's)")
 	fs.StringVar(&a.agentPolicy, "agent-policy", "", "the agent policy, as JSON")
+	fs.StringVar(&a.backing, "backing", "", "create: subnet or local (default the parent's)")
+	fs.StringVar(&a.isolation, "isolation", "", "comma-separated isolation classes allowed: vm, sandbox (create: default the parent's)")
+	fs.StringVar(&a.isolationDefault, "isolation-default", "", "the isolation class a container gets when it names none (default the strongest allowed)")
+	fs.StringVar(&a.ingress, "ingress", "", "host or none: whether published ports also listen on the host's loopback (create: default none)")
+	fs.StringVar(&a.reposMirror, "repos-mirror", "", "true or false: whether the silo's repos are mirrored into the uber repo (create: default the parent's)")
 	fs.StringVar(&a.labels, "labels", "", "key=value,... (patch replaces them all)")
 	return a
 }
@@ -113,6 +122,20 @@ func (a *allocFlags) createRequest() (client.CreateRequest, error) {
 		}
 	}
 	req.Control = a.control
+	if set["backing"] {
+		req.Backing = &client.Backing{Kind: a.backing}
+	}
+	if set["isolation"] || set["isolation-default"] {
+		req.Isolation = &client.Isolation{Allowed: parseList(a.isolation), Default: a.isolationDefault}
+	}
+	req.Ingress = a.ingress
+	if set["repos-mirror"] {
+		v, err := strconv.ParseBool(a.reposMirror)
+		if err != nil {
+			return req, usagef("--repos-mirror %q: want true or false", a.reposMirror)
+		}
+		req.Repos = &client.ReposPolicy{Mirror: v}
+	}
 	if set["agent-policy"] {
 		req.AgentPolicy = &client.AgentPolicy{}
 		if err := json.Unmarshal([]byte(a.agentPolicy), req.AgentPolicy); err != nil {
@@ -133,6 +156,9 @@ func (a *allocFlags) patchBody() (client.Patch, error) {
 	p := client.Patch{}
 	if set["address"] {
 		return nil, usagef("--address can't be patched: use silo grow or silo block add|release")
+	}
+	if set["backing"] {
+		return nil, usagef("--backing can't be patched: a silo keeps the backing it was created with")
 	}
 	if set["regions"] {
 		p["regions"] = parseList(a.regions)
@@ -182,6 +208,26 @@ func (a *allocFlags) patchBody() (client.Patch, error) {
 		} else {
 			p["control"] = a.control
 		}
+	}
+	if set["isolation"] || set["isolation-default"] {
+		i := map[string]any{}
+		if set["isolation"] {
+			i["allowed"] = parseList(a.isolation)
+		}
+		if set["isolation-default"] {
+			i["default"] = a.isolationDefault
+		}
+		p["isolation"] = i
+	}
+	if set["repos-mirror"] {
+		v, err := strconv.ParseBool(a.reposMirror)
+		if err != nil {
+			return nil, usagef("--repos-mirror %q: want true or false", a.reposMirror)
+		}
+		p["repos"] = map[string]any{"mirror": v}
+	}
+	if set["ingress"] {
+		p["ingress"] = a.ingress
 	}
 	if set["agent-policy"] {
 		var v map[string]any

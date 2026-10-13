@@ -73,6 +73,12 @@ commands:
                                     proposes the mirror image
   link list                         list the caller's links
   link delete <name>                end a link, for both sides
+  repo create [silo/]<name> [--default-branch main] [--seed /team-a/bar]
+                                    make a git repo, empty or a copy of one
+                                    the caller may read
+  repo list [--recursive] [silo]    list a silo's repos
+  repo get|delete [silo/]<name>     read or delete a repo
+  repo url [silo/]<name> [--by-id]  the URL the caller clones it by
   audit [silo] [--since --kind --subtree]
   agent create <silo>/agents/<name> --credential --model --budget --tool-zone --tool-subnet
                                     make an agent and its tool VM
@@ -105,6 +111,8 @@ its id. Every command but install and uninstall takes --endpoint
 --output table|json and --timeout, and goes through the front door
 outside the cloud: --front-door, --project (default $SILO_PROJECT),
 --zone and --instance.
+A repo is named [silo/]name, its silo a path relative to the caller's own
+unless it starts with /.
 Every change takes --request-id and --validate-only. The export,
 import and link commands take --silo, to act for a descendant (or a silo a
 manage grant with the grants scope covers).
@@ -179,6 +187,9 @@ var commands = map[string]command{
 	}),
 	"link": group("link", map[string]command{
 		"propose": (*cli).linkPropose, "list": (*cli).linkList, "delete": (*cli).linkDelete,
+	}),
+	"repo": group("repo", map[string]command{
+		"create": (*cli).repoCreate, "list": (*cli).repoList, "get": (*cli).repoGet, "delete": (*cli).repoDelete, "url": (*cli).repoURL,
 	}),
 	"audit": (*cli).audit,
 	"agent": group("agent", map[string]command{

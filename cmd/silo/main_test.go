@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/agents"
+	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
+	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/client"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
@@ -39,11 +42,15 @@ func startSilod(t *testing.T) *silod {
 	if err := db.Migrate(ctx, db.Latest()); err != nil {
 		t.Fatal(err)
 	}
+	silos := filepath.Join(t.TempDir(), "silos")
+	if err := os.Mkdir(silos, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	runner := &agents.Fake{AutoConnect: true}
 	api := fenceapi.New(db, fenceapi.Options{Caller: func(r *http.Request) (fenceapi.Caller, error) {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaInternal}, nil
 	}, ToolVMs: toolVMs{}, Runner: runner, Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"},
-		CredentialKey: bytes.Repeat([]byte{1}, 32)})
+		CredentialKey: bytes.Repeat([]byte{1}, 32), Repos: &gitstore.Host{Storage: &storage.Dir{Root: silos}}})
 	runner.Connected = api.ToolServerConnected
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() { srv.Close(); api.Close() })
@@ -222,6 +229,20 @@ func TestCreatePatchAndDescribe(t *testing.T) {
 	if ci.Control.Own != "full" {
 		t.Errorf("patch --control inherit: %+v", ci.Control)
 	}
+
+	// Isolation and ingress, on create and patch.
+	out = d.ok(d.root, "create", "/team-a/vm", "--address", "/24", "--backing", "subnet",
+		"--isolation", "vm,sandbox", "--isolation-default", "sandbox", "--ingress", "none")
+	contains(t, "create --isolation", out, "Isolation:", "vm,sandbox, default sandbox", "Ingress:", "none (own: none)")
+	var vm client.Silo
+	d.json(d.root, &vm, "patch", "/team-a/vm", "--isolation", "vm")
+	if strings.Join(vm.Isolation.Own.Allowed, ",") != "vm" || vm.Isolation.Own.Default != "vm" || vm.Ingress.Effective != "none" {
+		t.Errorf("patch --isolation vm: %+v %+v", vm.Isolation, vm.Ingress)
+	}
+	r := d.silo(d.root, "create", "/team-a/vm/x", "--address", "/26", "--isolation", "sandbox")
+	contains(t, "looser isolation", r.stderr, "LOOSER_THAN_PARENT")
+	r = d.silo(d.root, "patch", "/team-a/vm", "--backing", "local")
+	contains(t, "patch --backing", r.stderr, "--backing can't be patched")
 }
 
 func TestErrors(t *testing.T) {

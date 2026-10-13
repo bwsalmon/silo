@@ -27,6 +27,9 @@ type Silo struct {
 	GrantPolicy   Owned[map[string]string]          `json:"grant_policy"`
 	Control       Control                           `json:"control"`
 	AgentPolicy   Owned[AgentPolicy]                `json:"agent_policy"`
+	Isolation     Owned[Isolation]                  `json:"isolation"`
+	Ingress       Owned[string]                     `json:"ingress"`
+	Repos         ReposOwned                        `json:"repos"`
 	OwnerAgent    *string                           `json:"owner_agent"`
 	State         string                            `json:"state"`
 	OverCommitted []OverCommit                      `json:"over_committed"`
@@ -106,6 +109,27 @@ type AgentPolicy struct {
 	MaxLease    string   `json:"max_lease,omitempty"`
 }
 
+// Isolation is an isolation policy: the classes ("vm", "sandbox") a
+// silo's containers may run in, and the one they get by default.
+type Isolation struct {
+	Allowed []string `json:"allowed,omitempty"`
+	Default string   `json:"default,omitempty"`
+}
+
+// ReposPolicy is the repos policy: whether the silo's repos are
+// mirrored into the uber repo (local-git.md, call L54).
+type ReposPolicy struct {
+	Mirror bool `json:"mirror"`
+}
+
+// ReposOwned is the repos policy as the silo set it and as it is in
+// effect, with the silo its effective value comes from.
+type ReposOwned struct {
+	Own           ReposPolicy `json:"own"`
+	Effective     ReposPolicy `json:"effective"`
+	EffectiveFrom string      `json:"effective_from"`
+}
+
 // Control is the control policy, with the silo its effective value
 // comes from.
 type Control struct {
@@ -145,6 +169,9 @@ type CreateRequest struct {
 	GrantPolicy    map[string]string `json:"grant_policy,omitempty"`
 	Control        string            `json:"control,omitempty"`
 	AgentPolicy    *AgentPolicy      `json:"agent_policy,omitempty"`
+	Isolation      *Isolation        `json:"isolation,omitempty"`
+	Ingress        string            `json:"ingress,omitempty"`
+	Repos          *ReposPolicy      `json:"repos,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`
 }
 
