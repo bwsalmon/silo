@@ -50,6 +50,13 @@ func (p Paths) ContainerdRoot() string { return filepath.Join(p.DataDir, "cache"
 // /run/containerd/s whatever the configuration says.
 func (p Paths) ContainerdState() string { return "/run/containerd" }
 
+// TaskBundle is the OCI bundle containerd made for container id's task
+// in namespace, in the holder's mount namespace: runtime v2's, under
+// ContainerdState.
+func (p Paths) TaskBundle(namespace, id string) string {
+	return filepath.Join(p.ContainerdState(), "io.containerd.runtime.v2.task", namespace, id)
+}
+
 // ContainerdSocket is containerd's API socket. silod reaches it from
 // the host's namespaces as an ordinary file: the socket belongs to
 // silod's own uid, which is root in the holder.

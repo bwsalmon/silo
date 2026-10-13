@@ -793,6 +793,29 @@ The allowlists for the new endpoints live in
   `etc/motd`), because they share one inode. The facade's conversion
   turns all three into OCI's `.wh.` entries. Its test runs on the tar
   runsc wrote (`pkg/facade/local/docker/testdata/rootfs-upper.tar`).
+  The gVisor driver's `RootfsUpper` (task 3575) checks this again on
+  every CI run, through silod's own path, in `gvisor_linux_test`'s
+  `rootfs upper` case. There, a container with silod's runsc flags
+  writes `/created`, appends to the image's `/etc/passwd`, removes
+  `/bin/head` and `/bin/grep`, and remakes `/root`. runsc writes
+  `./bin/head` as a 0/0 character device, `./bin/grep` as a hard link to
+  `./bin/head`, and `./root/` with `SCHILY.xattr.trusted.overlay.opaque=y`.
+  Names start with `./`. `WhiteoutLayer` turns these into
+  `bin/.wh.head`, `bin/.wh.grep` and `root/.wh..wh..opq`, so it needed
+  no change. Two more things showed up. runsc mounts a tmpfs of its own
+  over an image's `/tmp` when that directory is empty and the spec
+  mounts nothing there (`mountTmp` in `runsc/boot/vfs.go`), so writes
+  under `/tmp` aren't in the upper layer and aren't committed, as they
+  would be under runc. runsc's own `/run` shows up as an opaque
+  directory, which is harmless where the image has no `/run`.
+  silod runs `runsc tar rootfs-upper --file /proc/self/fd/3 <id>`
+  through `silod runsc --bundle <the task's bundle>` inside the holder,
+  so runsc runs in the container's user namespace as its root, with
+  `--root` the shim's (`Paths.RunscRoot()`, then the containerd
+  namespace). The tar goes to its own pipe, because runsc also prints a
+  line on stdout. `silod runsc` gives that pipe to the container's root
+  so that runsc can reopen it. A container whose sandbox has exited has
+  no upper layer left, so it is refused as not running.
 - **`vm`: still 501**, `silo: commit of a vm container is not served:
   its writable layer is a guest disk`. The writable layer is granule's
   overlay over a guest disk image, an ext4 filesystem that rootless
@@ -1599,8 +1622,11 @@ earlier depends on them. Each can be filed on its own, in this order.
     as the facade package's tests (`registry_test.go`), but for the
     private upstream ones, which need step 32.
 
-    *Left:* the gVisor driver's `RootfsUpper` (`runsc tar rootfs-upper`
-    through `silod runsc`); silod's wiring of
+    *Landed in task 3575:* the gVisor driver's `RootfsUpper`
+    (`runsc tar rootfs-upper` through `silod runsc`), checked against the
+    pinned runsc in `gvisor_linux_test`, as [§7](#commit) says.
+
+    *Left:* silod's wiring of
     the facade's `Content`, `Registry` and `Login` (with step 27b's
     containerd `registry.Content`); and moving the facade cases into
     `pkg/conformance/docker`, so that step 36 runs them against
