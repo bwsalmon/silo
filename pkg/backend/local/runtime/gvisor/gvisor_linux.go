@@ -85,6 +85,10 @@ type Config struct {
 	// ToolboxPath in every container for CopyIn and CopyOut. Without
 	// it, they need tar in the image.
 	Toolbox string
+	// SiloTools is silod's static silo-tools on the host, mounted
+	// read-only at runtime.ToolsPath in an agent's tool container
+	// (Spec.SiloTools). Without it, no tool container is made.
+	SiloTools string
 	// CgroupsPath gives a container's linux.cgroupsPath
 	// (rootless.CgroupsPath), or "" for none, when cgroups aren't
 	// delegated and the shim's options say ignore-cgroups.
@@ -217,6 +221,9 @@ func (d *Driver) Create(ctx context.Context, spec runtime.Spec) (err error) {
 				return fmt.Errorf("gvisor: mount target %s is reserved", m.Target)
 			}
 		}
+	}
+	if spec.SiloTools && d.cfg.SiloTools == "" {
+		return errors.New("gvisor: an agent's tool container needs silo-tools, and this driver was given none")
 	}
 	ctx = d.ns(ctx)
 	if _, err := d.client.LoadContainer(ctx, spec.ID); err == nil {
@@ -370,6 +377,9 @@ func (d *Driver) specOpts(spec runtime.Spec, imageEnv []string, imageWorkdir, im
 			}
 			ms = append(ms, specs.Mount{Destination: m.Target, Type: "tmpfs", Source: "tmpfs", Options: o})
 		}
+	}
+	if spec.SiloTools {
+		ms = append(ms, specs.Mount{Destination: runtime.ToolsPath, Type: "bind", Source: d.cfg.SiloTools, Options: []string{"rbind", "ro"}})
 	}
 	if d.cfg.Toolbox != "" {
 		ms = append(ms, specs.Mount{Destination: ToolboxPath, Type: "bind", Source: d.cfg.Toolbox, Options: []string{"rbind", "ro"}})

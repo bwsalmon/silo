@@ -62,6 +62,16 @@ type ToolVMSpec struct {
 	Spot        bool   `json:"spot"`
 	// Metadata is more instance metadata; startup-script is silod's.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Isolation is a local backend's tool container's class, vm or
+	// sandbox; the silo's default if empty (local-backend.md §10).
+	Isolation string `json:"isolation,omitempty"`
+}
+
+// ToolSpecChecker is a ToolVMs that checks and completes a tool_vm spec
+// itself, in place of the GCE checks: the local backend's tool
+// containers, which have no zone, subnet or machine type.
+type ToolSpecChecker interface {
+	CheckToolSpec(spec *ToolVMSpec) error
 }
 
 // ToolVMs makes and deletes agents' tool VMs through the facade
@@ -520,6 +530,37 @@ func agentFields(a *agentRow, more map[string]any) map[string]any {
 	return f
 }
 
+// checkToolVM checks a GCE tool VM's spec, and fills in its defaults.
+func checkToolVM(vm *ToolVMSpec) error {
+	if vm.Zone == "" {
+		return errorf(InvalidArgument, "tool_vm.zone is required").with("field", "tool_vm.zone")
+	}
+	if vm.Subnet == "" {
+		return errorf(InvalidArgument, "tool_vm.subnet is required: one of the silo's subnetworks").with("field", "tool_vm.subnet")
+	}
+	if vm.Isolation != "" {
+		return errorf(InvalidArgument, "tool_vm.isolation is the local backend's; a tool VM is a VM").with("field", "tool_vm.isolation")
+	}
+	for k := range vm.Metadata {
+		if strings.EqualFold(k, agents.StartupScriptKey) {
+			return errorf(InvalidArgument, "tool_vm.metadata %s is silod's: it starts silo-tools", k).with("field", "tool_vm.metadata")
+		}
+	}
+	if vm.MachineType == "" {
+		vm.MachineType = DefaultToolMachineType
+	}
+	if vm.Image == "" {
+		vm.Image = DefaultToolImage
+	}
+	if vm.DiskGB == 0 {
+		vm.DiskGB = DefaultToolDiskGB
+	}
+	if vm.DiskGB < 0 {
+		return errorf(InvalidArgument, "tool_vm.disk_gb %d: want a positive size", vm.DiskGB).with("field", "tool_vm.disk_gb")
+	}
+	return nil
+}
+
 // createAgent is POST .../agents (fence-api.md, "Operations" under
 // Agents, SV-24). Every check of the fence API's runs in one
 // transaction, which reserves the budget and the session slot and
@@ -537,28 +578,12 @@ func (s *Server) createAgent(q *request, ref string) (any, error) {
 		return nil, errorf(InvalidArgument, "%v", err).with("field", "name")
 	}
 	vm := req.ToolVM
-	if vm.Zone == "" {
-		return nil, errorf(InvalidArgument, "tool_vm.zone is required").with("field", "tool_vm.zone")
-	}
-	if vm.Subnet == "" {
-		return nil, errorf(InvalidArgument, "tool_vm.subnet is required: one of the silo's subnetworks").with("field", "tool_vm.subnet")
-	}
-	for k := range vm.Metadata {
-		if strings.EqualFold(k, agents.StartupScriptKey) {
-			return nil, errorf(InvalidArgument, "tool_vm.metadata %s is silod's: it starts silo-tools", k).with("field", "tool_vm.metadata")
+	if c, ok := s.opts.ToolVMs.(ToolSpecChecker); ok {
+		if err := c.CheckToolSpec(&vm); err != nil {
+			return nil, err
 		}
-	}
-	if vm.MachineType == "" {
-		vm.MachineType = DefaultToolMachineType
-	}
-	if vm.Image == "" {
-		vm.Image = DefaultToolImage
-	}
-	if vm.DiskGB == 0 {
-		vm.DiskGB = DefaultToolDiskGB
-	}
-	if vm.DiskGB < 0 {
-		return nil, errorf(InvalidArgument, "tool_vm.disk_gb %d: want a positive size", vm.DiskGB).with("field", "tool_vm.disk_gb")
+	} else if err := checkToolVM(&vm); err != nil {
+		return nil, err
 	}
 	if req.Budget.USD == "" {
 		return nil, errorf(InvalidArgument, "budget.usd is required").with("field", "budget.usd")

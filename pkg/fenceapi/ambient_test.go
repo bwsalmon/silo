@@ -95,3 +95,40 @@ func TestResourceUsage(t *testing.T) {
 		t.Errorf("the root's usage: %v", r["usage"])
 	}
 }
+
+// localVMs is a local backend's tool containers: it checks the spec
+// itself, and takes no zone or subnet.
+type localVMs struct {
+	*fakeVMs
+	specs []fenceapi.ToolVMSpec
+}
+
+func (l *localVMs) CheckToolSpec(vm *fenceapi.ToolVMSpec) error {
+	if vm.Subnet != "" {
+		return &fenceapi.Error{Code: fenceapi.InvalidArgument, Message: "no subnets here"}
+	}
+	vm.Zone = "local"
+	l.specs = append(l.specs, *vm)
+	return nil
+}
+
+func TestToolSpecChecker(t *testing.T) {
+	l := &localVMs{fakeVMs: &fakeVMs{}}
+	e := newAgentEnv(t, func(o *fenceapi.Options) { o.ToolVMs = l })
+	e.ok(e.root, "POST", "/silo/v1/silos/team/agents", agentBody("a", obj{"tool_vm": obj{"isolation": "sandbox", "image": "alpine"}}))
+	if len(l.specs) != 1 || l.specs[0].Isolation != "sandbox" || l.specs[0].MachineType != "" || l.specs[0].Image != "alpine" {
+		t.Errorf("checked %+v", l.specs)
+	}
+	a := e.ok(e.root, "GET", "/silo/v1/silos/team/agents/a", nil)
+	if get(a, "tool_vm", "zone") != "local" || get(a, "tool_vm", "isolation") != "sandbox" {
+		t.Errorf("tool_vm %v", a["tool_vm"])
+	}
+	if code, _ := e.do(e.root, "POST", "/silo/v1/silos/team/agents", agentBody("b", obj{"tool_vm": obj{"subnet": "work"}})); code != 400 {
+		t.Errorf("the checker's refusal: %d", code)
+	}
+	// A GCE tool VM has no isolation class.
+	g := newAgentEnv(t)
+	if code, _ := g.do(g.root, "POST", "/silo/v1/silos/team/agents", agentBody("c", obj{"tool_vm": obj{"zone": "us-central1-a", "subnet": "work", "isolation": "vm"}})); code != 400 {
+		t.Errorf("isolation on a tool VM: %d", code)
+	}
+}
