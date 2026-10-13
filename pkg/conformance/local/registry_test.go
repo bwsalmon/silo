@@ -1,9 +1,11 @@
 // Package local holds the conformance suite's local-only structural
 // cases (local-backend.md §13, call L24), against the local targets:
 // the registry's, of local-registry.md §12, through a look at
-// silo-containerd's content store (conformance.Structural), and the
+// silo-containerd's content store (conformance.Structural), the
 // fence's (fence_test.go): no way from silo-net into the root
-// namespace, and nothing through a port with no pin.
+// namespace, and nothing through a port with no pin, and those of
+// repos and the mirror (git_test.go, local-git.md §11 item 24), with
+// real git clients through the gateway's port 80 (conformance.Git).
 //
 // §12's other local-only cases are still where their steps put them,
 // as they need a real data directory, a restored store, real uids or a

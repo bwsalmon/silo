@@ -7,7 +7,11 @@
 //     front of a test upstream. It runs everywhere, on every push.
 //     Its Fence compiles the local fence (local/netfence) from the
 //     store and the facade's topology, and decides each probe's check
-//     with the nftables evaluator, as silo-net's kernel would.
+//     with the nftables evaluator, as silo-net's kernel would. It
+//     also runs silod's git service, gitstore and mirror, with the
+//     gateway in front (conformance.Git), for the repo cases; an uber
+//     repo is git http-backend, and a restore restarts that part of
+//     silod on a copy of its store and repos.
 //   - "local/sandbox" and "local/vm": silod installed with --backend
 //     local, probes made through the facade in each isolation class.
 //     They report themselves not runnable until silod serves the
