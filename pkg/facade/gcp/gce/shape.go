@@ -9,15 +9,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/facade/gcp/gce/filter"
 )
 
 var (
 	treesMu sync.Mutex
-	trees   = map[string]pathTree{}
+	trees   = map[string]facade.Fields{}
 )
 
-func responseTree(kind string) (pathTree, bool) {
+func responseTree(kind string) (facade.Fields, bool) {
 	treesMu.Lock()
 	defer treesMu.Unlock()
 	if t, ok := trees[kind]; ok {
@@ -27,7 +28,7 @@ func responseTree(kind string) (pathTree, bool) {
 	if !ok {
 		return nil, false
 	}
-	t := treeOf(paths)
+	t := facade.AllowFields(paths)
 	trees[kind] = t
 	return t, true
 }
@@ -44,7 +45,7 @@ func (q *request) shape(kind string, obj any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, _ := prune(m, t).(map[string]any)
+	out, _ := t.Prune(m).(map[string]any)
 	out["kind"] = kind
 	q.n.out(out, "")
 	return out, nil

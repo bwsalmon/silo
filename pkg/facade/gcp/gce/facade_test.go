@@ -18,6 +18,7 @@ import (
 	gceapi "github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/control"
+	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -767,7 +768,7 @@ func TestNaming(t *testing.T) {
 }
 
 func TestRequestChecks(t *testing.T) {
-	tr := treeOf([]string{"name", "labels", "networkInterfaces[].subnetwork", "metadata.items"})
+	tr := facade.AllowFields([]string{"name", "labels", "networkInterfaces[].subnetwork", "metadata.items"})
 	ok := []string{
 		`{"name": "x", "labels": {"a": "b"}}`,
 		`{"networkInterfaces": [{"subnetwork": "s", "accessConfigs": []}]}`,
@@ -777,7 +778,7 @@ func TestRequestChecks(t *testing.T) {
 	for _, b := range ok {
 		var v map[string]any
 		json.Unmarshal([]byte(b), &v)
-		if err := checkFields(v, tr, ""); err != nil {
+		if err := checkFields(v, tr); err != nil {
 			t.Errorf("%s: %v", b, err)
 		}
 	}
@@ -789,7 +790,7 @@ func TestRequestChecks(t *testing.T) {
 	} {
 		var v map[string]any
 		json.Unmarshal([]byte(b), &v)
-		err := checkFields(v, tr, "")
+		err := checkFields(v, tr)
 		e := asError(err, nil)
 		if err == nil || e.Code != 403 || e.Message != "silo: field "+field+" is not allowed" {
 			t.Errorf("%s: %v, want field %s refused", b, err, field)

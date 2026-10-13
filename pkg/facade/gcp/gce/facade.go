@@ -8,7 +8,7 @@
 //  1. the resource type: one the facade doesn't know is 404 (SV-63);
 //  2. the project: silo-<id>, or the host project's ID meaning the
 //     caller's own silo. The caller reaches its own silo and its
-//     descendants', and, through the ManageChecker hook, a manage
+//     descendants', and, through the facade.ManageChecker hook, a manage
 //     grant's target. Any other project is 403, whether or not it
 //     exists (SV-62);
 //  3. the caller's own effective control policy, by pkg/control's
@@ -23,8 +23,10 @@
 //     own objects only, and builds the response from allowlisted
 //     fields, with names and links mapped back (SV-63, SV-76).
 //
-// The allowlists are data, in tables.go; the resource write paths
-// add their rows there and their handlers to handlers.
+// The mechanics of steps 1 to 4 and 6, the response allowlist of 7 and
+// the facade.call audit are pkg/facade's shared core; this package supplies GCE's paths, regions, handlers, naming
+// and error shape. The allowlists are data, in tables.go; the resource
+// write paths add their rows there and their handlers to handlers.
 //
 // The package is named gce after the facade it serves; it imports the
 // GCE client, pkg/backend/gcp/gce, as gceapi.
@@ -41,6 +43,7 @@ import (
 
 	gceapi "github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/control"
+	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/manage"
@@ -62,22 +65,11 @@ const DefaultEndpoint = "http://silo.internal:8080/compute/v1/"
 
 // KindFacadeCall is the audit kind of every facade write, accepted or
 // refused.
-const KindFacadeCall = "facade.call"
+const KindFacadeCall = facade.KindFacadeCall
 
 // KindFacadeRefund is the audit kind of a refund for a failed
 // operation.
 const KindFacadeRefund = "facade.refund"
-
-// ManageChecker is the hook for manage grants (gcp-backend.md,
-// "Projects and the caller"): asked when the caller is neither the
-// target silo nor one of its ancestors. It returns the id of an active
-// grant the caller holds on the target or one of its ancestors that
-// covers resource (and a write, if write is set); "" if the caller has
-// none at all; or a 403 error naming the grant when one exists but
-// doesn't cover the call. ManageGrants is the one silod uses.
-type ManageChecker interface {
-	Covers(ctx context.Context, tx store.Tx, caller string, target *tree.Silo, resource string, write bool) (grant string, err error)
-}
 
 // RefundFunc gives back what a failed operation charged, inside tx.
 // The default refunds everything rec.Object is charged.
@@ -103,8 +95,10 @@ type Options struct {
 	// Caller identifies the caller of a request that carries none in
 	// its context (fenceapi.ContextWithCaller).
 	Caller func(*http.Request) (fenceapi.Caller, error)
-	// Manage is the manage-grant hook; ManageGrants if nil.
-	Manage ManageChecker
+	// Manage is the manage-grant hook (gcp-backend.md, "Projects and
+	// the caller"), asked with the resource type in the call's path;
+	// facade.ManageGrants if nil.
+	Manage facade.ManageChecker
 	// Refund overrides the refund of a failed operation.
 	Refund RefundFunc
 	// Ready reports whether the store is usable: "" or why not, which
@@ -153,7 +147,7 @@ func New(st store.Store, opts Options) *Server {
 		opts.ImageProjects = DefaultImageProjects
 	}
 	if opts.Manage == nil {
-		opts.Manage = ManageGrants{}
+		opts.Manage = facade.ManageGrants{}
 	}
 	s := &Server{st: st, gce: opts.GCE, opts: opts, public: map[string]bool{}}
 	for _, p := range opts.ImageProjects {
@@ -243,15 +237,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serve(q *request) (any, error) {
 	c := q.call
-	if !knownResources[c.Resource] && !refusedResources[c.Resource] {
+	if !table.Known(c.Resource) {
 		return nil, notFound(q.rest)
 	}
 	q.public = s.public[c.Project] && c.Resource == "images" && q.class == control.Reading
 	if err := s.resolve(q); err != nil {
 		return nil, err
 	}
-	h := handlers[c.FullMethod()]
-	if c.Method == "" || h == nil || refusedResources[c.Resource] {
+	h, ok := table.Lookup(c.Resource, c.FullMethod())
+	if c.Method == "" || !ok || h == nil {
 		return nil, s.refuse(q, methodNotAllowed(c.FullMethod()))
 	}
 	if err := q.checkScope(); err != nil {
@@ -285,84 +279,37 @@ func (s *Server) refuse(q *request, err error) error {
 func (s *Server) resolve(q *request) error {
 	ctx := q.ctx()
 	c := q.call
+	ref := facade.Ref{Resource: c.Resource, Write: q.class == control.Mutation}
+	switch {
+	case q.public || c.Project == s.opts.HostProject:
+		ref.Self = true
+	case strings.HasPrefix(c.Project, "silo-"):
+		ref.Silo = strings.TrimPrefix(c.Project, "silo-")
+	}
+	// silod's own call for an agent's tool VM is covered by the
+	// grant's agents group, which is what let the holder create or
+	// delete the agent.
+	if agentCall(ctx) != "" {
+		ref.Resource = manage.GroupAgents
+	}
 	var denied error
 	err := s.st.Tx(ctx, func(tx store.Tx) error {
-		callerChain, err := tree.Ancestry(ctx, tx, q.caller.Silo)
-		if errors.Is(err, tree.ErrNotFound) {
-			denied = projectForbidden(c.FullMethod(), c.Project)
+		t, err := facade.Resolve(ctx, tx, s.opts.Manage, q.caller, ref)
+		if err == nil && !s.opts.SkipControl {
+			err = facade.CheckControl(ctx, tx, t, q.class, "compute."+c.FullMethod(), requestID(q.r))
+		}
+		if e, ok := q.refusal(err); ok {
+			denied = e
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		var t *tree.Silo
-		switch {
-		case q.public || c.Project == s.opts.HostProject:
-			t = callerChain[len(callerChain)-1]
-		case strings.HasPrefix(c.Project, "silo-"):
-			t, err = tree.Get(ctx, tx, strings.TrimPrefix(c.Project, "silo-"))
-			if errors.Is(err, tree.ErrNotFound) {
-				denied = projectForbidden(c.FullMethod(), c.Project)
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-		default:
-			denied = projectForbidden(c.FullMethod(), c.Project)
-			return nil
-		}
-		chain, err := tree.Ancestry(ctx, tx, t.ID)
+		regions, err := ledger.Regions(ctx, tx, t.Silo.ID)
 		if err != nil {
 			return err
 		}
-		reach := t.ID == q.caller.Silo
-		for _, a := range chain[:len(chain)-1] {
-			if a.ID == q.caller.Silo {
-				reach = true
-			}
-		}
-		if !reach && s.opts.Manage != nil {
-			// silod's own call for an agent's tool VM is covered by
-			// the grant's agents group, which is what let the holder
-			// create or delete the agent.
-			resource := c.Resource
-			if agentCall(ctx) != "" {
-				resource = manage.GroupAgents
-			}
-			g, err := s.opts.Manage.Covers(ctx, tx, q.caller.Silo, t, resource, q.class == control.Mutation)
-			if err != nil {
-				var e *Error
-				if errors.As(err, &e) {
-					denied = e
-					return nil
-				}
-				return err
-			}
-			if g != "" {
-				reach = true
-				q.caller.Manage = g
-			}
-		}
-		if !reach {
-			denied = projectForbidden(c.FullMethod(), c.Project)
-			return nil
-		}
-		policy, from, err := fenceapi.EffectiveControl(ctx, tx, callerChain)
-		if err != nil {
-			return err
-		}
-		if !s.opts.SkipControl && !control.Allows(policy, q.class) {
-			self := callerChain[len(callerChain)-1]
-			denied = forbidden("silo: control-plane calls from %s are refused (control=%s)", self.Path, policy)
-			return fenceapi.Audit(ctx, tx, self, q.caller, fenceapi.KindControlDenied, requestID(q.r), string(fenceapi.ControlDenied),
-				map[string]any{"op": "compute." + c.FullMethod(), "class": q.class.String(), "policy": policy, "effective_from": from})
-		}
-		regions, err := ledger.Regions(ctx, tx, t.ID)
-		if err != nil {
-			return err
-		}
-		q.target, q.chain = t, chain
+		q.caller, q.target, q.chain = t.Caller, t.Silo, t.Chain
 		q.regions = map[string]bool{}
 		for _, r := range regions {
 			q.regions[r] = true
@@ -377,6 +324,38 @@ func (s *Server) resolve(q *request) error {
 	}
 	q.n = &namer{silo: q.target.ID, host: s.opts.HostProject, base: s.opts.Endpoint, network: s.opts.Network, public: s.public}
 	return nil
+}
+
+// refusal answers a refusal of the shared core in GCE's shape.
+func (q *request) refusal(err error) (*Error, bool) {
+	var (
+		unreachable *facade.Unreachable
+		grant       *facade.GrantDenied
+		ctl         *facade.ControlDenied
+		field       *facade.FieldDenied
+	)
+	switch {
+	case errors.As(err, &unreachable):
+		return projectForbidden(q.call.FullMethod(), q.call.Project), true
+	case errors.As(err, &grant):
+		return forbidden("%s", grant.Error()), true
+	case errors.As(err, &ctl):
+		return forbidden("%s", ctl.Error()), true
+	case errors.As(err, &field):
+		return forbidden("%s", field.Error()), true
+	}
+	return nil, false
+}
+
+// checkFields refuses the first field of body outside t that is set to
+// anything but its default: 403, naming the field.
+func checkFields(body any, t facade.Fields) error {
+	err := facade.CheckFields(body, t)
+	var field *facade.FieldDenied
+	if errors.As(err, &field) {
+		return forbidden("%s", field.Error())
+	}
+	return err
 }
 
 // checkScope refuses a region, or a zone in a region, outside the
@@ -412,7 +391,7 @@ func (s *Server) readBody(q *request) error {
 	if err := checkReserved(q.body, ""); err != nil {
 		return err
 	}
-	return checkFields(q.body, treeOf(requestFields[q.call.FullMethod()]), "")
+	return checkFields(q.body, facade.AllowFields(requestFields[q.call.FullMethod()]))
 }
 
 // requestID is the call's requestId, GCE's idempotency key.
@@ -429,11 +408,7 @@ func (s *Server) audit(q *request, result string, extra map[string]any, charges 
 }
 
 func (s *Server) auditTx(ctx context.Context, tx store.Tx, q *request, result string, extra map[string]any, charges []fenceapi.ChargeLine) error {
-	t, err := tree.Get(ctx, tx, q.target.ID)
-	if err != nil {
-		return nil // gone since
-	}
-	fields := map[string]any{"method": "compute." + q.call.FullMethod(), "project": q.call.Project}
+	fields := map[string]any{"project": q.call.Project}
 	if q.call.Scope() != "global" {
 		fields["scope"] = q.call.Scope()
 	}
@@ -444,23 +419,12 @@ func (s *Server) auditTx(ctx context.Context, tx store.Tx, q *request, result st
 	if name != "" && tenantCollections[q.call.Collection] {
 		fields["name"] = name
 	}
-	if charges == nil {
-		charges = []fenceapi.ChargeLine{}
-	}
-	fields["charges"] = charges
 	for k, v := range extra {
 		fields[k] = v
 	}
-	return fenceapi.Audit(ctx, tx, t, q.caller, KindFacadeCall, requestID(q.r), result, fields)
+	return facade.Audit(ctx, tx, q.target.ID, q.caller, facade.Call{Method: "compute." + q.call.FullMethod(),
+		RequestID: requestID(q.r), Result: result, Charges: charges, Fields: fields})
 }
 
 // via is how the caller reached the target, as a charge records it.
-func (q *request) via() string {
-	switch {
-	case q.caller.Manage != "":
-		return "manage:" + q.caller.Silo
-	case q.caller.Silo != q.target.ID:
-		return "ancestor:" + q.caller.Silo
-	}
-	return ledger.ViaFacade
-}
+func (q *request) via() string { return facade.Via(q.caller, q.target.ID) }
