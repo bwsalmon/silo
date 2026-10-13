@@ -409,6 +409,7 @@ func serve(ctx context.Context, args []string) error {
 	imageStorage := fs.Int64("image-storage-gb", 0, "the root's image_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	snapshotStorage := fs.Int64("snapshot-storage-gb", 0, "the root's snapshot_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	backendKind := fs.String("backend", "gcp", "the backend: gcp, or local (one machine; needs --data-dir, whose SQLite store is its production store, and silo-nsd)")
+	imageCacheSize := fs.Float64("image-cache-size", 0, "with --backend=local: the registry cache's budget in GiB, from install's --image-cache-size, set if the cache's configuration never was (0 leaves it)")
 	afterRestore := fs.Bool("after-restore", false, "with --backend=local: the data directory was restored, cache included, so start the reconcile report-only whatever the object sequence says")
 	nsdState := fs.String("nsd-state", "", "with --backend=local: the namespace holder's state file (default $XDG_RUNTIME_DIR/silo/nsd.state)")
 	nftPath := fs.String("nft", "nft", "with --backend=local: the nft command, run in silo-net through the holder")
@@ -635,6 +636,11 @@ func serve(ctx context.Context, args []string) error {
 		}
 		if err := bindHolder(ctx, db, *nsdState); err != nil {
 			return err
+		}
+		if why == "" && *imageCacheSize > 0 {
+			if err := fenceapi.SeedCacheBudget(ctx, db, *imageCacheSize); err != nil {
+				return fmt.Errorf("--image-cache-size: %w", err)
+			}
 		}
 		if why == "" {
 			// Before the reconcile's first run: a store older than the

@@ -141,6 +141,22 @@ func ReadCacheSettings(ctx context.Context, tx store.Tx) (CacheSettings, error) 
 	return s, nil
 }
 
+// SeedCacheBudget makes gb GiB the cache's budget, size_limit_gb, if
+// its configuration was never set: silod's --image-cache-size, which
+// install gives it from its own (local-registry.md, "Eviction and the
+// cache budget"). A configuration already set is the operator's, and
+// stays.
+func SeedCacheBudget(ctx context.Context, st store.Store, gb float64) error {
+	return st.Tx(ctx, func(tx store.Tx) error {
+		if _, ok, err := store.ReadSetting(ctx, tx, SettingRegistryCache); err != nil || ok {
+			return err
+		}
+		s := DefaultCacheSettings()
+		s.SizeLimitGB = gb
+		return WriteCacheSettings(ctx, tx, s)
+	})
+}
+
 // WriteCacheSettings stores s, in tx, after checking it.
 func WriteCacheSettings(ctx context.Context, tx store.Tx, s CacheSettings) error {
 	if err := s.Valid(); err != nil {

@@ -134,12 +134,17 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.Silod, "silod", "", "the silod binary the units run (default the one beside silo, else on PATH)")
 	fs.IntVar(&cfg.RegistryHostPort, "registry-host-port", localinstall.DefaultRegistryHostPort,
 		fmt.Sprintf("serve the registry to host clients (crane, skopeo, oras) on 127.0.0.1 at this port, such as %d; 0 turns it off", hostdoor.Port))
+	fs.Float64Var(&cfg.ImageCacheSizeGB, "image-cache-size", 0,
+		fmt.Sprintf("the registry cache's budget in GiB, carved from the root's disk and charged to nobody (default 10%% of the data filesystem, at least %d)", localinstall.MinImageCacheGB))
 	fs.BoolVar(&dryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&yes, "yes", false, "don't ask for confirmation")
 	fs.StringVar(&output, "output", "table", "the plan's format: table or json")
 	fs.StringVar(&output, "o", "table", "short for --output")
 	if err := c.installFlags(fs, args); err != nil {
 		return err
+	}
+	if cfg.ImageCacheSizeGB < 0 {
+		return usagef("--image-cache-size %v: want a size in GiB", cfg.ImageCacheSizeGB)
 	}
 	c.output = output
 	if output != "table" && output != "json" {

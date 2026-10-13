@@ -168,6 +168,12 @@ func Of(ctx context.Context, tx store.Tx, silos ...string) ([]*Repo, error) {
 	return out, nil
 }
 
+// All lists every image repo, by id: the registry's reconcile compares
+// them with the content store's records.
+func All(ctx context.Context, tx store.Tx) ([]*Repo, error) {
+	return many(ctx, tx, `SELECT `+columns+` FROM image_repos ORDER BY id`)
+}
+
 // Count is how many image repos silo has.
 func Count(ctx context.Context, tx store.Tx, silo string) (int, error) {
 	var n int

@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
@@ -53,6 +54,37 @@ type Config struct {
 	// RegistryHostPort is the registry's port for host clients on
 	// 127.0.0.1 (--registry-host-port); 0 turns it off.
 	RegistryHostPort int
+	// ImageCacheSizeGB is the registry cache's budget, in GiB
+	// (--image-cache-size): carved from the root's disk capacity and
+	// charged to nobody. 0 is DefaultImageCacheGB of the data
+	// directory's filesystem.
+	ImageCacheSizeGB float64
+}
+
+// MinImageCacheGB is the smallest default cache budget, in GiB.
+const MinImageCacheGB = 10
+
+// DefaultImageCacheGB is --image-cache-size's default for a data
+// filesystem of fsBytes (local-registry.md, "Eviction and the cache
+// budget", call L74): 10% of it, and at least MinImageCacheGB.
+func DefaultImageCacheGB(fsBytes int64) float64 {
+	gb := float64(fsBytes) / 10 / (1 << 30)
+	if gb < MinImageCacheGB {
+		return MinImageCacheGB
+	}
+	return gb
+}
+
+// RootDiskGB is the root's disk_gb on a data filesystem of fsBytes:
+// what is left after the reserve and the cache budget (call L74,
+// adding to call L20), so that every byte on disk is either charged to
+// some silo or inside the budget. It is never below 0.
+func RootDiskGB(fsBytes, reserveBytes int64, cacheGB float64) float64 {
+	gb := float64(fsBytes-reserveBytes)/(1<<30) - cacheGB
+	if gb < 0 {
+		return 0
+	}
+	return gb
 }
 
 // DefaultRegistryHostPort is --registry-host-port's default: on, at
@@ -179,6 +211,12 @@ func Defaults(c Config) (Config, error) {
 		}
 		c.DataDir = d
 	}
+	if c.ImageCacheSizeGB == 0 {
+		c.ImageCacheSizeGB = MinImageCacheGB
+		if n, err := filesystemSize(c.DataDir); err == nil {
+			c.ImageCacheSizeGB = DefaultImageCacheGB(n)
+		}
+	}
 	if c.Silod == "" {
 		if self, err := os.Executable(); err == nil {
 			if p := filepath.Join(filepath.Dir(self), "silod"); fileExists(p) {
@@ -225,7 +263,8 @@ func Steps(c Config, h Host) []install.Step {
 // unitsConfig is c's units.Config: silo-buildkitd only where buildkitd
 // is installed.
 func unitsConfig(c Config, report rootless.Report) units.Config {
-	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort}
+	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort,
+		ImageCacheSizeGB: c.ImageCacheSizeGB}
 	if c.Mode == units.System {
 		uc.User = c.User
 	}
@@ -673,4 +712,21 @@ func (s *unitsStep) Apply(ctx context.Context, changes []install.Change) error {
 		fmt.Fprintf(s.h.Progress, "  %s %s\n", verb, u.Name)
 	}
 	return nil
+}
+
+// filesystemSize is the size of the filesystem path is on, or would be
+// on: the nearest directory of it that exists.
+func filesystemSize(path string) (int64, error) {
+	for {
+		var st syscall.Statfs_t
+		err := syscall.Statfs(path, &st)
+		if err == nil {
+			return int64(st.Blocks) * int64(st.Bsize), nil
+		}
+		parent := filepath.Dir(path)
+		if !errors.Is(err, os.ErrNotExist) || parent == path {
+			return 0, err
+		}
+		path = parent
+	}
 }

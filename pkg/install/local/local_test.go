@@ -342,3 +342,26 @@ func TestRegistryHostPort(t *testing.T) {
 		t.Errorf("silod.service:\n%s", f.files["/units/silod.service"])
 	}
 }
+
+// The cache budget is 10% of the data filesystem, at least 10 GiB, and
+// comes out of the root's disk_gb (local-registry.md, call L74).
+func TestImageCacheBudget(t *testing.T) {
+	for fs, want := range map[int64]float64{50 << 30: 10, 1000 << 30: 100} {
+		if got := DefaultImageCacheGB(fs); got != want {
+			t.Errorf("DefaultImageCacheGB(%d GiB) = %v, want %v", fs>>30, got, want)
+		}
+	}
+	if got := RootDiskGB(1000<<30, 50<<30, 100); got != 850 {
+		t.Errorf("RootDiskGB: %v, want 850", got)
+	}
+	if got := RootDiskGB(10<<30, 5<<30, 10); got != 0 {
+		t.Errorf("RootDiskGB of a small disk: %v, want 0", got)
+	}
+	c, err := Defaults(Config{Mode: "rootless", DataDir: t.TempDir() + "/not/yet", Silod: "/s", User: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ImageCacheSizeGB < MinImageCacheGB {
+		t.Errorf("the default budget: %v GiB", c.ImageCacheSizeGB)
+	}
+}

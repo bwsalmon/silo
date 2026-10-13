@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -65,6 +66,10 @@ type Config struct {
 	// on 127.0.0.1 (local-registry.md §5), which silod serves with
 	// --registry-host-listen; 0 serves none.
 	RegistryHostPort int
+	// ImageCacheSizeGB is the registry cache's budget, in GiB, which
+	// silod is given as --image-cache-size; 0 gives none, leaving
+	// silod's default.
+	ImageCacheSizeGB float64
 }
 
 // Unit is one unit file.
@@ -125,6 +130,9 @@ func (c Config) Validate() error {
 	}
 	if !filepath.IsAbs(c.DataDir) {
 		errs = append(errs, fmt.Errorf("units: data directory %q is not an absolute path", c.DataDir))
+	}
+	if c.ImageCacheSizeGB < 0 {
+		errs = append(errs, fmt.Errorf("units: image cache size %v GiB: want 0 or more", c.ImageCacheSizeGB))
 	}
 	if c.RegistryHostPort < 0 || c.RegistryHostPort > 65535 {
 		errs = append(errs, fmt.Errorf("units: registry host port %d: want 1 to 65535, or 0 for none", c.RegistryHostPort))
@@ -221,6 +229,9 @@ func Units(c Config) ([]Unit, error) {
 	}
 	if c.RegistryHostPort != 0 {
 		serve += fmt.Sprintf(" --registry-host-listen 127.0.0.1:%d", c.RegistryHostPort)
+	}
+	if c.ImageCacheSizeGB > 0 {
+		serve += " --image-cache-size " + strconv.FormatFloat(c.ImageCacheSizeGB, 'f', -1, 64)
 	}
 	add(Silod, "Silo's control plane (silod), local backend",
 		[]string{"Wants=" + deps, "After=" + deps},
