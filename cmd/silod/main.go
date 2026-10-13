@@ -1108,6 +1108,12 @@ func runFence(ctx context.Context, db store.Store, a backend.Fence) {
 	}
 }
 
+// manageExpiryEvery is how often runManageExpiry looks for grants that
+// have run out: often enough that, with the tables' propagation, the
+// gateway closes a holder's connections within a second of its grant
+// expiring (local-registry.md, "Who may do what", call L63).
+const manageExpiryEvery = 500 * time.Millisecond
+
 // runManageExpiry ends manage grants whose lease has run out, while
 // this process holds the "manage-expiry" lease. A grant stops working
 // the moment it runs out whatever this does; this is what audits it and
@@ -1118,7 +1124,7 @@ func runManageExpiry(ctx context.Context, db store.Store) {
 		if err != nil {
 			return
 		}
-		t := time.NewTicker(10 * time.Second)
+		t := time.NewTicker(manageExpiryEvery)
 	lead:
 		for {
 			select {

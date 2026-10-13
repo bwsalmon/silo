@@ -25,7 +25,20 @@ var (
 	upstreamRE = regexp.MustCompile(`^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*$`)
 	hostRE     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	digestRE   = regexp.MustCompile(`^sha256:[a-f0-9]{64}$|^sha512:[a-f0-9]{128}$`)
+	routeRE    = regexp.MustCompile(`^/v2/(.+)/(manifests/[^/]+|blobs/uploads/?[^/]*|blobs/[^/]+|tags/list|referrers/[^/]+)$`)
 )
+
+// SplitPath splits a distribution API path under /v2/ into the
+// repository name, for ParseName, and what follows it: manifests/<ref>,
+// blobs/<digest>, blobs/uploads/[<id>], tags/list or referrers/<digest>.
+// It reports false for any other path, /v2/ and /v2/_catalog included.
+func SplitPath(path string) (name, rest string, ok bool) {
+	m := routeRE.FindStringSubmatch(path)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
 
 // ValidName reports whether name may name an image repo: one
 // component of 1 to 63 characters matching the OCI name grammar
