@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 
 	"golang.org/x/sys/unix"
@@ -99,9 +100,10 @@ type State struct {
 	Pid int `json:"pid"`
 }
 
-// Run is the holder, inside the namespaces Start made: it pins
-// containers' namespaces on a private tmpfs, brings up silo-net's
-// loopback and gw0, and serves the RPC until ctx is done.
+// Run is the holder, inside the namespaces Start made: it gives itself
+// a private /run, pins containers' namespaces on a private tmpfs,
+// brings up silo-net's loopback and gw0, and serves the RPC until ctx
+// is done.
 func Run(ctx context.Context, cfg Config) error {
 	m, err := ReadMapping(os.Getpid())
 	if err != nil {
@@ -109,6 +111,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if len(m.UID) == 0 || m.UID[0].Inside != 0 || os.Getuid() != 0 {
 		return errors.New("nsd: Run must be started by Start, as root of its own user namespace")
+	}
+	if err := privateRun(); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(cfg.PinDir, 0o755); err != nil {
 		return err
@@ -155,6 +160,53 @@ func Run(ctx context.Context, cfg Config) error {
 	return s.Serve(ctx, l)
 }
 
+// PrivateRun are the directories of /run that belong to the holder's
+// runtimes. containerd's shims put their sockets under
+// /run/containerd/s whatever its configuration says, and an
+// unprivileged user can't create /run/containerd on the host.
+var PrivateRun = []string{"containerd", "buildkit", "silo"}
+
+// privateRun replaces /run, in the holder's mount namespace, with a
+// tmpfs of its own, as rootlesskit's copy-up does: the host's /run is
+// moved under /run/host, every entry in it but PrivateRun is a symlink
+// there (so $XDG_RUNTIME_DIR, /run/user/<uid>, still resolves, and the
+// user's systemd manager is still reachable), and PrivateRun are empty
+// directories the holder owns.
+func privateRun() error {
+	entries, err := os.ReadDir("/run")
+	if err != nil {
+		return err
+	}
+	fd, err := unix.OpenTree(unix.AT_FDCWD, "/run", unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC|unix.AT_RECURSIVE)
+	if err != nil {
+		return fmt.Errorf("nsd: clone /run: %w", err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
+		return fmt.Errorf("nsd: tmpfs on /run: %w", err)
+	}
+	if err := os.Mkdir("/run/host", 0o755); err != nil {
+		return err
+	}
+	if err := unix.MoveMount(fd, "", unix.AT_FDCWD, "/run/host", unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+		return fmt.Errorf("nsd: move the host's /run to /run/host: %w", err)
+	}
+	for _, e := range entries {
+		if e.Name() == "host" || slices.Contains(PrivateRun, e.Name()) {
+			continue
+		}
+		if err := os.Symlink(filepath.Join("host", e.Name()), filepath.Join("/run", e.Name())); err != nil {
+			return err
+		}
+	}
+	for _, d := range PrivateRun {
+		if err := os.Mkdir(filepath.Join("/run", d), 0o711); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ReadState reads nsd.state and checks that its pid is still a holder:
 // a process in another user namespace than the caller's.
 func ReadState(path string) (State, error) {
@@ -175,6 +227,28 @@ func ReadState(path string) (State, error) {
 		return st, fmt.Errorf("nsd: process %d in %s is not a holder", st.Pid, path)
 	}
 	return st, nil
+}
+
+// JoinExec returns a command that runs argv inside the holder's user,
+// mount and network namespaces as their root, through exe: exe's nsexec
+// constructor joins them and execs argv, so no Go code runs inside.
+// containerd and buildkitd are started this way. exe must carry package
+// nsexec.
+func JoinExec(holderPid int, exe string, argv ...string) *exec.Cmd {
+	cmd := JoinCommand(holderPid, exe, argv...)
+	cmd.Env = append(cmd.Env, "_SILO_NSEXEC_EXEC=1")
+	return cmd
+}
+
+// UserNSExec returns a command that runs argv as root of the user
+// namespace pinned at userns, and in no other new namespace, through
+// exe's nsexec constructor. It is how runsc is started inside a
+// container's user namespace (call L30), and must be called from inside
+// the holder, which owns that namespace.
+func UserNSExec(userns, exe string, argv ...string) *exec.Cmd {
+	cmd := exec.Command(exe, argv...)
+	cmd.Env = append(os.Environ(), "_SILO_NSEXEC=userns", "_SILO_NSEXEC_USERNS="+userns, "_SILO_NSEXEC_EXEC=1")
+	return cmd
 }
 
 // JoinCommand returns a command that runs exe inside the holder's

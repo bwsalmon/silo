@@ -21,6 +21,11 @@ func RuntimeDir() (string, error) {
 	return filepath.Join(d, "silo"), nil
 }
 
+// DefaultPinDir is where containers' namespaces are pinned: in the
+// holder's private /run, which a container's root can traverse (runsc
+// opens its netns pin as that root), unlike $XDG_RUNTIME_DIR.
+const DefaultPinDir = "/run/silo/netns"
+
 // Main is `silod nsd`, run by silo-nsd.service: it checks the host's
 // prerequisites, starts the holder in fresh namespaces (re-running this
 // binary with the same arguments) and waits for it. args are the
@@ -30,7 +35,7 @@ func Main(ctx context.Context, exe string, args []string) error {
 	fs := flag.NewFlagSet("nsd", flag.ContinueOnError)
 	socket := fs.String("socket", filepath.Join(rt, "nsd.sock"), "the RPC socket")
 	state := fs.String("state", filepath.Join(rt, "nsd.state"), "the holder's state file")
-	pins := fs.String("pins", filepath.Join(rt, "netns"), "where containers' namespaces are pinned, in the holder's mount namespace")
+	pins := fs.String("pins", DefaultPinDir, "where containers' namespaces are pinned, in the holder's mount namespace")
 	silos := fs.String("silos", "", "the data directory's silos/, served by the dir storage driver")
 	bridge := fs.String("bridge", "gw0", "the gateway bridge in silo-net")
 	addrs := fs.String("addr", "", "gw0's addresses, comma-separated prefixes")

@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
+	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 )
 
 // unshare is `silo unshare [--probe] [-- command...]`: run a command
@@ -28,8 +31,13 @@ func (c *cli) unshare(ctx context.Context, args []string) error {
 		return err
 	}
 	if *probe {
-		checks := nsd.Probe()
-		for _, ch := range checks {
+		// The holder's own prerequisites, then the runtimes' (step 16):
+		// containerd, runsc, crun, KVM and cgroup delegation. Only the
+		// holder's are fatal; a runtime that is missing makes its class
+		// unavailable.
+		holder := nsd.Probe()
+		rt := rootless.Probe(rootless.LocalHost())
+		for _, ch := range append(slices.Clone(holder), rt.Checks...) {
 			mark := "ok  "
 			if !ch.OK {
 				mark = "FAIL"
@@ -39,7 +47,10 @@ func (c *cli) unshare(ctx context.Context, args []string) error {
 				fmt.Fprintf(c.stdout, "     fix: %s\n", ch.Fix)
 			}
 		}
-		if n := len(nsd.Failed(checks)); n > 0 {
+		if cg := rt.Cgroups; len(cg.Missing) > 0 {
+			fmt.Fprintf(c.stdout, "cgroups: %s (missing: %s)\n", cg.Enforced, strings.Join(cg.Missing, ", "))
+		}
+		if n := len(nsd.Failed(holder)); n > 0 {
 			return fmt.Errorf("%d prerequisite(s) missing", n)
 		}
 		return nil
