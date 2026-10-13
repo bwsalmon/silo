@@ -561,10 +561,19 @@ func (s *Server) imageLoad(q *request) error {
 // root is refused, an overlayfs whiteout (a 0/0 character device)
 // becomes OCI's .wh.<name>, a directory overlayfs made opaque gains
 // .wh..wh..opq, overlayfs's own xattrs are dropped, and any other
-// device is refused.
+// device is refused. runsc writes every whiteout after the first as a
+// hard link to the first, since they share one inode
+// (local-registry.md §7, "commit"), so a hard link to a whiteout is a
+// whiteout too.
 func whiteoutLayer(w io.Writer, r io.Reader) error {
 	tr := tar.NewReader(r)
 	tw := tar.NewWriter(w)
+	whiteouts := map[string]bool{}
+	whiteout := func(clean string, h *tar.Header) error {
+		whiteouts[clean] = true
+		dir, base := path.Split(clean)
+		return tw.WriteHeader(&tar.Header{Name: dir + ".wh." + base, Typeflag: tar.TypeReg, Mode: 0o600, ModTime: h.ModTime})
+	}
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -582,8 +591,15 @@ func whiteoutLayer(w io.Writer, r io.Reader) error {
 			return fmt.Errorf("entry %q is outside the root", h.Name)
 		}
 		if h.Typeflag == tar.TypeLink {
-			if l := path.Clean(strings.TrimPrefix(h.Linkname, "/")); l == ".." || strings.HasPrefix(l, "../") {
+			l := path.Clean(strings.TrimPrefix(strings.TrimPrefix(h.Linkname, "./"), "/"))
+			if l == ".." || strings.HasPrefix(l, "../") {
 				return fmt.Errorf("hard link %q is outside the root", h.Name)
+			}
+			if whiteouts[l] {
+				if err := whiteout(clean, h); err != nil {
+					return err
+				}
+				continue
 			}
 		}
 		opaque := false
@@ -604,8 +620,7 @@ func whiteoutLayer(w io.Writer, r io.Reader) error {
 			if h.Devmajor != 0 || h.Devminor != 0 {
 				return fmt.Errorf("%s is a device", h.Name)
 			}
-			dir, base := path.Split(clean)
-			if err := tw.WriteHeader(&tar.Header{Name: dir + ".wh." + base, Typeflag: tar.TypeReg, Mode: 0o600, ModTime: h.ModTime}); err != nil {
+			if err := whiteout(clean, h); err != nil {
 				return err
 			}
 			continue
