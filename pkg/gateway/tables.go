@@ -37,6 +37,12 @@ type Tables struct {
 	// imports alone: what the gateway carries (gateway.md, "Proxied
 	// exports").
 	Exports []Export `json:"exports"`
+	// RegistryImports are the ACTIVE imports of registry exports, by
+	// import id. The gateway carries nothing for them, since the
+	// registry is silod's, but cuts off an importer's registry calls
+	// to the exporter's repos when one ends (local-registry.md,
+	// "Registry exports", call L64).
+	RegistryImports map[string]RegistryImport `json:"registry_imports"`
 
 	origin  *address.Table
 	vpc     []netip.Prefix // every block and own range: the shared VPC's
@@ -63,6 +69,13 @@ type Import struct {
 	Importer     string `json:"importer"`
 	ImporterPath string `json:"importer_path"`
 	Port         int    `json:"port,omitempty"` // a tcp export's gateway port
+}
+
+// RegistryImport is an ACTIVE import of a registry export.
+type RegistryImport struct {
+	Importer     string `json:"importer"`
+	Exporter     string `json:"exporter"`
+	ExporterPath string `json:"exporter_path"`
 }
 
 type portEntry struct {
@@ -144,6 +157,9 @@ func (t *Tables) index() *Tables {
 	if t.Grants == nil {
 		t.Grants = map[string]string{}
 	}
+	if t.RegistryImports == nil {
+		t.RegistryImports = map[string]RegistryImport{}
+	}
 	t.byName, t.byPort, t.imports = map[string]*Export{}, map[int]portEntry{}, map[string]bool{}
 	for i := range t.Exports {
 		e := &t.Exports[i]
@@ -180,7 +196,7 @@ func Snapshot(ctx context.Context, tx store.Tx) (*Tables, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Tables{Version: origin.Version, Silos: map[string]Silo{}, Grants: map[string]string{}}
+	t := &Tables{Version: origin.Version, Silos: map[string]Silo{}, Grants: map[string]string{}, RegistryImports: map[string]RegistryImport{}}
 	for _, e := range origin.Blocks {
 		t.Blocks = append(t.Blocks, Entry{Range: e.Range, Silo: e.Silo})
 	}
@@ -258,6 +274,14 @@ func (t *Tables) readExports(ctx context.Context, tx store.Tx) error {
 	for _, e := range es {
 		target := e.Target()
 		info, ok := t.Silos[e.Exporter]
+		if e.Protocol == exports.Registry {
+			for _, im := range live[e.ID] {
+				if ok {
+					t.RegistryImports[im.ID] = RegistryImport{Importer: im.Importer, Exporter: e.Exporter, ExporterPath: info.Path}
+				}
+			}
+			continue
+		}
 		if len(live[e.ID]) == 0 || !target.IsValid() || !ok {
 			continue
 		}
