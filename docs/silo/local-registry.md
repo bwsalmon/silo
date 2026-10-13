@@ -363,12 +363,15 @@ pulled again. A pushed image can't: the registry holds its only copy. So
 - **`cache/` stays safe to wipe.** That is the point of the move: an
   operator who empties `cache/` to get disk back loses writable layers
   and wraps, as part 2 says, and never a pushed image.
-- **Layout version 2.** `pkg/backend/local/datadir` writes layout 1
-  today and has no containerd directory yet. If this lands before the
-  gVisor driver (plan item 7) first creates one, layout 2 simply adds
-  `containerd/`. If it lands after, silod's forward migration moves
-  `cache/containerd/` to `containerd/` (one rename on one filesystem)
-  and points the snapshotter at `cache/snapshots/`.
+- **Layout version 2.** `pkg/backend/local/datadir` writes layout 2,
+  with `containerd/` and `cache/snapshots/` (`Dir.Containerd` and
+  `Dir.Snapshots`, the root and `root_path` the gVisor driver, plan
+  item 7, gives silo-containerd). It landed before that driver, so no
+  data directory had a containerd root yet, but the forward migration
+  handles one anyway: it moves `cache/containerd/` to `containerd/`
+  (one rename on one filesystem) and the overlayfs snapshotter's state
+  in it, `io.containerd.snapshotter.v1.overlayfs/`, to
+  `cache/snapshots/` (another).
 - **Restore** (call L40): each `silo-registry` record carries the
   object sequence label (`dev.silo.seq`). A record newer than the
   restored store is an orphan: reported, never deleted, and not served
@@ -1357,6 +1360,8 @@ earlier depends on them. Each can be filed on its own, in this order.
     `containerd/` and `cache/snapshots/`, the migration from layout 1,
     and the data table. Depends on 14. Best landed before 7, so that
     the gVisor driver creates containerd in the right place first.
+
+    *Landed in task 3479*, before 7.
 27. **The registry service for local repos.**
     - `registry.silo.internal` in the gateway's DNS and in `NO_PROXY`;
     - `Host` routing on port 80;

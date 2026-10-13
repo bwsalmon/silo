@@ -3,15 +3,22 @@
 // (docs/silo/local-rootless-storage.md, "One data directory", call L35).
 //
 //	<data-dir>/
-//	  layout.json   {"layout": 1, "data_dir_id": "<random>"}: written once
+//	  layout.json   {"layout": 2, "data_dir_id": "<random>"}
 //	  state/        silo.db, the SQLite store
 //	  keys/         silod's own secrets, mode 0700
 //	  silos/<id>/   one subtree per silo, made by the storage driver
+//	  containerd/   silo-containerd's root: the content store and its
+//	                bolt metadata, which hold pushed images (call L60)
 //	  cache/        re-creatable; never data
+//	    snapshots/  the overlayfs snapshotter's root_path: writable layers
 //
 // Nothing persistent is written outside it. The store records the data
 // directory's id, and Bind refuses a store and a data directory that
 // don't belong together.
+//
+// Layout 1 had no containerd/, and put containerd's root, snapshots
+// included, at cache/containerd/. Open migrates it forward
+// (docs/silo/local-registry.md, "Pushed images are data").
 package datadir
 
 import (
@@ -29,7 +36,12 @@ import (
 )
 
 // Layout is the layout version this binary writes and runs on.
-const Layout = 1
+const Layout = 2
+
+// SnapshotterDir is the directory under containerd's root where the
+// overlayfs snapshotter keeps its state when it has no root_path of its
+// own: where layout 1's writable layers are, under cache/containerd/.
+const SnapshotterDir = "io.containerd.snapshotter.v1.overlayfs"
 
 // LayoutFile is the name of the file that marks a data directory.
 const LayoutFile = "layout.json"
@@ -44,7 +56,9 @@ var dirs = []struct {
 	{"state", 0o700},
 	{"keys", 0o700},
 	{"silos", 0o755},
+	{"containerd", 0o700},
 	{"cache", 0o755},
+	{filepath.Join("cache", "snapshots"), 0o700},
 }
 
 // ErrNewerLayout is a data directory written by a newer silod.
@@ -131,9 +145,12 @@ func Open(path string) (*Dir, error) {
 		case l.Layout < 1 || l.DataDirID == "":
 			return nil, fmt.Errorf("datadir: %s: no layout or data_dir_id", d.file(LayoutFile))
 		}
-		// Layout 1 is the first: there is nothing older to migrate
-		// forward yet. A later layout migrates here, in place.
 		d.ID = l.DataDirID
+		if l.Layout < 2 {
+			if err := d.migrate1to2(); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, sub := range dirs {
 		if err := os.MkdirAll(d.file(sub.name), sub.mode); err != nil {
@@ -144,21 +161,69 @@ func Open(path string) (*Dir, error) {
 }
 
 // create writes layout.json for a new data directory, and returns its
-// id. It writes a temporary file and renames it, so that a crash leaves
-// either no layout.json or a whole one.
+// id.
 func (d *Dir) create() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
 	id := hex.EncodeToString(b[:])
+	if err := d.writeLayout(id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// migrate1to2 moves a layout-1 data directory forward. containerd's
+// root, if layout 1 has one, moves from cache/containerd/ to
+// containerd/ with one rename, and the overlayfs snapshotter's state in
+// it moves to cache/snapshots/, its root_path in layout 2, with
+// another; nothing is copied. layout.json is rewritten last, so a
+// crash part way leaves layout 1, and the next start finishes the
+// steps not yet done.
+func (d *Dir) migrate1to2() error {
+	if err := d.moveDir(d.file("cache", "containerd"), d.Containerd()); err != nil {
+		return err
+	}
+	if err := d.moveDir(filepath.Join(d.Containerd(), SnapshotterDir), d.Snapshots()); err != nil {
+		return err
+	}
+	return d.writeLayout(d.ID)
+}
+
+// moveDir renames from to to, if from exists. A to that exists and is
+// empty, left by a start that made it before the rename, is replaced;
+// one that isn't empty is refused, rather than merge two roots. The two
+// must be on one filesystem: the migration never copies.
+func (d *Dir) moveDir(from, to string) error {
+	if _, err := os.Lstat(from); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("datadir: migrating to layout 2: %w", err)
+	}
+	if err := os.Remove(to); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("datadir: migrating to layout 2: %s and %s both exist: %w", from, to, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		return fmt.Errorf("datadir: migrating to layout 2: %w", err)
+	}
+	if err := os.Rename(from, to); err != nil {
+		return fmt.Errorf("datadir: migrating to layout 2: moving %s to %s (they must be on one filesystem): %w", from, to, err)
+	}
+	return nil
+}
+
+// writeLayout writes layout.json with this binary's layout and id. It
+// writes a temporary file and renames it, so that a crash leaves either
+// the old layout.json, or none, or a whole new one.
+func (d *Dir) writeLayout(id string) error {
 	j, err := json.Marshal(layoutJSON{Layout: Layout, DataDirID: id})
 	if err != nil {
-		return "", err
+		return err
 	}
 	tmp, err := os.CreateTemp(d.Path, ".layout-*.json")
 	if err != nil {
-		return "", fmt.Errorf("datadir: %w", err)
+		return fmt.Errorf("datadir: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 	_, err = tmp.Write(append(j, '\n'))
@@ -175,9 +240,9 @@ func (d *Dir) create() (string, error) {
 		err = os.Rename(tmp.Name(), d.file(LayoutFile))
 	}
 	if err != nil {
-		return "", fmt.Errorf("datadir: writing %s: %w", LayoutFile, err)
+		return fmt.Errorf("datadir: writing %s: %w", LayoutFile, err)
 	}
-	return id, nil
+	return nil
 }
 
 func (d *Dir) file(name ...string) string {
@@ -197,9 +262,18 @@ func (d *Dir) Keys() string { return d.file("keys") }
 // subtree.
 func (d *Dir) Silos() string { return d.file("silos") }
 
-// Cache is cache/: containerd, buildkit, wrapped images and runtimes.
-// Nothing in it is data.
+// Containerd is containerd/, silo-containerd's root: the content store
+// and its bolt metadata. Content a registry repo references is the only
+// copy of a pushed image, so it is data, outside cache/ (call L60).
+func (d *Dir) Containerd() string { return d.file("containerd") }
+
+// Cache is cache/: writable layers, buildkit, wrapped images and
+// runtimes. Nothing in it is data, and wiping it loses no pushed image.
 func (d *Dir) Cache() string { return d.file("cache") }
+
+// Snapshots is cache/snapshots/, the overlayfs snapshotter's root_path:
+// containers' writable layers, which are never data.
+func (d *Dir) Snapshots() string { return d.file("cache", "snapshots") }
 
 // Bind checks that st belongs with d and with the storage driver
 // named driver. The first start on a store records both; every later
