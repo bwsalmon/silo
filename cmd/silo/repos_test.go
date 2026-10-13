@@ -53,9 +53,16 @@ func TestRepoCommands(t *testing.T) {
 	res = d.silo(x.ID, "repo", "get", "/team-a/own")
 	contains(t, "a parent's repo", res.stderr, "NOT_FOUND")
 
+	contains(t, "repo external, mirroring off", d.ok(x.ID, "repo", "external", "bar"), "/team-a/x ("+x.ID+")", "off (by /team-a)")
+	res = d.silo(x.ID, "repo", "which", "refs/heads/silo/team-a/x/bar.git/main")
+	contains(t, "repo which with no mirror", res.stderr, "FAILED_PRECONDITION")
+	res = d.silo(x.ID, "repo", "external-clone", "bar", t.TempDir())
+	contains(t, "repo external-clone, mirroring off", res.stderr, "/team-a/x/bar isn't in an uber repo")
+
 	contains(t, "repo delete", d.ok(x.ID, "repo", "delete", "foo"), "deleted /team-a/x/foo")
 	res = d.silo(x.ID, "repo", "get", "foo")
 	contains(t, "deleted", res.stderr, "NOT_FOUND")
 	d.ok(d.root, "patch", "/team-a", "--repos-mirror", "true")
 	contains(t, "mirror back on", d.ok(a.ID, "repo", "get", "own"), "UNCONFIGURED (refs/heads/silo/team-a/own.git/)")
+	contains(t, "repo external, no mirror", d.ok(a.ID, "repo", "external", "own"), "UNCONFIGURED: no uber repo is set")
 }

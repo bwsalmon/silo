@@ -113,3 +113,64 @@ func TestMirrorCalls(t *testing.T) {
 		t.Errorf("the mirror was told of %d deletions", len(f.deleting))
 	}
 }
+
+// fakeExternals is a mirror that maps between the views.
+type fakeExternals struct {
+	fakeMirror
+	which fenceapi.RefWhich
+	local string
+}
+
+func (f *fakeExternals) External(_ context.Context, _, local string, out *fenceapi.RepoExternal) error {
+	f.local = local
+	out.State, out.URL = fenceapi.MirrorInSync, "https://example.com/uber.git"
+	return nil
+}
+
+func (f *fakeExternals) Which(context.Context, string) (*fenceapi.RefWhich, error) {
+	w := f.which
+	return &w, nil
+}
+
+// silo repo external and which (local-git.md, §9) are for whoever may
+// read the repo; a repo that is gone, for whoever may read the deepest
+// silo still on its path.
+func TestExternalCalls(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git on $PATH")
+	}
+	silos := filepath.Join(t.TempDir(), "silos")
+	if err := os.Mkdir(silos, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeExternals{}
+	e := newEnv(t, fenceapi.Options{Repos: &gitstore.Host{Storage: &storage.Dir{Root: silos}}, Mirror: f})
+	x := e.mk(e.root, "-"+e.root, "x", obj{"quota": obj{"global": obj{"repos": 3}}})
+	y := e.mk(e.root, "-"+e.root, "y", nil)
+	e.ok(x, "POST", "/silo/v1/self/repos", obj{"name": "foo"})
+
+	got := e.ok(e.root, "GET", "/silo/v1/silos/-"+x+"/repos/foo/external?branch=feature/a", nil)
+	if got["state"] != fenceapi.MirrorInSync || got["repo"] != "/x/foo" || got["silo_id"] != x || f.local != "refs/heads/feature/a" {
+		t.Errorf("external: %v (local %q)", got, f.local)
+	}
+	e.ok(x, "GET", "/silo/v1/self/repos/foo/external?tag=v1.0", nil)
+	if f.local != "refs/tags/v1.0" {
+		t.Errorf("external tag=v1.0 asked for %q", f.local)
+	}
+	e.fail(fenceapi.NotFound, y, "GET", "/silo/v1/silos/-"+x+"/repos/foo/external", nil)
+	e.fail(fenceapi.InvalidArgument, x, "GET", "/silo/v1/self/repos/foo/external?branch=a&tag=b", nil)
+	e.fail(fenceapi.NotFound, x, "GET", "/silo/v1/self/repos/nope/external", nil)
+
+	e.fail(fenceapi.InvalidArgument, x, "GET", "/silo/v1/mirror:which", nil)
+	e.fail(fenceapi.NotFound, x, "POST", "/silo/v1/mirror:which?ref=r", nil)
+	f.which = fenceapi.RefWhich{Kind: fenceapi.RefBranch, Repo: "/x/foo", Silo: "/x", Exists: true}
+	for _, c := range []string{x, e.root} {
+		if got := e.ok(c, "GET", "/silo/v1/mirror:which?ref=r", nil); got["repo"] != "/x/foo" {
+			t.Errorf("which: %v", got)
+		}
+	}
+	e.fail(fenceapi.NotFound, y, "GET", "/silo/v1/mirror:which?ref=r", nil)
+	f.which = fenceapi.RefWhich{Kind: fenceapi.RefBranch, Repo: "/x/gone/deeper/old", Silo: "/x/gone/deeper"}
+	e.ok(x, "GET", "/silo/v1/mirror:which?ref=r", nil)
+	e.fail(fenceapi.NotFound, y, "GET", "/silo/v1/mirror:which?ref=r", nil)
+}

@@ -1151,6 +1151,41 @@ can be filed on its own, in this order.
 23. **Mapping back.** `silo repo external`, `silo repo which`, and
     `silo repo external-clone` with the submodule-URL fix-up. Depends on
     21, and on 22 for the index line.
+
+    **Built (task 3426),** in `pkg/mirror/external.go` and
+    `cmd/silo/external.go`. Where it differs from
+    [§9](#9-mapping-back-the-ref-layout-and-silo-repo-external):
+    - The calls are `GET .../repos/{repo}/external` (`branch=` or
+      `tag=` for one ref), for whoever may read the repo, and
+      `GET mirror:which?ref=`. The mirror implements them as
+      `fenceapi.Externals`, beside `fenceapi.Mirror`.
+    - `which` takes a ref in full, a branch as GitHub shows it
+      (`silo/team-a/x/foo.git/main`), a GitHub `tree/` URL, or an index
+      entry (`main:team-a/x/foo.git` or `main/team-a/x/foo.git`).
+    - A repo that is gone is shown to a caller who may read the repos of
+      the deepest silo still on its path, since that caller could have
+      read the repo. Anyone else gets `NOT_FOUND`, as for a repo they
+      may not read. Its silo id comes from `mirror_repos` while silod
+      still has the ref's record. Otherwise it comes from the index:
+      the newest commit in `mirror/index.git` that added or dropped the
+      repo's README row (`git log -S`), or that commit's parent.
+    - The archive count is the archive refs silod has pushed for the
+      repo (`mirror_refs`), not a listing of the uber repo. The
+      `mirror ... at` time is when silod last moved one of the repo's
+      refs.
+    - The `mirror` line shows `silo mirror status`'s state for the
+      repo. The repo object's `mirror.state` still says only `OFF` or
+      `UNCONFIGURED` (item 21).
+    - `external-clone` uses the URL `silo mirror set` was given, with
+      any password taken out; `--url` overrides it, for someone who
+      reaches the uber repo another way. It rewrites only submodules
+      whose URL starts `http://silo.internal/git/`, sets their URL in
+      `.git/config` and not in `.gitmodules`, and runs
+      `git submodule update --init --single-branch` at each level.
+      Tested with a single-branch `file://` clone, where a pinned SHA is
+      reachable only from another branch.
+    - None of it has been run against GitHub (item 22's check is still
+      open).
 24. **Conformance.** Local-structural cases in `local-conformance`
     (item 12):
     - a sibling gets 404 on clone and push;
