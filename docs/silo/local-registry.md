@@ -13,6 +13,8 @@ fake content store; containerd's half is step 27b. Task 3483 landed
 step 30's facade endpoints over the same fake. Task 3484 landed step
 31's pull-through cache for public content, over the same fake and a
 test upstream ([§13](#13-staged-implementation-plan) says what is left).
+Task 3488 ran step 35's builders in `sandbox` and wrote what they
+showed into [§9](#9-building-images); the `vm` half is step 35b.
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -104,9 +106,14 @@ documentation was read from their Go module archives on
   earlier parts, [`gateway.md`](gateway.md) and
   [`fence-api.md`](fence-api.md), and `pkg/backend/local/datadir`.
 
-Nothing on this page was run. Claims about how a builder behaves under
-gVisor or in a granule VM that the documentation doesn't settle are
-marked *unverified*. Plan item 35 runs them.
+The page was first written without running anything. Claims the
+documentation didn't settle were marked *unverified*. Plan item 35
+(task 3488) has since run kaniko and rootless BuildKit under gVisor
+release-20261005, against this repository's registry and cache, and
+`runsc tar rootfs-upper` on a real container. It settled the
+`sandbox` claims in [§9](#9-building-images) and the whiteout claim
+in [§7](#commit). The claims about a granule VM stay *unverified*
+until step 35b.
 
 ## Contents
 
@@ -774,8 +781,15 @@ The allowlists for the new endpoints live in
   host. The new image's config is the container's, with the request's
   `changes` (`CMD`, `ENTRYPOINT`, `ENV`, `EXPOSE`, `LABEL`, `USER`,
   `WORKDIR`, `VOLUME`) applied. Its layer is charged as a pull is.
-  *Unverified:* how `rootfs-upper` represents deletions (whiteouts),
-  which plan item 30 checks against an image that removes a file.
+  **Whiteouts, as runsc release-20261005 writes them** (step 35):
+  `rootfs-upper` writes the upper layer in overlayfs's form, not
+  OCI's. A removed file is a 0/0 character device. A directory that
+  was removed and made again carries
+  `SCHILY.xattr.trusted.overlay.opaque=y`. **Every whiteout after the
+  first is a hard link to the first** (`etc/os-release` linked to
+  `etc/motd`), because they share one inode. The facade's conversion
+  turns all three into OCI's `.wh.` entries. Its test runs on the tar
+  runsc wrote (`pkg/facade/local/docker/testdata/rootfs-upper.tar`).
 - **`vm`: still 501**, `silo: commit of a vm container is not served:
   its writable layer is a guest disk`. The writable layer is granule's
   overlay over a guest disk image, an ext4 filesystem that rootless
@@ -1063,20 +1077,54 @@ fenced, charged and audited.
 
 | Builder | `sandbox` (gVisor) | `vm` (granule) |
 | --- | --- | --- |
-| **kaniko** | **Supported.** kaniko's README has "Running kaniko in gVisor", which needs only `--force`, "since currently there isn't a way to determine whether or not a container is running in gVisor". Its `run_in_docker.sh` runs it with Docker's default privileges, which is what the facade gives every container. *Unverified* on this backend until plan item 35 runs it | **Supported, *unverified*.** kaniko unpacks the base image into its own root and runs `RUN` steps there with no namespaces or mounts, which the wrapped container's chroot allows. It probably needs `--force` here too, because granule-container's chroot looks like no container runtime kaniko recognises |
-| **BuildKit, rootless** | ***Unverified*, with known obstacles**, below | ***Unverified*, likely to work** with one change, below |
+| **kaniko** | **Supported, run in step 35.** Builds, `chown`s to another user, pulls its base through the cache and pushes, with the facade's privileges as they are | **Supported, *unverified*.** kaniko unpacks the base image into its own root and runs `RUN` steps there with no namespaces or mounts, which the wrapped container's chroot allows. Step 35b runs it once local-backend.md item 10 lands |
+| **BuildKit, rootless** | **Not with the facade as it is (run in step 35).** It needs `no-new-privileges` off, and nothing else, below. That is [open question 33](#open-questions) | ***Unverified*.** The same `newuidmap` question, below. Step 35b |
 
-**kaniko** is the default this page documents. Two facts about it
+### What step 35 ran
+
+Step 35 (task 3488) ran both builders in `sandbox` on 2026-10-13. The
+rig is `pkg/registry/testdata/builders/run.sh`, and anyone can run it
+again:
+
+- **The runtime:** gVisor release-20261005, CI's pin, under Docker's
+  `runsc` runtime with silod's flags (`rootless.RunscFlags`:
+  `--platform=systrap --network=sandbox --overlay2=root:self
+  --directfs=true`). The containers got what the gVisor driver gives
+  every container: containerd's default spec, so Docker's default
+  capabilities and `noNewPrivileges: true`, with no AppArmor profile.
+  It wasn't silod's own driver (that's rootless runsc in a user
+  namespace through `silo-nsd`), but every answer below is the Sentry's
+  and doesn't depend on who started runsc.
+- **The registry:** `pkg/registry`'s handler and cache, served by
+  `TestBuildersLive` as silo `team-a/x` with Docker Hub as `docker.io`,
+  on the address `registry.silo.internal` resolved to. silod doesn't
+  serve the registry itself yet (step 27b).
+- **The builders:** kaniko v1.25.19, built from `chainguard-dev/kaniko`'s
+  source and packaged as its `kaniko-slim` stage is.
+  `cgr.dev/chainguard/kaniko` refused an anonymous pull (403). And
+  `moby/buildkit:v0.34.0-rootless`, with `--oci-worker-no-process-sandbox
+  --oci-worker-snapshotter=native`.
+- **The build:** `FROM alpine:3.20`, then a `RUN` that adds uid 1234,
+  `chown`s a file to it and removes `/etc/motd`. Both pushed images'
+  last layer holds `owned` as `1234/1234` and `etc/.wh.motd`.
+
+**kaniko** is the default this page documents. Three facts about it
 matter:
 
 - `GoogleContainerTools/kaniko` was **archived in June 2025**. The
-  maintained fork is `chainguard-dev/kaniko`, which publishes no images
-  of its own beyond Chainguard's, and says that "Running kaniko in any
-  Docker image other than the official kaniko image is not supported".
-  So the operator decides where the executor image comes from: built
-  from the fork and pushed to a local repo, or pulled through the cache
-  from Chainguard's registry, whose host the silo's egress must then
-  allow.
+  maintained fork is `chainguard-dev/kaniko`. It says that "Running
+  kaniko in any Docker image other than the official kaniko image is
+  not supported", and Chainguard's image isn't free to pull. So the
+  operator builds the executor from the fork, as step 35 did, and
+  pushes it to a local repo. Pulling it through the cache from
+  Chainguard's registry also works, with a credential the silo has and
+  an egress allowance for that host.
+- **`--force`:** kaniko refuses to start unless it believes it is in a
+  container. It decides from `/.dockerenv`, `/run/.containerenv`,
+  `/run/systemd/container` and the cgroup paths (`pkg/util/proc`).
+  Step 35's runs passed the check without `--force`, but only because
+  Docker writes `/.dockerenv`, which silod's driver doesn't. So keep
+  `--force`, as kaniko's README says to under gVisor.
 - kaniko "by itself **does not** make it safe to run untrusted builds",
   and "relies on the security features of your container runtime"
   (its README, "Security"). Here that runtime is the silo's class,
@@ -1085,65 +1133,76 @@ matter:
 **Rootless BuildKit** (`moby/buildkit:rootless`) is what BuildKit's own
 container recipe runs, with `--security-opt seccomp=unconfined`,
 `apparmor=unconfined` and `systempaths=unconfined` (BuildKit
-`docs/rootless.md`, "Docker"). Against this backend:
+`docs/rootless.md`, "Docker"). Against this backend, step 35 found:
 
-- **seccomp and AppArmor:** the facade refuses both options. In
-  `sandbox` it doesn't matter: `runsc` loads an OCI seccomp profile only
-  with `--oci-seccomp`, which defaults to false ("Enables loading OCI
-  seccomp filters inside the sandbox", `runsc/config/flags.go`), and the
-  Sentry, not the host, answers the `unshare` and `mount` calls
-  BuildKit needs. *Unverified:* that runsc ignores the AppArmor profile
-  name as well.
-- **`systempaths=unconfined`:** the facade has no such option. BuildKit
-  offers `--oci-worker-no-process-sandbox` instead, which it discourages
+- **seccomp and AppArmor don't matter in `sandbox`.** The facade
+  refuses both options, and neither was needed. `runsc` loads an OCI
+  seccomp profile only with `--oci-seccomp`, which defaults to false
+  (`runsc/config/flags.go`). **runsc ignores the AppArmor profile
+  name:** a bundle naming a profile that doesn't exist
+  (`apparmorProfile: silo-no-such-profile`) started under runsc, and
+  the same bundle under runc failed with `unable to apply apparmor
+  profile`. The gVisor driver sets no profile anyway.
+- **`systempaths=unconfined` isn't needed** with
+  `--oci-worker-no-process-sandbox`. BuildKit discourages that flag
   ("it cannot terminate processes that did not exit during an
-  `ExecOp`", and lets `ExecOp`s signal the daemon), but uses in its own
-  Kubernetes examples. Inside one container of one silo, that cost is
-  the builder's own. Use the flag.
-- **The overlay snapshotter:** gVisor's "Docker in gVisor" guide says
-  overlay-on-overlay fails and that "gVisor currently requires tmpfs as
-  an upper layer for overlayfs". In `sandbox`, run BuildKit with
-  `--oci-worker-snapshotter=native`, or with its state directory on a
-  `tmpfs` mount (which is charged to memory).
-- **`newuidmap` and `no-new-privileges`:** rootlesskit maps a range of
-  subordinate ids with the setuid `newuidmap` helper. The facade sets
-  `no-new-privileges` on every container, so a setuid helper gains
-  nothing, and rootlesskit can map only its own uid. Builds whose
-  `RUN` steps create files owned by other users then fail. This is the
-  obstacle most likely to stop rootless BuildKit in **both** classes.
-  *Unverified* which way it goes. Plan item 35 finds out.
+  `ExecOp`", and lets `ExecOp`s signal the daemon), but uses it in its
+  own Kubernetes examples. Inside one container of one silo, that cost
+  is the builder's own. Use the flag.
+- **The snapshotter:** `--oci-worker-snapshotter=native` worked. It
+  copies each layer instead of stacking overlays, which gVisor's
+  "Docker in gVisor" guide says fail unless the upper layer is `tmpfs`.
+  The overlay snapshotter wasn't tried.
+- **`newuidmap` and `no-new-privileges` stop it.** rootlesskit maps
+  subordinate ids (`0 1000 1 1 100000 65536`) with `newuidmap`. In
+  BuildKit's image `newuidmap` isn't setuid: it carries file
+  capabilities. With `no-new-privileges`, which the driver sets on
+  every container, `execve` grants neither, and rootlesskit exits:
+  `newuidmap: Could not set caps`. With `no-new-privileges` off, and
+  nothing else changed, the same container built, `chown`ed and pushed.
+  Without `newuidmap`, a process can still map just its own uid
+  (`unshare -r`): mounts then work, but `chown` to 1234 fails with
+  `EINVAL`, because 1234 isn't mapped. That breaks exactly the builds
+  this page asks for.
+- **Running BuildKit as root doesn't get round it.** `--user 0` in
+  the same image, with `no-new-privileges`, starts `buildkitd` without
+  rootlesskit. Its first bind mount then fails with `operation not
+  permitted`, because Docker's default capabilities have no
+  `CAP_SYS_ADMIN`.
 - **In `vm`**, the guest kernel is a full Linux kernel, so overlay and
   user namespaces work if granule's guest kernel enables them. The
   `newuidmap` question is the same, and depends on whether
   granule-container applies `no-new-privileges` inside the guest
-  (*unverified*).
+  (*unverified*, step 35b).
 
 **Where a builder doesn't work, do this:**
 
 - **Use kaniko** in that class. It covers Dockerfile builds.
 - **If BuildKit is needed** (multi-platform output, cache mounts,
-  build secrets), and it fails in `sandbox` but works in `vm`, run the
-  builder in the `vm` class, if the silo's `isolation` policy allows
-  it.
-- **If it fails in both**, the reason will be privilege the facade
-  doesn't grant. Granting in-sandbox or in-guest privileges to a
-  declared builder container would not weaken the fence, because in
-  both classes those privileges are perceived only inside the boundary
-  (gVisor's tutorial: "gVisor never runs with capabilities on the host
-  Linux kernel"; a guest's capabilities are the guest kernel's). But it
-  is a facade change, so it is [open question 33](#open-questions), not
-  part of this page.
+  build secrets), it doesn't run in `sandbox` today. If step 35b shows
+  it works in `vm`, run the builder in the `vm` class, if the silo's
+  `isolation` policy allows it.
+- **What would make it run in `sandbox`** is one setting: letting a
+  declared builder container run without `no-new-privileges`, so that
+  `newuidmap`'s file capabilities apply. No added capability, seccomp
+  or AppArmor option, and no `systempaths`. The capabilities
+  `newuidmap` gains are the Sentry's, perceived only inside the
+  sandbox (gVisor's tutorial: "gVisor never runs with capabilities on
+  the host Linux kernel"). But it is a facade change, so it is
+  [open question 33](#open-questions), and step 35 doesn't make it.
 
 ### Using the registry and the cache from a container
 
 Each tool needs to be told that `registry.silo.internal` is plain HTTP.
+Step 35 ran the kaniko and BuildKit recipes below as written.
 
 ```sh
-# kaniko: build, pull the base image through the cache, push locally
+# kaniko: name the base image through the cache in the Dockerfile,
+#   FROM registry.silo.internal/docker.io/library/alpine:3.20
+# then build and push locally
 /kaniko/executor --force --context dir:///workspace \
   --destination registry.silo.internal/team-a/x/app:1 \
-  --insecure-registry registry.silo.internal \
-  --registry-map index.docker.io=registry.silo.internal/docker.io
+  --insecure-registry registry.silo.internal
 ```
 
 ```toml
@@ -1162,13 +1221,30 @@ crane push --insecure image.tar registry.silo.internal/team-a/x/app:1
 skopeo copy --dest-tls-verify=false oci-archive:image.tar docker://registry.silo.internal/team-a/x/app:1
 ```
 
-- BuildKit's `mirrors` also takes a path form
-  (`"core.harbor.domain/proxy.docker.io"` in its own example), so
-  `registry.silo.internal/docker.io` works there too.
-- *Verify* (plan item 35) that kaniko's `--registry-map` accepts a
-  target with a path, as BuildKit's mirrors do. If it doesn't, name the
-  base image in full in the Dockerfile:
-  `FROM registry.silo.internal/docker.io/library/alpine:3.20`.
+- **BuildKit's mirror** sent its pulls as
+  `/v2/library/alpine/...?ns=docker.io`, and the cache served them,
+  recording each one as `registry.cache` for the calling silo.
+  BuildKit's `mirrors` also takes a path form
+  (`"core.harbor.domain/proxy.docker.io"` in its own example).
+- **kaniko's `--registry-map` can't reach the cache.** It does accept a
+  target with a path: the fork cuts the target at its first `/` and
+  puts the rest in front of the repository (`parseRegistryMapping`,
+  `pkg/image/remote`). But it builds the new name with
+  go-containerregistry's parser, which reads a first component with a
+  dot in it as a registry host. So
+  `--registry-map index.docker.io=registry.silo.internal/docker.io`
+  becomes `docker.io/library/alpine`, and kaniko pulls **straight from
+  Docker Hub**, silently. It doesn't fall back: it never asked the
+  cache, even with `--skip-default-registry-fallback`. A dotless path
+  is used as written (`.../mirror` asked for
+  `/v2/mirror/library/alpine`). But the cache knows an upstream only by
+  a dotted first component, and reads anything else as a silo's path
+  ([§2](#repository-names-call-l57)). So no map target reaches it. In
+  a silo, that pull still goes through the silo's egress, so it fails
+  or succeeds by the silo's policy. It just isn't cached. **Name the
+  base image in full in the Dockerfile**, as above. kaniko then pulled
+  the manifest, the index's image manifest, the config and the layer
+  from the cache.
 
 ## 10. Garbage collection and deletion
 
@@ -1346,7 +1422,9 @@ the fence API and the OCI API through a probe):
 - the host front door maps `localhost:5115` connections from two uids
   to their own silos;
 - the builder recipes in [§9](#9-building-images): kaniko in both
-  classes, and whatever plan item 35 finds for BuildKit.
+  classes, with the base image named in full, and rootless BuildKit
+  in `sandbox` refused at `newuidmap` until open question 33 is
+  answered.
 
 ## 13. Staged implementation plan
 
@@ -1519,8 +1597,7 @@ earlier depends on them. Each can be filed on its own, in this order.
     private upstream ones, which need step 32.
 
     *Left:* the gVisor driver's `RootfsUpper` (`runsc tar rootfs-upper`
-    through `silod runsc`) and the run that settles this page's
-    *unverified* whiteout claim against real runsc; silod's wiring of
+    through `silod runsc`); silod's wiring of
     the facade's `Content`, `Registry` and `Login` (with step 27b's
     containerd `registry.Content`); and moving the facade cases into
     `pkg/conformance/docker`, so that step 36 runs them against
@@ -1608,6 +1685,21 @@ earlier depends on them. Each can be filed on its own, in this order.
     `newuidmap` question, and kaniko's `--registry-map` with a path,
     and writes the results back into [§9](#9-building-images). Depends
     on 27, 30 and 31, and on 10 for the `vm` half.
+
+    *Done for `sandbox` in task 3488*, as [§9](#what-step-35-ran) says.
+    It used gVisor release-20261005 under Docker with silod's runsc
+    flags, and `pkg/registry`'s handler and cache served by
+    `TestBuildersLive`. `pkg/registry/testdata/builders/run.sh` runs
+    it again. kaniko works. Its `--registry-map` can't reach the cache,
+    so the recipe names the base image in full. Rootless BuildKit needs
+    `no-new-privileges` off and nothing else, which is
+    [open question 33](#open-questions). runsc ignores the AppArmor
+    profile name. The run also showed that runsc's `rootfs-upper`
+    writes later whiteouts as hard links to the first, which the
+    facade's `commit` copied through as links. That is fixed, with a
+    test on runsc's own tar. *Left, as step 35b:* the same runs in
+    `vm` once item 10 lands, and the runs through silod's own driver
+    and registry once steps 27b and 30's wiring land.
 36. **Registry and cache conformance cases** in `local-conformance`,
     as listed in [§12](#12-conformance-cases). Depends on 12 and on
     28 to 35.
@@ -1750,7 +1842,13 @@ L76. **containerd's collector is the only one.** silod removes roots
     capabilities, seccomp and AppArmor apply only inside the boundary.
     Should the facade accept them for a container labelled as a builder,
     in a silo whose policy allows builders, if plan item 35 shows
-    rootless BuildKit can't run without them?
+    rootless BuildKit can't run without them? *Narrowed by step 35:* in
+    `sandbox` it needs exactly one thing, `no-new-privileges` off, so
+    that `newuidmap`'s file capabilities apply inside the sandbox. It
+    needs no added capability, seccomp, AppArmor or `systempaths`
+    option ([§9](#9-building-images)). So the question is whether a
+    declared builder container may run with new privileges allowed.
+    `vm` waits for step 35b.
 34. **Pointing tools at the cache automatically.** Should silod set
     well-known configuration (`/etc/containers/registries.conf.d/`,
     a `buildkitd.toml`, containerd's `hosts.toml`) in containers that
