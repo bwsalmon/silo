@@ -1,6 +1,9 @@
 package local
 
 import (
+	"context"
+	"time"
+
 	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 )
@@ -14,4 +17,18 @@ func HolderNFT(state, nft string) netfence.NFT {
 		st, err := nsd.ReadState(state)
 		return st.Pid, err
 	}, nft)
+}
+
+// HolderMapping waits up to timeout for the holder whose state file is
+// state, and returns its id mapping, as BindMapping takes it.
+func HolderMapping(ctx context.Context, state string, timeout time.Duration) (string, error) {
+	st, err := nsd.WaitState(ctx, state, timeout)
+	if err != nil {
+		return "", err
+	}
+	m, err := nsd.ReadMapping(st.Pid)
+	if err != nil {
+		return "", err
+	}
+	return m.String(), nil
 }

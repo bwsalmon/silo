@@ -123,3 +123,26 @@ func TestNewWithFence(t *testing.T) {
 		t.Errorf("loaded %v", rs)
 	}
 }
+
+// TestBindMapping: the first start records the holder's mapping, and a
+// later one, after a reboot, must find the same.
+func TestBindMapping(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(filepath.Join(t.TempDir(), "silo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx, db.Latest()); err != nil {
+		t.Fatal(err)
+	}
+	const m = "uid=0:1000:1,1:100000:65536 gid=0:1000:1,1:100000:65536"
+	for range 2 {
+		if err := local.BindMapping(ctx, db, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := local.BindMapping(ctx, db, "uid=0:1000:1,1:200000:65536 gid=0:1000:1,1:200000:65536"); !errors.Is(err, local.ErrMappingChanged) {
+		t.Errorf("another mapping: %v, want ErrMappingChanged", err)
+	}
+}

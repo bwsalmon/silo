@@ -115,6 +115,8 @@ commands:
                                     after a restore (root only)
   install --project p --regions r,... --admin user:...
                                     set Silo up in a project (docs/silo/install.md)
+  install --backend local [--system] set the local backend up on this machine: user
+                                    units as you, or system units under a silo account
   uninstall --project p             remove what install set up
   proxy [--listen localhost:8642]   serve the facade and fence API on localhost,
                                     through the front door, for gcloud and terraform
