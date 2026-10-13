@@ -289,12 +289,20 @@ silod's account, which controls the fence. So:
     or not the rootfs is a mount of its own. runc opens the namespaces it
     joins by path as the holder's root, before joining, so it needs no
     more than the holder does. `TestHolder` runs both runtimes.
-    `$XDG_RUNTIME_DIR` is `0700` under systemd, so the default pin
-    directory is not reachable by runsc yet. The gVisor driver (item
-    7/16) has to settle where the pins and its rootfs live.
-  - Pins live in `$XDG_RUNTIME_DIR/silo/netns/` on a tmpfs the holder
-    mounts in its own mount namespace, rather than `/run/silo/netns`,
-    which an unprivileged user can't create.
+    `$XDG_RUNTIME_DIR` is `0700` under systemd, so a pin directory
+    under it is not reachable by runsc. Step 16 settled it (next item).
+  - **The holder has a private `/run`** (step 16). In its own mount
+    namespace it moves the host's `/run` to `/run/host`, mounts a
+    tmpfs on `/run`, and links every host entry back
+    (`/run/user -> host/user`, so `$XDG_RUNTIME_DIR` and the user's
+    systemd manager still resolve), as rootlesskit's copy-up does.
+    `/run/containerd`, `/run/buildkit` and `/run/silo` are the holder's
+    own, mode `0711`. Pins live in `/run/silo/netns` on a tmpfs there,
+    which a container's root can reach; containerd's state is
+    `/run/containerd`, where its shims put their sockets whatever the
+    configuration says. Only the sockets silod dials
+    (`containerd.sock`, `buildkitd.sock`, `nsd.sock`) are in
+    `$XDG_RUNTIME_DIR/silo`.
 - **The mapping is part of the state.** Files in volumes are owned by
   subuids on disk. If `/etc/subuid` changed between runs, every
   volume's owners would shift. silod records its mapping in the store
@@ -337,9 +345,40 @@ Limits that follow:
   without ignoring `chown` errors, which would change images' meaning.
   Install refuses a host without `newuidmap` and a subuid range, and
   names the fix.
-- *Verify:* that `containerd-shim-runsc-v1` passes a pre-made user
-  namespace path through to runsc in method 2 with `--network=sandbox`.
-  The gVisor driver task (item 7) proves it in CI before anything else.
+- **How runsc gets into the namespace** (step 16,
+  `pkg/backend/local/rootless`). The shim can't pass a user namespace
+  path through: runsc's gofer can't join one (above). So the runsc
+  shim's `binary_name` is a script that runs **`silod runsc`**, inside
+  the holder as the shim is. It reads two annotations from the
+  bundle's `config.json`, `dev.silo.userns` (the pin) and
+  `dev.silo.root` (the container root's id in the holder, its range's
+  first id). It gives the bundle directory to that root, so runsc can
+  write its log and pid file there, and execs runsc inside the user
+  namespace through nsexec's `userns` stage. A bundle without them is
+  refused, so runsc never runs as the holder's root, which is silod's
+  uid. runsc's `--root` is `/run/silo/runsc`, shared and sticky, since
+  each container's runsc writes its own state there as its own root.
+  The spec names only the netns (`SandboxPatch`).
+- *What step 16 found* with containerd 2.4 and gVisor 20261005 in the
+  holder:
+  - `ctr run` through the runsc shim and `silod runsc` starts the
+    sandbox as root of the container's user namespace, on the pinned
+    netns. Its stdout came back as `EPIPE` to `ctr`, and the same
+    happens without `silod runsc`, with the shim calling runsc as the
+    holder's root. So it is the shim's stdio under `ctr` in this setup,
+    not the namespace. The driver (item 7) uses containerd's client,
+    with its own I/O, and has to check this first.
+  - `--overlay2=root:self` puts its filestore in the rootfs mount. On a
+    snapshot still owned by the holder's root, the container's root
+    can't create it. The driver remaps each container's snapshot to its
+    range (containerd's `WithRemappedSnapshot`, a chowned copy).
+    Idmapped mounts would avoid the copy, but making one needs
+    `CAP_SYS_ADMIN` in the initial user namespace, and containerd's
+    overlay snapshotter tries them, and fails, when asked to remap by
+    label.
+  - CI's `nsd` job runs runsc through `silod runsc` directly (not
+    through containerd), and checks that netstack takes the veth's
+    address and that a bundle without the annotations is refused.
 
 ### KVM for the vm class (call L31)
 
@@ -371,6 +410,22 @@ Limits that follow:
   unchanged when container root isn't host root, and with `/dev/kvm`
   bind-mounted rather than created. This is part of plan item 9's
   granule work.
+- *What step 16 found:*
+  - **The holder dropped the groups itself.** nsexec called
+    `setgroups(0)` when it became root of the holder's namespace, so
+    `kvm` was gone before any runtime started. It no longer does. The
+    holder, containerd and the shims keep the user's supplementary
+    groups. Only a container started with `keep_original_groups` keeps
+    them too; any other container's runtime sets its own.
+  - With that, crun 1.8.1 joining a container's pinned user namespace
+    and netns with `keep_original_groups` opens the bind-mounted
+    `/dev/kvm` through `kvm`, and the same container without the
+    annotation can't. CI's `nsd` job runs both
+    (`TestRuntimesInTheHolder`).
+  - Debian 12's crun (1.8.1) refuses the runtime-spec version that
+    containerd 2 writes (`unknown version specified` for 1.2.x). The
+    `vm` class under containerd needs a newer crun, or the driver
+    writes a version crun accepts. Plan item 10 settles which.
 
 ### cgroups
 
@@ -385,6 +440,18 @@ Limits that follow:
   `user@.service` (`Delegate=cpu cpuset io memory pids`), which is a
   one-time root step. Without it, CPU and memory limits hold and I/O is
   neither limited nor metered. `describe` says which.
+- **Slices are named by the tree** because systemd nests slices by
+  name: `silo.slice`, `silo-<root>.slice`, `silo-<root>-<child>.slice`.
+  Ids are lower-case base 32, so they need no escaping. A container's
+  `cgroupsPath` is `<silo's slice>:silo:<container id>`, a scope in
+  its silo's slice (`rootless.CgroupsPath`).
+- **What `describe` reports** is `rootless.Cgroups`: the cgroup
+  version, the user manager, the delegated and missing controllers,
+  and `enforced`, which is `all`, `partial` (CPU, memory and pids
+  hold, `io` or `cpuset` don't) or `none` (cgroup v1, no user manager
+  without lingering, or `cpu`, `memory` or `pids` not delegated, when
+  only the ledger limits a silo), with a sentence and the fix.
+  `silo unshare --probe` prints it beside the runtime checks.
 - **Root capacity** (call L20) is unchanged. The host's totals are what
   they are, and the user slice can't exceed them.
 
