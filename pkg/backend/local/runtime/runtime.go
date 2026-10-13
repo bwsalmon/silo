@@ -242,7 +242,9 @@ type Driver interface {
 	Streams(ctx context.Context, id string) (Streams, error)
 	Stats(ctx context.Context, id string) (Stats, error)
 	// CopyIn extracts a tar archive at dir in the container's root;
-	// CopyOut is path in its root as a tar archive.
+	// CopyOut is path in its root as a tar archive. A path the
+	// container doesn't have is fs.ErrNotExist, from CopyOut or from
+	// the archive's first read.
 	CopyIn(ctx context.Context, id, dir string, tar io.Reader) error
 	CopyOut(ctx context.Context, id, path string) (io.ReadCloser, error)
 	// List is every container this driver has, with silod's labels.

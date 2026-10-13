@@ -135,6 +135,10 @@ type Server struct {
 	// flight.
 	mu sync.Mutex
 
+	// execs are the exec instances made and not yet forgotten, by id.
+	execMu sync.Mutex
+	execs  map[string]*execInstance
+
 	wg   sync.WaitGroup
 	bg   context.Context
 	stop context.CancelFunc
@@ -148,7 +152,7 @@ func New(st store.Store, opts Options) *Server {
 	if opts.PublishPorts == [2]int{} {
 		opts.PublishPorts = [2]int{32768, 60999}
 	}
-	s := &Server{st: st, opts: opts, drivers: map[runtime.Class]runtime.Driver{}}
+	s := &Server{st: st, opts: opts, drivers: map[runtime.Class]runtime.Driver{}, execs: map[string]*execInstance{}}
 	for _, d := range opts.Drivers {
 		s.drivers[d.Class()] = d
 	}
@@ -264,7 +268,7 @@ func (s *Server) serve(q *request) error {
 	if err := s.resolve(q); err != nil {
 		return err
 	}
-	if q.route.class() == control.Mutation && !q.route.stream {
+	if q.class() == control.Mutation && !q.route.stream {
 		if err := s.readBody(q); err != nil {
 			return s.refuse(q, err)
 		}
@@ -294,12 +298,12 @@ func target(r *http.Request) facade.Ref {
 func (s *Server) resolve(q *request) error {
 	ctx := q.ctx()
 	ref := target(q.r)
-	ref.Resource, ref.Write = q.route.resource, q.route.class() == control.Mutation
+	ref.Resource, ref.Write = q.route.resource, q.class() == control.Mutation
 	var denied error
 	err := s.st.Tx(ctx, func(tx store.Tx) error {
 		t, err := facade.Resolve(ctx, tx, s.opts.Manage, q.caller, ref)
 		if err == nil {
-			err = facade.CheckControl(ctx, tx, t, q.route.class(), "docker."+q.r.Method+" "+q.route.pattern, "")
+			err = facade.CheckControl(ctx, tx, t, q.class(), "docker."+q.r.Method+" "+q.route.pattern, "")
 		}
 		var refusal facade.Refusal
 		if errors.As(err, &refusal) {
@@ -352,6 +356,9 @@ func (s *Server) readBody(q *request) error {
 		if err := refuseHost(q.body); err != nil {
 			return err
 		}
+	}
+	if p, _ := q.body["Privileged"].(bool); p && q.route.pattern == "/containers/{id}/exec" {
+		return forbidden("silo: a privileged exec is not allowed in a silo")
 	}
 	if err := facade.CheckFields(q.body, allow); err != nil {
 		return asError(err)
@@ -420,12 +427,6 @@ func (s *Server) auditTx(ctx context.Context, tx store.Tx, q *request, result st
 	}
 	return facade.Audit(ctx, tx, q.target.ID, q.caller, facade.Call{
 		Method: "docker." + q.r.Method + " " + q.route.pattern, Result: result, Charges: charges, Fields: fields})
-}
-
-// notYet answers an endpoint the facade serves in a later step of the
-// plan (local-backend.md §15): exec, attach, archive and top.
-func (s *Server) notYet(q *request) error {
-	return unsupported("silo: %s %s is not served by this facade yet", q.r.Method, q.route.pattern)
 }
 
 // noContent answers 204, as Docker answers most writes.

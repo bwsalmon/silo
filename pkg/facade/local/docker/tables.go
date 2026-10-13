@@ -28,9 +28,13 @@ type route struct {
 	// by endpoint, not by verb.
 	read bool
 	// stream is set for a write whose body is not JSON, which its
-	// handler reads as a stream: docker load's archive.
+	// handler reads as a stream: docker load's archive, docker cp's, and
+	// attach's stdin.
 	stream bool
-	h      handler
+	// writeIf is a query flag that makes a read route a mutation:
+	// attach with stdin=1 writes to the workload (call 52).
+	writeIf string
+	h       handler
 }
 
 // class is the route's class under pkg/control.
@@ -41,8 +45,16 @@ func (r *route) class() control.Class {
 	return control.Mutation
 }
 
-// routes are the endpoints served. Exec, attach and archive are served
-// by later steps of the plan, and answer 501 until then.
+// class is the call's class: its route's, unless the route's writeIf
+// flag is set.
+func (q *request) class() control.Class {
+	if q.route.writeIf != "" && q.flag(q.route.writeIf) {
+		return control.Mutation
+	}
+	return q.route.class()
+}
+
+// routes are the endpoints served.
 var routes = []route{
 	// System.
 	{method: "GET", pattern: "/_ping", resource: "containers", h: (*Server).ping},
@@ -69,15 +81,15 @@ var routes = []route{
 	{method: "DELETE", pattern: "/containers/{id}", resource: "containers", h: (*Server).containerDelete},
 	{method: "GET", pattern: "/containers/{id}/logs", resource: "containers", h: (*Server).containerLogs},
 	{method: "GET", pattern: "/containers/{id}/stats", resource: "containers", h: (*Server).containerStats},
-	{method: "GET", pattern: "/containers/{id}/top", resource: "containers", h: (*Server).notYet},
-	{method: "POST", pattern: "/containers/{id}/attach", resource: "containers", h: (*Server).notYet},
-	{method: "POST", pattern: "/containers/{id}/exec", resource: "containers", h: (*Server).notYet},
-	{method: "POST", pattern: "/exec/{id}/start", resource: "containers", h: (*Server).notYet},
-	{method: "POST", pattern: "/exec/{id}/resize", resource: "containers", h: (*Server).notYet},
-	{method: "GET", pattern: "/exec/{id}/json", resource: "containers", h: (*Server).notYet},
-	{method: "HEAD", pattern: "/containers/{id}/archive", resource: "containers", h: (*Server).notYet},
-	{method: "GET", pattern: "/containers/{id}/archive", resource: "containers", h: (*Server).notYet},
-	{method: "PUT", pattern: "/containers/{id}/archive", resource: "containers", h: (*Server).notYet},
+	{method: "GET", pattern: "/containers/{id}/top", resource: "containers", h: (*Server).containerTop},
+	{method: "POST", pattern: "/containers/{id}/attach", resource: "containers", read: true, writeIf: "stdin", stream: true, h: (*Server).containerAttach},
+	{method: "POST", pattern: "/containers/{id}/exec", resource: "containers", h: (*Server).execCreate},
+	{method: "POST", pattern: "/exec/{id}/start", resource: "containers", h: (*Server).execStart},
+	{method: "POST", pattern: "/exec/{id}/resize", resource: "containers", h: (*Server).execResize},
+	{method: "GET", pattern: "/exec/{id}/json", resource: "containers", h: (*Server).execInspect},
+	{method: "HEAD", pattern: "/containers/{id}/archive", resource: "containers", h: (*Server).archiveStat},
+	{method: "GET", pattern: "/containers/{id}/archive", resource: "containers", h: (*Server).archiveGet},
+	{method: "PUT", pattern: "/containers/{id}/archive", resource: "containers", stream: true, h: (*Server).archivePut},
 
 	// Images.
 	{method: "POST", pattern: "/images/create", resource: "images", h: (*Server).imageCreate},
@@ -250,6 +262,11 @@ var requestFields = map[string]facade.Fields{
 	}),
 	"/networks/{id}/disconnect": facade.AllowFields([]string{"Container", "Force"}),
 	"/volumes/create":           facade.AllowFields([]string{"Name", "Driver", "DriverOpts", "Labels"}),
+	"/containers/{id}/exec": facade.AllowFields([]string{
+		"AttachStdin", "AttachStdout", "AttachStderr", "DetachKeys", "Tty", "ConsoleSize",
+		"Env", "Cmd", "User", "WorkingDir", "Privileged",
+	}),
+	"/exec/{id}/start": facade.AllowFields([]string{"Detach", "Tty", "ConsoleSize"}),
 }
 
 // endpointFields is the allowlist of one entry of

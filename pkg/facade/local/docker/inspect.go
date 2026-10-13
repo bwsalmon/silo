@@ -3,7 +3,6 @@ package docker
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"io"
 	"net/http"
 	"strconv"
@@ -323,28 +322,17 @@ func (s *Server) containerLogs(q *request) error {
 	}
 	tty := c.Process.TTY
 	if tty {
-		q.w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+		q.w.Header().Set("Content-Type", mediaRaw)
 	} else {
-		q.w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
+		q.w.Header().Set("Content-Type", mediaMultiplexed)
 	}
 	q.w.WriteHeader(http.StatusOK)
-	write := func(stream byte, b []byte) {
-		if len(b) == 0 {
-			return
-		}
-		if !tty {
-			var h [8]byte
-			h[0] = stream
-			binary.BigEndian.PutUint32(h[4:], uint32(len(b)))
-			_, _ = q.w.Write(h[:])
-		}
-		_, _ = q.w.Write(b)
-	}
+	stdout, stderr := outputs(q.w, tty)
 	if out {
-		write(1, read(st.Stdout))
+		_, _ = stdout.Write(read(st.Stdout))
 	}
 	if errs {
-		write(2, read(st.Stderr))
+		_, _ = stderr.Write(read(st.Stderr))
 	}
 	if fl, ok := q.w.(http.Flusher); ok {
 		fl.Flush()

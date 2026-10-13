@@ -730,8 +730,27 @@ open, or leaves something for later:
   fence's `TopologySource`), `Published` (the listeners, with `Host`
   set where effective `ingress` is `host`) and `Lookup` (the DNS
   answers, scoped by origin and by shared network).
-- **Not yet served:** exec, attach, archive and top answer 501 until
-  their own step. `/events` stays open and empty, and logs carry no
+- **Exec, attach, `docker cp` and top.** Exec instances are kept in
+  silod's memory, as Docker's daemon keeps them. A restart forgets
+  them, and so does removing the container, or five minutes after the
+  process ends. A process the driver can't start ends 126, or 127 if
+  the executable is missing. The driver's streams are the output so
+  far, so a streaming attach reads them again (every 100 ms) until the
+  workload stops. `logs=0` starts at the end of what is there, and
+  detach keys apply to a TTY's stdin. `docker cp`'s archive is parsed
+  and written again before the driver sees it:
+  - names are kept inside the destination;
+  - a name under a symlink the same archive made is refused;
+  - devices are refused (403);
+  - extended attributes are dropped;
+  - owners become root unless `copyUIDGID` is set.
+
+  The archive lands in the container's writable layer or a volume.
+  Both are charged to `disk_gb` already, so it is capped at the
+  container's `disk_gb` and not charged again. A read-only root or
+  mount refuses it (403). `top` is an exec of `ps` in both classes,
+  and 501 when that exits 126 or 127.
+- **Not yet served:** `/events` stays open and empty, and logs carry no
   timestamps. Restart policies are kept but not acted on; `AutoRemove`
   is.
 - **Left to wiring:** the host sockets, the `docker.silo.internal`
