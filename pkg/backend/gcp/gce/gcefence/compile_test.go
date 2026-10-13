@@ -1,4 +1,4 @@
-package fence
+package gcefence
 
 import (
 	"errors"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	fe "github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
+	"github.com/bwsalmon/silo/pkg/fence"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -18,10 +19,10 @@ func pfx(ss ...string) []netip.Prefix {
 	return out
 }
 
-func smallInput() *Input {
-	return &Input{
-		Gateway: genGateway, Control: genControl, Root: Minus(genSpace, genGateway, genControl),
-		Silos: []Silo{
+func smallInput() *fence.Input {
+	return &fence.Input{
+		Gateway: genGateway, Control: genControl, Root: fence.Minus(genSpace, genGateway, genControl),
+		Silos: []fence.Silo{
 			{ID: "root", Depth: 0, Blocks: pfx("10.0.0.0/16")},
 			{ID: "a", Depth: 1, Blocks: pfx("10.0.1.0/24", "10.0.2.0/24")},
 			{ID: "b", Depth: 1, Blocks: pfx("10.0.16.0/20"), Sealed: true},
@@ -84,8 +85,8 @@ func TestCompileShapeAndBands(t *testing.T) {
 	if r := byName(rules2)["gw-health-in"]; r == nil || r.Priority != 10002 {
 		t.Errorf("gw-health-in = %+v", r)
 	}
-	if _, err := Compile(&Input{Gateway: genGateway, Control: genControl, Root: pfx("10.0.0.0/17"),
-		Silos: []Silo{{ID: "x", Depth: 17, Blocks: pfx("10.0.0.0/24")}}}, DefaultConfig, nil); err == nil {
+	if _, err := Compile(&fence.Input{Gateway: genGateway, Control: genControl, Root: pfx("10.0.0.0/17"),
+		Silos: []fence.Silo{{ID: "x", Depth: 17, Blocks: pfx("10.0.0.0/24")}}}, DefaultConfig, nil); err == nil {
 		t.Errorf("depth 17 compiled")
 	}
 }
@@ -99,7 +100,7 @@ func TestCompileKeepsSlots(t *testing.T) {
 	// a goes, and d comes at depth 1: d takes a slot nobody holds, and
 	// b keeps its own.
 	in.Silos = append(in.Silos[:1:1], in.Silos[2:]...)
-	in.Silos = append(in.Silos, Silo{ID: "d", Depth: 1, Blocks: pfx("10.0.64.0/20")})
+	in.Silos = append(in.Silos, fence.Silo{ID: "d", Depth: 1, Blocks: pfx("10.0.64.0/20")})
 	in.Silos[1].Sealed = false
 	next, err := Compile(in, DefaultConfig, first)
 	if err != nil {
@@ -118,7 +119,7 @@ func TestCompileKeepsSlots(t *testing.T) {
 	for _, s := range steps {
 		applied = applyStep(applied, s)
 	}
-	in.Silos = append(in.Silos, Silo{ID: "e", Depth: 1, Blocks: pfx("10.0.80.0/20")})
+	in.Silos = append(in.Silos, fence.Silo{ID: "e", Depth: 1, Blocks: pfx("10.0.80.0/20")})
 	again, _ := Compile(in, DefaultConfig, applied)
 	if byName(again)["e-intra-in"].Priority != 170000 {
 		t.Errorf("e at %d, want a's old slot 170000", byName(again)["e-intra-in"].Priority)
@@ -128,7 +129,7 @@ func TestCompileKeepsSlots(t *testing.T) {
 func TestPlanOrder(t *testing.T) {
 	in := smallInput()
 	before, _ := Compile(in, DefaultConfig, nil)
-	in.Silos = append(in.Silos, Silo{ID: "n", Depth: 2, Blocks: pfx("10.0.17.0/24")})
+	in.Silos = append(in.Silos, fence.Silo{ID: "n", Depth: 2, Blocks: pfx("10.0.17.0/24")})
 	after, _ := Compile(in, DefaultConfig, before)
 	var names []string
 	for _, s := range Plan(before, after) {

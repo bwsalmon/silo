@@ -943,7 +943,7 @@ per backend:
 | Interface | Methods | GCP | Local |
 | --- | --- | --- | --- |
 | `Inventory` | `List(ctx) ([]Object, error)`, where an `Object` has a kind, scope, name, owning silo id (from label, prefix or namespace) and whether a delete is pending; `Delete(ctx, Object)` | Today's `reconcile.list` and `reconcile.delete` | containerd namespaces, silod's netns and bridges, volume directories, nftables sets |
-| `Fence` | `Apply(ctx, *fence.Input) error`, `Budget(ctx, *fence.Input) error`, `Drift(ctx) ([]string, error)` | `fence.Compile`, `Plan`, `Applier`, moved under `pkg/backend/gcp/gce/fence` | The nftables compiler ([§9](#9-the-local-network-fence)) |
+| `Fence` | `Apply(ctx, *fence.Input) error`, `Budget(ctx, *fence.Input) error`, `Drift(ctx) ([]string, error)` | `fence.Compile`, `Plan`, `Applier`, moved under `pkg/backend/gcp/gce/gcefence` | The nftables compiler ([§9](#9-the-local-network-fence)) |
 | `Capacity` | `Root(ctx) (Capacity, error)`: classes and limits, regions, the control plane's own use | `pkg/ledger/rootcap`, moved | Host CPU, memory and disk, less the reserve, times the overcommit ([§11](#11-resources-and-quota)) |
 | `Classes` | The quota classes this backend charges, and their prices for preview | GCE's (`ledger/classes.go`, `prices.go`) | `vcpu_m`, `memory_mb`, `disk_gb`, `containers`, `networks`, `volumes` |
 | `Contents` | `DeleteContents(ctx, silo)` | Deletes the silo's labelled GCE objects | Stops and removes containers, networks, volumes and image records in `silo-<id>` |
@@ -967,6 +967,19 @@ the applier's own surface: `WaitApplied`, `CheckBudget`, `Run`, and
 root's capacity as `rootcap` does today. `Targets.Resolve` takes a
 scope (a zone on GCP). GCP's `Contents` stays nil until refactor item 5.
 
+As built in step 2 (task 3406), the GCE half of the fence is
+`pkg/backend/gcp/gce/gcefence` (named like `gceclient` and `gcetest`,
+so that callers can import it beside the neutral `pkg/fence`). It
+holds `Compile`, `Plan`, `Applier`, the rule budget (`Quota`,
+`Budget`, `Measure`) and `Config`, and every test of the fence,
+`links_test.go` included, since each one runs through the applier and
+GCE's fake. `pkg/fence` keeps `Input`, `Silo`, `Grant` and `L4`, the
+range arithmetic (now exported: `Normalize`, `Union`, `Intersect`,
+`LastAddr`), the grants, `Load` and the applied sequence number
+(`Applied`, `SetApplied`, `LastSeq`). `rootcap` moved whole to
+`pkg/backend/gcp/gce/rootcap`; the ledger's class table coming from
+`Classes` is left for a later step.
+
 ### The refactor
 
 The refactor changes no behaviour, and lands before any local code
@@ -978,7 +991,7 @@ The refactor changes no behaviour, and lands before any local code
    `reconcile.Object.Collection` becomes `Kind`.
 2. **Split `pkg/fence`.** `Input`, `links.go`, `ranges.go` and the
    database reads stay as the neutral part. `compile.go`, `plan.go`
-   and `apply.go` move to `pkg/backend/gcp/gce/fence`, and so do their
+   and `apply.go` move to `pkg/backend/gcp/gce/gcefence`, and so do their
    tests, including the property test against `fenceeval`.
 3. **Move `pkg/ledger/rootcap`** under `pkg/backend/gcp/gce` as its
    `Capacity`. Make the ledger's class table come from `Classes`.
@@ -1171,7 +1184,7 @@ change to the tree or a grant is a set update, applied as one atomic
   chains above, plus every set's full contents.
 - **The applier** loads it with `nft -f` as a single transaction, so
   the kernel switches from the old ruleset to the new one atomically.
-  It records the applied sequence number as `fence.Applier` does, so
+  It records the applied sequence number as `gcefence.Applier` does, so
   `WaitApplied` works unchanged.
 - **Drift** is a ruleset in the kernel that differs from the one last
   applied. The reconcile finds it every 10 minutes, and on start, by
@@ -1655,7 +1668,7 @@ as two targets, and against `gcp`.
   compiled ruleset for a packet, as `fake/fenceeval` does for GCE's
   policy. The neutral cases then run against "local/fake" in seconds,
   and a property test checks that the compiled ruleset never allows
-  more than `fence.Input` says, as `pkg/fence/property_test.go` does
+  more than `fence.Input` says, as `pkg/backend/gcp/gce/gcefence/property_test.go` does
   today. **A fake runtime is needed**: without it, every fence case
   needs root, nftables and a real runtime (call L25).
 - **The real local conformance, in a new job, `local-conformance`,

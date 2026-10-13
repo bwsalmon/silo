@@ -41,7 +41,7 @@ func OwnSpaces(blocks map[string][]netip.Prefix, gateway, control netip.Prefix) 
 		out[x.holder] = append(out[x.holder], Minus(x.block, holes...)...)
 	}
 	for h, ps := range out {
-		out[h] = normalize(ps)
+		out[h] = Normalize(ps)
 	}
 	return out
 }

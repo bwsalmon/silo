@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/install"
 	"github.com/bwsalmon/silo/pkg/install/fakecloud"
@@ -126,13 +126,13 @@ func TestReplicas(t *testing.T) {
 	if got := siloInternal(t, f); got != gwLB.IPAddress {
 		t.Errorf("silo.internal is %s, not the gateway NLB's %s", got, gwLB.IPAddress)
 	}
-	pol, err := f.Compute.GetFirewallPolicy(ctx, project, fence.PolicyName)
+	pol, err := f.Compute.GetFirewallPolicy(ctx, project, gcefence.PolicyName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	health := false
 	for _, r := range pol.Rules {
-		health = health || r.RuleName == fence.RuleGatewayHealth
+		health = health || r.RuleName == gcefence.RuleGatewayHealth
 	}
 	if !health {
 		t.Error("the fence has no gw-health-in")

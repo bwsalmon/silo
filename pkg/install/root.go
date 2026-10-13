@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/rootcap"
 	"github.com/bwsalmon/silo/pkg/ledger"
-	"github.com/bwsalmon/silo/pkg/ledger/rootcap"
 )
 
 // SilodTimeout is how long the root step waits for silod to serve.

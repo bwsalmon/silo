@@ -1,4 +1,4 @@
-// Package fence is the fence compiler and applier for the subnet
+// Package gcefence is the fence compiler and applier for the subnet
 // backing: it compiles the global network firewall policy silo-fence
 // from silod's database and applies it to GCE rule by rule
 // (docs/silo/gcp-backend.md "The fence", SV-57 to SV-60; state.md "What
@@ -27,7 +27,7 @@
 // Compile reads the slots from the policy GCE has and gives a new silo
 // the lowest slot nobody holds, so adding, removing, sealing or
 // unsealing one silo moves no other rule.
-package fence
+package gcefence
 
 import (
 	"fmt"
@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bwsalmon/silo/pkg/fence"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -132,56 +133,20 @@ type Config struct {
 // DefaultConfig is install's defaults.
 var DefaultConfig = Config{ExportPorts: "20000-29999", FrontDoorPort: 8443}
 
-// Silo is one silo, as the fence sees it.
-type Silo struct {
-	ID     string
-	Depth  int
-	Blocks []netip.Prefix
-	// Sealed is set when the silo's effective control policy is none.
-	Sealed bool
-}
-
-// Grant is one rule a grant adds to the grants band: an export's
-// export-<x>-in or one direction of a link. Its action is allow. Grants
-// are built by later tasks; the compiler takes them as they are.
-type Grant struct {
-	Name      string // the rule name, unique: "export-x-in", "link-l-out"
-	Direction string // "INGRESS" or "EGRESS"
-	Src, Dst  []netip.Prefix
-	L4        []L4
-}
-
-// L4 is a protocol and its ports, as a layer4Config.
-type L4 struct {
-	Protocol string
-	Ports    []string
-}
-
-// Input is everything the policy is compiled from.
-type Input struct {
-	// Gateway and Control are the gateway and control ranges, and Root
-	// the root's block less both. A database with no root yet has none
-	// of them, and its policy is the catch-all rules alone.
-	Gateway, Control netip.Prefix
-	Root             []netip.Prefix
-	Silos            []Silo
-	Grants           []Grant
-}
-
 // Compile compiles in into the fence's rules, in priority order, with
 // GCE's default rules left out. cur is the policy's rules as GCE has
 // them now (nil for none): each silo and grant already there keeps its
 // priority, and a new one takes the lowest priority in its band that
 // no rule in cur holds, so applying the result moves nothing.
-func Compile(in *Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*compute.FirewallPolicyRule, error) {
+func Compile(in *fence.Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*compute.FirewallPolicyRule, error) {
 	if err := cfg.check(); err != nil {
 		return nil, err
 	}
 	var out []*compute.FirewallPolicyRule
-	add := func(name string, priority int64, dir, action string, src, dst []netip.Prefix, l4 ...L4) {
+	add := func(name string, priority int64, dir, action string, src, dst []netip.Prefix, l4 ...fence.L4) {
 		out = append(out, newRule(name, priority, dir, action, src, dst, l4))
 	}
-	all := []L4{{Protocol: "all"}}
+	all := []fence.L4{{Protocol: "all"}}
 	anywhere := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
 	known := in.Gateway.IsValid() && in.Control.IsValid() && len(in.Root) > 0
 	if known {
@@ -192,10 +157,10 @@ func Compile(in *Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*compu
 			return nil, err
 		}
 		out = append(out, grants...)
-		gwPorts := L4{Protocol: "tcp", Ports: []string{strconv.Itoa(HTTPPort), strconv.Itoa(APIPort), strconv.Itoa(ProxyPort), cfg.ExportPorts}}
+		gwPorts := fence.L4{Protocol: "tcp", Ports: []string{strconv.Itoa(HTTPPort), strconv.Itoa(APIPort), strconv.Itoa(ProxyPort), cfg.ExportPorts}}
 		add(RuleGatewayIn, fixedPriority[RuleGatewayIn], "INGRESS", "allow", in.Root, gw, gwPorts)
 		add(RuleGatewayAdmin, fixedPriority[RuleGatewayAdmin], "INGRESS", "allow", []netip.Prefix{IAPRange}, gw,
-			L4{Protocol: "tcp", Ports: []string{strconv.Itoa(cfg.FrontDoorPort)}})
+			fence.L4{Protocol: "tcp", Ports: []string{strconv.Itoa(cfg.FrontDoorPort)}})
 		if cfg.GatewayReplicas {
 			add(RuleGatewayHealth, fixedPriority[RuleGatewayHealth], "INGRESS", "allow", HealthCheckRanges, gw, gwPorts)
 		}
@@ -260,7 +225,7 @@ func SiloSlot(r *compute.FirewallPolicyRule) (id string, depth, index int, ok bo
 	return id, depth, index, true
 }
 
-func siloRules(in *Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*compute.FirewallPolicyRule, error) {
+func siloRules(in *fence.Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*compute.FirewallPolicyRule, error) {
 	type key struct {
 		id    string
 		depth int
@@ -281,30 +246,30 @@ func siloRules(in *Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*com
 			held[key{id, d}] = i
 		}
 	}
-	silos := append([]Silo(nil), in.Silos...)
+	silos := append([]fence.Silo(nil), in.Silos...)
 	sort.Slice(silos, func(i, j int) bool { return silos[i].ID < silos[j].ID })
 	seen := map[string]bool{}
 	var out []*compute.FirewallPolicyRule
-	var fresh []Silo
-	place := func(n Silo, index int) {
+	var fresh []fence.Silo
+	place := func(n fence.Silo, index int) {
 		b := siloRanges(n.Blocks, in)
 		gw := []netip.Prefix{in.Gateway}
 		base := DepthBand(n.Depth) + int64(index*SlotsPerSilo)
-		all := L4{Protocol: "all"}
+		all := fence.L4{Protocol: "all"}
 		out = append(out,
-			newRule(n.ID+slotSuffix[SlotIntraIn], base+SlotIntraIn, "INGRESS", "goto_next", b, b, []L4{all}),
-			newRule(n.ID+slotSuffix[SlotIntraOut], base+SlotIntraOut, "EGRESS", "goto_next", b, b, []L4{all}),
+			newRule(n.ID+slotSuffix[SlotIntraIn], base+SlotIntraIn, "INGRESS", "goto_next", b, b, []fence.L4{all}),
+			newRule(n.ID+slotSuffix[SlotIntraOut], base+SlotIntraOut, "EGRESS", "goto_next", b, b, []fence.L4{all}),
 			newRule(n.ID+slotSuffix[SlotGatewayOut], base+SlotGatewayOut, "EGRESS", "allow", b, gw,
-				[]L4{{Protocol: "tcp", Ports: []string{strconv.Itoa(HTTPPort), strconv.Itoa(ProxyPort), cfg.ExportPorts}}}),
+				[]fence.L4{{Protocol: "tcp", Ports: []string{strconv.Itoa(HTTPPort), strconv.Itoa(ProxyPort), cfg.ExportPorts}}}),
 		)
 		if !n.Sealed || (cfg.KeepControlPort != nil && cfg.KeepControlPort()) {
 			out = append(out, newRule(n.ID+slotSuffix[SlotAPIOut], base+SlotAPIOut, "EGRESS", "allow", b, gw,
-				[]L4{{Protocol: "tcp", Ports: []string{strconv.Itoa(APIPort)}}}))
+				[]fence.L4{{Protocol: "tcp", Ports: []string{strconv.Itoa(APIPort)}}}))
 		}
 		anywhere := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
 		out = append(out,
-			newRule(n.ID+slotSuffix[SlotDenyIn], base+SlotDenyIn, "INGRESS", "deny", anywhere, b, []L4{all}),
-			newRule(n.ID+slotSuffix[SlotDenyOut], base+SlotDenyOut, "EGRESS", "deny", b, anywhere, []L4{all}),
+			newRule(n.ID+slotSuffix[SlotDenyIn], base+SlotDenyIn, "INGRESS", "deny", anywhere, b, []fence.L4{all}),
+			newRule(n.ID+slotSuffix[SlotDenyOut], base+SlotDenyOut, "EGRESS", "deny", b, anywhere, []fence.L4{all}),
 		)
 	}
 	for _, n := range silos {
@@ -348,15 +313,15 @@ func siloRules(in *Input, cfg Config, cur []*compute.FirewallPolicyRule) ([]*com
 // siloRanges is a silo's blocks as the fence names them: less the
 // gateway and control ranges, which lie inside the root's block but
 // are no silo's space.
-func siloRanges(blocks []netip.Prefix, in *Input) []netip.Prefix {
+func siloRanges(blocks []netip.Prefix, in *fence.Input) []netip.Prefix {
 	var out []netip.Prefix
 	for _, b := range blocks {
-		out = append(out, Minus(b.Masked(), in.Gateway, in.Control)...)
+		out = append(out, fence.Minus(b.Masked(), in.Gateway, in.Control)...)
 	}
-	return normalize(out)
+	return fence.Normalize(out)
 }
 
-func grantRules(gs []Grant, cur []*compute.FirewallPolicyRule) ([]*compute.FirewallPolicyRule, error) {
+func grantRules(gs []fence.Grant, cur []*compute.FirewallPolicyRule) ([]*compute.FirewallPolicyRule, error) {
 	held := map[string]int64{}
 	taken := map[int64]bool{}
 	for _, r := range cur {
@@ -367,10 +332,10 @@ func grantRules(gs []Grant, cur []*compute.FirewallPolicyRule) ([]*compute.Firew
 			}
 		}
 	}
-	gs = append([]Grant(nil), gs...)
+	gs = append([]fence.Grant(nil), gs...)
 	sort.Slice(gs, func(i, j int) bool { return gs[i].Name < gs[j].Name })
 	var out []*compute.FirewallPolicyRule
-	var fresh []Grant
+	var fresh []fence.Grant
 	seen := map[string]bool{}
 	for _, g := range gs {
 		if seen[g.Name] || !(strings.HasPrefix(g.Name, "export-") || strings.HasPrefix(g.Name, "link-")) {
@@ -400,7 +365,7 @@ func grantRules(gs []Grant, cur []*compute.FirewallPolicyRule) ([]*compute.Firew
 	return out, nil
 }
 
-func newRule(name string, priority int64, dir, action string, src, dst []netip.Prefix, l4 []L4) *compute.FirewallPolicyRule {
+func newRule(name string, priority int64, dir, action string, src, dst []netip.Prefix, l4 []fence.L4) *compute.FirewallPolicyRule {
 	m := &compute.FirewallPolicyRuleMatcher{SrcIpRanges: strs(src), DestIpRanges: strs(dst)}
 	for _, c := range l4 {
 		m.Layer4Configs = append(m.Layer4Configs, &compute.FirewallPolicyRuleMatcherLayer4Config{
@@ -413,7 +378,7 @@ func newRule(name string, priority int64, dir, action string, src, dst []netip.P
 }
 
 func strs(ps []netip.Prefix) []string {
-	ps = normalize(ps)
+	ps = fence.Normalize(ps)
 	if len(ps) == 0 {
 		return nil
 	}

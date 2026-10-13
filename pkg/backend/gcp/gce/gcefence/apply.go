@@ -1,4 +1,4 @@
-package fence
+package gcefence
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/store"
 	compute "google.golang.org/api/compute/v1"
 )
@@ -24,7 +25,7 @@ type Applier struct {
 	// Policy is the policy's name; empty means PolicyName.
 	Policy string
 	Config Config
-	Grants GrantSource
+	Grants fence.GrantSource
 	// Poll is how often WaitApplied reads the applied sequence number
 	// when nothing in this process has told it of progress. Zero means
 	// a second.
@@ -134,17 +135,17 @@ func (a *Applier) drifted(ctx context.Context, steps []Step, repaired bool) {
 // applyOnce returns the steps it took, and whether they were drift:
 // whether seq was already recorded as applied before it started.
 func (a *Applier) applyOnce(ctx context.Context) (seq uint64, taken []Step, drifted bool, err error) {
-	var in *Input
+	var in *fence.Input
 	var applied uint64
 	if err := a.Store.Tx(ctx, func(tx store.Tx) error {
 		var err error
-		if in, err = Load(ctx, tx, a.Grants); err != nil {
+		if in, err = fence.Load(ctx, tx, a.Grants); err != nil {
 			return err
 		}
-		if applied, err = Applied(ctx, tx); err != nil {
+		if applied, err = fence.Applied(ctx, tx); err != nil {
 			return err
 		}
-		seq, err = lastSeq(ctx, tx)
+		seq, err = fence.LastSeq(ctx, tx)
 		return err
 	}); err != nil {
 		return 0, nil, false, err
@@ -155,7 +156,7 @@ func (a *Applier) applyOnce(ctx context.Context) (seq uint64, taken []Step, drif
 	return seq, taken, drifted, err
 }
 
-func (a *Applier) applyInput(ctx context.Context, in *Input, seq uint64) (uint64, []Step, error) {
+func (a *Applier) applyInput(ctx context.Context, in *fence.Input, seq uint64) (uint64, []Step, error) {
 	pol, err := a.GCE.GetFirewallPolicy(ctx, a.Project, a.policy())
 	if err != nil {
 		return 0, nil, err
@@ -193,7 +194,7 @@ func (a *Applier) applyInput(ctx context.Context, in *Input, seq uint64) (uint64
 				return err
 			}
 		}
-		return setApplied(ctx, tx, seq)
+		return fence.SetApplied(ctx, tx, seq)
 	}); err != nil {
 		return 0, taken, err
 	}
@@ -345,7 +346,7 @@ func (a *Applier) WaitApplied(ctx context.Context, seq uint64) error {
 		var applied uint64
 		if err := a.Store.Tx(ctx, func(tx store.Tx) error {
 			var err error
-			applied, err = Applied(ctx, tx)
+			applied, err = fence.Applied(ctx, tx)
 			return err
 		}); err != nil {
 			return err
@@ -373,7 +374,7 @@ func (a *Applier) Run(ctx context.Context, retry time.Duration) error {
 	var since uint64
 	if err := a.Store.Tx(ctx, func(tx store.Tx) error {
 		var err error
-		since, err = Applied(ctx, tx)
+		since, err = fence.Applied(ctx, tx)
 		return err
 	}); err != nil {
 		return err

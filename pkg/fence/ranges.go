@@ -30,11 +30,12 @@ func cut(p, hole netip.Prefix) []netip.Prefix {
 		return nil
 	}
 	lo := netip.PrefixFrom(p.Addr(), p.Bits()+1)
-	hi := netip.PrefixFrom(lastAddr(lo).Next(), p.Bits()+1)
+	hi := netip.PrefixFrom(LastAddr(lo).Next(), p.Bits()+1)
 	return append(cut(lo, hole), cut(hi, hole)...)
 }
 
-func lastAddr(p netip.Prefix) netip.Addr {
+// LastAddr is the last address in p.
+func LastAddr(p netip.Prefix) netip.Addr {
 	a := p.Masked().Addr().As4()
 	host := uint32(1)<<(32-p.Bits()) - 1
 	v := uint32(a[0])<<24 | uint32(a[1])<<16 | uint32(a[2])<<8 | uint32(a[3])
@@ -42,10 +43,10 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
 }
 
-// normalize masks ps, drops any prefix inside another, and sorts them
+// Normalize masks ps, drops any prefix inside another, and sorts them
 // by address. Two prefixes either nest or are disjoint, so the result
 // covers exactly what ps does.
-func normalize(ps []netip.Prefix) []netip.Prefix {
+func Normalize(ps []netip.Prefix) []netip.Prefix {
 	in := make([]netip.Prefix, 0, len(ps))
 	for _, p := range ps {
 		if p.IsValid() {
@@ -68,14 +69,14 @@ func normalize(ps []netip.Prefix) []netip.Prefix {
 	return out
 }
 
-// union is everything in a or b.
-func union(a, b []netip.Prefix) []netip.Prefix {
-	return normalize(append(append([]netip.Prefix(nil), a...), b...))
+// Union is everything in a or b.
+func Union(a, b []netip.Prefix) []netip.Prefix {
+	return Normalize(append(append([]netip.Prefix(nil), a...), b...))
 }
 
-// intersect is everything in both a and b: where two prefixes overlap,
+// Intersect is everything in both a and b: where two prefixes overlap,
 // the narrower one.
-func intersect(a, b []netip.Prefix) []netip.Prefix {
+func Intersect(a, b []netip.Prefix) []netip.Prefix {
 	var out []netip.Prefix
 	for _, x := range a {
 		for _, y := range b {
@@ -89,17 +90,5 @@ func intersect(a, b []netip.Prefix) []netip.Prefix {
 			}
 		}
 	}
-	return normalize(out)
-}
-
-func parsePrefixes(ss []string) ([]netip.Prefix, bool) {
-	out := make([]netip.Prefix, 0, len(ss))
-	for _, s := range ss {
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			return nil, false
-		}
-		out = append(out, p)
-	}
-	return out, true
+	return Normalize(out)
 }

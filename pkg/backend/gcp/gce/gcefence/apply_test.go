@@ -1,4 +1,4 @@
-package fence_test
+package gcefence_test
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	fe "github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
@@ -33,7 +33,7 @@ type env struct {
 	t       *testing.T
 	db      store.Database
 	gce     *fake.Fake
-	applier *fence.Applier
+	applier *gcefence.Applier
 	srv     *httptest.Server
 	root    string
 }
@@ -57,14 +57,14 @@ func newEnvBoot(t *testing.T, boot obj) *env {
 		t.Fatal(err)
 	}
 	f := fake.New(fake.Options{Project: project})
-	op, err := f.InsertFirewallPolicy(ctx, project, &compute.FirewallPolicy{Name: fence.PolicyName})
+	op, err := f.InsertFirewallPolicy(ctx, project, &compute.FirewallPolicy{Name: gcefence.PolicyName})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := gce.Await(ctx, f, project, op); err != nil {
 		t.Fatal(err)
 	}
-	a := &fence.Applier{Store: db, GCE: f, Project: project, Config: fence.DefaultConfig, Poll: 20 * time.Millisecond}
+	a := &gcefence.Applier{Store: db, GCE: f, Project: project, Config: gcefence.DefaultConfig, Poll: 20 * time.Millisecond}
 	api := fenceapi.New(db, fenceapi.Options{
 		Fence: a, Budget: a,
 		Caller: func(r *http.Request) (fenceapi.Caller, error) {
@@ -135,7 +135,7 @@ func (e *env) create(caller, parent, name string, bits int, extra obj) string {
 // rules is the policy in the fake, by rule name.
 func (e *env) rules() (map[string]*compute.FirewallPolicyRule, *compute.FirewallPolicy) {
 	e.t.Helper()
-	pol, err := e.gce.GetFirewallPolicy(context.Background(), project, fence.PolicyName)
+	pol, err := e.gce.GetFirewallPolicy(context.Background(), project, gcefence.PolicyName)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -152,17 +152,17 @@ func TestApplyFollowsTheAPI(t *testing.T) {
 	e := newEnv(t)
 	// Bootstrap waited for the fence: the root's rules are in place.
 	rs, _ := e.rules()
-	for _, n := range []string{fence.RuleControlDeny, fence.RuleGatewayIn, fence.RuleGatewayAdmin, fence.RuleGatewayOut,
-		fence.RuleCatchIn, fence.RuleCatchOut, e.root + "-intra-in", e.root + "-deny-out", e.root + "-api-out"} {
+	for _, n := range []string{gcefence.RuleControlDeny, gcefence.RuleGatewayIn, gcefence.RuleGatewayAdmin, gcefence.RuleGatewayOut,
+		gcefence.RuleCatchIn, gcefence.RuleCatchOut, e.root + "-intra-in", e.root + "-deny-out", e.root + "-api-out"} {
 		if rs[n] == nil {
 			t.Errorf("after bootstrap the policy has no %s", n)
 		}
 	}
-	if got := rs[fence.RuleControlDeny]; got != nil && (got.Priority != fence.ControlBand ||
+	if got := rs[gcefence.RuleControlDeny]; got != nil && (got.Priority != gcefence.ControlBand ||
 		strings.Join(got.Match.DestIpRanges, ",") != "10.0.254.0/24" || got.Action != "deny") {
 		t.Errorf("ctl-deny-out = %+v", got)
 	}
-	if _, ok := rs[fence.RuleGatewayHealth]; ok {
+	if _, ok := rs[gcefence.RuleGatewayHealth]; ok {
 		t.Errorf("gw-health-in without gateway replicas")
 	}
 
@@ -208,7 +208,7 @@ func TestApplyFollowsTheAPI(t *testing.T) {
 	}
 	e.ok(e.root, "PATCH", "/silo/v1/silos/-"+prod, obj{"control": "read"})
 	rs, _ = e.rules()
-	if r := rs[prod+"-api-out"]; r == nil || r.Priority != before[prod+"-intra-in"]+fence.SlotAPIOut {
+	if r := rs[prod+"-api-out"]; r == nil || r.Priority != before[prod+"-intra-in"]+gcefence.SlotAPIOut {
 		t.Errorf("prod-api-out = %+v, want it at its slot", r)
 	}
 	if rs[web+"-api-out"] != nil {
@@ -229,7 +229,7 @@ func TestApplyFollowsTheAPI(t *testing.T) {
 
 	// Drift is repaired by the next apply.
 	ctx := context.Background()
-	op, err := e.gce.RemoveFirewallPolicyRule(ctx, project, fence.PolicyName, rs[team+"-deny-out"].Priority)
+	op, err := e.gce.RemoveFirewallPolicyRule(ctx, project, gcefence.PolicyName, rs[team+"-deny-out"].Priority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,9 +257,9 @@ func TestRuleBudget(t *testing.T) {
 	// The root's policy now: set the quota so that one more silo, six
 	// rules, passes 90% of it.
 	n := len(rs)
-	quota := (n+3)*100/fence.BudgetPercent + 1
+	quota := (n+3)*100/gcefence.BudgetPercent + 1
 	if err := e.db.Tx(ctx, func(tx store.Tx) error {
-		return fence.SetQuota(ctx, tx, fence.Quota{Rules: quota})
+		return gcefence.SetQuota(ctx, tx, gcefence.Quota{Rules: quota})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestRuleBudget(t *testing.T) {
 		t.Fatalf("create past the budget: %d %v, want RESOURCE_EXHAUSTED", code, out)
 	}
 	details, _ := er["details"].(obj)
-	if details["quota"] != fence.QuotaRules || !strings.Contains(er["message"].(string), "quota") {
+	if details["quota"] != gcefence.QuotaRules || !strings.Contains(er["message"].(string), "quota") {
 		t.Errorf("refusal %v doesn't name the quota", er)
 	}
 	// Nothing was created.
@@ -279,7 +279,7 @@ func TestRuleBudget(t *testing.T) {
 	}
 	// With room, it goes through.
 	if err := e.db.Tx(ctx, func(tx store.Tx) error {
-		return fence.SetQuota(ctx, tx, fence.Quota{Rules: 1000, Attributes: 10000})
+		return gcefence.SetQuota(ctx, tx, gcefence.Quota{Rules: 1000, Attributes: 10000})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -297,9 +297,9 @@ func TestWaitAppliedWaitsForApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := fake.New(fake.Options{Project: project})
-	op, _ := f.InsertFirewallPolicy(ctx, project, &compute.FirewallPolicy{Name: fence.PolicyName})
+	op, _ := f.InsertFirewallPolicy(ctx, project, &compute.FirewallPolicy{Name: gcefence.PolicyName})
 	gce.Await(ctx, f, project, op)
-	a := &fence.Applier{Store: db, GCE: f, Project: project, Config: fence.DefaultConfig, Poll: 10 * time.Millisecond}
+	a := &gcefence.Applier{Store: db, GCE: f, Project: project, Config: gcefence.DefaultConfig, Poll: 10 * time.Millisecond}
 	var seq uint64
 	if err := db.Tx(ctx, func(tx store.Tx) error {
 		var err error
@@ -315,7 +315,7 @@ func TestWaitAppliedWaitsForApply(t *testing.T) {
 	}
 	// Another applier (another replica) applies; this one sees it in
 	// the database.
-	other := &fence.Applier{Store: db, GCE: f, Project: project, Config: fence.DefaultConfig}
+	other := &gcefence.Applier{Store: db, GCE: f, Project: project, Config: gcefence.DefaultConfig}
 	if got, err := other.Apply(ctx); err != nil || got != seq {
 		t.Fatalf("Apply = %d, %v; want %d", got, err, seq)
 	}
@@ -325,7 +325,7 @@ func TestWaitAppliedWaitsForApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The empty policy is the catch-all rules alone.
-	pol, _ := f.GetFirewallPolicy(ctx, project, fence.PolicyName)
+	pol, _ := f.GetFirewallPolicy(ctx, project, gcefence.PolicyName)
 	var names []string
 	for _, r := range pol.Rules {
 		if r.RuleName != "" {

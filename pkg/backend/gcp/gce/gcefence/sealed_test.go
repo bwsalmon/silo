@@ -1,4 +1,4 @@
-package fence_test
+package gcefence_test
 
 import (
 	"net/netip"
