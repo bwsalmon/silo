@@ -39,6 +39,19 @@ repositories that silos host for their agents, served at
 them. Its calls are L41–L55, its open questions are 21–30, and its
 staged-plan steps are items 19–24 [below](#15-staged-implementation-plan).
 
+**Part 4** is [`local-registry.md`](local-registry.md) (task 3449). It
+adds a host-local OCI registry that silod serves at
+`registry.silo.internal`, with repos scoped per silo under git's fence
+model, and a pull-through cache for Docker Hub, gcr.io, ghcr.io and
+other configured upstreams, held to each silo's own egress policy. It
+changes the facade: `push` to the local registry, `save`, `load`,
+`commit` for `sandbox` and a validate-only `/auth` are served, and
+`build` stays refused, with builds done by kaniko or BuildKit in a
+container. It moves containerd's root out of `cache/`, and answers
+open questions 6 and 7. Its calls are L56–L76, its open questions are
+31–40, and its staged-plan steps are items 25–36
+[below](#15-staged-implementation-plan).
+
 ### What was checked, and against what
 
 - **granule**: gke-labs/granule at `9cd65eb` (2026-10-12): its README,
@@ -80,6 +93,7 @@ staged-plan steps are items 19–24 [below](#15-staged-implementation-plan).
 17. [Open questions](#open-questions)
 18. Part 2: [rootless operation and the data directory](local-rootless-storage.md)
 19. Part 3: [git repositories for agents, mirrored into one external repo](local-git.md)
+20. Part 4: [a host-local OCI registry with a pull-through cache](local-registry.md)
 
 ## 1. Settled direction
 
@@ -362,7 +376,7 @@ recognises.
 | Attach | `POST /containers/{id}/attach` (hijacked stream) | Both classes ([Exec, logs and attach](#exec-logs-and-attach)). `GET /containers/{id}/attach/ws` is refused. |
 | Exec | `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `POST /exec/{id}/resize`, `GET /exec/{id}/json` | |
 | Archive | `HEAD`/`GET`/`PUT /containers/{id}/archive` (`docker cp`) | testcontainers copies files with it. See [Archive](#archive-docker-cp). |
-| Images | `POST /images/create` (pull: `fromImage` and `tag` only), `GET /images/json`, `GET /images/{name}/json`, `GET /images/{name}/history`, `POST /images/{name}/tag`, `DELETE /images/{name}`, `POST /images/prune` | Pulls go through the egress policy ([Images](#images)) |
+| Images | `POST /images/create` (pull: `fromImage` and `tag` only), `GET /images/json`, `GET /images/{name}/json`, `GET /images/{name}/history`, `POST /images/{name}/tag`, `DELETE /images/{name}`, `POST /images/prune` | Pulls go through the egress policy ([Images](#images)). *Part 4* adds `POST /images/{name}/push` to the local registry, `GET /images/get` and `/images/{name}/get`, `POST /images/load`, `POST /commit` (`sandbox` only) and `POST /auth` ([`local-registry.md` §7](local-registry.md#7-the-docker-facade)) |
 | Networks | `GET /networks`, `GET /networks/{id}`, `POST /networks/create`, `DELETE /networks/{id}`, `POST /networks/{id}/connect`, `/disconnect`, `POST /networks/prune` | `bridge` driver only ([Networks](#networks)) |
 | Volumes | `GET /volumes`, `POST /volumes/create`, `GET /volumes/{name}`, `DELETE /volumes/{name}`, `POST /volumes/prune` | `local` driver, no driver options ([Volumes](#volumes)) |
 
@@ -385,9 +399,9 @@ and `POST /exec/…` mutate.
 | Other mounts | `Mounts[].Type=npipe`/`cluster`, `VolumeDriver` other than `local`, volume `DriverOpts` (which can name a host device or an NFS server) | 403 |
 | Raw host ports | `PortBindings` with a `HostIp` | 403. A published port has no host address ([Published ports](#published-ports)). |
 | Logging drivers | `LogConfig.Type` other than `json-file` or `local` | 403. Logs are silod's. |
-| Build | `POST /build`, `POST /build/prune`, `/session` | 501 `silo: image builds are not served; build elsewhere and pull` |
-| Image import/export | `POST /images/create?fromSrc=…`, `POST /images/load`, `GET /images/get`, `GET /images/{name}/get`, `POST /images/{name}/push`, `POST /commit`, `GET /containers/{id}/export`, `GET /containers/{id}/changes`, `GET /images/search` | 501 ([open question 6](#open-questions) for `load`) |
-| Registry login | `POST /auth` | 501. Credentials travel per pull in `X-Registry-Auth` and are never stored. |
+| Build | `POST /build`, `POST /build/prune`, `/session` | 501. *Part 4* changes the message to name the supported path, kaniko or BuildKit in a container and a push to `registry.silo.internal` ([`local-registry.md` §9](local-registry.md#9-building-images)) |
+| Image import/export | `POST /images/create?fromSrc=…`, `GET /containers/{id}/export`, `GET /containers/{id}/changes`, `GET /images/search`, `POST /commit` of a `vm` container, and `POST /images/{name}/push` to any registry but `registry.silo.internal` | 501. *Part 4* serves `load`, `save`, push to the local registry and `sandbox` commit ([`local-registry.md` §7](local-registry.md#what-changes-call-l68)) |
+| Registry login | `POST /auth` | *Part 4:* served, validate-only. Credentials still travel per pull in `X-Registry-Auth` and are never stored ([`local-registry.md`, `docker login`](local-registry.md#docker-login)). |
 | Resource updates | `POST /containers/{id}/update` | 501 in v1 |
 | Swarm | `/swarm*`, `/nodes*`, `/services*`, `/tasks*`, `/secrets*`, `/configs*` | 503 `This node is not a swarm manager`, Docker's own answer for a node outside a swarm, so clients handle it |
 | Plugins | `/plugins*` | 501 |
@@ -518,6 +532,11 @@ container's own root and never followed on the host, using the same
   granule version, shared the same way, and charged the same way.
 - **`/images/json` shows only the tenant's image**, never the wrapped
   one.
+- *Part 4:* every pull now goes through the pull-through cache's
+  fetcher, which applies the egress rule above to cache hits as well
+  as fetches, and revalidates private images with the caller's
+  credentials. Pulls from `registry.silo.internal` skip egress and need
+  read access instead ([`local-registry.md` §8](local-registry.md#8-the-pull-through-cache)).
 
 ### Networks
 
@@ -1708,11 +1727,16 @@ True of the local backend by design:
   ([§10](#10-agents-on-the-local-backend)).
 - **Image pulls share a cache across silos,** which leaks, by timing,
   whether another silo pulled an image
-  ([Images](#images)).
+  ([Images](#images)). Part 4's pull-through cache widens this, and its
+  `images.sharing: isolated` policy closes it for a subtree, at the
+  cost of upstream fetches
+  ([`local-registry.md`, call L73](local-registry.md#the-timing-channel-and-imagessharing-call-l73)).
 - **The `vm` class is degraded until granule closes its gaps:** exec
   in the image's root, the workload's own logs, exit codes, stdin and
   volumes in the chroot ([§6](#granule-driver)).
-- **No builds, no `load`, no Docker-in-Docker** in v1.
+- **No builds in the facade, and no Docker-in-Docker** in v1. Images
+  are built in a container and pushed to the local registry, and
+  `load` is served ([part 4](local-registry.md#9-building-images)).
 - **Code isn't portable between backends' facades**, as
   [README §8](README.md#8-limitations) already says. A compose file
   runs on a local silo; a terraform module for the GCP facade doesn't.
@@ -1737,7 +1761,10 @@ They are numbered after the others so that existing references stay
 valid. Earlier items that now depend on them say so, and none of those
 earlier items is built rootful first. Items 19–24 were added with
 [part 3](local-git.md)'s hosted git repos and their outbound mirror.
-Nothing earlier depends on them.
+Nothing earlier depends on them. Items 25–36 were added with
+[part 4](local-registry.md)'s registry and pull-through cache. Nothing
+earlier depends on them either, except that item 26 is best landed
+before item 7.
 
 1. **Backend interfaces and the reconcile on them.**
    - Add `pkg/backend` (`Inventory`, `Fence`, `Capacity`, `Classes`,
@@ -1927,6 +1954,57 @@ Nothing earlier depends on them.
 24. **Repo and mirror conformance cases** in `local-conformance`
     ([part 3, §11](local-git.md#11-staged-implementation-plan)).
     Depends on 12, 21 and 22.
+25. **Image repos in the fence API and the store**
+    ([part 4, §3](local-registry.md#3-repos-as-silo-objects)):
+    - the `imageRepos` object and `silo registry`;
+    - the `image_repos` quota class and the `registry` manage-grant type;
+    - registry exports and imports;
+    - the never-looser `images.sharing` policy.
+
+    Depends on 4.
+26. **containerd's root out of `cache/`**
+    ([part 4, call L60](local-registry.md#pushed-images-are-data-call-l60)):
+    layout 2, `containerd/` and `cache/snapshots/`, and the migration.
+    Depends on 14; best landed before 7.
+27. **The registry service for local repos**
+    ([part 4, §6](local-registry.md#6-the-registry-service)):
+    - `registry.silo.internal` on port 80 by `Host`;
+    - names, the access table and the 404 rule;
+    - uploads, manifests, mounts, tags, referrers and catalog;
+    - proof of possession;
+    - charging at push, first-push creation, records and audit.
+
+    Depends on 25, 26 and 15.
+28. **Registry grants:** exports, manage grants, and closing connections
+    on revocation. Depends on 27.
+29. **The host registry port** with the `inet_diag` uid lookup. Depends
+    on 27.
+30. **The Docker facade's image changes**
+    ([part 4, §7](local-registry.md#7-the-docker-facade)): push, local
+    pulls without egress, `save`, `load`, `sandbox` commit and `/auth`.
+    Depends on 6, 7 and 27.
+31. **The pull-through cache for public content**
+    ([part 4, §8](local-registry.md#8-the-pull-through-cache)):
+    upstreams, addressing, the per-request egress check, misses as the
+    caller, tag revalidation, and facade pulls on the fetcher. Depends
+    on 27 and 30.
+32. **Private upstream content:** classification, revalidation with the
+    caller's credentials, in-memory authorisations, and the
+    canary-credential test. Depends on 31.
+33. **Sharing domains** for `images.sharing: isolated`. Depends on 25
+    and 31.
+34. **Cache budget, eviction, GC and deletion**
+    ([part 4, §10](local-registry.md#10-garbage-collection-and-deletion)).
+    Depends on 27 and 31.
+35. **Builders, run for real:** kaniko and rootless BuildKit in both
+    classes, with the results written back into part 4. Depends on 27,
+    30 and 31, and on 10 for `vm`.
+36. **Registry and cache conformance cases** in `local-conformance`
+    ([part 4, §12](local-registry.md#12-conformance-cases)). Depends on
+    12 and 28–35.
+
+Item 9's granule list also gains the diff of a wrapped container's
+root as a tar, for `docker commit` in the `vm` class (part 4).
 
 ## Calls made on this page
 
@@ -2033,6 +2111,13 @@ L41–L55 are in part 3, under
 cover hosted git repos, the fence on them, submodule URLs, the outbound
 mirror to the uber repo, and its submodule index.
 
+L56–L76 are in part 4, under
+[Calls made on that page](local-registry.md#calls-made-on-this-page).
+They cover the local registry, its names and fence, charging and data,
+the facade's image changes, builders, the pull-through cache with
+per-silo egress and private-image checks, sharing domains, and garbage
+collection.
+
 ## Open questions
 
 1. **Ambient versus a dedicated agent user.** Ambient (the operator's
@@ -2056,10 +2141,13 @@ mirror to the uber repo, and its submodule index.
    unchanged.
 6. **`docker load`** of a tarball: useful for CI and air-gapped
    images, but silod would parse an untrusted archive on the host. Run
-   the import in a sandbox of its own?
+   the import in a sandbox of its own? *Answered in part 4* (call
+   L68): `load` is served, and never extracts the archive.
 7. **Image sharing across silos.** Should an ancestor be able to turn
    off content sharing for a subtree, to close the timing channel, at
-   the cost of disk and pulls?
+   the cost of disk and pulls? *Answered in part 4* (call L73): yes,
+   with `images.sharing: isolated`, at the cost of upstream fetches
+   rather than disk.
 8. **IPv6.** The bridge drops it in v1. The README's IPv6 plan (ULA
    prefixes carved like blocks) would apply directly; granule already
    takes over a pod's IPv6 identity.
@@ -2091,6 +2179,12 @@ a subtree, the external ref layout, archive refs, a diverged index,
 attribution, sandboxing git's server side, mirror lag, and hosts other
 than GitHub.
 
+Open questions 31–40 are in
+[part 4](local-registry.md#open-questions). They cover multi-component
+repo names, TLS, privileges for builder containers, pointing tools at
+the cache, private revalidation, padding hits, the host registry port,
+retention, write grants between silos, and upstream rate limits.
+
 ## Later
 
 - Mixed nesting ([README §9](README.md#9-later)).
@@ -2105,3 +2199,7 @@ than GitHub.
 - For hosted git: two-way sync with the uber repo, a rewritten-tree
   folder view, the GCP backend, per-silo external repos and LFS
   ([part 3, Later](local-git.md#10-later)).
+- For the registry: an outbound copy of pushed images to an external
+  registry, beside the uber repo; a facade build that pushes; the GCP
+  backend; signature policy; cache warming
+  ([part 4, Later](local-registry.md#14-later)).

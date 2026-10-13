@@ -672,7 +672,7 @@ type Ref struct {
 | `silos/<id>/logs/` | Kept, not precious | Lost logs are lost history. A backup may skip them. |
 | `silos/<id>/repos/` | **Yes** | Hosted git repos ([part 3](local-git.md#5-storage-and-quota)). Copied with `git bundle`, not file by file |
 | `mirror/` | Kept, not precious | The submodule index's own history, and the mirror's quarantine. Rebuilt from the store if lost |
-| `cache/containerd/` content and images | **No** | Re-pulled on demand, through the silo's egress policy (call L6) |
+| `cache/containerd/` content and images | **No** | Re-pulled on demand, through the silo's egress policy (call L6). *Part 4* moves containerd's root to `<data-dir>/containerd/`, because content a registry repo references is the only copy of a pushed image, and **is** data ([`local-registry.md`, call L60](local-registry.md#pushed-images-are-data-call-l60)) |
 | `cache/containerd/` snapshots: **containers' writable layers** | **No, explicitly** | A container is re-created from its row with a fresh writable layer from its image. Docker's own guidance applies: data that matters goes in a volume. `local-backend.md` §14 gets this as a limitation. |
 | `cache/buildkit/`, wrapped images, `cache/runtimes/` | **No** | Re-wrapped and re-fetched by digest |
 
