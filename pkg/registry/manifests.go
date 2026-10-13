@@ -277,6 +277,15 @@ func (s *Service) putManifest(q *request, ref string) {
 						size, ok = h.Size, true
 					}
 				}
+			} else if q.held {
+				size, err = s.opts.Content.Size(ctx, d.Digest)
+				ok = err == nil
+				if errors.Is(err, ErrUnknown) {
+					err = nil
+				}
+				if err != nil {
+					return err
+				}
 			} else {
 				size, ok, err = s.blob(ctx, tx, t.Repo, d.Digest)
 				if err != nil {

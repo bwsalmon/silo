@@ -121,6 +121,10 @@ type ImageRecord struct {
 	Size        int64
 	Created     time.Time
 	Config      ImageConfig
+	// Manifest is the digest of the image's manifest in the content
+	// store, of media type MediaType, which push, save and commit read.
+	Manifest  string `json:",omitempty"`
+	MediaType string `json:",omitempty"`
 }
 
 // newID is 64 hex characters.

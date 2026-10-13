@@ -35,6 +35,10 @@ type Pulled struct {
 	Size    int64
 	Created time.Time
 	Config  ImageConfig
+	// Manifest is the digest of the manifest the pull stored in the
+	// content store, of media type MediaType; empty if it stored none.
+	Manifest  string
+	MediaType string
 }
 
 // ImageConfig is the part of an image's config a container is made
@@ -163,38 +167,21 @@ func (s *Server) imageCreate(q *request) error {
 	if err != nil {
 		return s.refuse(q, err)
 	}
-	if s.opts.Images == nil {
-		return s.refuse(q, unavailable("silo: this silod pulls no images"))
+	var p *Pulled
+	if _, _, local := localName(ref); local {
+		p, err = s.pullLocal(q, ref)
+	} else if s.opts.Images == nil {
+		err = unavailable("silo: this silod pulls no images")
+	} else {
+		p, err = s.opts.Images.Pull(q.ctx(), q.target.ID, ref, q.r.Header.Get("X-Registry-Auth"))
 	}
-	p, err := s.opts.Images.Pull(q.ctx(), q.target.ID, ref, q.r.Header.Get("X-Registry-Auth"))
 	if err != nil {
 		return s.refuse(q, err)
 	}
-	var charges []fenceapi.ChargeLine
 	s.mu.Lock()
 	err = s.st.Tx(q.ctx(), func(tx store.Tx) error {
-		img, err := row[ImageRecord](q.ctx(), tx, q.target.ID, kindImage, imageKey(p.ID))
-		if err != nil {
-			return err
-		}
-		if img == nil {
-			img = &ImageRecord{ID: p.ID, Size: p.Size, Created: p.Created, Config: p.Config}
-			if charges, err = s.charge(q.ctx(), tx, q, Object(q.target.ID, kindImage, imageKey(p.ID)), line{ClassDiskGB, gib(p.Size)}); err != nil {
-				return err
-			}
-		}
-		if p.RepoDigest != "" && !slices.Contains(img.RepoDigests, p.RepoDigest) {
-			img.RepoDigests = append(img.RepoDigests, p.RepoDigest)
-		}
-		if !strings.Contains(ref, "@") {
-			if err := s.retag(q.ctx(), tx, q.target.ID, img, ref); err != nil {
-				return err
-			}
-		}
-		if err := put(q.ctx(), tx, q.target.ID, kindImage, imageKey(img.ID), imageKey(img.ID), img); err != nil {
-			return err
-		}
-		return s.auditTx(q.ctx(), tx, q, "OK", map[string]any{"image": ref, "id": p.ID}, charges)
+		_, err := s.recordPull(q.ctx(), tx, q, p, []string{ref}, map[string]any{"image": ref})
+		return err
 	})
 	s.mu.Unlock()
 	if err != nil {
@@ -202,7 +189,10 @@ func (s *Server) imageCreate(q *request) error {
 	}
 	q.w.Header().Set("Content-Type", "application/json")
 	q.w.WriteHeader(http.StatusOK)
-	name, tag, _ := strings.Cut(ref, ":")
+	name, tag := ref, "latest"
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		name, tag = ref[:i], ref[i+1:]
+	}
 	enc := jsonLines(q.w)
 	enc(map[string]any{"status": "Pulling from " + name, "id": tag})
 	enc(map[string]any{"status": "Digest: " + strings.TrimPrefix(p.RepoDigest, name+"@")})
