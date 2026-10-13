@@ -21,8 +21,9 @@ import (
 // L59): blobs by digest, ingests that a client's upload writes into,
 // leases that keep an upload's bytes while it is open and for the grace
 // hour after, and the image records of namespace silo-registry that
-// keep what a repo references. containerd implements it on the host
-// (a later step's wiring); Memory is the fake every test runs on.
+// keep what a repo references. containerdstore implements it over
+// silo-containerd, which is what silod runs on; Memory is the fake the
+// handler's tests run on.
 //
 // Content answers for every blob on disk, whoever pushed it. The
 // registry never asks it whether a blob exists on a caller's behalf:
@@ -32,8 +33,14 @@ type Content interface {
 	// Size is a stored blob's size, or ErrUnknown.
 	Size(ctx context.Context, digest string) (int64, error)
 	// Open opens a stored blob for reading, with its size, or
-	// ErrUnknown.
+	// ErrUnknown. Under a context from ReadLease, the blob is held from
+	// GC until that lease ends.
 	Open(ctx context.Context, digest string) (io.ReaderAt, int64, io.Closer, error)
+	// ReadLease opens a short lease for one request (local-registry.md
+	// §6, "Requests" step 4): what is opened under the context it
+	// returns is kept from GC until done is called, or the lease
+	// expires, so that a blob can't go mid-read.
+	ReadLease(ctx context.Context) (lctx context.Context, done func(), err error)
 	// Ingest opens the ingest ref under lease, creating it empty or
 	// resuming it where it was left.
 	Ingest(ctx context.Context, ref, lease string) (Ingest, error)
@@ -70,8 +77,10 @@ type Ingest interface {
 	io.Writer
 	// Offset is how many bytes the ingest holds.
 	Offset() int64
-	// Truncate drops the bytes after size, as containerd's
-	// content.Writer does: a chunk refused for quota is taken back.
+	// Truncate drops the bytes after size: a chunk refused for quota is
+	// taken back. It may take back only what was written since the
+	// ingest last answered Offset (or all of it, to size 0), which is
+	// what containerd's writers allow.
 	Truncate(size int64) error
 	// Digest is the digest of the bytes so far, in algorithm alg.
 	Digest(alg string) string
@@ -117,12 +126,38 @@ type Memory struct {
 	// leased is the lease each blob was committed under, which holds
 	// it from GC while the lease lasts.
 	leased map[string]string
+	// held is what each read lease holds, by lease.
+	held map[string][]string
+}
+
+// ReadLeaseTTL is how long a request's read lease lasts if it is never
+// ended: a backstop for a silod that dies mid-request.
+const ReadLeaseTTL = 10 * time.Minute
+
+// readLeaseKey is the context key of a request's read lease.
+type readLeaseKey struct{}
+
+// ReadLeaseOf is the read lease of ctx's request, as ReadLease made it,
+// or nil.
+func ReadLeaseOf(ctx context.Context) any { return ctx.Value(readLeaseKey{}) }
+
+// WithReadLease is ctx carrying lease as its request's read lease, for
+// a Content's ReadLease.
+func WithReadLease(ctx context.Context, lease any) context.Context {
+	return context.WithValue(ctx, readLeaseKey{}, lease)
 }
 
 // NewMemory returns an empty Memory.
 func NewMemory() *Memory {
 	return &Memory{blobs: map[string][]byte{}, ingests: map[string]*memIngest{}, leases: map[string]time.Time{},
-		images: map[string]map[string]Image{}, leased: map[string]string{}}
+		images: map[string]map[string]Image{}, leased: map[string]string{}, held: map[string][]string{}}
+}
+
+func (m *Memory) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	return time.Now()
 }
 
 func (m *Memory) Size(_ context.Context, digest string) (int64, error) {
@@ -135,14 +170,27 @@ func (m *Memory) Size(_ context.Context, digest string) (int64, error) {
 	return int64(len(b)), nil
 }
 
-func (m *Memory) Open(_ context.Context, digest string) (io.ReaderAt, int64, io.Closer, error) {
+func (m *Memory) Open(ctx context.Context, digest string) (io.ReaderAt, int64, io.Closer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.blobs[digest]
 	if !ok {
 		return nil, 0, nil, ErrUnknown
 	}
+	if l, ok := ReadLeaseOf(ctx).(string); ok {
+		if _, open := m.leases[l]; open {
+			m.held[l] = append(m.held[l], digest)
+		}
+	}
 	return bytes.NewReader(b), int64(len(b)), io.NopCloser(nil), nil
+}
+
+func (m *Memory) ReadLease(ctx context.Context) (context.Context, func(), error) {
+	id := "silo-registry-read-" + randomID()
+	m.mu.Lock()
+	m.leases[id] = m.now().Add(ReadLeaseTTL)
+	m.mu.Unlock()
+	return WithReadLease(ctx, id), func() { m.DeleteLease(context.Background(), id) }, nil
 }
 
 func (m *Memory) Ingest(_ context.Context, ref, lease string) (Ingest, error) {
@@ -174,6 +222,7 @@ func (m *Memory) DeleteLease(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.leases, id)
+	delete(m.held, id)
 	return nil
 }
 
@@ -213,15 +262,20 @@ func (m *Memory) Namespaces(context.Context) ([]string, error) {
 
 // Collect is containerd's mark and sweep over Memory: a blob is kept if
 // some record of any namespace is it or references it, or the lease it
-// was committed under is still open and unexpired.
+// was committed under, or a read lease that opened it, is still open
+// and unexpired.
 func (m *Memory) Collect(context.Context) error {
-	now := time.Now()
-	if m.Now != nil {
-		now = m.Now()
-	}
+	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	live := map[string]bool{}
+	for l, ds := range m.held {
+		if exp, open := m.leases[l]; open && now.Before(exp) {
+			for _, d := range ds {
+				live[d] = true
+			}
+		}
+	}
 	for _, imgs := range m.images {
 		for _, img := range imgs {
 			live[img.Digest] = true
