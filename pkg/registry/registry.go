@@ -234,6 +234,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("Authorization")
 	c.Manage = ""
 	s.sweep(r.Context())
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		// A short lease for the request, so that GC can't remove a blob
+		// mid-read (local-registry.md §6, "Requests" step 4).
+		ctx, done, err := s.opts.Content.ReadLease(r.Context())
+		if err != nil {
+			writeErr(w, r, err)
+			return
+		}
+		defer done()
+		r = r.WithContext(ctx)
+	}
 	path := r.URL.Path
 	switch {
 	case path == "/v2" || path == "/v2/":
