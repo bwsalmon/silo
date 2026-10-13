@@ -115,7 +115,28 @@ func (a Adapter) Takes(provider string) bool {
 const (
 	CredentialAPIKey       = "api_key"
 	CredentialSubscription = "subscription"
+	// CredentialAmbient is whatever login or key the CLI finds in the
+	// agent user's own home and environment, on the local backend
+	// (local-backend.md §10, call L17). silod holds no secret for it,
+	// and meters it by the usage the CLI reports, as a subscription.
+	CredentialAmbient = "ambient"
 )
+
+// AmbientPrefix starts the name of every ambient credential:
+// ambient-<provider>, one a provider. Nobody adds or removes them; a
+// silod whose harnesses run on its host has them all.
+const AmbientPrefix = "ambient-"
+
+// AmbientName is provider's ambient credential.
+func AmbientName(provider string) string { return AmbientPrefix + provider }
+
+// MeteredByReport reports whether a credential of kind is charged by
+// the usage its harness reports after each turn (agents.md, "Metering",
+// call 47), rather than by the model proxy call by call: a
+// subscription's and an ambient login's, which never pass the proxy.
+func MeteredByReport(kind string) bool {
+	return kind == CredentialSubscription || kind == CredentialAmbient
+}
 
 // Credential is one of the deployment's agent credentials, as the
 // fence API needs it: its name, the provider it logs in to, its kind,
