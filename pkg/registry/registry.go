@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -182,8 +181,6 @@ func nameUnknown() *regError {
 	return rerr(http.StatusNotFound, codeNameUnknown, "repository name not known to registry")
 }
 
-var routeRE = regexp.MustCompile(`^/v2/(.+)/(manifests/[^/]+|blobs/uploads/?[^/]*|blobs/[^/]+|tags/list|referrers/[^/]+)$`)
-
 // request is one request's caller and name.
 type request struct {
 	w      http.ResponseWriter
@@ -221,14 +218,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.catalog(w, r, c)
 		return
 	}
-	m := routeRE.FindStringSubmatch(path)
-	if m == nil {
+	name, rest, ok := imagerepos.SplitPath(path)
+	if !ok {
 		writeErr(w, r, rerr(http.StatusNotFound, codeNameUnknown, "silo: no such registry path %s", path))
 		return
 	}
-	n, ok := imagerepos.ParseName(m[1], r.URL.Query().Get("ns"))
+	n, ok := imagerepos.ParseName(name, r.URL.Query().Get("ns"))
 	if !ok {
-		writeErr(w, r, rerr(http.StatusNotFound, codeNameInvalid, "silo: invalid repository name %q", m[1]))
+		writeErr(w, r, rerr(http.StatusNotFound, codeNameInvalid, "silo: invalid repository name %q", name))
 		return
 	}
 	q := &request{w: w, r: r, caller: c, name: n}
@@ -241,7 +238,6 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, rerr(http.StatusNotFound, codeNameUnknown, "silo: this host's pull-through cache is not served yet"))
 		return
 	}
-	rest := m[2]
 	switch {
 	case strings.HasPrefix(rest, "manifests/"):
 		ref := strings.TrimPrefix(rest, "manifests/")

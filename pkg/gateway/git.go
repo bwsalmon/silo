@@ -8,6 +8,8 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
+
+	"github.com/bwsalmon/silo/pkg/imagerepos"
 )
 
 // The git service on port 80 (local-git.md, §3 "The git service",
@@ -33,7 +35,12 @@ type gitState struct {
 	open map[string]map[*gitCall]struct{}
 }
 
-type gitCall struct{ cancel context.CancelFunc }
+type gitCall struct {
+	cancel context.CancelFunc
+	// repo is a registry call's local repo, which an import of the
+	// repo's silo's may be what lets the caller read it.
+	repo *imagerepos.Name
+}
 
 func (g *Gateway) newGitProxy(tr http.RoundTripper) *httputil.ReverseProxy {
 	return newForwarder(tr, "git", "/git", GitSilodPath)
@@ -65,13 +72,14 @@ func newForwarder(tr http.RoundTripper, what, prefix, silodPath string) *httputi
 // its source IP, with its silo and address. Git's Authorization header
 // means nothing here, and goes no further.
 func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
-	g.forwardPort80(w, r, g.gitProxy)
+	g.forwardPort80(w, r, g.gitProxy, nil)
 }
 
 // forwardPort80 sends a port 80 request to silod through p, from a caller
 // known by its source IP, with its silo and address, cut off when the
-// caller's manage grants end.
-func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httputil.ReverseProxy) {
+// caller's manage grants end, or, for a registry call to repo, when an
+// import of repo's silo's ends.
+func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httputil.ReverseProxy, repo *imagerepos.Name) {
 	t, silo, ip, err := g.portOrigin(r)
 	if err != nil {
 		writeToolsError(w, err)
@@ -87,7 +95,7 @@ func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httpu
 	r.Header.Set(OriginAddressHeader, ip.String())
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	c := &gitCall{cancel: cancel}
+	c := &gitCall{cancel: cancel, repo: repo}
 	g.git.mu.Lock()
 	if g.git.open == nil {
 		g.git.open = map[string]map[*gitCall]struct{}{}
@@ -121,8 +129,10 @@ func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httpu
 	p.ServeHTTP(w, out)
 }
 
-// closeGit cuts off the git requests in flight of every silo that held
-// a manage grant in old that cur no longer has.
+// closeGit cuts off the port 80 requests in flight, git's and the
+// registry's, of every silo that held a manage grant in old that cur no
+// longer has: revoked, given up or expired. A registry upload cut off is
+// abandoned, and its lease expires.
 func (g *Gateway) closeGit(old, cur *Tables) {
 	if old == nil {
 		return
@@ -140,6 +150,36 @@ func (g *Gateway) closeGit(old, cur *Tables) {
 		}
 	}
 	if n > 0 {
-		log.Printf("gateway: cut off %d git requests at version %d, whose callers' manage grants ended", n, cur.Version)
+		log.Printf("gateway: cut off %d git and registry requests at version %d, whose callers' manage grants ended", n, cur.Version)
+	}
+}
+
+// closeRegistry cuts off the registry calls in flight, to the exporter's
+// repos, of every importer whose registry import in old cur no longer
+// has: withdrawn by either side, suspended by a grant policy, or gone
+// with a silo (local-registry.md, "Registry exports", call L64). A call
+// to a repo the importer reads some other way is cut off too, and its
+// client retries; one to any other silo's repo is left alone. An upload
+// cut off is abandoned, and its lease expires.
+func (g *Gateway) closeRegistry(old, cur *Tables) {
+	if old == nil {
+		return
+	}
+	g.git.mu.Lock()
+	defer g.git.mu.Unlock()
+	n := 0
+	for id, im := range old.RegistryImports {
+		if _, ok := cur.RegistryImports[id]; ok {
+			continue
+		}
+		for c := range g.git.open[im.Importer] {
+			if r := c.repo; r != nil && (r.SiloID == im.Exporter || r.SiloID == "" && r.SiloPath == im.ExporterPath) {
+				c.cancel()
+				n++
+			}
+		}
+	}
+	if n > 0 {
+		log.Printf("gateway: cut off %d registry requests at version %d, whose callers' imports ended", n, cur.Version)
 	}
 }
