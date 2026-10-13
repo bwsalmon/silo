@@ -498,6 +498,8 @@ type SiloNode struct {
 type SilodHealth struct {
 	Status string `json:"status"`
 	Root   bool   `json:"root"`
+	// RootID is the root's id, once there is one.
+	RootID string `json:"root_id,omitempty"`
 }
 
 // BootstrapRequest is silod's /silod/bootstrap body (fenceapi's
@@ -517,6 +519,22 @@ type BootstrapRequest struct {
 	AgentPolicy    map[string]any               `json:"agent_policy,omitempty"`
 	Admins         []string                     `json:"admins"`
 	Labels         map[string]string            `json:"labels,omitempty"`
+	// Backing, Isolation and Ingress are the local install's: backing
+	// local, the classes the host offers, and ingress host.
+	Backing   *RootBacking   `json:"backing,omitempty"`
+	Isolation *RootIsolation `json:"isolation,omitempty"`
+	Ingress   string         `json:"ingress,omitempty"`
+}
+
+// RootBacking is the root's backing: its kind.
+type RootBacking struct {
+	Kind string `json:"kind"`
+}
+
+// RootIsolation is the root's isolation policy (local-backend.md §3).
+type RootIsolation struct {
+	Allowed []string `json:"allowed"`
+	Default string   `json:"default"`
 }
 
 // RootEgress is the root's egress policy.
