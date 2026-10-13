@@ -279,6 +279,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mirror(q, rest)
 		return
 	}
+	if rest == "mirror:which" {
+		s.which(q)
+		return
+	}
 	call := control.ParseFence(r.Method, rest)
 	if !s.opts.SkipControl {
 		if err := s.checkControl(q, call); err != nil {
@@ -474,6 +478,7 @@ var handlers = map[string]func(s *Server, q *request, c control.FenceCall){
 		s.mutating(q, func(q *request) (any, error) { return s.restoreRef(q, c.Ref, c.ID) }, true)
 	},
 	control.OpReposGit:       func(s *Server, q *request, c control.FenceCall) { s.gitConnect(q, c.Ref, c.ID) },
+	control.OpReposExternal:  func(s *Server, q *request, c control.FenceCall) { s.externalRepo(q, c.Ref, c.ID) },
 	control.OpImageReposList: func(s *Server, q *request, c control.FenceCall) { s.listImageRepos(q, c.Ref) },
 	control.OpImageReposGet:  func(s *Server, q *request, c control.FenceCall) { s.getImageRepo(q, c.Ref, c.ID) },
 	control.OpImageReposTags: func(s *Server, q *request, c control.FenceCall) { s.imageRepoTags(q, c.Ref, c.ID) },

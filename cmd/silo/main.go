@@ -87,6 +87,12 @@ commands:
                                     a deletion would have orphaned
   repo restore-ref [silo/]<name> <archive> <branch>
                                     make a branch from an archive ref
+  repo external [silo/]<name> [--branch b | --tag t]
+                                    where it is in the uber repo
+  repo which <ref>                  the repo an uber-repo ref is of
+  repo external-clone [silo/]<name> [dir] [--branch b] [--url u]
+                                    clone it from the uber repo, with its
+                                    silo submodules fetched from there too
   registry list [--recursive] [silo]
                                     list a silo's image repos
   registry get|tags [silo/]<name>   read an image repo, or its tags and manifests
@@ -221,6 +227,7 @@ var commands = map[string]command{
 	"repo": group("repo", map[string]command{
 		"create": (*cli).repoCreate, "list": (*cli).repoList, "get": (*cli).repoGet, "delete": (*cli).repoDelete, "url": (*cli).repoURL,
 		"clone": (*cli).repoClone, "archives": (*cli).repoArchives, "restore-ref": (*cli).repoRestoreRef,
+		"external": (*cli).repoExternal, "which": (*cli).repoWhich, "external-clone": (*cli).repoExternalClone,
 	}),
 	RemoteHelper: (*cli).gitRemote,
 	"registry": group("registry", map[string]command{
