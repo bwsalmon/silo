@@ -1038,6 +1038,66 @@ Three things in gVisor's shim had to be worked around:
   is fenced, but `exec`, health checks and exit codes are degraded as
   described.
 
+### As built in step 10
+
+`pkg/backend/local/runtime/granule` (task 3417) holds the `vm` class's
+runtime pieces. It is written against gke-labs/granule at `3ca10a3`
+(`granule.Commit`), where every item of plan item 9 has landed. The
+containerd lifecycle that puts them together, the `runtime.Driver`
+itself, is not built yet. It is step 10's remaining half, filed as its
+own task.
+
+- **The VM container** (`VM`, `SpecOpts`) is granule-shim in run mode
+  under crun, with the settings `granule vm create` derives from its
+  flags:
+  - inline netshim on the container's veth, with no control link and
+    `NETSHIM_IPV6=off`, because the fence is IPv4-only;
+  - the gateway as DNS;
+  - `CHV_CPUS` (the vCPU charge rounded up) and `CHV_MEMORY_MB`;
+  - an overlay disk sized at the `disk_gb` charge;
+  - a 10s shutdown timeout, which is Docker's stop timeout.
+
+  The cgroup allows the guest's memory plus 256 MiB for the VMM. The
+  wrap is bind-mounted read-only at granule's guest directory, and the
+  container's directory at `/run/silo`.
+- **The container's process** reaches the guest as
+  `CHV_CONTAINER_OVERRIDE`. Its entrypoint is the facade's argv and its
+  cmd is empty, so the override sets the process whole, and the same
+  wrap serves every container of an image. The workload's stdout,
+  stderr, stdin, TTY, resizes and exit status use granule's
+  `GRANULE_WORKLOAD_*`: FIFOs in `/run/silo`, and the exit record
+  `/run/silo/exit.json`. A tmpfs mount is refused, because granule's
+  override has none.
+- **Checked against granule.** `TestVMCreateMatchesGranule` compares the
+  generated OCI spec with what `granule vm create` passes to `docker run`
+  for the same VM: devices, capabilities, security options, mounts,
+  environment and process. The `docker run` arguments are recorded
+  through granule's fake docker by `testdata/record.sh`. Bumping the pin
+  means re-running that script and following the test.
+- **Volumes** are virtio-fs shares in `CHV_VOLUMES`, which
+  granule-container mounts inside the wrapped root. `Virtiofsd` starts
+  one virtiofsd per volume, inside the container's user namespace, with
+  `--sandbox=chroot --modcaps=-mknod`, as granule's rootless notes
+  prescribe. A read-only volume is enforced by virtiofsd's
+  `--readonly`, on the host. The guest's `MS_RDONLY` doesn't count,
+  because the guest kernel is the tenant's. *Unverified:* `--readonly`
+  against the pinned virtiofsd (1.11 or later). An older virtiofsd
+  rejects the flag and refuses to start, so it fails closed.
+- **The wrap needs no builder.** Plan item 9's daemonless wrap
+  (`granule wrap -rootfs`) replaced the `docker build` that buildkitd
+  was going to run. `silod runtime-wrap` (`WrapMain`) runs it inside the
+  holder: it mounts read-only views of the image's, the guest rootfs's
+  and the granule image's snapshots, writes the image's config, and
+  renames the finished guest half into place under the wraps
+  directory, one per image digest. Nothing from the image runs.
+  buildkitd stays for builders in containers
+  ([part 4](local-registry.md)).
+- **The probe** (`ProbeHost`) opens `/dev/kvm`, checks
+  `KVM_GET_API_VERSION` and `KVM_CREATE_VM`, and opens `/dev/net/tun`.
+  `Doctor` runs `granule doctor -only kvm,tun`. Nothing falls back to
+  emulation (call L3). Booting a `silo-probe` VM is part of the
+  driver's remaining half.
+
 ### Snapshot and checkpoint
 
 Docker's `checkpoint` endpoints stay refused in both classes in v1.
@@ -2141,7 +2201,9 @@ before item 7.
     - virtiofsd per volume;
     - the KVM probe.
 
-    Depends on 7, 9 and 16.
+    Depends on 7, 9 and 16. Its pieces were built in task 3417, as
+    recorded under [As built in step 10](#as-built-in-step-10). The
+    `runtime.Driver` on containerd that uses them is still to do.
 11. **Agents on the local backend.**
     - Ambient harnesses in scopes under the agent user;
     - the `ambient` credential kind and metering by reported usage;

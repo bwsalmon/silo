@@ -55,6 +55,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
+	"github.com/bwsalmon/silo/pkg/backend/local/runtime/granule"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	localusage "github.com/bwsalmon/silo/pkg/backend/local/usage"
@@ -143,6 +144,9 @@ func main() {
 	case gvisor.RemapArg:
 		// Remapping a container's snapshot, run inside the holder.
 		err = gvisor.RemapMain(os.Args[2:])
+	case granule.WrapArg:
+		// Wrapping an image for the vm class, run inside the holder.
+		err = granule.WrapMain(os.Args[2:])
 	case "containerd", "buildkitd":
 		// silo-containerd and silo-buildkitd, which replace this
 		// process with the runtime inside the holder's namespaces.
