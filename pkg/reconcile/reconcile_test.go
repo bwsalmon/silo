@@ -504,7 +504,10 @@ func TestFenceDrift(t *testing.T) {
 
 	// The reconcile repairs it, unless the fence's own loop, which
 	// also repairs at its start and on each change, got there first;
-	// either way it is audited.
+	// either way it is audited. The loop may see the policy between
+	// the two calls above and repair the removal and the addition
+	// separately, so the drift may be split across several records,
+	// each naming a repair, that together name both.
 	e.run()
 	rs = rules()
 	if _, ok := rs[open+"-api-out"]; !ok {
@@ -514,13 +517,18 @@ func TestFenceDrift(t *testing.T) {
 		t.Errorf("%s-api-out not removed", sealed)
 	}
 	recs := e.audits(reconcile.KindFenceDrift)
-	if len(recs) != 1 {
-		t.Fatalf("%d fence_drift records, want 1", len(recs))
+	if len(recs) == 0 {
+		t.Fatal("no fence_drift record")
 	}
-	steps, _ := recs[0]["steps"].([]any)
 	var all []string
-	for _, s := range steps {
-		all = append(all, s.(string))
+	for i, rec := range recs {
+		steps, _ := rec["steps"].([]any)
+		if len(steps) == 0 {
+			t.Errorf("fence_drift record %d names no steps", i)
+		}
+		for _, s := range steps {
+			all = append(all, s.(string))
+		}
 	}
 	if j := strings.Join(all, "; "); !strings.Contains(j, "add "+open+"-api-out") || !strings.Contains(j, fmt.Sprintf("remove %d", extra.Priority)) {
 		t.Errorf("fence_drift steps %q don't name both repairs", j)
