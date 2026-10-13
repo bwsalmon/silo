@@ -198,7 +198,7 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		if err := looser(peff, &chk); err != nil {
 			return err
 		}
-		quota, err := amounts(ctx, tx, req.Quota)
+		quota, err := amounts(ctx, tx, req.Quota, "")
 		if err != nil {
 			return err
 		}
@@ -486,7 +486,7 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			if err := json.Unmarshal(body["quota"], &m); err != nil {
 				return errorf(InvalidArgument, "quota: %v", err).with("field", "quota")
 			}
-			if quota, err = amounts(ctx, tx, m); err != nil {
+			if quota, err = amounts(ctx, tx, m, ""); err != nil {
 				return err
 			}
 		}

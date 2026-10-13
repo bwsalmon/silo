@@ -703,6 +703,42 @@ Charging works as the ledger does today: charge, commit, call the
 runtime, and refund on failure ([`allocators.md`, Charging and
 refunds](allocators.md#charging-and-refunds)).
 
+### As built in step 6
+
+`pkg/facade/local/docker` serves the tables above against the runtime
+drivers (tested on the fake driver), the step 14 storage driver and
+the shared facade core. Where it settles something this section left
+open, or leaves something for later:
+
+- **The store.** Containers, networks, volumes and image records are
+  rows of `docker_objects` (migration 25), one JSON body each, unique
+  by (silo, kind, name). Migration 25 also adds the local classes of
+  [§11](#classes-call-l19) as kind `local`, all global. Two kinds can
+  now share a class name (`memory_mb`). The fence API reads such a
+  name as the class of the tree's own backend.
+- **Manage grants** name the Docker resource types `containers`,
+  `images`, `networks` and `volumes`. Exec and the system endpoints
+  count as `containers`.
+- **Addresses** are given at create, not at start. That is when the
+  endpoint, its MAC and its fence pin are made. A connect records the
+  endpoint. Hot-plugging it into a running container is the real
+  driver's work.
+- **Published ports** whose `HostPort` is empty get a number at each
+  start, as Docker gives them. A port is refused (409) if another
+  running container of the same silo already holds it.
+- **What the gateway reads** comes from three calls: `Topology` (the
+  fence's `TopologySource`), `Published` (the listeners, with `Host`
+  set where effective `ingress` is `host`) and `Lookup` (the DNS
+  answers, scoped by origin and by shared network).
+- **Not yet served:** exec, attach, archive and top answer 501 until
+  their own step. `/events` stays open and empty, and logs carry no
+  timestamps. Restart policies are kept but not acted on; `AutoRemove`
+  is.
+- **Left to wiring:** the host sockets, the `docker.silo.internal`
+  listener, the DNS and published-port listeners, and making bridges
+  and veths (`Options.Wire`). So are the production image puller and
+  the root's capacity of the local classes.
+
 ## 5. Compose and testcontainers
 
 ### Docker compose v2
