@@ -77,15 +77,6 @@ type Unpinned interface {
 	FromUnpinnedPort(p Probe, checks []Check) map[string]ProbeResult
 }
 
-// Simulated is what a Fence whose containers don't run their images
-// says of itself (local/fake's run a scripted shell). The compose and
-// testcontainers cases (local-backend.md §5) that need an image's own
-// behaviour, a module's database answering, skip on it with Simulated's
-// reason, never pass.
-type Simulated interface {
-	Simulated() string
-}
-
 // Git is what a local target's Fence offers beyond it for the repo and
 // mirror cases (local-git.md §11 item 24): the git service on port 80,
 // as a probe reaches it, an uber repo for the mirror, and a restore of

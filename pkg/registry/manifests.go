@@ -248,7 +248,14 @@ func (s *Service) putManifest(q *request, ref string) {
 		writeErr(q.w, q.r, rerr(http.StatusBadRequest, codeManifestInvalid, "silo: %v", perr))
 		return
 	}
-	in, err := s.opts.Content.Ingest(context.WithoutCancel(ctx), "silo-registry-manifest-"+digest, "")
+	// The manifest's own lease keeps it until its record does.
+	lease := "silo-registry-manifest-" + randomID()
+	if err := s.opts.Content.Lease(context.WithoutCancel(ctx), lease, s.opts.Now().Add(s.opts.Grace)); err != nil {
+		writeErr(q.w, q.r, err)
+		return
+	}
+	defer s.opts.Content.DeleteLease(context.WithoutCancel(ctx), lease)
+	in, err := s.opts.Content.Ingest(context.WithoutCancel(ctx), "silo-registry-manifest-"+digest, lease)
 	if err == nil {
 		_ = in.Truncate(0)
 		if _, err = in.Write(b); err == nil {

@@ -143,7 +143,8 @@ func TestRegistryCacheCommands(t *testing.T) {
 	contains(t, "a child's evict", res.stderr, "PERMISSION_DENIED")
 	res = d.silo(d.root, "registry", "cache", "evict", "docker.io/library/alpine@nope")
 	contains(t, "a bad evict ref", res.stderr, "INVALID_ARGUMENT")
-	// This silod serves no registry yet (step 27b wires it).
+	// This fence API is given no registry, as silod gives none to a
+	// backend other than the local one.
 	res = d.silo(d.root, "registry", "cache", "evict", "docker.io/library/alpine")
 	contains(t, "evict with no registry", res.stderr, "FAILED_PRECONDITION")
 }
