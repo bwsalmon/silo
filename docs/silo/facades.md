@@ -35,6 +35,7 @@ Today there is one of each, for GCE:
 
 | Package | What it is |
 | --- | --- |
+| `pkg/facade` | The facade core every facade shares: resolve, the control check, the method table, field allowlists and the `facade.call` audit record |
 | `pkg/facade/gcp/gce` | The per-silo `compute/v1` facade (package `gce`) |
 | `pkg/facade/gcp/gce/filter` | The facade's list-filter grammar (SV-74) |
 | `pkg/backend/gcp/gce` | The GCE client interface silod calls, `gce.Client`, with `Await` and the error helpers (package `gce`) |
@@ -148,3 +149,11 @@ local backend. Its design for the extraction, built from both users,
 is in [`local-backend.md`, Extracting the facade core](local-backend.md#8-extracting-the-facade-core).
 It also covers how a Docker request names its silo when there is no
 project in the path.
+
+**Done:** the core was extracted into `pkg/facade` ahead of the Docker
+facade (local-backend.md step 3), with GCE as its only user and no
+behaviour change: `Resolve`, `CheckControl`, `Table`, `Fields` and
+`CheckFields`, and `Audit`. Its refusals are `facade.Refusal` values,
+which the GCE facade answers in GCE's error shape. The `facade` field
+naming the service on a `facade.call` record is added with the Docker
+facade, when there is a second service to tell apart.

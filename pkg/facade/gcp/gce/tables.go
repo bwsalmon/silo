@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/silo/pkg/control"
+	"github.com/bwsalmon/silo/pkg/facade"
 )
 
 // This file is the facade's allowlists, as data (gcp-backend.md,
@@ -24,6 +25,10 @@ var knownResources = func() map[string]bool {
 	}
 	return out
 }()
+
+// table is the method table: knownResources, refusedResources and the
+// handlers.
+var table = facade.Table[handler]{Resources: knownResources, Refused: refusedResources, Methods: handlers}
 
 // refusedResources are GCE resource types the facade knows and
 // refuses every method of (gcp-backend.md, "Refused"), with 403 naming
@@ -203,119 +208,4 @@ var responseFields = map[string][]string{
 	"compute#serialPortOutput": {"kind", "contents", "start", "next", "selfLink"},
 	"compute#project": {"kind", "id", "creationTimestamp", "name", "description", "commonInstanceMetadata",
 		"quotas", "selfLink", "defaultNetworkTier"},
-}
-
-// pathTree is an allowlist as a tree of JSON keys. A nil subtree
-// allows everything below its key.
-type pathTree map[string]pathTree
-
-func treeOf(paths []string) pathTree {
-	t := pathTree{}
-	for _, p := range paths {
-		cur := t
-		parts := strings.Split(strings.ReplaceAll(p, "[]", ""), ".")
-		for i, part := range parts {
-			next, seen := cur[part]
-			if i == len(parts)-1 {
-				cur[part] = nil // the whole subtree
-				break
-			}
-			if seen && next == nil {
-				break // already allowed whole
-			}
-			if next == nil {
-				next = pathTree{}
-				cur[part] = next
-			}
-			cur = next
-		}
-	}
-	return t
-}
-
-// prune keeps only what t allows of v, a decoded JSON value.
-func prune(v any, t pathTree) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, val := range x {
-			sub, ok := t[k]
-			if !ok {
-				continue
-			}
-			if sub == nil {
-				out[k] = val
-			} else {
-				out[k] = prune(val, sub)
-			}
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, e := range x {
-			out[i] = prune(e, t)
-		}
-		return out
-	}
-	return v
-}
-
-// checkFields refuses the first field of body, a decoded JSON request,
-// that t doesn't allow and that is set to anything but its default.
-// The field is named by its path, with list indexes:
-// networkInterfaces[0].accessConfigs.
-func checkFields(body any, t pathTree, path string) error {
-	switch x := body.(type) {
-	case map[string]any:
-		for _, k := range sortedKeys(x) {
-			val := x[k]
-			p := k
-			if path != "" {
-				p = path + "." + k
-			}
-			sub, ok := t[k]
-			switch {
-			case !ok:
-				if !isDefault(val) {
-					return forbidden("silo: field %s is not allowed", p)
-				}
-			case sub != nil:
-				if err := checkFields(val, sub, p); err != nil {
-					return err
-				}
-			}
-		}
-	case []any:
-		for i, e := range x {
-			if err := checkFields(e, t, path+"["+itoa(i)+"]"); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// isDefault reports whether v is a JSON field's default: null, false,
-// 0, "", or an empty list or object, or an object of defaults.
-func isDefault(v any) bool {
-	switch x := v.(type) {
-	case nil:
-		return true
-	case bool:
-		return !x
-	case float64:
-		return x == 0
-	case string:
-		return x == ""
-	case []any:
-		return len(x) == 0
-	case map[string]any:
-		for _, e := range x {
-			if !isDefault(e) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }

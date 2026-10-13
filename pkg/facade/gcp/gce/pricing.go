@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	gceapi "github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -508,7 +509,7 @@ func (p pricer) Price(ctx context.Context, tx store.Tx, caller fenceapi.Caller, 
 	if err := checkReserved(q.body, ""); err != nil {
 		return "", nil, previewError(err)
 	}
-	if err := checkFields(q.body, treeOf(requestFields[c.FullMethod()]), ""); err != nil {
+	if err := checkFields(q.body, facade.AllowFields(requestFields[c.FullMethod()])); err != nil {
 		return "", nil, previewError(err)
 	}
 	as, err := price(s, q, tx)

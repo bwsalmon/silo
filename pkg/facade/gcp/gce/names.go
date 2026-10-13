@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bwsalmon/silo/pkg/facade"
 	"github.com/bwsalmon/silo/pkg/ids"
 )
 
@@ -320,7 +321,7 @@ func (n *namer) outTags(v any) any {
 
 // reservedLabel reports whether a label key or a tag is the facade's
 // own: anything starting with silo.
-func reservedLabel(k string) bool { return strings.HasPrefix(k, "silo") }
+func reservedLabel(k string) bool { return facade.ReservedLabel(k) }
 
 // checkReserved refuses a request that sets a label or a tag starting
 // with silo, which are the facade's own (gcp-backend.md, "Layout").
