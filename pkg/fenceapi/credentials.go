@@ -162,6 +162,9 @@ func (s *Server) credential(ctx context.Context, tx store.Tx, name string) (agen
 	if name == "" {
 		return agents.Credential{}, false, nil
 	}
+	if c, ok := s.ambient(name); ok {
+		return c, true, nil
+	}
 	l, err := readCredentials(ctx, tx, `name = ?`, name)
 	if err != nil {
 		return agents.Credential{}, false, err
@@ -177,6 +180,30 @@ func (s *Server) credential(ctx context.Context, tx store.Tx, name string) (agen
 		return c, ok, err
 	}
 	return agents.Credential{}, false, nil
+}
+
+// ambient is the ambient credential called name, if silod has
+// ambient credentials and name is one: ambient-<provider>, for each
+// provider an adapter takes. It has no cap of its own; the root's
+// agent_sessions is the cap.
+func (s *Server) ambient(name string) (agents.Credential, bool) {
+	provider, ok := strings.CutPrefix(name, agents.AmbientPrefix)
+	if !s.opts.Ambient || !ok || !contains(credentialProviders(), provider) {
+		return agents.Credential{}, false
+	}
+	return agents.Credential{Name: name, Provider: provider, Kind: agents.CredentialAmbient}, true
+}
+
+// ambientInfos are the ambient credentials, as the list shows them.
+func (s *Server) ambientInfos() []CredentialInfo {
+	if !s.opts.Ambient {
+		return nil
+	}
+	var out []CredentialInfo
+	for _, p := range credentialProviders() {
+		out = append(out, CredentialInfo{Name: agents.AmbientName(p), Provider: p, Kind: agents.CredentialAmbient})
+	}
+	return out
 }
 
 // mustRootMember refuses a caller that isn't a root member at the front
@@ -209,6 +236,7 @@ func (s *Server) listCredentials(q *request) {
 		for _, c := range l {
 			out = append(out, c.CredentialInfo)
 		}
+		out = append(out, s.ambientInfos()...)
 		return nil
 	})
 	if err != nil {
@@ -234,6 +262,9 @@ func (s *Server) addCredential(q *request) (any, error) {
 	}
 	if err := agents.ValidName(req.Name); err != nil {
 		return nil, errorf(InvalidArgument, "name: %v", err).with("field", "name")
+	}
+	if strings.HasPrefix(req.Name, agents.AmbientPrefix) {
+		return nil, errorf(InvalidArgument, "name %q: names starting %s are the ambient credentials', which nobody adds", req.Name, agents.AmbientPrefix).with("field", "name")
 	}
 	if !contains(credentialProviders(), req.Provider) {
 		return nil, errorf(InvalidArgument, "provider %q: want one of %s", req.Provider, strings.Join(credentialProviders(), ", ")).with("field", "provider")
@@ -261,6 +292,8 @@ func (s *Server) addCredential(q *request) (any, error) {
 			files[p] = b
 		}
 		plain, _ = json.Marshal(files)
+	case agents.CredentialAmbient:
+		return nil, errorf(InvalidArgument, "kind ambient: an ambient credential is the agent user's own login on a local backend's host, which silod has without being given it (ambient-<provider>)").with("field", "kind")
 	default:
 		return nil, errorf(InvalidArgument, "kind %q: want api_key or subscription", req.Kind).with("field", "kind")
 	}
@@ -400,6 +433,9 @@ func (s *Server) removeAllCredentials(q *request) (any, error) {
 func (s *Server) CredentialSecret(ctx context.Context, name string) (agents.Credential, []byte, error) {
 	var cred agents.Credential
 	var key []byte
+	if a, ok := s.ambient(name); ok {
+		return a, nil, errorf(FailedPrecondition, "credential %s is ambient: the harness uses its own login, and the model proxy carries nothing for it", name)
+	}
 	err := s.st.Tx(ctx, func(tx store.Tx) error {
 		l, err := readCredentials(ctx, tx, `name = ?`, name)
 		if err != nil {

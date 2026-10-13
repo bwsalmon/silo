@@ -106,6 +106,9 @@ commands:
   registry cache set [--upstream name=endpoint[,alias...]]... [--stale-tag-max d]
                                     change them; each silo's egress still
                                     decides what it may get from the cache
+  registry cache evict [<upstream>[/<repo>[@digest]]]
+                                    drop cache entries now (root); bytes a silo
+                                    or a repo references stay
   audit [silo] [--since --kind --subtree]
   agent create <silo>/agents/<name> --credential --model --budget --tool-zone --tool-subnet
                                     make an agent and its tool VM
@@ -132,8 +135,12 @@ commands:
   install --project p --regions r,... --admin user:...
                                     set Silo up in a project (docs/silo/install.md)
   install --backend local [--system] set the local backend up on this machine: user
-                                    units as you, or system units under a silo account
+                                    units as you, or system units under a silo account,
+                                    the pinned gVisor, the root silo and a docker context
   uninstall --project p             remove what install set up
+  uninstall --backend local [--system] [--delete-data]
+                                    stop every container and remove the local backend,
+                                    keeping its data directory unless --delete-data
   proxy [--listen localhost:8642]   serve the facade and fence API on localhost,
                                     through the front door, for gcloud and terraform
   unshare [--probe] [-- cmd...]     run cmd as root in the local backend's namespace
@@ -238,7 +245,7 @@ var commands = map[string]command{
 		"list": (*cli).registryList, "get": (*cli).registryGet, "tags": (*cli).registryTags, "url": (*cli).registryURL,
 		"delete": (*cli).registryDelete, "prune": (*cli).registryPrune,
 		"cache": group("registry cache", map[string]command{
-			"status": (*cli).registryCacheStatus, "set": (*cli).registryCacheSet,
+			"status": (*cli).registryCacheStatus, "set": (*cli).registryCacheSet, "evict": (*cli).registryCacheEvict,
 		}),
 	}),
 	"audit": (*cli).audit,

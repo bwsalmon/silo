@@ -515,6 +515,22 @@ func TestCacheSharingDomains(t *testing.T) {
 		}
 	}
 	fetches(4)
+
+	// Each domain's entries are its own silo-cache records, and
+	// eviction drops them all: the host's, team-i's, team-i/y's and
+	// team-a/j's manifest and two blobs.
+	if imgs, err := ce.content.ListImages(context.Background(), registry.CacheNamespace); err != nil || len(imgs) != 12 {
+		t.Fatalf("silo-cache records: %d %v, want 12", len(imgs), err)
+	}
+	ev, err := ce.reg.EvictCache(context.Background(), "docker.io", "", "")
+	if err != nil || ev.Entries != 12 {
+		t.Fatalf("EvictCache: %+v %v, want 12 entries", ev, err)
+	}
+	if imgs, _ := ce.content.ListImages(context.Background(), registry.CacheNamespace); len(imgs) != 0 {
+		t.Fatalf("silo-cache records after evicting: %d", len(imgs))
+	}
+	pull(ix, ce.manifest, "miss")
+	fetches(5)
 }
 
 // The configuration is the root's: shown with install's defaults until

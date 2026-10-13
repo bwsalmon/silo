@@ -19,18 +19,24 @@ import (
 // --resume continues it.
 type ClaudeCode struct{}
 
-func (ClaudeCode) Name() string              { return "claude-code" }
-func (ClaudeCode) CredentialKinds() []string { return []string{KindAPIKey, KindSubscription} }
-func (ClaudeCode) StatePaths() []string      { return []string{".claude/projects"} }
-func (ClaudeCode) NewSessionID() string      { return newUUID() }
-func (ClaudeCode) Parser() Parser            { return &claudeParser{} }
+func (ClaudeCode) Name() string { return "claude-code" }
+func (ClaudeCode) CredentialKinds() []string {
+	return []string{KindAPIKey, KindSubscription, KindAmbient}
+}
+func (ClaudeCode) StatePaths() []string { return []string{".claude/projects"} }
+func (ClaudeCode) NewSessionID() string { return newUUID() }
+func (ClaudeCode) Parser() Parser       { return &claudeParser{} }
 
 func (ClaudeCode) Command(l Launch) Command {
+	mcp := claudeMCPConfig
+	if l.Ambient {
+		mcp = claudeStdioMCPConfig(l.MCP)
+	}
 	argv := []string{"claude", "--print",
 		"--output-format", "stream-json", "--verbose",
 		"--model", l.Model,
 		"--tools", "",
-		"--mcp-config", claudeMCPConfig, "--strict-mcp-config",
+		"--mcp-config", mcp, "--strict-mcp-config",
 		"--allowedTools", "mcp__" + mcpServer,
 	}
 	if l.Resume {
@@ -41,18 +47,44 @@ func (ClaudeCode) Command(l Launch) Command {
 	// The prompt after --, so that no option takes it for a value.
 	argv = append(argv, "--", l.Prompt)
 	env := []string{
-		"HOME=" + Home,
 		"DISABLE_AUTOUPDATER=1",
 		"DISABLE_TELEMETRY=1",
 		"DISABLE_ERROR_REPORTING=1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 	}
+	if l.Ambient {
+		// The agent user's own HOME, login and keys: ambient.
+		return Command{Argv: argv, Env: env}
+	}
+	env = append(env, "HOME="+Home)
 	if !l.Subscription {
 		// An API key would win over the login, so a subscription
 		// session gets neither.
 		env = append(env, "ANTHROPIC_BASE_URL="+modelBase("anthropic"), "ANTHROPIC_API_KEY="+ProxyKey)
 	}
 	return Command{Argv: argv, Env: env}
+}
+
+// VersionArgv implements Versioned.
+func (ClaudeCode) VersionArgv() []string { return []string{"claude", "--version"} }
+
+// MinVersion implements Versioned: the release this adapter's flags
+// were written against.
+func (ClaudeCode) MinVersion() string { return "2.1.4" }
+
+// claudeStdioMCPConfig is an ambient session's MCP configuration: the
+// session's one server, run as cmd over stdio.
+func claudeStdioMCPConfig(cmd []string) string {
+	var args []string
+	if len(cmd) > 1 {
+		args = cmd[1:]
+	}
+	server := map[string]any{"type": "stdio", "args": args}
+	if len(cmd) > 0 {
+		server["command"] = cmd[0]
+	}
+	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{mcpServer: server}})
+	return string(b)
 }
 
 var claudeMCPConfig = func() string {

@@ -289,6 +289,16 @@ func TestUnknownPeerIsRefused(t *testing.T) {
 	if n, err := c.Read(make([]byte, 1)); err == nil || n != 0 {
 		t.Fatalf("read %d bytes, err %v: want the connection closed", n, err)
 	}
+	// The listener closes the connection and then reports why, so the
+	// report may come just after the close the client saw.
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		e.mu.Lock()
+		n := len(e.refused)
+		e.mu.Unlock()
+		if n > 0 {
+			break
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if len(e.refused) != 1 || !errors.Is(e.refused[0], hostdoor.ErrNoPeer) {

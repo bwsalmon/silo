@@ -57,6 +57,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
+	localusage "github.com/bwsalmon/silo/pkg/backend/local/usage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/facade/local/docker"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
@@ -100,6 +101,8 @@ commands:
   harness-init
             a session container's entrypoint: forward the session
             socket to the loopback, and run the harness
+  mcp-stdio an ambient harness's MCP server: its session socket's /mcp
+            over stdio
 `
 
 func main() {
@@ -154,6 +157,8 @@ func main() {
 	case gitserve.HookArg:
 		// The git service's pre-receive hook, which receive-pack runs.
 		os.Exit(gitserve.HookMain(os.Args[2:], os.Stdin, os.Stderr))
+	case "mcp-stdio":
+		err = mcpStdio(ctx, os.Args[2:])
 	case "harness-init":
 		var code int
 		code, err = harnessInit(ctx, os.Args[2:])
@@ -409,9 +414,11 @@ func serve(ctx context.Context, args []string) error {
 	imageStorage := fs.Int64("image-storage-gb", 0, "the root's image_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	snapshotStorage := fs.Int64("snapshot-storage-gb", 0, "the root's snapshot_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	backendKind := fs.String("backend", "gcp", "the backend: gcp, or local (one machine; needs --data-dir, whose SQLite store is its production store, and silo-nsd)")
+	imageCacheSize := fs.Float64("image-cache-size", 0, "with --backend=local: the registry cache's budget in GiB, from install's --image-cache-size, set if the cache's configuration never was (0 leaves it)")
 	afterRestore := fs.Bool("after-restore", false, "with --backend=local: the data directory was restored, cache included, so start the reconcile report-only whatever the object sequence says")
 	nsdState := fs.String("nsd-state", "", "with --backend=local: the namespace holder's state file (default $XDG_RUNTIME_DIR/silo/nsd.state)")
 	nftPath := fs.String("nft", "nft", "with --backend=local: the nft command, run in silo-net through the holder")
+	ambientAgents := fs.Bool("ambient-agents", false, "with --backend=local: run agents' harnesses on this host as silod's own user, the agent user, each turn in a systemd scope silo-agent-<agent id>.scope, with that user's own login (local-backend.md §10); the ambient-<provider> credentials then exist")
 	localGateway := fs.String("local-gateway", "10.255.255.1,10.255.255.2", "with --backend=local: silo.internal's and docker.silo.internal's addresses on gw0, comma-separated")
 	fs.Parse(args)
 	if *socket == "" && *listen == "" && *gatewaySocket == "" && *frontDoorAddr == "" && *gatewayTLS == "" {
@@ -459,6 +466,9 @@ func serve(ctx context.Context, args []string) error {
 		}
 	default:
 		return fmt.Errorf("--backend=%s: want gcp or local", *backendKind)
+	}
+	if *ambientAgents && (*backendKind != local.Kind || *sessiondSocket != "" || *fakeAgents) {
+		return errors.New("--ambient-agents is the local backend's, and runs harnesses itself: not with --sessiond-socket or --fake-agents")
 	}
 	db, sp, err := openStore(ctx, sf)
 	if err != nil {
@@ -546,6 +556,12 @@ func serve(ctx context.Context, args []string) error {
 			Layout: harness.Layout{SocketDir: *sessionDir, StateDir: *sessionStateDir}}
 		replica.Host, replica.AgentSlots = host, slots
 		log.Printf("running up to %d harness sessions on %s (%d vCPU, %d MiB), through %s", slots, host, cpus, memMB, *sessiondSocket)
+	} else if *ambientAgents {
+		if runner, err = ambientRunner(fs, dd, *sessionHost, *agentSessions, sessionDir, sessionStateDir); err != nil {
+			return err
+		}
+		replica.Host, replica.AgentSlots = runner.Host, runner.Slots
+		log.Printf("running up to %d ambient harness sessions on this host, in systemd scopes", runner.Slots)
 	}
 	if why == "" && v >= store.HeartbeatSchema {
 		go heartbeat(ctx, db, replica, &sessions, runner)
@@ -636,6 +652,11 @@ func serve(ctx context.Context, args []string) error {
 		if err := bindHolder(ctx, db, *nsdState); err != nil {
 			return err
 		}
+		if why == "" && *imageCacheSize > 0 {
+			if err := fenceapi.SeedCacheBudget(ctx, db, *imageCacheSize); err != nil {
+				return fmt.Errorf("--image-cache-size: %w", err)
+			}
+		}
 		if why == "" {
 			// Before the reconcile's first run: a store older than the
 			// disk makes it report-only (local-rootless-storage.md call
@@ -693,6 +714,23 @@ func serve(ctx context.Context, args []string) error {
 	// §5, SV-107).
 	sockets := &session.Sockets{Dir: *sessionDir}
 	defer sockets.CloseAll()
+	if *ambientAgents {
+		// Every ambient session is the agent user's, so its socket
+		// takes a connection only from its own scope (call L18).
+		sockets.Peer = session.ScopePeer(harness.ScopeName)
+		opts.Ambient = true
+	}
+	if *backendKind == local.Kind {
+		// Each silo's slice, and each agent's own cgroups, sampled
+		// every minute and shown as usage (local-backend.md §11).
+		manager := localusage.ManagerDir(os.Getuid())
+		meter := &localusage.Meter{Manager: manager, Silos: localusage.StoreSilos(db)}
+		if *ambientAgents {
+			meter.Agents = localusage.HarnessScopes(manager)
+		}
+		opts.Usage = meter
+		go meter.Run(ctx)
+	}
 	if *fakeAgents {
 		fakeRunner = &agents.Fake{AutoConnect: true}
 		opts.Runner = &session.Runner{Inner: fakeRunner, Sockets: sockets}

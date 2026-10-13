@@ -1515,6 +1515,76 @@ What follows from that (call L17):
 
   The tool server dials the gateway, as today.
 
+### As built in step 11
+
+Task 3418 built this section's agents, and the resource metering in
+[§11](#metering):
+
+- **Ambient credentials** (`agents.CredentialAmbient`). With fenceapi's
+  `Options.Ambient` every provider has one, `ambient-<provider>`. It
+  holds no secret, can't be added or removed, and is refused by the
+  model proxy. Each turn is charged by the usage the harness reports
+  (`agents.MeteredByReport`, shared with subscriptions). A root's
+  agent policy has to allow the name, as for any credential.
+- **Harnesses in scopes** (`harness.Scopes`). Each turn runs the host's
+  CLI with `systemd-run --user --scope --unit=silo-agent-<id>.scope`,
+  with the session's memory, task and CPU limits, in silod's own user
+  manager. silod runs as the agent user, so this runs the harness as
+  that user. Its working directory is `<data dir>/cache/sessions/<id>`.
+  The CLI's session file stays in the agent user's home, so a resume
+  needs nothing from the database. A system install, whose silod user
+  is not the agent user, is not handled yet.
+- **MCP over stdio.** An ambient CLI's one MCP server is
+  `silod mcp-stdio --socket <session socket>`, the CLI's own child. The
+  container's loopback forwarder would let any host process in, so it
+  isn't used here. That also means no model proxy reaches an ambient
+  harness: on a host Runner an API-key or subscription credential is
+  refused, and the operator's explicit API keys need a way in that
+  passes the peer check first.
+- **The CLI version.** Before a session's first turn the Runner runs
+  `claude --version` or `codex --version`. It refuses a CLI older than
+  the adapter's `MinVersion` (2.1.4 and 0.46.0), and records the
+  version as the agent's `harness.version`, audited
+  `agent.harness_version`.
+- **Peer checks** (call L18, `session.ScopePeer`). The peer is held by a
+  pidfd: `SO_PEERPIDFD` on 6.5 and later, otherwise `SO_PEERCRED` and
+  `pidfd_open`. Its cgroup's last element must be the session's scope,
+  under silod's own `user@<uid>.service`, and the pidfd must still be
+  alive after the cgroup is read. A process of the agent user that
+  means harm can move itself into the scope; the check keeps sessions
+  off each other's sockets, which is what call L18 asks.
+- **Tool containers** (`docker.ToolContainers`). They are made through
+  the Docker facade in-process, as the caller, so its checks, charges
+  and audit apply, and marked as the agent's call. They are named like
+  tool VMs. `tool_vm.isolation` picks the class (the silo's default if
+  empty), and `tool_vm.image` the image. A tool container takes no
+  zone, subnet, machine type, disk or metadata
+  (`fenceapi.ToolSpecChecker`). In the sandbox class the driver mounts
+  silod's static silo-tools read-only at `/.silo/silo-tools`
+  (`runtime.Spec.SiloTools`, gVisor's `Config.SiloTools`). In the vm
+  class the image carries silo-tools there itself: the facade's
+  `VMToolImage`, which install is to build, or the agent's own. Any
+  write to a tool container except the agent's is a 403 naming the
+  agent, and prune passes it by. silo-tools runs as the container's
+  root with no name prefix (`--name-prefix=-`).
+- **Resource metering** (`pkg/backend/local/usage`). Every minute silod
+  reads each silo's slice and each agent's harness scope: `cpu.stat`
+  `usage_usec`, `memory.current`, `memory.peak` and `io.stat`. The
+  silo's last reading is its `usage` on describe; the agent's is its
+  `usage` on get, from its last turn.
+- **`silod serve --backend=local --ambient-agents`** wires the
+  harnesses, the peer check and the ambient credentials. The meter runs
+  on every local backend.
+
+Left for later steps:
+
+- serving the Docker facade, the gVisor driver (with `SiloTools`) and
+  `ToolContainers` from silod;
+- `--ambient-agents` in install's units;
+- the vm tool image built at install;
+- putting the silos' containers in their slices (`CgroupsPath`), until
+  which most silos have no reading.
+
 ## 11. Resources and quota
 
 ### Classes (call L19)
@@ -1738,6 +1808,89 @@ under `--data-dir`. The system install is the rootless design under a
 - stops and removes every container;
 - removes `silo-net`, the units and the pinned runtimes;
 - removes `/var/lib/silo` only with `--delete-data`.
+
+*As built in step 8* (task 3416), `pkg/install/local`'s steps are, in
+order: `account` (system install only), `prerequisites`, `lingering`
+(rootless only), `data`, `runtimes`, `units`, `root` and
+`docker context`. Uninstall plans and removes them in reverse.
+
+- **Prerequisites** are part 2's one-time root steps, as step 17 built
+  them, and the kernel rows of the table above: Linux 5.15 or later,
+  cgroup v2's unified hierarchy and systemd as init refuse; nftables is
+  probed by loading an `inet` and a `bridge` table with `nft` in a
+  scratch user and network namespace (`unshare -rn`), which refuses on
+  failure and covers "a network namespace can be created". Reflinks are
+  a warning unless the data filesystem is btrfs or xfs. Project quotas
+  aren't checked: the `dir` driver, the only one, doesn't use them, and
+  the plan says so. The `vm` class's probe stays `granule doctor`'s,
+  with step 10.
+- **`data`** opens the data directory's layout before anything is
+  written into it, since silod refuses a non-empty directory without
+  `layout.json`. The system install, run as root, then gives the new
+  directory to `silo`.
+- **`runtimes`** fetches gVisor's release tarball, the same pinned
+  release as CI's `nsd` job (20261005). gVisor publishes one SHA-512
+  per release, the tarball's, and no sums for the binaries in it. Install
+  pins the tarball's sum and each binary's, for x86_64 and aarch64. It
+  checks the tarball before reading it. It renames each binary into
+  `cache/runtimes/runsc-<version>/` only once that binary's own sum has
+  been checked. On a later run it checks the installed binaries against
+  their sums, and fetches again if one differs. The units put that
+  directory first on `PATH` (`units.Config.RuntimePath`), and that is
+  how `silod containerd` finds `runsc` and containerd finds the shim. A
+  host whose architecture has no pinned release gets a warning, and uses
+  whatever `runsc` is on `PATH`. containerd, crun and buildkitd stay the
+  distribution's packages, and the prerequisites check for them. The
+  granule images are pinned with their driver (step 10).
+- **`root`** waits for silod on its socket (`$XDG_RUNTIME_DIR/silo/silo.sock`,
+  or `/run/silo/silo.sock`), then bootstraps the root with:
+  - backing `local`;
+  - `--address-space`;
+  - the classes the host offers, `vm` the default when it is offered;
+  - ingress `host`, and egress none;
+  - the installing user as admin, by `uid:<n>`: the user who ran
+    `sudo` for the system install.
+
+  The capacity is call L20's: `vcpu_m` is (CPUs − 1) × 1000 ×
+  `--cpu-overcommit` (default 2, at most 8). `memory_mb` is MemTotal
+  less the larger of 2 GiB and 10%. `disk_gb` is 90% of the data
+  filesystem. The count classes, which the host's totals don't bound,
+  get 1000 containers, 256 networks and 1000 volumes. `/silod/health`
+  now also answers `root_id`, because a later run has no other way to
+  learn the root's id without being a member.
+- **`docker context`** writes the context `silo-root` into the
+  installing user's docker configuration (`$DOCKER_CONFIG`, or
+  `~/.docker`, which under `sudo` is the invoking user's, chowned to
+  them). Its endpoint is `unix:///run/silo/docker/<root id>.sock`, or
+  `$XDG_RUNTIME_DIR/silo/docker/<root id>.sock` where there is no
+  `/run/silo` (`DockerSocket`). Install doesn't make it the current
+  context. It prints `docker context use silo-root` and the
+  `DOCKER_HOST` line. *Not built yet:* silod doesn't serve those sockets,
+  which are step 6's "left to wiring", so wiring them has to use
+  `DockerSocket`'s paths. `silo docker-env`, and a context for every
+  silo the user can reach, come with that wiring.
+- **Uninstall** takes `--system`, `--data-dir`, `--delete-data`,
+  `--dry-run`, `--yes` and `-o`, and removes, in this order:
+  1. the docker context;
+  2. every container, by stopping `silod.service` and killing the
+     runtimes' whole cgroups (`systemctl kill --signal=SIGKILL`). Their
+     units have `KillMode=process`, so stopping them alone would leave
+     the shims and sandboxes running;
+  3. the units: stopped, disabled and removed. `silo-net` goes with the
+     holder's namespaces when the last process in them exits;
+  4. the pinned runtimes.
+
+  The data directory, which holds the store and so the root and the
+  tree, is kept unless `--delete-data`. Rootless, files owned by a
+  container's subuids can only be removed inside the holder's user
+  namespace. So with `--delete-data`, uninstall runs `silo unshare --
+  rm -rf` over `silos/`, `containerd/` and `cache/` before it stops the
+  holder, and removes the rest after. containerd's own records of the
+  containers are in `containerd/`, which is data (call L60), so a kept
+  data directory keeps them. The next install's silod then finds them
+  as it finds any containers after a reboot. The system install's
+  `silo` account, with its subordinate ids, and lingering are kept, and
+  the plan names the command that removes each.
 
 ### Restart and adoption
 
@@ -1964,7 +2117,9 @@ before item 7.
    Depends on 5 and 16. It runs anywhere, CI included.
 8. **`silo install --backend local` and `uninstall`.** Covers the
    prerequisite checks, the pinned runtime fetch, the units, the root
-   silo and the docker context. Depends on 7 and 17.
+   silo and the docker context. Depends on 7 and 17. Built in task
+   3416. What it built, and what it left to the facade's host sockets,
+   is under [Install](#install-call-l23).
 9. **granule changes, filed against gke-labs/granule:**
    - exec inside the wrapped container's root, with its env and user;
    - the workload's stdout and stderr apart from the console;

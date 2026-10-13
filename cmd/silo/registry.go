@@ -259,6 +259,30 @@ func (c *cli) registryCacheStatus(ctx context.Context, args []string) error {
 	return c.printCache(st)
 }
 
+// registryCacheEvict is silo registry cache evict: it drops the cache's
+// entries for an upstream, a repo of one or one digest of a repo, or
+// every entry, now (local-registry.md, "Eviction and the cache
+// budget"). Bytes something else references stay. The root's only.
+func (c *cli) registryCacheEvict(ctx context.Context, args []string) error {
+	fs := c.flags("registry cache evict")
+	pos, err := c.parse(fs, args, 0, 1, "[<upstream>[/<repo>[@digest]]]")
+	if err != nil {
+		return err
+	}
+	ref := ""
+	if len(pos) == 1 {
+		ref = pos[0]
+	}
+	out, err := c.api.EvictRegistryCache(ctx, ref)
+	if err != nil {
+		return err
+	}
+	return c.print(out, func(w *tw) {
+		w.row("Evicted:", fmt.Sprintf("%d entries, %d bytes freed", out.Entries, out.FreedBytes))
+		w.row("Cache:", fmt.Sprintf("%d of %d bytes", out.CacheBytes, out.BudgetBytes))
+	})
+}
+
 // registryCacheSet is silo registry cache set: it changes what its
 // flags name and keeps the rest. --upstream, given at all, replaces the
 // whole list. The upstream list is not an allowlist: each silo's own

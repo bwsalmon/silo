@@ -384,7 +384,8 @@ func (s *Server) WarnLeases(ctx context.Context) (int, error) {
 
 // ReportUsage is a harness's own report of a turn's model usage (the
 // adapter reads it from the harness's event stream). For a subscription
-// session, which the model proxy can't see, it is what the agent is
+// or ambient session (local-backend.md §10), which the model proxy
+// can't see, it is what the agent is
 // charged, at the API list price of its model (call 47); usage is known
 // only after the turn, so the agent can overshoot by up to one turn,
 // which exhaust records. An API-key session's turns were charged by the
@@ -403,7 +404,7 @@ func (s *Server) ReportUsage(ctx context.Context, agent string, report map[strin
 	if err != nil {
 		return err
 	}
-	if kind != agents.CredentialSubscription {
+	if !agents.MeteredByReport(kind) {
 		return s.RecordEvent(ctx, agent, EventUsage, report)
 	}
 	_, err = s.ChargeModel(ctx, agent, HarnessUsage(report))

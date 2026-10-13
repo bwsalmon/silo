@@ -19,6 +19,11 @@ silo install ... --dry-run
 silo uninstall --project bsalmon-fun-sandbox [--force] [--delete-data] [--dry-run]
 ```
 
+This page is the GCP backend's install. The local backend's,
+`silo install --backend local` and `silo uninstall --backend local`,
+uses the same plan, confirmation and `--dry-run`, with steps of its own
+([`local-backend.md`, Install](local-backend.md#install-call-l23)).
+
 ## Input {#SV-90}
 
 | Flag | Default | Meaning |
