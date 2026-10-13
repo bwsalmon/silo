@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/agents"
+	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
+	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/client"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
@@ -39,11 +42,15 @@ func startSilod(t *testing.T) *silod {
 	if err := db.Migrate(ctx, db.Latest()); err != nil {
 		t.Fatal(err)
 	}
+	silos := filepath.Join(t.TempDir(), "silos")
+	if err := os.Mkdir(silos, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	runner := &agents.Fake{AutoConnect: true}
 	api := fenceapi.New(db, fenceapi.Options{Caller: func(r *http.Request) (fenceapi.Caller, error) {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaInternal}, nil
 	}, ToolVMs: toolVMs{}, Runner: runner, Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"},
-		CredentialKey: bytes.Repeat([]byte{1}, 32)})
+		CredentialKey: bytes.Repeat([]byte{1}, 32), Repos: &gitstore.Host{Storage: &storage.Dir{Root: silos}}})
 	runner.Connected = api.ToolServerConnected
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() { srv.Close(); api.Close() })

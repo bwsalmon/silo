@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,7 @@ type allocFlags struct {
 	maxBlocks                      int
 	agentPolicy                    string
 	backing, ingress               string
+	reposMirror                    string
 	isolation, isolationDefault    string
 }
 
@@ -79,6 +81,7 @@ func addAllocFlags(fs *flag.FlagSet) *allocFlags {
 	fs.StringVar(&a.isolation, "isolation", "", "comma-separated isolation classes allowed: vm, sandbox (create: default the parent's)")
 	fs.StringVar(&a.isolationDefault, "isolation-default", "", "the isolation class a container gets when it names none (default the strongest allowed)")
 	fs.StringVar(&a.ingress, "ingress", "", "host or none: whether published ports also listen on the host's loopback (create: default none)")
+	fs.StringVar(&a.reposMirror, "repos-mirror", "", "true or false: whether the silo's repos are mirrored into the uber repo (create: default the parent's)")
 	fs.StringVar(&a.labels, "labels", "", "key=value,... (patch replaces them all)")
 	return a
 }
@@ -126,6 +129,13 @@ func (a *allocFlags) createRequest() (client.CreateRequest, error) {
 		req.Isolation = &client.Isolation{Allowed: parseList(a.isolation), Default: a.isolationDefault}
 	}
 	req.Ingress = a.ingress
+	if set["repos-mirror"] {
+		v, err := strconv.ParseBool(a.reposMirror)
+		if err != nil {
+			return req, usagef("--repos-mirror %q: want true or false", a.reposMirror)
+		}
+		req.Repos = &client.ReposPolicy{Mirror: v}
+	}
 	if set["agent-policy"] {
 		req.AgentPolicy = &client.AgentPolicy{}
 		if err := json.Unmarshal([]byte(a.agentPolicy), req.AgentPolicy); err != nil {
@@ -208,6 +218,13 @@ func (a *allocFlags) patchBody() (client.Patch, error) {
 			i["default"] = a.isolationDefault
 		}
 		p["isolation"] = i
+	}
+	if set["repos-mirror"] {
+		v, err := strconv.ParseBool(a.reposMirror)
+		if err != nil {
+			return nil, usagef("--repos-mirror %q: want true or false", a.reposMirror)
+		}
+		p["repos"] = map[string]any{"mirror": v}
 	}
 	if set["ingress"] {
 		p["ingress"] = a.ingress
