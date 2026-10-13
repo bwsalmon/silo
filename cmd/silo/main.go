@@ -113,6 +113,12 @@ commands:
                                     override a price (root only; --delete removes it)
   reconcile [--apply]               show the reconcile's mode, or leave report-only
                                     after a restore (root only)
+  mirror set --url u --credential-file f [--prefix silo] [--index-branch main]
+                                    mirror every repo into an uber repo (root only)
+  mirror status [--all]             the repos that aren't in sync, and why
+  mirror retry [repo]               run a repo's pass now, or retry every repo
+  mirror adopt <repo> [--ref r] [--keep-external]
+                                    resolve refs the uber repo diverged on
   install --project p --regions r,... --admin user:...
                                     set Silo up in a project (docs/silo/install.md)
   install --backend local [--system] set the local backend up on this machine: user
@@ -230,10 +236,13 @@ var commands = map[string]command{
 		"list": (*cli).credentialList, "remove": (*cli).credentialRemove}),
 	"model-price": group("model-price", map[string]command{"list": (*cli).modelPriceList, "set": (*cli).modelPriceSet}),
 	"reconcile":   (*cli).reconcile,
-	"install":     (*cli).install,
-	"uninstall":   (*cli).uninstall,
-	"proxy":       (*cli).proxy,
-	"unshare":     (*cli).unshare,
+	"mirror": group("mirror", map[string]command{
+		"set": (*cli).mirrorSet, "status": (*cli).mirrorStatus, "retry": (*cli).mirrorRetry, "adopt": (*cli).mirrorAdopt,
+	}),
+	"install":   (*cli).install,
+	"uninstall": (*cli).uninstall,
+	"proxy":     (*cli).proxy,
+	"unshare":   (*cli).unshare,
 }
 
 // group is a command with subcommands, as "block add".

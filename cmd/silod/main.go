@@ -64,6 +64,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/harness"
 	"github.com/bwsalmon/silo/pkg/leader"
+	"github.com/bwsalmon/silo/pkg/mirror"
 	"github.com/bwsalmon/silo/pkg/modelproxy"
 	"github.com/bwsalmon/silo/pkg/reconcile"
 	"github.com/bwsalmon/silo/pkg/session"
@@ -464,6 +465,7 @@ func serve(ctx context.Context, args []string) error {
 	// makes no repos.
 	var repoHost fenceapi.RepoHost
 	var git *gitserve.Service
+	var mir *mirror.Mirror
 	if dd != nil && why == "" && v >= store.HeartbeatSchema {
 		// The dir driver is the only one; the local backend (step 5 of
 		// local-backend.md §15) takes it from here.
@@ -487,6 +489,13 @@ func serve(ctx context.Context, args []string) error {
 		// No disk_gb class on this backend yet: pushes are not held to
 		// one until there is (local-git.md, "Quota").
 		git = gitserve.New(gitserve.Options{Host: gh, Hook: exe})
+		if v >= store.MirrorSchema {
+			// The outbound mirror (local-git.md §8): its credential in
+			// keys/mirror/, its quarantine repo in cache/, since it
+			// keeps nothing that can't be fetched again.
+			mir = mirror.New(mirror.Options{Store: db, Repos: gh,
+				Keys: filepath.Join(dd.Keys(), "mirror"), Dir: filepath.Join(dd.Cache(), "mirror")})
+		}
 	}
 	replica := store.Replica{ID: replicaID(), Release: release, Latest: db.Latest(), Started: time.Now(), Address: *advertise}
 	if replica.Address == "" {
@@ -528,6 +537,14 @@ func serve(ctx context.Context, args []string) error {
 	opts := fenceapi.Options{Ready: func() string { return why }, Budget: gcefence.Budget{Config: cfg}, Repos: repoHost}
 	if git != nil {
 		opts.Git = git
+	}
+	if mir != nil {
+		opts.Mirror = mir
+		if leaderLed {
+			duties = append(duties, leader.Duty{Name: "mirror", Run: mir.Run})
+		} else {
+			go mir.Run(ctx)
+		}
 	}
 	if *fenceProject != "" {
 		client, err := gceclient.New(ctx, gcpOptions(*computeEndpoint))
