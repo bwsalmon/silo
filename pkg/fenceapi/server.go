@@ -157,6 +157,10 @@ type Options struct {
 	// ambient-<provider>, which holds no secret and is metered by the
 	// usage its harness reports.
 	Ambient bool
+	// Usage, if set, is the host resources silos and agents have used
+	// (local-backend.md §11, "Metering"), which describe and an
+	// agent's get show as usage.
+	Usage UsageMeter
 	// CredentialKey is silo-credential-key, the AES-256 key the stored
 	// credentials are sealed with; without it none can be added or used.
 	CredentialKey []byte

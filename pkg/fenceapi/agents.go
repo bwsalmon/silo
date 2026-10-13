@@ -90,22 +90,25 @@ type ToolVMIdentifier interface {
 
 // Agent is the agent object (agents.md, "The agent object", SV-101).
 type Agent struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	Silo          string            `json:"silo"`
-	SiloPath      string            `json:"silo_path"`
-	Harness       AgentHarness      `json:"harness"`
-	Model         string            `json:"model"`
-	Budget        AgentBudget       `json:"budget"`
-	ToolVM        AgentToolVM       `json:"tool_vm"`
-	Lease         AgentLease        `json:"lease"`
-	Prompt        string            `json:"prompt"`
-	Owner         *string           `json:"owner"`
-	State         string            `json:"state"`
-	StatusMessage string            `json:"status_message,omitempty"`
-	Session       *AgentSession     `json:"session"`
-	CreateTime    time.Time         `json:"create_time"`
-	Labels        map[string]string `json:"labels"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name"`
+	Silo          string        `json:"silo"`
+	SiloPath      string        `json:"silo_path"`
+	Harness       AgentHarness  `json:"harness"`
+	Model         string        `json:"model"`
+	Budget        AgentBudget   `json:"budget"`
+	ToolVM        AgentToolVM   `json:"tool_vm"`
+	Lease         AgentLease    `json:"lease"`
+	Prompt        string        `json:"prompt"`
+	Owner         *string       `json:"owner"`
+	State         string        `json:"state"`
+	StatusMessage string        `json:"status_message,omitempty"`
+	Session       *AgentSession `json:"session"`
+	// Usage is the host resources the agent's own cgroups have used,
+	// next to its model spend, on the local backend.
+	Usage      *ResourceUsage    `json:"usage,omitempty"`
+	CreateTime time.Time         `json:"create_time"`
+	Labels     map[string]string `json:"labels"`
 }
 
 // AgentHarness is an agent's harness.
@@ -984,6 +987,7 @@ func (s *Server) getAgent(q *request, ref, name string) {
 		writeError(q.w, err)
 		return
 	}
+	out.Usage = s.agentUsage(out.ID)
 	writeJSON(q.w, http.StatusOK, out)
 }
 

@@ -61,3 +61,37 @@ func TestAmbientCredentials(t *testing.T) {
 		t.Errorf("an ambient credential without ambient harnesses: %d", code)
 	}
 }
+
+type fakeUsage map[string]fenceapi.ResourceUsage
+
+func (f fakeUsage) SiloUsage(id string) (fenceapi.ResourceUsage, bool) {
+	u, ok := f["silo:"+id]
+	return u, ok
+}
+
+func (f fakeUsage) AgentUsage(id string) (fenceapi.ResourceUsage, bool) {
+	u, ok := f["agent:"+id]
+	return u, ok
+}
+
+// On the local backend describe shows a silo's host resource use, and
+// an agent's get its own, next to its model spend.
+func TestResourceUsage(t *testing.T) {
+	u := fakeUsage{}
+	e := newAgentEnv(t, func(o *fenceapi.Options) { o.Usage = u })
+	id := e.create(e.root, "team", "a", nil)
+	u["silo:"+e.team] = fenceapi.ResourceUsage{CPUUsec: 1500, MemoryBytes: 4096}
+	u["agent:"+id] = fenceapi.ResourceUsage{CPUUsec: 300}
+	d := e.ok(e.root, "GET", "/silo/v1/silos/team", nil)
+	if get(d, "usage", "cpu_usec") != float64(1500) || get(d, "usage", "memory_bytes") != float64(4096) {
+		t.Errorf("describe's usage: %v", d["usage"])
+	}
+	a := e.ok(e.root, "GET", "/silo/v1/silos/team/agents/a", nil)
+	if get(a, "usage", "cpu_usec") != float64(300) {
+		t.Errorf("the agent's usage: %v", a["usage"])
+	}
+	// A silo with no reading shows none.
+	if r := e.ok(e.root, "GET", "/silo/v1/silos/-"+e.root, nil); r["usage"] != nil {
+		t.Errorf("the root's usage: %v", r["usage"])
+	}
+}

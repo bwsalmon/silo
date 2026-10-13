@@ -97,6 +97,9 @@ func writeSilo(w *tw, s *client.Silo) {
 	}
 	b := s.ModelBudget
 	w.row("Model budget:", fmt.Sprintf("$%s granted, $%s delegated, $%s used, per %s", b.GrantedUSD, b.DelegatedUSD, b.UsedUSD, b.Period))
+	if u := s.Usage; u != nil {
+		w.row("Usage:", usageLine(u))
+	}
 	w.row("Labels:", kvs(s.Labels))
 	w.row("Created:", s.CreateTime.UTC().Format(time.RFC3339))
 	for _, o := range s.OverCommitted {
@@ -284,4 +287,15 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// usageLine is a host resource reading in a line: metering, not a charge.
+func usageLine(u *client.ResourceUsage) string {
+	mib := func(b uint64) string { return fmt.Sprintf("%.1f MiB", float64(b)/(1<<20)) }
+	mem := mib(u.MemoryBytes)
+	if u.MemoryPeakBytes > 0 {
+		mem += " (peak " + mib(u.MemoryPeakBytes) + ")"
+	}
+	return fmt.Sprintf("%.1fs CPU, %s memory, %s read, %s written, at %s", float64(u.CPUUsec)/1e6, mem,
+		mib(u.ReadBytes), mib(u.WriteBytes), u.SampleTime.UTC().Format(time.RFC3339))
 }

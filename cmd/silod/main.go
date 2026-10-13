@@ -57,6 +57,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
+	localusage "github.com/bwsalmon/silo/pkg/backend/local/usage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
@@ -674,6 +675,17 @@ func serve(ctx context.Context, args []string) error {
 		// takes a connection only from its own scope (call L18).
 		sockets.Peer = session.ScopePeer(harness.ScopeName)
 		opts.Ambient = true
+	}
+	if *backendKind == local.Kind {
+		// Each silo's slice, and each agent's own cgroups, sampled
+		// every minute and shown as usage (local-backend.md §11).
+		manager := localusage.ManagerDir(os.Getuid())
+		meter := &localusage.Meter{Manager: manager, Silos: localusage.StoreSilos(db)}
+		if *ambientAgents {
+			meter.Agents = localusage.HarnessScopes(manager)
+		}
+		opts.Usage = meter
+		go meter.Run(ctx)
 	}
 	if *fakeAgents {
 		fakeRunner = &agents.Fake{AutoConnect: true}
