@@ -91,11 +91,17 @@ var ambient = map[string]bool{
 // serves it; the fence API and the git service ask for it.
 const Repos = "repos"
 
+// Registry is the resource type of image repos (local-registry.md,
+// "Manage grants: the registry resource type"): read pulls, lists and
+// gets them, and write also pushes, untags and deletes them. No facade
+// serves it; the fence API and the registry ask for it.
+const Registry = "registry"
+
 // Resources are the resource types a scope may name: the facade types
-// gcp-backend.md "Covered" lists, as pkg/control's table has them, and
-// repos.
+// gcp-backend.md "Covered" lists, as pkg/control's table has them,
+// repos and registry.
 func Resources() []string {
-	seen := map[string]bool{Repos: true}
+	seen := map[string]bool{Repos: true, Registry: true}
 	for m := range control.FacadeMethods() {
 		seen[strings.SplitN(m, ".", 2)[0]] = true
 	}

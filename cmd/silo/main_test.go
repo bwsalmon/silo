@@ -19,6 +19,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/client"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
 )
 
@@ -27,6 +28,7 @@ type silod struct {
 	t    *testing.T
 	url  string
 	root string // the root silo's id
+	db   store.Database
 	// stdin is what the next command reads on its stdin.
 	stdin string
 }
@@ -71,7 +73,7 @@ func startSilod(t *testing.T) *silod {
 	if err := json.NewDecoder(resp.Body).Decode(&root); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("bootstrap: %d %v", resp.StatusCode, err)
 	}
-	return &silod{t: t, url: srv.URL + "/silo/v1/", root: root.ID}
+	return &silod{t: t, url: srv.URL + "/silo/v1/", root: root.ID, db: db}
 }
 
 // asCaller is the transport of a caller inside the cloud: the gateway
