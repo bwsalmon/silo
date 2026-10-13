@@ -27,7 +27,10 @@ type route struct {
 	// read is set for the reads that aren't GETs (call 52): classified
 	// by endpoint, not by verb.
 	read bool
-	h    handler
+	// stream is set for a write whose body is not JSON, which its
+	// handler reads as a stream: docker load's archive.
+	stream bool
+	h      handler
 }
 
 // class is the route's class under pkg/control.
@@ -84,6 +87,12 @@ var routes = []route{
 	{method: "GET", pattern: "/images/{name+}/history", resource: "images", h: (*Server).imageHistory},
 	{method: "POST", pattern: "/images/{name+}/tag", resource: "images", h: (*Server).imageTag},
 	{method: "DELETE", pattern: "/images/{name+}", resource: "images", h: (*Server).imageDelete},
+	{method: "POST", pattern: "/images/{name+}/push", resource: "images", h: (*Server).imagePush},
+	{method: "GET", pattern: "/images/get", resource: "images", h: (*Server).imageSave},
+	{method: "GET", pattern: "/images/{name+}/get", resource: "images", h: (*Server).imageSave},
+	{method: "POST", pattern: "/images/load", resource: "images", stream: true, h: (*Server).imageLoad},
+	{method: "POST", pattern: "/commit", resource: "images", h: (*Server).commit},
+	{method: "POST", pattern: "/auth", resource: "images", read: true, h: (*Server).auth},
 
 	// Networks.
 	{method: "GET", pattern: "/networks", resource: "networks", h: (*Server).networkList},
@@ -112,8 +121,8 @@ type refusal struct {
 }
 
 var (
-	errBuild = unsupported("silo: building images is not supported by this facade; build with kaniko or BuildKit in a container")
-	errIO    = unsupported("silo: image import and export are not supported by this facade")
+	errBuild = unsupported("silo: image builds are not served by the facade; build in a container with kaniko or BuildKit and push to registry.silo.internal")
+	errIO    = unsupported("silo: image import and container export are not supported by this facade")
 )
 
 // refused are the refused routes, before routes are looked at: the
@@ -125,12 +134,6 @@ var refused = []refusal{
 	{method: "GET", pattern: "/containers/{id}/export", err: errIO},
 	{method: "GET", pattern: "/containers/{id}/changes", err: errIO},
 	{method: "GET", pattern: "/images/search", err: errIO},
-	{method: "POST", pattern: "/commit", err: errIO},
-	{method: "POST", pattern: "/images/{name+}/push", err: errIO},
-	{method: "GET", pattern: "/images/get", err: errIO},
-	{method: "GET", pattern: "/images/{name+}/get", err: errIO},
-	{method: "POST", pattern: "/images/load", err: errIO},
-	{method: "POST", pattern: "/auth", err: unsupported("silo: registry login is not supported; credentials go with each pull in X-Registry-Auth")},
 	{method: "POST", pattern: "/containers/{id}/update", err: unsupported("silo: updating a container's resources is not supported")},
 	{method: "GET", pattern: "/containers/{id}/attach/ws", err: unsupported("silo: attach over websocket is not supported; use POST /containers/{id}/attach")},
 	{pattern: "/containers/{id}/checkpoints", prefix: true, err: unsupported("silo: checkpoints are not supported")},

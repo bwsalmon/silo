@@ -9,7 +9,8 @@ Task 3450 landed the first part of step 25: image repos in the store
 and the fence API, the `image_repos` class, the `registry` scope type
 and `silo registry` ([§13](#13-staged-implementation-plan) says what of
 step 25 is left). Task 3480 landed step 27's registry handler over a
-fake content store; containerd's half is step 27b.
+fake content store; containerd's half is step 27b. Task 3483 landed
+step 30's facade endpoints over the same fake.
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -1449,6 +1450,34 @@ earlier depends on them. Each can be filed on its own, in this order.
     - the updated refusals.
 
     Depends on 6, 7 and 27.
+
+    *Landed in task 3483, against the fake driver and `registry.Memory`:*
+    the facade's `imagePush`, `imageSave`, `imageLoad`, `commit` and
+    `auth` (`pkg/facade/local/docker/registry.go` and `archive.go`), and
+    pulls of `registry.silo.internal` names through the registry rather
+    than `Options.Images`. The registry gained `Service.PushHeld` and
+    `Service.Pull`, which serve the facade's push and pull in process as
+    the caller, as a client's manifest PUT and GET are served, except
+    that a facade push proves possession by the caller's image record:
+    each blob is checked in the content store, not through
+    `Service.blob`. Image records now carry their manifest's digest and
+    media type. `load` commits no ingest until the whole archive has
+    been read and its manifests checked, so a refused load leaves
+    nothing in the content store. `commit` reads the writable layer
+    through `runtime.Committer` and turns overlayfs whiteouts (a 0/0
+    character device) and opaque directories (`trusted.overlay.opaque`)
+    into OCI's `.wh.` entries, refusing devices and paths outside the
+    root. The cases of [§12](#12-conformance-cases)'s facade list run
+    as the facade package's tests (`registry_test.go`), but for the
+    private upstream ones, which need step 32.
+
+    *Left:* the gVisor driver's `RootfsUpper` (`runsc tar rootfs-upper`
+    through `silod runsc`) and the run that settles this page's
+    *unverified* whiteout claim against real runsc; silod's wiring of
+    the facade's `Content`, `Registry` and `Login` (with step 27b's
+    containerd `registry.Content`); and moving the facade cases into
+    `pkg/conformance/docker`, so that step 36 runs them against
+    `local/sandbox` too.
 31. **The pull-through cache, public content:**
     - the upstream configuration and `silo registry cache`;
     - path and `ns` addressing, Docker Hub normalisation;
