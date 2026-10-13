@@ -255,6 +255,10 @@ func (s *Server) runDelete(ctx context.Context, opID string) {
 			fail(leaf.ID, asError(ctx, nil, err).with("silo", leaf.Path))
 			return
 		}
+		if err := s.deleteReposIn(ctx, leaf, op.caller); err != nil {
+			fail(leaf.ID, asError(ctx, nil, err).with("silo", leaf.Path))
+			return
+		}
 		if s.opts.Deleter != nil {
 			if err := s.opts.Deleter.DeleteContents(ctx, leaf); err != nil {
 				fail(leaf.ID, errorf(FailedPrecondition, "deleting what %s holds: %v", leaf.Path, err).with("silo", leaf.Path))
@@ -376,7 +380,8 @@ func (s *Server) getOperation(q *request, id string) {
 // BootstrapRequest creates the root silo (install.md, step 13). It is
 // accepted only while there is no root. Backing is the tree's, subnet
 // unless given; a local tree's regions default to local, its only one.
-// Isolation defaults to every class, and ingress to host.
+// Isolation defaults to every class, ingress to host and repos to
+// mirrored; the root's repos capacity, unless given, is unlimited.
 type BootstrapRequest struct {
 	Name           string            `json:"name"`
 	AddressSpace   string            `json:"address_space"`
@@ -392,6 +397,7 @@ type BootstrapRequest struct {
 	Backing        *Backing          `json:"backing"`
 	Isolation      *Isolation        `json:"isolation"`
 	Ingress        string            `json:"ingress"`
+	Repos          *ReposPolicy      `json:"repos"`
 	Admins         []string          `json:"admins"`
 	Labels         map[string]string `json:"labels"`
 }
@@ -486,6 +492,9 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if _, ok := req.Capacity[ledger.Global][ReposClass.Class]; !ok {
+			capacity = append(capacity, ledger.Amount{Key: ReposClass, Amount: ledger.Unlimited})
+		}
 		if req.ModelBudgetUSD != "" {
 			m, err := ledger.ParseAmount(req.ModelBudgetUSD)
 			if err != nil {
@@ -499,7 +508,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		// The root's egress is install's --egress-allow, and empty, which
 		// allows nothing, by default (gateway.md, "Policy", SV-86).
 		p := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull,
-			Isolation: RootIsolation(), Ingress: IngressHost}
+			Isolation: RootIsolation(), Ingress: IngressHost, Repos: ReposPolicy{Mirror: true}}
 		for k, v := range RootGrantPolicy {
 			p.Grant[k] = v
 		}
@@ -517,6 +526,9 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Ingress != "" {
 			p.Ingress = req.Ingress
+		}
+		if req.Repos != nil {
+			p.Repos = *req.Repos
 		}
 		if err := checkPolicies(p); err != nil {
 			return err

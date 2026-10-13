@@ -34,6 +34,7 @@ type Silo struct {
 	AgentPolicy   Owned[AgentPolicy]                `json:"agent_policy"`
 	Isolation     Owned[Isolation]                  `json:"isolation"`
 	Ingress       Owned[string]                     `json:"ingress"`
+	Repos         Repos                             `json:"repos"`
 	OwnerAgent    *string                           `json:"owner_agent"`
 	State         string                            `json:"state"`
 	OverCommitted []OverCommit                      `json:"over_committed"`
@@ -96,6 +97,15 @@ type OwnRange struct {
 type Owned[T any] struct {
 	Own       T `json:"own"`
 	Effective T `json:"effective"`
+}
+
+// Repos is the repos policy, with where its effective value comes
+// from: the nearest silo up the tree that turned mirroring off, or the
+// root.
+type Repos struct {
+	Own           ReposPolicy `json:"own"`
+	Effective     ReposPolicy `json:"effective"`
+	EffectiveFrom string      `json:"effective_from"`
 }
 
 // Control is the control policy, with where its effective value comes
@@ -197,13 +207,14 @@ func (s *Server) object(ctx context.Context, tx store.Tx, chain []*tree.Silo) (*
 	out.Control = Control{Own: own.Control, Effective: eff.Control, EffectiveFrom: eff.ControlFrom}
 	out.Isolation = Owned[Isolation]{Own: own.Isolation, Effective: eff.Isolation}
 	out.Ingress = Owned[string]{Own: own.Ingress, Effective: eff.Ingress}
+	out.Repos = Repos{Own: own.Repos, Effective: eff.Repos, EffectiveFrom: eff.ReposFrom}
 	return out, nil
 }
 
 // className is how the quota maps name a class: its name, for the
-// built-in gce kind, and kind/name for any other.
+// built-in gce and silo kinds, and kind/name for any other.
 func className(k ledger.Key) string {
-	if k.Kind == "gce" {
+	if k.Kind == "gce" || k.Kind == ReposClass.Kind {
 		return k.Class
 	}
 	return k.Kind + "/" + k.Class

@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 )
 
-// Dir is the dir driver: a directory per silo under Root, and a
-// directory per volume under the silo's volumes/.
+// Dir is the dir driver: a directory per silo under Root, a directory
+// per volume under the silo's volumes/, and one per repo under its
+// repos/.
 //
-//	<Root>/<silo id>/                  the silo's subtree
-//	<Root>/<silo id>/volumes/<volume>/ a volume
+//	<Root>/<silo id>/                     the silo's subtree
+//	<Root>/<silo id>/volumes/<volume>/    a volume
+//	<Root>/<silo id>/repos/<repo id>.git/ a repo, owned by the process
 //
 // Create is mkdir plus ownership, Delete is a recursive remove and
 // Usage is a walk. Sizes are charged, not enforced, and it takes no
@@ -42,41 +44,46 @@ func (d *Dir) Path(ref Ref) (string, error) {
 	if err := ref.Valid(); err != nil {
 		return "", err
 	}
-	if ref.Volume == "" {
-		return filepath.Join(d.Root, ref.Silo), nil
+	switch {
+	case ref.Volume != "":
+		return filepath.Join(d.Root, ref.Silo, "volumes", ref.Volume), nil
+	case ref.Repo != "":
+		return filepath.Join(d.Root, ref.Silo, "repos", ref.Repo+".git"), nil
 	}
-	return filepath.Join(d.Root, ref.Silo, "volumes", ref.Volume), nil
+	return filepath.Join(d.Root, ref.Silo), nil
 }
 
-// Create makes ref's directory. A volume needs its silo's subtree to
-// exist already: the subtree is made when the silo is, and a volume
-// for a silo with none is a bug, not something to paper over. size is
-// not enforced.
+// Create makes ref's directory. A volume or a repo needs its silo's
+// subtree to exist already: the subtree is made when the silo is, and
+// a volume for a silo with none is a bug, not something to paper over.
+// size is not enforced. A repo's directories are left to the process,
+// whatever Owner says.
 func (d *Dir) Create(ctx context.Context, ref Ref, size int64) (string, error) {
 	p, err := d.Path(ref)
 	if err != nil {
 		return "", err
 	}
-	if ref.Volume != "" {
+	own := ref.Repo == ""
+	if ref.Volume != "" || ref.Repo != "" {
 		silo, _ := d.Path(Ref{Silo: ref.Silo})
 		if _, err := os.Stat(silo); err != nil {
-			return "", fmt.Errorf("storage: volume %s: silo %s has no subtree: %w", ref, ref.Silo, err)
+			return "", fmt.Errorf("storage: %s: silo %s has no subtree: %w", ref, ref.Silo, err)
 		}
-		if err := d.mkdir(ref.Silo, filepath.Dir(p)); err != nil {
+		if err := d.mkdir(ref.Silo, filepath.Dir(p), own); err != nil {
 			return "", err
 		}
 	}
-	if err := d.mkdir(ref.Silo, p); err != nil {
+	if err := d.mkdir(ref.Silo, p, own); err != nil {
 		return "", err
 	}
 	return p, nil
 }
 
-func (d *Dir) mkdir(silo, p string) error {
+func (d *Dir) mkdir(silo, p string, own bool) error {
 	if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("storage: %w", err)
 	}
-	if d.Owner == nil {
+	if d.Owner == nil || !own {
 		return nil
 	}
 	uid, gid, ok := d.Owner(silo)

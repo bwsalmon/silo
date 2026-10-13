@@ -17,7 +17,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/tree"
 )
 
-// Each silo has six policies of its own, stored as JSON in
+// Each silo has seven policies of its own, stored as JSON in
 // silo_policies, and an effective value of each worked out down the
 // tree from the root: the silo's own narrowed by every ancestor's.
 
@@ -92,6 +92,15 @@ func RootIsolation() Isolation {
 	return Isolation{Allowed: append([]string{}, IsolationClasses...), Default: IsolationVM}
 }
 
+// ReposPolicy is the repos policy (local-git.md, "What egress
+// allowlists mean here", call L54): whether the silo's repos are
+// mirrored into the uber repo. Effective mirror is the AND down the
+// tree, so an ancestor that turns it off keeps its whole subtree's code
+// on the host.
+type ReposPolicy struct {
+	Mirror bool `json:"mirror"`
+}
+
 // The ingress policies (local-backend.md, "Published ports"): whether a
 // published port also listens on the host's loopback.
 const (
@@ -126,15 +135,16 @@ type policies struct {
 	Control   string
 	Isolation Isolation
 	Ingress   string
+	Repos     ReposPolicy
 }
 
 func readPolicies(ctx context.Context, tx store.Tx, silo string) (*policies, error) {
-	var eg, gp, ap, ctl, iso, ing string
-	err := tx.QueryRow(ctx, `SELECT egress, grant_policy, agent_policy, control, isolation, ingress FROM silo_policies WHERE silo = ?`, silo).
-		Scan(&eg, &gp, &ap, &ctl, &iso, &ing)
+	var eg, gp, ap, ctl, iso, ing, rp string
+	err := tx.QueryRow(ctx, `SELECT egress, grant_policy, agent_policy, control, isolation, ingress, repos FROM silo_policies WHERE silo = ?`, silo).
+		Scan(&eg, &gp, &ap, &ctl, &iso, &ing, &rp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull,
-			Isolation: RootIsolation(), Ingress: IngressNone}, nil
+			Isolation: RootIsolation(), Ingress: IngressNone, Repos: ReposPolicy{Mirror: true}}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -143,7 +153,7 @@ func readPolicies(ctx context.Context, tx store.Tx, silo string) (*policies, err
 	for _, f := range []struct {
 		s string
 		v any
-	}{{eg, &p.Egress}, {gp, &p.Grant}, {ap, &p.Agent}, {iso, &p.Isolation}} {
+	}{{eg, &p.Egress}, {gp, &p.Grant}, {ap, &p.Agent}, {iso, &p.Isolation}, {rp, &p.Repos}} {
 		if err := json.Unmarshal([]byte(f.s), f.v); err != nil {
 			return nil, fmt.Errorf("silo %s policies: %w", silo, err)
 		}
@@ -161,16 +171,17 @@ func writePolicies(ctx context.Context, tx store.Tx, silo string, p *policies) e
 	gp, _ := json.Marshal(p.Grant)
 	ap, _ := json.Marshal(p.Agent)
 	iso, _ := json.Marshal(normIsolation(p.Isolation))
+	rp, _ := json.Marshal(p.Repos)
 	now, err := tx.Now(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO silo_policies (silo, egress, grant_policy, agent_policy, control, isolation, ingress, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = tx.Exec(ctx, `INSERT INTO silo_policies (silo, egress, grant_policy, agent_policy, control, isolation, ingress, repos, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (silo) DO UPDATE SET egress = excluded.egress, grant_policy = excluded.grant_policy,
 			agent_policy = excluded.agent_policy, control = excluded.control, isolation = excluded.isolation,
-			ingress = excluded.ingress, updated_at = excluded.updated_at`,
-		silo, string(eg), string(gp), string(ap), p.Control, string(iso), p.Ingress, store.Millis(now))
+			ingress = excluded.ingress, repos = excluded.repos, updated_at = excluded.updated_at`,
+		silo, string(eg), string(gp), string(ap), p.Control, string(iso), p.Ingress, string(rp), store.Millis(now))
 	return err
 }
 
@@ -236,6 +247,8 @@ type effective struct {
 	ControlFrom string // the path of the silo whose setting wins
 	Isolation   Isolation
 	Ingress     string // host only where every silo up to the root has host
+	Repos       ReposPolicy
+	ReposFrom   string // the path of the silo whose setting wins
 }
 
 // effectiveOf works out the effective policies of chain's last silo,
@@ -260,6 +273,8 @@ func effectiveOf(ctx context.Context, tx store.Tx, chain []*tree.Silo, own *poli
 				ControlFrom: s.Path,
 				Isolation:   narrowIsolation(RootIsolation(), p.Isolation),
 				Ingress:     p.Ingress,
+				Repos:       p.Repos,
+				ReposFrom:   s.Path,
 			}
 			for k, v := range p.Grant {
 				eff.Grant[k] = v
@@ -288,6 +303,9 @@ func effectiveOf(ctx context.Context, tx store.Tx, chain []*tree.Silo, own *poli
 		eff.Isolation = narrowIsolation(eff.Isolation, p.Isolation)
 		if p.Ingress != IngressHost {
 			eff.Ingress = IngressNone
+		}
+		if eff.Repos.Mirror && !p.Repos.Mirror {
+			eff.Repos, eff.ReposFrom = p.Repos, s.Path
 		}
 	}
 	return eff, nil
@@ -519,6 +537,10 @@ func looser(parent *effective, own *policies) error {
 		return errorf(LooserThanParent, "ingress host is not allowed to the parent").
 			with("policy", "ingress").with("parent", parent.Ingress)
 	}
+	if own.Repos.Mirror && !parent.Repos.Mirror {
+		return errorf(LooserThanParent, "repos mirror is off for the parent (from %s)", parent.ReposFrom).
+			with("policy", "repos").with("from", parent.ReposFrom)
+	}
 	return nil
 }
 
@@ -526,7 +548,7 @@ func looser(parent *effective, own *policies) error {
 // next only narrows them: no host, grant kind, credential, adapter or
 // model it didn't allow itself, no deny entry dropped, no longer
 // max_lease, no isolation class it didn't allow, no ingress host it
-// didn't have. Anything wider is PERMISSION_DENIED, since only an
+// didn't have, no repos mirror it had turned off. Anything wider is PERMISSION_DENIED, since only an
 // ancestor may widen a silo's policies.
 func narrower(old, next *policies) error {
 	deny := func(policy, format string, args ...any) error {
@@ -576,6 +598,9 @@ func narrower(old, next *policies) error {
 	}
 	if next.Ingress == IngressHost && old.Ingress != IngressHost {
 		return deny("ingress", "host is not allowed now")
+	}
+	if next.Repos.Mirror && !old.Repos.Mirror {
+		return deny("repos", "mirror is off now")
 	}
 	return nil
 }
