@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -280,4 +281,22 @@ func JoinCommand(holderPid int, exe string, args ...string) *exec.Cmd {
 	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "_SILO_NSEXEC=join", "_SILO_NSEXEC_PID="+strconv.Itoa(holderPid))
 	return cmd
+}
+
+// WaitState waits up to timeout for a holder to write path and answer
+// for it, as the units started after silo-nsd do: the holder writes
+// nsd.state only once its namespaces are ready.
+func WaitState(ctx context.Context, path string, timeout time.Duration) (State, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		st, err := ReadState(path)
+		if err == nil || time.Now().After(deadline) {
+			return st, err
+		}
+		select {
+		case <-ctx.Done():
+			return st, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
