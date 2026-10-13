@@ -161,18 +161,19 @@ func (c *Client) Bridge(name string, addrs ...netip.Prefix) error {
 	return err
 }
 
-// Veth describes a container's link: Name on Bridge in silo-net, eth0
-// in the container's netns.
+// Veth describes a container's link: Name on Bridge in silo-net, Peer
+// (eth0 if "") in the container's netns. Gateway, if set, is the
+// container's default route, which only its first link has.
 type Veth struct {
-	Container, Name, Bridge string
-	Addrs                   []netip.Prefix
-	MAC                     string
-	Gateway                 netip.Addr
+	Container, Name, Bridge, Peer string
+	Addrs                         []netip.Prefix
+	MAC                           string
+	Gateway                       netip.Addr
 }
 
 // Veth wires a container to a bridge.
 func (c *Client) Veth(v Veth) error {
-	_, _, err := c.call(Request{Op: OpVeth, Container: v.Container, Name: v.Name, Bridge: v.Bridge,
+	_, _, err := c.call(Request{Op: OpVeth, Container: v.Container, Name: v.Name, Bridge: v.Bridge, Peer: v.Peer,
 		Addrs: v.Addrs, MAC: v.MAC, Gateway: v.Gateway})
 	return err
 }

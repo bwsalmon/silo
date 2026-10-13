@@ -50,6 +50,7 @@ const usage = `usage: silo <command> [flags]
 
 commands:
   describe [silo] [--subtree]       show a silo (default: the caller's own)
+  docker-env [silo] [--socket-dir D]  print DOCKER_HOST for the silo's Docker socket (local backend)
   children [silo]                   list a silo's direct children
   create <path> --address /n|cidr   make a silo under its parent
   patch <silo>                      change a silo's allocations and policies
@@ -215,14 +216,15 @@ func usagef(format string, args ...any) error { return usageError{fmt.Sprintf(fo
 type command func(c *cli, ctx context.Context, args []string) error
 
 var commands = map[string]command{
-	"describe": (*cli).describe,
-	"children": (*cli).children,
-	"create":   (*cli).create,
-	"patch":    (*cli).patch,
-	"delete":   (*cli).delete,
-	"grow":     (*cli).grow,
-	"block":    group("block", map[string]command{"add": (*cli).blockAdd, "release": (*cli).blockRelease}),
-	"quota":    group("quota", map[string]command{"preview": (*cli).quotaPreview}),
+	"describe":   (*cli).describe,
+	"docker-env": (*cli).dockerEnv,
+	"children":   (*cli).children,
+	"create":     (*cli).create,
+	"patch":      (*cli).patch,
+	"delete":     (*cli).delete,
+	"grow":       (*cli).grow,
+	"block":      group("block", map[string]command{"add": (*cli).blockAdd, "release": (*cli).blockRelease}),
+	"quota":      group("quota", map[string]command{"preview": (*cli).quotaPreview}),
 	"members": group("members", map[string]command{
 		"get": (*cli).membersGet, "list": (*cli).membersGet, "put": (*cli).membersPut, "delete": (*cli).membersDelete,
 	}),

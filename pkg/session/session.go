@@ -87,6 +87,10 @@ type Sockets struct {
 	Control Control
 	// Facade serves /compute/v1/; with none, the facade is UNAVAILABLE.
 	Facade http.Handler
+	// Docker is the local backend's Docker facade, served at /docker/
+	// with that prefix taken off (DOCKER_HOST's path is the harness's
+	// to set); with none, it is UNAVAILABLE.
+	Docker http.Handler
 	// Tools reaches the agents' tool VMs; with none, their tools are
 	// listed but every call is retryable.
 	Tools ToolChannel
@@ -221,6 +225,14 @@ func (s *Sockets) Handler(agent, silo string) http.Handler {
 				return
 			}
 			s.Facade.ServeHTTP(w, r)
+		case strings.HasPrefix(p, "/docker/"):
+			if s.Docker == nil {
+				writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "silo: the Docker facade isn't served here")
+				return
+			}
+			r2 := r.Clone(r.Context())
+			r2.URL.Path, r2.URL.RawPath = strings.TrimPrefix(p, "/docker"), ""
+			s.Docker.ServeHTTP(w, r2)
 		case strings.HasPrefix(p, "/model/"):
 			if s.Model == nil {
 				writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "silo: the model proxy isn't served here")
@@ -231,7 +243,7 @@ func (s *Sockets) Handler(agent, silo string) http.Handler {
 			r2.URL.Path, r2.URL.RawPath = "/"+rest, ""
 			s.Model.ServeModel(w, r2, agent, provider)
 		default:
-			writeErr(w, http.StatusNotFound, "NOT_FOUND", "silo: no such path "+p+"; the session socket serves /mcp, /silo/v1/, /compute/v1/ and /model/")
+			writeErr(w, http.StatusNotFound, "NOT_FOUND", "silo: no such path "+p+"; the session socket serves /mcp, /silo/v1/, /compute/v1/, /docker/ and /model/")
 		}
 	})
 }

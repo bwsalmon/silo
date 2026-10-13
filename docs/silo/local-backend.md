@@ -753,10 +753,81 @@ open, or leaves something for later:
 - **Not yet served:** `/events` stays open and empty, and logs carry no
   timestamps. Restart policies are kept but not acted on; `AutoRemove`
   is.
-- **Left to wiring:** the host sockets, the `docker.silo.internal`
-  listener, the DNS and published-port listeners, and making bridges
-  and veths (`Options.Wire`). So are the production image puller and
-  the root's capacity of the local classes.
+- **Wiring** (task 3529) is `pkg/facade/local/dockergw`, which
+  `silod serve --backend=local` starts beside the facade:
+  - **Host sockets.** `<dir>/<silo id>.sock`, one per silo, followed
+    from the tree every 5 seconds. `<dir>` is `--docker-socket-dir`,
+    by default `/run/silo/docker` where `/run/silo` exists and
+    `$XDG_RUNTIME_DIR/silo/docker` otherwise, as install's
+    `DockerSocket` has it. silod refuses a directory another user owns.
+    It makes the directory mode `0755` and each socket `0666`. The
+    peer's uid comes from `SO_PEERCRED` when it connects, and is looked
+    up in the member table (`uid:<n>`) at each request. A uid with no
+    silo gets 403 on everything but `/_ping`. The caller is
+    `via=front_door`, and the target is always the socket's silo.
+    `silo docker-env [silo]` prints the `DOCKER_HOST` line for a silo.
+  - **`docker.silo.internal:2375`** is a listener that `silo-nsd`
+    opens in `silo-net`. The caller is the silo its source address
+    belongs to (`via=origin`). That comes from the origin table the
+    gateway's tables carry, which a `gateway.Publisher` in silod keeps
+    current. **`/docker/`** on an agent's session socket strips the
+    prefix and serves the facade as the session's caller
+    (`via=harness`).
+  - **DNS** is UDP and TCP on port 53 at silo.internal's address. An A
+    query is answered through `Lookup`, as the source's silo, with a
+    5-second TTL. A name `Lookup` doesn't know is `NXDOMAIN`. Another
+    query type for a name it does know is answered empty, not
+    `NXDOMAIN`, because musl takes an `NXDOMAIN` on AAAA as the
+    name's. A source that is no silo's is `REFUSED`. Answers over 512
+    bytes are truncated on UDP.
+  - **Published ports** are the facade's `Options.Listeners`. A start
+    opens its container's listeners before the driver starts it, and a
+    stop, exit or remove closes them. `Ports.Run` also brings the set
+    in line with `Published` every 10 seconds, which reopens the
+    listeners of containers still running after a restart. There is
+    one listener per port on `docker.silo.internal`. It forwards a
+    connection to the container of the silo it comes from, through the
+    holder's dial pool, and closes any other. With `Host`, silod also
+    listens on `127.0.0.1:<port>` in the host's namespace. A port taken
+    there refuses the start with 409, and its opening and closing are
+    audited as `docker.host_export`. Only `tcp` is served. A `udp`
+    port is recorded and not listened on.
+  - **Bridges and veths.** `Options.Wire` now takes the container, the
+    silo's networks and the runtime spec, so that it can name the user
+    namespace and range as `local.Wire` does for the gVisor driver.
+    `dockergw.Wiring` pins the namespaces through the holder. For each
+    endpoint, the first one first, it makes the network's bridge
+    (`sb-<id>`, holding the gateway address) and a veth
+    (`VethName`, `eth0`, `eth1`… inside) pinned to the endpoint's MAC
+    and address. Only the first veth gets the default route. The
+    holder's veth RPC takes the peer's name for this. `Unwire` deletes
+    them after the driver's delete.
+  - **The fence** takes its topology from `docker.Topology` over
+    `--local-gateway`'s addresses, in place of the gateway addresses
+    alone.
+  - **Teardown.** `local.Containers.DeleteContents` calls
+    `docker.Server.DeleteSilo` after removing the silo's containers.
+    That removes the silo's container, network, volume and image
+    record rows with their charges, gives the networks' subnets back,
+    deletes the volumes' directories, and closes and unwires each
+    container.
+- **Still to do after step 6:**
+  - silod has no real runtime drivers yet. Without `--fake-runtime`
+    (development and tests only), the facade serves networks, volumes
+    and images, and refuses container creates. Steps 7 and 10 have to
+    pass their drivers in.
+  - Wiring always uses container range 0, the shared one. Giving each
+    silo its own range is left for install and the units (steps 8
+    and 17).
+  - A deleted network's bridge stays in `silo-net` until the holder
+    restarts.
+  - None of the `silo-net` side has run against a real holder, and the
+    published ports haven't been reached from a real container. That
+    needs the gVisor driver wired into silod, and an install that
+    starts it with the holder (steps 7, 8 and 17). It is tested on
+    loopback listeners, a fake holder and the fake driver.
+  - The production image puller and the root's capacity of the local
+    classes are still open.
 
 ## 5. Compose and testcontainers
 
@@ -1944,10 +2015,10 @@ order: `account` (system install only), `prerequisites`, `lingering`
   `$XDG_RUNTIME_DIR/silo/docker/<root id>.sock` where there is no
   `/run/silo` (`DockerSocket`). Install doesn't make it the current
   context. It prints `docker context use silo-root` and the
-  `DOCKER_HOST` line. *Not built yet:* silod doesn't serve those sockets,
-  which are step 6's "left to wiring", so wiring them has to use
-  `DockerSocket`'s paths. `silo docker-env`, and a context for every
-  silo the user can reach, come with that wiring.
+  `DOCKER_HOST` line. silod serves those sockets at `DockerSocket`'s
+  paths, and `silo docker-env` prints them (task 3529,
+  [As built in step 6](#as-built-in-step-6)). A context for every
+  silo the user can reach is still to come.
 - **Uninstall** takes `--system`, `--data-dir`, `--delete-data`,
   `--dry-run`, `--yes` and `-o`, and removes, in this order:
   1. the docker context;

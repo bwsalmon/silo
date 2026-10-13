@@ -51,7 +51,6 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local"
 	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
 	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
-	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
@@ -427,6 +426,9 @@ func serve(ctx context.Context, args []string) error {
 	nftPath := fs.String("nft", "nft", "with --backend=local: the nft command, run in silo-net through the holder")
 	ambientAgents := fs.Bool("ambient-agents", false, "with --backend=local: run agents' harnesses on this host as silod's own user, the agent user, each turn in a systemd scope silo-agent-<agent id>.scope, with that user's own login (local-backend.md §10); the ambient-<provider> credentials then exist")
 	localGateway := fs.String("local-gateway", "10.255.255.1,10.255.255.2", "with --backend=local: silo.internal's and docker.silo.internal's addresses on gw0, comma-separated")
+	nsdSocket := fs.String("nsd-socket", "", "with --backend=local: the namespace holder's RPC socket, which opens silod's sockets in silo-net and wires containers (default nsd.sock beside --nsd-state)")
+	dockerSockets := fs.String("docker-socket-dir", dockerSocketDir(), "with --backend=local: serve the Docker facade on <dir>/<silo id>.sock, one socket per silo, each caller its peer uid's member silo; \"\" serves none")
+	fakeRuntime := fs.Bool("fake-runtime", false, "with --backend=local: run the Docker facade's containers on the fake runtime drivers, which start nothing (development and tests only)")
 	fs.Parse(args)
 	if *socket == "" && *listen == "" && *gatewaySocket == "" && *frontDoorAddr == "" && *gatewayTLS == "" {
 		return errors.New("give --socket, --listen, --gateway-socket, --gateway-tls-listen, --front-door-listen, or several")
@@ -645,6 +647,7 @@ func serve(ctx context.Context, args []string) error {
 			SnapshotStorageGB: *snapshotStorage, Guard: leader.Guard}
 	}
 	var be backend.Backend
+	var dk *localDocker
 	if *backendKind == local.Kind {
 		// The holder's storage driver comes with silod's use of it for
 		// volumes; until then, the data directory's silos/ read
@@ -653,10 +656,29 @@ func serve(ctx context.Context, args []string) error {
 		if why == "" {
 			sd = &storage.Dir{Root: dd.Silos()}
 		}
-		if be, err = localBackend(db, sd, *nsdState, *nftPath, *localGateway, leaderLed); err != nil {
+		names, err := parseLocalGateway(*localGateway)
+		if err != nil {
 			return err
 		}
 		if err := bindHolder(ctx, db, *nsdState); err != nil {
+			return err
+		}
+		var objects func(context.Context, string) error
+		if why == "" {
+			sock := *nsdSocket
+			if sock == "" {
+				sock = filepath.Join(filepath.Dir(holderState(*nsdState)), "nsd.sock")
+			}
+			sn, err := openSiloNet(sock)
+			if err != nil {
+				return fmt.Errorf("--backend=local: the namespace holder's socket: %w", err)
+			}
+			defer sn.Close()
+			dk = newLocalDocker(db, sd, names, sn, *fakeRuntime, dd.Silos(), release)
+			defer dk.f.Close()
+			objects = dk.f.DeleteSilo
+		}
+		if be, err = localBackend(db, sd, *nsdState, *nftPath, names, leaderLed, objects); err != nil {
 			return err
 		}
 		if why == "" && *imageCacheSize > 0 {
@@ -800,6 +822,14 @@ func serve(ctx context.Context, args []string) error {
 	}
 	hub := &toolchan.Hub{Connected: connected, Disconnected: api.ToolServerDisconnected}
 	sockets.API, sockets.Control, sockets.Tools = api, api, hub
+	if dk != nil {
+		// An agent's harness reaches its silo's Docker facade at
+		// /docker/ on its session socket, as via=harness.
+		sockets.Docker = dk.f
+		if err := dk.serve(ctx, *dockerSockets); err != nil {
+			return fmt.Errorf("serving the Docker facade: %w", err)
+		}
+	}
 	// The model proxy, for API-key sessions, on their sockets alone
 	// (agents.md, "Metering", SV-110).
 	sockets.Model = &modelproxy.Proxy{Meter: api}
@@ -1023,39 +1053,55 @@ func replicaID() string {
 // adopt the operations of a replica that died, and deletes it when ctx
 // ends. sessions is the replica's count of open connections.
 // localBackend is the local backend over db, with the fence loaded into
-// silo-net through the namespace holder whose state file is state.
-// There are no runtime drivers yet, so no container is listed, deleted
-// or resolved, and no network is in the fence's topology: tenants' sets
-// are complete, and no bridge is let through to the gateway. sd, if
-// set, puts the silos' subtrees and volumes in the inventory, and those
+// silo-net through the namespace holder whose state file is state. The
+// fence's topology is the Docker facade's networks and endpoints, with
+// names' gateway addresses; objects, if set, removes a deleted silo's
+// facade objects after its containers. There are no runtime drivers
+// yet, so no container is listed, deleted or resolved. sd, if set,
+// puts the silos' subtrees and volumes in the inventory, and those
 // without rows are reported as orphans.
-func localBackend(db store.Store, sd storage.Driver, state, nft, gateway string, leaderLed bool) (backend.Backend, error) {
+func localBackend(db store.Store, sd storage.Driver, state, nft string, names docker.Names, leaderLed bool, objects func(context.Context, string) error) (backend.Backend, error) {
+	state = holderState(state)
 	if state == "" {
-		rt := os.Getenv("XDG_RUNTIME_DIR")
-		if rt == "" {
-			return backend.Backend{}, errors.New("--backend=local: give --nsd-state, or set XDG_RUNTIME_DIR")
-		}
-		state = filepath.Join(rt, "silo", "nsd.state")
+		return backend.Backend{}, errors.New("--backend=local: give --nsd-state, or set XDG_RUNTIME_DIR")
 	}
-	var topo netfence.Topology
-	addrs := strings.Split(gateway, ",")
-	if len(addrs) != 2 {
-		return backend.Backend{}, fmt.Errorf("--local-gateway %q: want silo.internal's and docker.silo.internal's addresses", gateway)
-	}
-	for i, p := range []*netip.Addr{&topo.API, &topo.Docker} {
-		a, err := netip.ParseAddr(strings.TrimSpace(addrs[i]))
-		if err != nil || !a.Is4() {
-			return backend.Backend{}, fmt.Errorf("--local-gateway %q: %q is not an IPv4 address", gateway, addrs[i])
-		}
-		*p = a
-	}
-	o := local.Options{Store: db, NFT: local.HolderNFT(state, nft), Topology: netfence.Static(topo),
-		Storage: sd, Records: docker.Records}
+	o := local.Options{Store: db, NFT: local.HolderNFT(state, nft), Topology: docker.Topology(names.API, names.Docker),
+		Storage: sd, Records: docker.Records, Objects: objects}
 	if leaderLed {
 		o.Guard = leader.Guard
 		o.OnDrift = reconcile.AuditDriftNames(db, nil)
 	}
 	return local.New(o), nil
+}
+
+// holderState is --nsd-state, or its default under $XDG_RUNTIME_DIR;
+// "" with neither.
+func holderState(state string) string {
+	if state != "" {
+		return state
+	}
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		return filepath.Join(rt, "silo", "nsd.state")
+	}
+	return ""
+}
+
+// parseLocalGateway reads --local-gateway: silo.internal's and
+// docker.silo.internal's IPv4 addresses on gw0.
+func parseLocalGateway(gateway string) (docker.Names, error) {
+	var names docker.Names
+	addrs := strings.Split(gateway, ",")
+	if len(addrs) != 2 {
+		return names, fmt.Errorf("--local-gateway %q: want silo.internal's and docker.silo.internal's addresses", gateway)
+	}
+	for i, p := range []*netip.Addr{&names.API, &names.Docker} {
+		a, err := netip.ParseAddr(strings.TrimSpace(addrs[i]))
+		if err != nil || !a.Is4() {
+			return names, fmt.Errorf("--local-gateway %q: %q is not an IPv4 address", gateway, addrs[i])
+		}
+		*p = a
+	}
+	return names, nil
 }
 
 // bindHolder waits for silo-nsd, which writes its state once its

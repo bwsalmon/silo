@@ -40,13 +40,17 @@ func TestLocalBackend(t *testing.T) {
 	if err := db.Migrate(context.Background(), db.Latest()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := localBackend(db, nil, "/nowhere/nsd.state", "nft", "10.255.255.1", false); err == nil {
+	if _, err := parseLocalGateway("10.255.255.1"); err == nil {
 		t.Errorf("one gateway address was taken")
 	}
-	if _, err := localBackend(db, nil, "/nowhere/nsd.state", "nft", "10.255.255.1,fd00::2", false); err == nil {
+	if _, err := parseLocalGateway("10.255.255.1,fd00::2"); err == nil {
 		t.Errorf("an IPv6 gateway address was taken")
 	}
-	be, err := localBackend(db, nil, "/nowhere/nsd.state", "nft", "10.255.255.1, 10.255.255.2", true)
+	names, err := parseLocalGateway("10.255.255.1, 10.255.255.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	be, err := localBackend(db, nil, "/nowhere/nsd.state", "nft", names, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

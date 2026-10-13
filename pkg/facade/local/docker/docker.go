@@ -99,11 +99,21 @@ type Options struct {
 	// the egress proxy as silo, and stores nothing. Nil refuses logins
 	// to upstreams.
 	Login func(ctx context.Context, silo, server, username, password string) error
-	// Wire makes and wires a container's network namespace before the
-	// driver creates it, and returns its path. Nil gives a path under
-	// /run/silo/netns that nothing made, which only a fake driver
-	// accepts.
-	Wire func(ctx context.Context, c *Container) (netns string, err error)
+	// Wire makes and wires a container's namespaces before the driver
+	// creates it: a bridge for each of its networks (Network.Bridge;
+	// nets are the silo's, by id), and a veth on each, pinned to the
+	// endpoint's MAC and address. It names them in spec (NetNS, and
+	// UserNS and Root where it makes a user namespace). Nil leaves
+	// spec's NetNS a path under /run/silo/netns that nothing made,
+	// which only a fake driver accepts.
+	Wire func(ctx context.Context, c *Container, nets map[string]*Network, spec *runtime.Spec) error
+	// Unwire undoes Wire, once the driver has deleted the container or
+	// failed to make it. Nil does nothing.
+	Unwire func(ctx context.Context, c *Container) error
+	// Listeners are the gateway's published-port listeners: a start
+	// opens its container's, and a stop or a remove closes them. Nil
+	// opens none.
+	Listeners Listeners
 	// Caller identifies the caller of a request that carries none in
 	// its context (fenceapi.ContextWithCaller).
 	Caller func(*http.Request) (fenceapi.Caller, error)
