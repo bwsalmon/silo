@@ -282,6 +282,11 @@ type SilodOptions struct {
 	// forwards port 80's /git/ to, under GitSilodPath; it reads the
 	// caller from the context and serves /git/. Nil serves no repos.
 	Git http.Handler
+	// Registry is silod's registry service (package registry), which
+	// the gateway forwards port 80's registry.silo.internal to, under
+	// RegistrySilodPath; it reads the caller from the context and
+	// serves /v2/. Nil serves no repos.
+	Registry http.Handler
 }
 
 // Silod returns the handler silod serves on the gateway's Unix socket,
@@ -324,7 +329,8 @@ func (s *silod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	git := strings.HasPrefix(path, GitSilodPath+"/")
-	if !git && !strings.HasPrefix(path, "/compute/v1/") && !strings.HasPrefix(path, "/silo/v1/") {
+	reg := strings.HasPrefix(path, RegistrySilodPath+"/v2")
+	if !git && !reg && !strings.HasPrefix(path, "/compute/v1/") && !strings.HasPrefix(path, "/silo/v1/") {
 		notFound("silo: no such path "+path).write(w, path)
 		return
 	}
@@ -333,6 +339,15 @@ func (s *silod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := fenceapi.ContextWithCaller(r.Context(), caller)
+	if reg {
+		if s.opts.Registry == nil {
+			http.Error(w, "silo: this silod serves no registry", http.StatusNotFound)
+			return
+		}
+		r.URL.Path, r.URL.RawPath = strings.TrimPrefix(path, RegistrySilodPath), ""
+		s.opts.Registry.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
 	if git {
 		if s.opts.Git == nil {
 			http.Error(w, "silo: this silod serves no git repos", http.StatusNotFound)

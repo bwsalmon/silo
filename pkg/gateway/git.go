@@ -36,20 +36,26 @@ type gitState struct {
 type gitCall struct{ cancel context.CancelFunc }
 
 func (g *Gateway) newGitProxy(tr http.RoundTripper) *httputil.ReverseProxy {
+	return newForwarder(tr, "git", "/git", GitSilodPath)
+}
+
+// newForwarder forwards prefix's requests, streaming both ways, to
+// silodPath on silod's socket.
+func newForwarder(tr http.RoundTripper, what, prefix, silodPath string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport: tr,
 		// Packs and progress stream both ways.
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme, pr.Out.URL.Host, pr.Out.Host = "http", "silod", "silod"
-			pr.Out.URL.Path = GitSilodPath + strings.TrimPrefix(pr.In.URL.Path, "/git")
+			pr.Out.URL.Path = silodPath + strings.TrimPrefix(pr.In.URL.Path, prefix)
 			pr.Out.URL.RawPath = ""
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if r.Context().Err() != nil {
 				panic(http.ErrAbortHandler) // cut off: close the connection
 			}
-			log.Printf("gateway: forwarding git %s %s: %v", r.Method, r.URL.Path, err)
+			log.Printf("gateway: forwarding %s %s %s: %v", what, r.Method, r.URL.Path, err)
 			http.Error(w, "silo: silod is unreachable; retry", http.StatusServiceUnavailable)
 		},
 	}
@@ -59,6 +65,13 @@ func (g *Gateway) newGitProxy(tr http.RoundTripper) *httputil.ReverseProxy {
 // its source IP, with its silo and address. Git's Authorization header
 // means nothing here, and goes no further.
 func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
+	g.forwardPort80(w, r, g.gitProxy)
+}
+
+// forwardPort80 sends a port 80 request to silod through p, from a caller
+// known by its source IP, with its silo and address, cut off when the
+// caller's manage grants end.
+func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httputil.ReverseProxy) {
 	t, silo, ip, err := g.portOrigin(r)
 	if err != nil {
 		writeToolsError(w, err)
@@ -105,7 +118,7 @@ func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
 	}()
 	out := r.WithContext(ctx)
 	out.Body = pr
-	g.gitProxy.ServeHTTP(w, out)
+	p.ServeHTTP(w, out)
 }
 
 // closeGit cuts off the git requests in flight of every silo that held

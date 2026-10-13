@@ -42,7 +42,7 @@ func main() {
 	attach := flag.String("attach", toolchan.DefaultURL, "the tool channel's attach URL, on the gateway's port 80")
 	user := flag.String("user", "agent", "the user commands run as, when silo-tools runs as root")
 	proxy := flag.String("proxy", "http://silo.internal:3128", "the egress proxy, set as HTTPS_PROXY and HTTP_PROXY for commands")
-	noProxy := flag.String("no-proxy", "localhost,127.0.0.1,::1,silo.internal,metadata.google.internal,169.254.169.254", "NO_PROXY for commands")
+	noProxy := flag.String("no-proxy", "localhost,127.0.0.1,::1,silo.internal,registry.silo.internal,metadata.google.internal,169.254.169.254", "NO_PROXY for commands")
 	prefix := flag.String("name-prefix", "", "SILO_NAME_PREFIX for commands; the instance metadata's silo-name-prefix if empty")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
