@@ -157,6 +157,9 @@ type Options struct {
 	// Repos keeps silo repos on disk (local-git.md); with none, creating
 	// one is FAILED_PRECONDITION.
 	Repos RepoHost
+	// Git serves git-remote-silo's connections at the front door; nil
+	// refuses them.
+	Git GitConnector
 }
 
 // Server serves silo/v1.
@@ -458,6 +461,11 @@ var handlers = map[string]func(s *Server, q *request, c control.FenceCall){
 	control.OpReposDelete: func(s *Server, q *request, c control.FenceCall) {
 		s.mutating(q, func(q *request) (any, error) { return s.deleteRepo(q, c.Ref, c.ID) }, true)
 	},
+	control.OpReposArchives: func(s *Server, q *request, c control.FenceCall) { s.listArchives(q, c.Ref, c.ID) },
+	control.OpReposRestoreRef: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.restoreRef(q, c.Ref, c.ID) }, true)
+	},
+	control.OpReposGit:       func(s *Server, q *request, c control.FenceCall) { s.gitConnect(q, c.Ref, c.ID) },
 	control.OpImageReposList: func(s *Server, q *request, c control.FenceCall) { s.listImageRepos(q, c.Ref) },
 	control.OpImageReposGet:  func(s *Server, q *request, c control.FenceCall) { s.getImageRepo(q, c.Ref, c.ID) },
 	control.OpImageReposTags: func(s *Server, q *request, c control.FenceCall) { s.imageRepoTags(q, c.Ref, c.ID) },

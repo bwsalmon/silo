@@ -24,6 +24,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/gitserve"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
@@ -89,6 +90,9 @@ type envOptions struct {
 	silodSkipsControl   bool // the gateway's check alone
 	gatewaySkipsNow     func() bool
 	silodWait           time.Duration
+	// repos and git are silod's repos and git service, if any.
+	repos fenceapi.RepoHost
+	git   *gitserve.Service
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
@@ -108,7 +112,7 @@ func newEnv(t *testing.T, o envOptions) *env {
 	fc := facade.New(db, facade.Options{GCE: gce, HostProject: host, SkipControl: o.silodSkipsControl})
 	// Agents' tool VMs are made through the facade, as in silod.
 	api := fenceapi.New(db, fenceapi.Options{SkipControl: o.silodSkipsControl, ToolVMs: fc.ToolVMs(), Runner: &agents.Fake{},
-		Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"}})
+		Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"}, Repos: o.repos, Git: gitConnector(o.git)})
 	mux := http.NewServeMux()
 	mux.Handle("/compute/v1/", fc)
 	mux.Handle("/", api)
@@ -131,7 +135,11 @@ func newEnv(t *testing.T, o envOptions) *env {
 	pub := NewPublisher(db)
 	pctx, stopPub := context.WithCancel(ctx)
 	go pub.Run(pctx)
-	ssrv := &http.Server{Handler: Silod(db, SilodOptions{API: mux, Publisher: pub, Tools: e.tools})}
+	var git http.Handler
+	if o.git != nil {
+		git = o.git
+	}
+	ssrv := &http.Server{Handler: Silod(db, SilodOptions{API: mux, Publisher: pub, Tools: e.tools, Git: git})}
 	go ssrv.Serve(l)
 
 	e.resolver = &fakeResolver{names: map[string][]netip.Addr{}}
@@ -211,6 +219,14 @@ func newEnv(t *testing.T, o envOptions) *env {
 	e.ok(e.root, "PATCH", "/silo/v1/silos/sealed", obj{"control": "none"})
 	e.sync()
 	return e
+}
+
+// gitConnector is s, or a nil interface if s is nil.
+func gitConnector(s *gitserve.Service) fenceapi.GitConnector {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // mk creates a child of parent, as the root.

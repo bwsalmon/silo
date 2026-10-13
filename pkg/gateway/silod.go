@@ -278,6 +278,10 @@ type SilodOptions struct {
 	// silo, or "" (fenceapi's Server.ToolVMAgentAt). A call it names is
 	// audited with from_tool_vm; nil notes none.
 	ToolVMAgent func(ctx context.Context, silo string, ip netip.Addr) (string, error)
+	// Git is silod's git service (package gitserve), which the gateway
+	// forwards port 80's /git/ to, under GitSilodPath; it reads the
+	// caller from the context and serves /git/. Nil serves no repos.
+	Git http.Handler
 }
 
 // Silod returns the handler silod serves on the gateway's Unix socket,
@@ -319,18 +323,42 @@ func (s *silod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.attach(w, r)
 		return
 	}
-	if !strings.HasPrefix(path, "/compute/v1/") && !strings.HasPrefix(path, "/silo/v1/") {
+	git := strings.HasPrefix(path, GitSilodPath+"/")
+	if !git && !strings.HasPrefix(path, "/compute/v1/") && !strings.HasPrefix(path, "/silo/v1/") {
 		notFound("silo: no such path "+path).write(w, path)
 		return
 	}
+	caller, ok := s.origin(w, r, h)
+	if !ok {
+		return
+	}
+	ctx := fenceapi.ContextWithCaller(r.Context(), caller)
+	if git {
+		if s.opts.Git == nil {
+			http.Error(w, "silo: this silod serves no git repos", http.StatusNotFound)
+			return
+		}
+		r.URL.Path, r.URL.RawPath = "/git"+strings.TrimPrefix(path, GitSilodPath), ""
+		s.opts.Git.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
+	s.opts.API.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// origin is the caller of a call the gateway forwarded, with Silo-Origin
+// h: once Stale says no change since the gateway's tables could affect
+// it, the silo, via origin, and the agent whose tool VM it came from,
+// if any. Otherwise it writes the refusal.
+func (s *silod) origin(w http.ResponseWriter, r *http.Request, h []string) (fenceapi.Caller, bool) {
+	path := r.URL.Path
 	if len(h) != 1 {
 		forbidden("silo: more than one "+OriginHeader).write(w, path)
-		return
+		return fenceapi.Caller{}, false
 	}
 	id, version, err := ParseOrigin(h[0])
 	if err != nil {
 		forbidden("silo: "+err.Error()).write(w, path)
-		return
+		return fenceapi.Caller{}, false
 	}
 	var newest uint64
 	err = s.st.Tx(r.Context(), func(tx store.Tx) error {
@@ -340,21 +368,21 @@ func (s *silod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		unavailable("silo: checking the origin: "+err.Error()).write(w, path)
-		return
+		return fenceapi.Caller{}, false
 	}
 	if newest != 0 {
 		e := unavailable(fmt.Sprintf("silo: the gateway's origin table (version %d) is older than change %d, which affects the caller; retry", version, newest))
 		e.details = map[string]any{"origin_version": version, "change": newest}
 		w.Header().Set("Retry-After", "1")
 		e.write(w, path)
-		return
+		return fenceapi.Caller{}, false
 	}
 	caller := fenceapi.Caller{Silo: id, Via: fenceapi.ViaOrigin}
 	if ip, err := netip.ParseAddr(r.Header.Get(OriginAddressHeader)); err == nil && s.opts.ToolVMAgent != nil {
 		agent, err := s.opts.ToolVMAgent(r.Context(), id, ip)
 		if err != nil {
 			unavailable("silo: looking up the caller's tool VM: "+err.Error()).write(w, path)
-			return
+			return fenceapi.Caller{}, false
 		}
 		caller.FromToolVM = agent
 	}
@@ -363,8 +391,7 @@ func (s *silod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Header.Del(k)
 		}
 	}
-	ctx := fenceapi.ContextWithCaller(r.Context(), caller)
-	s.opts.API.ServeHTTP(w, r.WithContext(ctx))
+	return caller, true
 }
 
 // tables streams the tables to the gateway, one JSON object a line:
