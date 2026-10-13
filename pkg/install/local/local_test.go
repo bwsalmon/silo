@@ -312,3 +312,33 @@ func TestSubIDs(t *testing.T) {
 		}
 	}
 }
+
+// --registry-host-port reaches silod's unit as --registry-host-listen
+// on 127.0.0.1, and turning it on rewrites silod.service alone.
+func TestRegistryHostPort(t *testing.T) {
+	ctx := context.Background()
+	f := newFake()
+	var progress bytes.Buffer
+	c := rootlessConfig()
+	if err := install.Apply(ctx, Steps(c, f.host(1000, &progress)), &progress); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.files["/units/silod.service"], "--registry-host-listen") {
+		t.Errorf("port 0 listens:\n%s", f.files["/units/silod.service"])
+	}
+	c.RegistryHostPort = 5115
+	steps := Steps(c, f.host(1000, &progress))
+	got := changes(install.PlanAll(ctx, steps))
+	hasAll(t, got, "units update silod.service")
+	for _, g := range got {
+		if strings.HasPrefix(g, "units update") && g != "units update silod.service" {
+			t.Errorf("turning the port on changed %s", g)
+		}
+	}
+	if err := install.Apply(ctx, steps, &progress); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.files["/units/silod.service"], " --registry-host-listen 127.0.0.1:5115\n") {
+		t.Errorf("silod.service:\n%s", f.files["/units/silod.service"])
+	}
+}

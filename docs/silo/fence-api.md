@@ -869,6 +869,9 @@ nothing outside silod makes one.
 - `identity` is `user:alice@example.com` or
   `serviceAccount:ci@other-project.iam.gserviceaccount.com`. It is
   checked against the front door's verified email.
+- On the local backend it is also `uid:1000`, a host user, in decimal:
+  the uid the kernel reports for the caller of a host front door
+  (`SO_PEERCRED`, or `inet_diag` on the registry's host port).
 - An identity maps to exactly one silo. Mapping it again moves it.
   Only an ancestor of both the old silo and the new one may move it.
 - Called by an ancestor of `{silo}`. The root's members are set by

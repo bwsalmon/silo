@@ -49,7 +49,16 @@ type Config struct {
 	User string
 	// Silod is the silod binary the units run.
 	Silod string
+	// RegistryHostPort is the registry's port for host clients on
+	// 127.0.0.1 (--registry-host-port); 0 turns it off.
+	RegistryHostPort int
 }
+
+// DefaultRegistryHostPort is --registry-host-port's default. Whether the
+// host port is on by default is local-registry.md's open question 37;
+// until it is answered, it is off, and install opens it only when
+// asked (hostdoor.Port is the port the design names).
+const DefaultRegistryHostPort = 0
 
 // Runner runs a command and returns its combined output. Tests replace
 // it.
@@ -215,7 +224,7 @@ func Steps(c Config, h Host) []install.Step {
 // unitsConfig is c's units.Config: silo-buildkitd only where buildkitd
 // is installed.
 func unitsConfig(c Config, report rootless.Report) units.Config {
-	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir}
+	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort}
 	if c.Mode == units.System {
 		uc.User = c.User
 	}

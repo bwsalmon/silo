@@ -61,6 +61,10 @@ type Config struct {
 	// image wraps need. Without buildkitd on the host it would only
 	// fail.
 	Buildkitd bool
+	// RegistryHostPort is the registry's host port for registry clients
+	// on 127.0.0.1 (local-registry.md §5), which silod serves with
+	// --registry-host-listen; 0 serves none.
+	RegistryHostPort int
 }
 
 // Unit is one unit file.
@@ -121,6 +125,9 @@ func (c Config) Validate() error {
 	}
 	if !filepath.IsAbs(c.DataDir) {
 		errs = append(errs, fmt.Errorf("units: data directory %q is not an absolute path", c.DataDir))
+	}
+	if c.RegistryHostPort < 0 || c.RegistryHostPort > 65535 {
+		errs = append(errs, fmt.Errorf("units: registry host port %d: want 1 to 65535, or 0 for none", c.RegistryHostPort))
 	}
 	for _, s := range []string{c.Silod, c.DataDir, c.User} {
 		if strings.ContainsAny(s, " \t\n\"'\\%$") {
@@ -211,6 +218,9 @@ func Units(c Config) ([]Unit, error) {
 	serve := fmt.Sprintf("ExecStart=%s serve --backend=local --data-dir %s --migrate --socket %s", c.Silod, data, c.Socket())
 	if c.Mode == System {
 		serve += " --nsd-state " + rt + "/nsd.state"
+	}
+	if c.RegistryHostPort != 0 {
+		serve += fmt.Sprintf(" --registry-host-listen 127.0.0.1:%d", c.RegistryHostPort)
 	}
 	add(Silod, "Silo's control plane (silod), local backend",
 		[]string{"Wants=" + deps, "After=" + deps},

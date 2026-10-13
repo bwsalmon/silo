@@ -545,6 +545,21 @@ The split is git's ([call L44](local-git.md#sealed-and-read-silos-call-l44)):
   - *Verify* (plan item 29): that `inet_diag` reports the owning uid of
     a loopback peer to an unprivileged silod, and in which kernel
     versions.
+    *Verified in task 3482* on Debian 12's 6.1 kernel, as an
+    unprivileged user: an exact `SOCK_DIAG_BY_FAMILY` lookup of the
+    peer's socket (`inet_diag_req_v2`, no `NLM_F_DUMP`, no cookie)
+    returns its owner's uid, and a sudo'd client running as `nobody`
+    is told apart from the test's own uid. In the kernel's source the
+    TCP lookup has no capability check, `inet_diag_req_v2` is 3.3's,
+    and the uid has been translated into the asker's user namespace
+    since about 3.8 (an unmapped uid would read as 65534, the overflow uid,
+    so silod and its callers must share a user namespace, as they do
+    on the host). Two cases report no owner and are refused as a peer
+    that can't be found: a peer gone with a reset (`ENOENT`), and one
+    left only as a `TIME_WAIT` remnant, which the kernel reports *as
+    uid 0*. Taking that for root is the one way this lookup could go
+    wrong, so the answer's state is checked, as are its addresses and
+    ports.
   - The port is set at install (`--registry-host-port`, `0` turns it
     off). Whether it should be on by default is
     [open question 37](#open-questions).
@@ -1439,6 +1454,21 @@ earlier depends on them. Each can be filed on its own, in this order.
 29. **The host front door for registry clients:** the loopback listener,
     the `inet_diag` uid lookup and its verification across kernels, and
     `--registry-host-port`. Depends on 27.
+
+    *Landed in task 3482:* `pkg/hostdoor`, the listener (each accepted
+    connection's peer looked up with `inet_diag`, and closed unread
+    if it can't be found) and its handler, which maps the uid per
+    request through the member table, whose identities now include
+    `uid:<n>`, via `frontdoor.MemberSilo`, the GCP front door's own
+    mapping. silod serves it with `--registry-host-listen` (loopback
+    addresses only, local backend only), and `silo install --backend
+    local --registry-host-port <port>` puts that on silod's unit.
+    `--registry-host-port` defaults to 0, off, until open question 37
+    is answered. Until step 27b wires the registry service into
+    silod, the host port maps its callers and answers 404 to a
+    mapped one. Nothing maps the installing user's uid to the root
+    yet; that is the local install's root-silo step (local-backend.md
+    §12, step 4).
 30. **The Docker facade:**
     - `push` to the local registry;
     - pulls of local repos without egress;
