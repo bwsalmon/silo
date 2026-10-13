@@ -107,6 +107,10 @@ type Service struct {
 	grace map[string]map[string]graceBlob
 	// flights are the cache's upstream fetches in progress, by object.
 	flights map[string]*flight
+	// authz are the cache's authorisations for private content, by
+	// silo, upstream and repo, then manifest digest (private.go). They
+	// are held here only.
+	authz map[string]map[string]authorisation
 	// evictMu is held by one eviction at a time.
 	evictMu sync.Mutex
 }
@@ -137,7 +141,7 @@ func New(opts Options) *Service {
 		opts.Idle = DefaultIdle
 	}
 	return &Service{opts: opts, uploads: map[string]*upload{}, grace: map[string]map[string]graceBlob{},
-		flights: map[string]*flight{}}
+		flights: map[string]*flight{}, authz: map[string]map[string]authorisation{}}
 }
 
 // SetAPI sets Options.API, for a service made before the fence API.
@@ -157,6 +161,7 @@ const (
 	codeSizeInvalid       = "SIZE_INVALID"
 	codeUnsupported       = "UNSUPPORTED"
 	codeDenied            = "DENIED"
+	codeUnauthorized      = "UNAUTHORIZED"
 	codeTooMany           = "TOOMANYREQUESTS"
 )
 
@@ -180,6 +185,11 @@ func writeErr(w http.ResponseWriter, r *http.Request, err error) {
 		e = rerr(http.StatusInternalServerError, "UNKNOWN", "silo: %v", err)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if e.status == http.StatusUnauthorized {
+		// Private upstream content (call L72): registry clients send the
+		// credentials they have for the upstream.
+		w.Header().Set("Www-Authenticate", `Basic realm="`+imagerepos.Host+`"`)
+	}
 	w.WriteHeader(e.status)
 	if r.Method == http.MethodHead {
 		return
@@ -202,6 +212,9 @@ type request struct {
 	// held is a push by the Docker facade (PushHeld), whose caller's
 	// image record is its proof that it has the blobs.
 	held bool
+	// creds are the Basic credentials a request on an upstream path
+	// carried, for the upstream (call L72).
+	creds *Credentials
 }
 
 func (q *request) ctx() context.Context { return q.r.Context() }
@@ -215,7 +228,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The caller is its origin; Authorization, if a client sends one,
-	// means nothing for a local repo (call L66).
+	// means nothing for a local repo (call L66). On an upstream path it
+	// is the caller's credentials for the upstream, for this request.
+	creds := BasicCredentials(r)
 	r.Header.Del("Authorization")
 	c.Manage = ""
 	s.sweep(r.Context())
@@ -245,6 +260,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	q := &request{w: w, r: r, caller: c, name: n}
 	if !n.Local() {
+		q.creds = creds
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			writeErr(w, r, rerr(http.StatusMethodNotAllowed, codeUnsupported,
 				"silo: the cache is read-only; push to %s/<silo path>/<repo>", imagerepos.Host))

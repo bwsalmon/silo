@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,7 +41,9 @@ import (
 // hop. The upstream list is not an allowlist.
 //
 // Tags are revalidated on every request; digests aren't. Concurrent
-// misses on one object share one upstream fetch.
+// misses on one public object share one upstream fetch. Private
+// content (private.go) is served only after the caller's own
+// credentials revalidate it, and its fetches are never shared.
 //
 // The index is per sharing domain (call L73): the nearest silo, the
 // caller or an ancestor, that sets images.sharing isolated itself, or
@@ -48,7 +51,7 @@ import (
 // never by the content store, so a miss in an isolated domain is a
 // full upstream fetch even when the bytes are on disk, and the
 // duplicate is dropped at commit. Facade pulls are requests like any
-// other. Private content is a later step (32).
+// other.
 
 // Egress carries the cache's upstream requests through the gateway's
 // egress proxy as a silo.
@@ -135,6 +138,10 @@ type cacheObject struct {
 	size      int64
 	hosts     []CacheHost
 	fetchedAt time.Time
+	// private is whether the upstream wanted credentials for it, as of
+	// classifiedAt (private.go).
+	private      bool
+	classifiedAt time.Time
 }
 
 // cacheIndex is where a sharing domain's entries are (call L73): the
@@ -163,10 +170,11 @@ func (s *Service) cacheObject(ctx context.Context, tx store.Tx, domain, up, repo
 	x := indexOf(domain)
 	var o cacheObject
 	var hosts string
-	var fetched int64
-	err := tx.QueryRow(ctx, `SELECT digest, media_type, size, hosts, fetched_at FROM `+x.objects+`
+	var fetched, classified int64
+	var private int
+	err := tx.QueryRow(ctx, `SELECT digest, media_type, size, hosts, fetched_at, private, classified_at FROM `+x.objects+`
 		WHERE `+x.where+`upstream = ? AND repo = ? AND digest = ? AND kind = ?`, x.args(up, repo, digest, kind)...).
-		Scan(&o.digest, &o.mediaType, &o.size, &hosts, &fetched)
+		Scan(&o.digest, &o.mediaType, &o.size, &hosts, &fetched, &private, &classified)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -177,6 +185,7 @@ func (s *Service) cacheObject(ctx context.Context, tx store.Tx, domain, up, repo
 		return nil, fmt.Errorf("cache entry %s/%s@%s: hosts: %w", up, repo, digest, err)
 	}
 	o.fetchedAt = time.UnixMilli(fetched)
+	o.private, o.classifiedAt = private != 0, time.UnixMilli(classified)
 	return &o, nil
 }
 
@@ -189,10 +198,12 @@ func (s *Service) putCacheObject(ctx context.Context, domain, up, repo, kind str
 	now := store.Millis(s.opts.Now())
 	return s.opts.Store.Tx(ctx, func(tx store.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO `+x.objects+`
-			(`+x.cols+`upstream, repo, digest, kind, media_type, size, hosts, fetched_at, accessed_at) VALUES (`+x.marks+`?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(`+x.cols+`upstream, repo, digest, kind, media_type, size, hosts, fetched_at, accessed_at, private, classified_at)
+			VALUES (`+x.marks+`?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (`+x.cols+`upstream, repo, digest) DO UPDATE SET kind = excluded.kind, media_type = excluded.media_type,
-			size = excluded.size, hosts = excluded.hosts, fetched_at = excluded.fetched_at, accessed_at = excluded.accessed_at`,
-			x.args(up, repo, o.digest, kind, o.mediaType, o.size, string(hosts), now, now)...)
+			size = excluded.size, hosts = excluded.hosts, fetched_at = excluded.fetched_at, accessed_at = excluded.accessed_at,
+			private = excluded.private, classified_at = excluded.classified_at`,
+			x.args(up, repo, o.digest, kind, o.mediaType, o.size, string(hosts), now, now, boolInt(o.private), store.Millis(o.classifiedAt))...)
 		return err
 	})
 }
@@ -231,6 +242,9 @@ type cacheReq struct {
 	// a configured upstream; pullID is its image.pull record's.
 	facade bool
 	pullID string
+	// creds are the caller's own for the upstream, on this request
+	// only; nil if it presented none. Never recorded.
+	creds *Credentials
 
 	up       fenceapi.CacheUpstream
 	cfg      fenceapi.CacheSettings
@@ -244,13 +258,14 @@ type cacheReq struct {
 	domainPath string
 
 	// What the audit record says.
-	result string
-	digest string
-	bytes  int64
-	hosts  []CacheHost
-	auth   string
-	denied string
-	status int
+	result  string
+	digest  string
+	bytes   int64
+	hosts   []CacheHost
+	auth    string
+	denied  string
+	status  int
+	private bool
 }
 
 // begin reads the configuration and the caller's effective egress
@@ -327,7 +342,7 @@ func (s *Service) hit(ctx context.Context, cr *cacheReq, o *cacheObject, kind st
 	if kind != kindBlob || h.Role != HostRedirect || cr.check(withoutRole(o.hosts, HostRedirect)) != nil {
 		return cr.refuse(h.Host)
 	}
-	now, err := s.probeBlob(ctx, cr, o.digest)
+	now, err := s.probeBlob(ctx, cr, o)
 	if err != nil {
 		var r *EgressRefusal
 		if errors.As(err, &r) {
@@ -369,22 +384,29 @@ type upstreamErr struct {
 func (e *upstreamErr) Error() string { return e.msg }
 
 // fetcher is one caller's requests to one upstream: through the egress
-// proxy as the caller, following redirects and the anonymous token
-// exchange itself, and recording every host it used.
+// proxy as the caller, following redirects and the token exchange
+// itself, and recording every host it used. creds, if set, are the
+// caller's own, sent only to the API host and the token realm; the
+// token they get lives as long as the fetcher.
 type fetcher struct {
 	cr     *cacheReq
 	rt     http.RoundTripper
 	hosts  []CacheHost
+	creds  *Credentials
 	token  string
+	basic  bool
 	auth   string
 	maxHop int
+	// stopAtRedirect returns a redirect instead of following it.
+	stopAtRedirect bool
 }
 
-func (s *Service) fetcherFor(cr *cacheReq) (*fetcher, error) {
+// fetcherFor is a fetcher for cr's caller, anonymous if creds is nil.
+func (s *Service) fetcherFor(cr *cacheReq, creds *Credentials) (*fetcher, error) {
 	if s.opts.Egress == nil {
 		return nil, rerr(http.StatusServiceUnavailable, "UNAVAILABLE", "silo: this silod fetches from no upstream")
 	}
-	return &fetcher{cr: cr, rt: s.opts.Egress.Transport(cr.caller.Silo), auth: "none", maxHop: 10}, nil
+	return &fetcher{cr: cr, rt: s.opts.Egress.Transport(cr.caller.Silo), creds: creds, auth: "none", maxHop: 10}, nil
 }
 
 func (f *fetcher) record(h CacheHost) {
@@ -426,9 +448,11 @@ func (f *fetcher) roundTrip(ctx context.Context, method string, u *url.URL, hdr 
 	return resp, nil
 }
 
-// get makes method on path of the upstream's API, with the anonymous
-// token exchange on a Bearer challenge, following redirects. A
-// redirect's hosts are recorded as role redirect, and carry no token.
+// get makes method on path of the upstream's API, with the token
+// exchange on a Bearer challenge (anonymous, or with the fetcher's
+// credentials) or its credentials on a Basic one, following redirects.
+// A redirect's hosts are recorded as role redirect, and carry no token
+// or credential.
 func (f *fetcher) get(ctx context.Context, method, path string, accept string) (*http.Response, error) {
 	base, err := url.Parse(f.cr.up.Endpoint)
 	if err != nil {
@@ -442,23 +466,27 @@ func (f *fetcher) get(ctx context.Context, method, path string, accept string) (
 	role := HostAPI
 	for hop := 0; ; hop++ {
 		h := hdr.Clone()
-		if f.token != "" && role == HostAPI {
+		switch {
+		case role != HostAPI:
+		case f.token != "":
 			h.Set("Authorization", "Bearer "+f.token)
+		case f.basic:
+			h.Set("Authorization", basicAuth(f.creds))
 		}
 		resp, err := f.roundTrip(ctx, method, u, h, role)
 		if err != nil {
 			return nil, err
 		}
 		switch {
-		case resp.StatusCode == http.StatusUnauthorized && role == HostAPI && f.token == "":
+		case resp.StatusCode == http.StatusUnauthorized && role == HostAPI && f.token == "" && !f.basic:
 			ch := resp.Header.Get("Www-Authenticate")
 			resp.Body.Close()
-			if err := f.anonymousToken(ctx, ch); err != nil {
+			if err := f.authenticate(ctx, ch); err != nil {
 				return nil, err
 			}
 			hop--
 			continue
-		case resp.StatusCode >= 300 && resp.StatusCode < 400 && resp.Header.Get("Location") != "":
+		case resp.StatusCode >= 300 && resp.StatusCode < 400 && resp.Header.Get("Location") != "" && !f.stopAtRedirect:
 			resp.Body.Close()
 			if hop >= f.maxHop {
 				return nil, &upstreamErr{status: http.StatusBadGateway, msg: "silo: the upstream redirects too often"}
@@ -477,13 +505,24 @@ func (f *fetcher) get(ctx context.Context, method, path string, accept string) (
 	}
 }
 
-// anonymousToken does the distribution token exchange for an
-// anonymous pull, as Docker does for a public image: a GET of the
-// Bearer challenge's realm, with its service and scope.
-func (f *fetcher) anonymousToken(ctx context.Context, challenge string) error {
+func basicAuth(c *Credentials) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(c.Username+":"+c.Password))
+}
+
+// authenticate answers the upstream's challenge: the distribution token
+// exchange on a Bearer challenge, as Docker does, a GET of the realm
+// with its service and scope, anonymous or with the fetcher's
+// credentials; or, on a Basic challenge, the credentials themselves on
+// the requests that follow. Without credentials, a Basic challenge is
+// the upstream wanting them.
+func (f *fetcher) authenticate(ctx context.Context, challenge string) error {
 	scheme, params := parseChallenge(challenge)
+	if strings.EqualFold(scheme, "basic") && f.creds != nil {
+		f.basic, f.auth = true, "credentials"
+		return nil
+	}
 	if !strings.EqualFold(scheme, "bearer") || params["realm"] == "" {
-		return &upstreamErr{status: http.StatusUnauthorized, msg: "silo: the upstream wants credentials; private upstream images are not served yet"}
+		return &upstreamErr{status: http.StatusUnauthorized, msg: "silo: the upstream wants credentials"}
 	}
 	realm, err := url.Parse(params["realm"])
 	if err != nil || (realm.Scheme != "https" && realm.Scheme != "http") {
@@ -496,7 +535,11 @@ func (f *fetcher) anonymousToken(ctx context.Context, challenge string) error {
 		}
 	}
 	realm.RawQuery = q.Encode()
-	resp, err := f.roundTrip(ctx, http.MethodGet, realm, nil, HostToken)
+	var hdr http.Header
+	if f.creds != nil {
+		hdr = http.Header{"Authorization": {basicAuth(f.creds)}}
+	}
+	resp, err := f.roundTrip(ctx, http.MethodGet, realm, hdr, HostToken)
 	if err != nil {
 		return err
 	}
@@ -520,6 +563,9 @@ func (f *fetcher) anonymousToken(ctx context.Context, challenge string) error {
 		return &upstreamErr{status: http.StatusBadGateway, msg: "silo: the upstream's token service gave no token"}
 	}
 	f.auth = "anonymous"
+	if f.creds != nil {
+		f.auth = "credentials"
+	}
 	return nil
 }
 
@@ -592,7 +638,8 @@ func (s *Service) once(key string, fetch func() (*cacheObject, error)) (o *cache
 
 // fetchShared is once, falling back to the caller's own fetch when the
 // shared one failed: another silo's fetch can fail for reasons that
-// are that silo's, such as its egress.
+// are that silo's, such as its egress. Anonymous fetches only: a fetch
+// with a caller's credentials is never shared (call L72).
 func (s *Service) fetchShared(key string, fetch func() (*cacheObject, error)) (*cacheObject, error) {
 	o, shared, err := s.once(key, fetch)
 	if err != nil && shared {
@@ -603,7 +650,7 @@ func (s *Service) fetchShared(key string, fetch func() (*cacheObject, error)) (*
 
 // fetchManifest fetches ref's manifest from the upstream as the
 // caller, stores it and records it under its digest, which is checked
-// against the bytes.
+// against the bytes, as private if f has the caller's credentials.
 func (s *Service) fetchManifest(ctx context.Context, cr *cacheReq, f *fetcher, ref string) (*cacheObject, error) {
 	resp, err := f.get(ctx, http.MethodGet, "/v2/"+cr.name.UpstreamRepo+"/manifests/"+ref, manifestAccept)
 	if err != nil {
@@ -638,12 +685,14 @@ func (s *Service) fetchManifest(ctx context.Context, cr *cacheReq, f *fetcher, r
 	if err := s.store(ctx, cacheEntry(cr.domain, cr.name.Upstream, cr.name.UpstreamRepo, d), mt, d, int64(len(b)), strings.NewReader(string(b))); err != nil {
 		return nil, err
 	}
-	o := &cacheObject{digest: d, mediaType: mt, size: int64(len(b)), hosts: f.hosts, fetchedAt: s.opts.Now()}
+	o := &cacheObject{digest: d, mediaType: mt, size: int64(len(b)), hosts: f.hosts, fetchedAt: s.opts.Now(),
+		private: f.creds != nil, classifiedAt: s.opts.Now()}
 	return o, s.putCacheObject(ctx, cr.domain, cr.name.Upstream, cr.name.UpstreamRepo, kindManifest, o)
 }
 
 // fetchBlob fetches digest from the upstream as the caller, following
-// its redirects, and stores it, checked against the digest.
+// its redirects, and stores it, checked against the digest, as private
+// if f has the caller's credentials.
 func (s *Service) fetchBlob(ctx context.Context, cr *cacheReq, f *fetcher, digest string) (*cacheObject, error) {
 	resp, err := f.get(ctx, http.MethodGet, "/v2/"+cr.name.UpstreamRepo+"/blobs/"+digest, "")
 	if err != nil {
@@ -662,7 +711,8 @@ func (s *Service) fetchBlob(ctx context.Context, cr *cacheReq, f *fetcher, diges
 			return nil, err
 		}
 	}
-	o := &cacheObject{digest: digest, size: n, hosts: f.hosts, fetchedAt: s.opts.Now()}
+	o := &cacheObject{digest: digest, size: n, hosts: f.hosts, fetchedAt: s.opts.Now(),
+		private: f.creds != nil, classifiedAt: s.opts.Now()}
 	return o, s.putCacheObject(ctx, cr.domain, cr.name.Upstream, cr.name.UpstreamRepo, kindBlob, o)
 }
 
@@ -700,14 +750,19 @@ func (s *Service) store(ctx context.Context, entry, mediaType, digest string, si
 		Image{Name: entry, Digest: digest, MediaType: mediaType, Size: size})
 }
 
-// probeBlob asks the upstream for digest as the caller, follows its
-// redirects without reading the body, and returns the hosts it used.
-func (s *Service) probeBlob(ctx context.Context, cr *cacheReq, digest string) ([]CacheHost, error) {
-	f, err := s.fetcherFor(cr)
+// probeBlob asks the upstream for o as the caller, with its
+// credentials if o is private, follows its redirects without reading
+// the body, and returns the hosts it used.
+func (s *Service) probeBlob(ctx context.Context, cr *cacheReq, o *cacheObject) ([]CacheHost, error) {
+	var creds *Credentials
+	if o.private {
+		creds = cr.creds
+	}
+	f, err := s.fetcherFor(cr, creds)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := f.get(ctx, http.MethodGet, "/v2/"+cr.name.UpstreamRepo+"/blobs/"+digest, "")
+	resp, err := f.get(ctx, http.MethodGet, "/v2/"+cr.name.UpstreamRepo+"/blobs/"+o.digest, "")
 	if err != nil {
 		return nil, err
 	}
@@ -740,16 +795,22 @@ func (s *Service) cacheManifest(ctx context.Context, cr *cacheReq) (*cacheObject
 		})
 		return o, err
 	}
-	digest := cr.ref
+	digest, class := cr.ref, ""
 	if !imagerepos.ValidDigest(cr.ref) {
 		if !imagerepos.ValidTag(cr.ref) {
 			return nil, rerr(http.StatusNotFound, codeManifestUnknown, "silo: %q is neither a tag nor a digest", cr.ref)
 		}
-		d, err := s.revalidate(ctx, cr)
+		d, c, err := s.revalidate(ctx, cr)
 		if err != nil {
 			return nil, err
 		}
-		digest = d
+		digest, class = d, c
+	}
+	// A tag's HEAD with the caller's credentials has revalidated the
+	// digest it named.
+	validated := ""
+	if class == classPrivate {
+		validated = digest
 	}
 	o, err := lookup(digest)
 	if err != nil {
@@ -759,35 +820,60 @@ func (s *Service) cacheManifest(ctx context.Context, cr *cacheReq) (*cacheObject
 		if cr.result == "" {
 			cr.result = CacheHit
 		}
-		return o, s.hit(ctx, cr, o, kindManifest)
+		if err := s.hit(ctx, cr, o, kindManifest); err != nil {
+			return nil, err
+		}
+		return o, s.allowManifest(ctx, cr, o, class, validated)
 	}
 	cr.result = CacheMiss
-	f, err := s.fetcherFor(cr)
+	if class != classPrivate {
+		f, err := s.fetcherFor(cr, nil)
+		if err != nil {
+			return nil, err
+		}
+		o, err = s.fetchShared(cr.domain+" "+kindManifest+" "+up+"/"+repo+"@"+digest, func() (*cacheObject, error) {
+			return s.fetchManifest(ctx, cr, f, digest)
+		})
+		cr.auth = f.auth
+		if err == nil {
+			return o, s.hit(ctx, cr, o, kindManifest)
+		}
+		if !needsCredentials(err) {
+			return nil, cr.upstreamFailed(err)
+		}
+	}
+	// Private: the caller's own fetch, never shared, which is its
+	// revalidation.
+	cr.private = true
+	if cr.creds == nil {
+		return nil, cr.challenge()
+	}
+	f, err := s.fetcherFor(cr, cr.creds)
 	if err != nil {
 		return nil, err
 	}
-	o, err = s.fetchShared(cr.domain+" "+kindManifest+" "+up+"/"+repo+"@"+digest, func() (*cacheObject, error) {
-		return s.fetchManifest(ctx, cr, f, digest)
-	})
+	o, err = s.fetchManifest(ctx, cr, f, digest)
 	cr.auth = f.auth
 	if err != nil {
 		return nil, cr.upstreamFailed(err)
 	}
-	return o, s.hit(ctx, cr, o, kindManifest)
+	if err := s.hit(ctx, cr, o, kindManifest); err != nil {
+		return nil, err
+	}
+	s.grant(ctx, cr, o, s.opts.Now().Add(cr.cfg.AuthTTLDuration()))
+	return o, nil
 }
 
 // revalidate asks the upstream for the tag's current digest, as the
 // caller, with a manifest HEAD (falling back to a GET when the HEAD
-// carries no digest), and records it. An unreachable upstream leaves
-// the digest last recorded, if it was revalidated less than
-// stale_tag_max ago.
-func (s *Service) revalidate(ctx context.Context, cr *cacheReq) (string, error) {
+// carries no digest), and records it: anonymously first, and with the
+// caller's credentials if the upstream wants them, which makes the tag
+// classPrivate. An unreachable upstream leaves the digest last
+// recorded, if it was revalidated less than stale_tag_max ago, of no
+// class.
+func (s *Service) revalidate(ctx context.Context, cr *cacheReq) (string, string, error) {
 	up, repo, tag := cr.name.Upstream, cr.name.UpstreamRepo, cr.ref
-	f, err := s.fetcherFor(cr)
-	if err != nil {
-		return "", err
-	}
-	digest, err := func() (string, error) {
+	head := func(f *fetcher) (string, error) {
 		resp, err := f.get(ctx, http.MethodHead, "/v2/"+repo+"/manifests/"+tag, manifestAccept)
 		if err != nil {
 			return "", err
@@ -805,14 +891,32 @@ func (s *Service) revalidate(ctx context.Context, cr *cacheReq) (string, error) 
 		}
 		cr.result = CacheMiss
 		return o.digest, nil
-	}()
+	}
+	f, err := s.fetcherFor(cr, nil)
+	if err != nil {
+		return "", "", err
+	}
+	class := classPublic
+	digest, err := head(f)
+	if needsCredentials(err) {
+		cr.private = true
+		if cr.creds == nil {
+			cr.auth, cr.hosts = f.auth, f.hosts
+			return "", "", cr.challenge()
+		}
+		if f, err = s.fetcherFor(cr, cr.creds); err != nil {
+			return "", "", err
+		}
+		class = classPrivate
+		digest, err = head(f)
+	}
 	cr.auth, cr.hosts = f.auth, f.hosts
 	if err == nil {
-		return digest, s.putCacheTag(ctx, cr.domain, up, repo, tag, digest)
+		return digest, class, s.putCacheTag(ctx, cr.domain, up, repo, tag, digest)
 	}
 	var ue *upstreamErr
 	if !errors.As(err, &ue) || !ue.unreachable {
-		return "", cr.upstreamFailed(err)
+		return "", "", cr.upstreamFailed(err)
 	}
 	var at time.Time
 	var ok bool
@@ -821,16 +925,18 @@ func (s *Service) revalidate(ctx context.Context, cr *cacheReq) (string, error) 
 		digest, at, ok, err = s.cacheTag(ctx, tx, cr.domain, up, repo, tag)
 		return err
 	}); serr != nil {
-		return "", serr
+		return "", "", serr
 	}
 	if !ok || s.opts.Now().Sub(at) >= cr.cfg.StaleTagMaxDuration() {
-		return "", cr.upstreamFailed(err)
+		return "", "", cr.upstreamFailed(err)
 	}
 	cr.result = CacheStale
-	return digest, nil
+	return digest, "", nil
 }
 
 // upstreamFailed is the registry's answer for a failed upstream fetch.
+// A refusal of the caller's credentials is the upstream's own answer,
+// passed back.
 func (cr *cacheReq) upstreamFailed(err error) error {
 	var r *EgressRefusal
 	if errors.As(err, &r) {
@@ -848,18 +954,22 @@ func (cr *cacheReq) upstreamFailed(err error) error {
 			return rerr(http.StatusNotFound, codeBlobUnknown, "%s", ue.msg)
 		}
 		return rerr(http.StatusNotFound, codeManifestUnknown, "%s", ue.msg)
-	case ue.status == http.StatusUnauthorized || ue.status == http.StatusForbidden:
-		return rerr(http.StatusNotFound, codeNameUnknown, "silo: %s needs credentials; the cache serves public upstream images only", cr.name)
+	case ue.status == http.StatusUnauthorized:
+		return rerr(http.StatusUnauthorized, codeUnauthorized, "silo: the upstream refused the credentials for %s", cr.name)
+	case ue.status == http.StatusForbidden:
+		return rerr(http.StatusForbidden, codeDenied, "silo: the upstream denied access to %s", cr.name)
 	}
 	return rerr(http.StatusBadGateway, "UNKNOWN", "%s", ue.msg)
 }
 
 // cacheBlob resolves digest to a cached blob of the repo the caller
-// may have, fetching it on a miss.
+// may have, fetching it on a miss: anonymously and shared, or, for a
+// blob an authorisation of the caller's covers, with its own
+// credentials and alone.
 func (s *Service) cacheBlob(ctx context.Context, cr *cacheReq, digest string) (*cacheObject, error) {
 	up, repo := cr.name.Upstream, cr.name.UpstreamRepo
 	if !imagerepos.ValidDigest(digest) {
-		return nil, rerr(http.StatusNotFound, codeBlobUnknown, "blob unknown to registry")
+		return nil, blobUnknown()
 	}
 	if d := cr.check([]CacheHost{cr.apiHost()}); d != nil {
 		return nil, cr.refuse(d.Host)
@@ -874,10 +984,29 @@ func (s *Service) cacheBlob(ctx context.Context, cr *cacheReq, digest string) (*
 	}
 	if o != nil {
 		cr.result = CacheHit
-		return o, s.hit(ctx, cr, o, kindBlob)
+		if err := s.hit(ctx, cr, o, kindBlob); err != nil {
+			return nil, err
+		}
+		return o, s.allowBlob(ctx, cr, o)
 	}
 	cr.result = CacheMiss
-	f, err := s.fetcherFor(cr)
+	if _, ok := s.authorised(cr, digest); ok {
+		cr.private = true
+		if cr.creds == nil {
+			return nil, cr.challenge()
+		}
+		f, err := s.fetcherFor(cr, cr.creds)
+		if err != nil {
+			return nil, err
+		}
+		o, err = s.fetchBlob(ctx, cr, f, digest)
+		cr.auth = f.auth
+		if err != nil {
+			return nil, cr.upstreamFailed(err)
+		}
+		return o, s.hit(ctx, cr, o, kindBlob)
+	}
+	f, err := s.fetcherFor(cr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -885,6 +1014,11 @@ func (s *Service) cacheBlob(ctx context.Context, cr *cacheReq, digest string) (*
 		return s.fetchBlob(ctx, cr, f, digest)
 	})
 	cr.auth = f.auth
+	if needsCredentials(err) {
+		// A private repo's blob, which no authorisation of the caller's
+		// covers.
+		return nil, blobUnknown()
+	}
 	if err != nil {
 		return nil, cr.upstreamFailed(err)
 	}
@@ -922,6 +1056,9 @@ func (s *Service) auditCache(ctx context.Context, cr *cacheReq, kind string, req
 	if cr.denied != "" {
 		fields["denied_host"] = cr.denied
 	}
+	if cr.private {
+		fields["private"] = true
+	}
 	if cr.pullID != "" {
 		fields["pull_id"] = cr.pullID
 	}
@@ -956,7 +1093,7 @@ func (s *Service) auditCache(ctx context.Context, cr *cacheReq, kind string, req
 // served.
 func (s *Service) serveCache(q *request, rest string) {
 	ctx := q.ctx()
-	cr := &cacheReq{caller: q.caller, method: q.r.Method, name: q.name}
+	cr := &cacheReq{caller: q.caller, method: q.r.Method, name: q.name, creds: q.creds}
 	var kind string
 	switch {
 	case strings.HasPrefix(rest, "manifests/"):
@@ -1015,13 +1152,15 @@ func (s *Service) cacheRequest(ctx context.Context, cr *cacheReq, kind string) (
 // an upstream path, carrying pullID. name is an upstream name as
 // imagerepos.ParseName takes it (docker.io/library/alpine); a registry
 // that isn't a configured upstream is fetched from at https://<host>.
-func (s *Service) PullThrough(ctx context.Context, c fenceapi.Caller, name, ref, pullID string) (mediaType string, manifest []byte, digest string, err error) {
+// creds are the caller's own for the registry (the pull's
+// X-Registry-Auth, RegistryAuth), or nil, used for this call only.
+func (s *Service) PullThrough(ctx context.Context, c fenceapi.Caller, name, ref, pullID string, creds *Credentials) (mediaType string, manifest []byte, digest string, err error) {
 	n, ok := imagerepos.ParseName(name, "")
 	if !ok || n.Local() {
 		return "", nil, "", &Error{Status: http.StatusNotFound, Code: codeNameInvalid, Message: fmt.Sprintf("silo: invalid upstream repository name %q", name)}
 	}
 	c.Manage = ""
-	cr := &cacheReq{caller: c, method: http.MethodGet, name: n, ref: ref, facade: true, pullID: pullID}
+	cr := &cacheReq{caller: c, method: http.MethodGet, name: n, ref: ref, facade: true, pullID: pullID, creds: creds}
 	o, err := s.cacheRequest(ctx, cr, kindManifest)
 	if err != nil {
 		return "", nil, "", asError(err)
@@ -1036,13 +1175,13 @@ func (s *Service) PullThrough(ctx context.Context, c fenceapi.Caller, name, ref,
 // FetchThrough is a facade pull's blob through the cache: digest of
 // name, as c, fetched into the content store on a miss, with the same
 // egress rule and record as PullThrough.
-func (s *Service) FetchThrough(ctx context.Context, c fenceapi.Caller, name, digest, pullID string) error {
+func (s *Service) FetchThrough(ctx context.Context, c fenceapi.Caller, name, digest, pullID string, creds *Credentials) error {
 	n, ok := imagerepos.ParseName(name, "")
 	if !ok || n.Local() {
 		return &Error{Status: http.StatusNotFound, Code: codeNameInvalid, Message: fmt.Sprintf("silo: invalid upstream repository name %q", name)}
 	}
 	c.Manage = ""
-	cr := &cacheReq{caller: c, method: http.MethodGet, name: n, ref: digest, facade: true, pullID: pullID}
+	cr := &cacheReq{caller: c, method: http.MethodGet, name: n, ref: digest, facade: true, pullID: pullID, creds: creds}
 	_, err := s.cacheRequest(ctx, cr, kindBlob)
 	return asError(err)
 }

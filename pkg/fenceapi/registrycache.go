@@ -91,6 +91,24 @@ func (s CacheSettings) StaleTagMaxDuration() time.Duration {
 	return 24 * time.Hour
 }
 
+// PublicTTLDuration is PublicTTL, how long an anonymous classification
+// of upstream content holds, or 24 hours if it doesn't parse.
+func (s CacheSettings) PublicTTLDuration() time.Duration {
+	if d, err := time.ParseDuration(s.PublicTTL); err == nil {
+		return d
+	}
+	return 24 * time.Hour
+}
+
+// AuthTTLDuration is AuthTTL, how long a private manifest's
+// authorisation is held, or 5 minutes if it doesn't parse.
+func (s CacheSettings) AuthTTLDuration() time.Duration {
+	if d, err := time.ParseDuration(s.AuthTTL); err == nil {
+		return d
+	}
+	return 5 * time.Minute
+}
+
 // Valid checks s: every upstream named by a host with a dot, an http
 // or https endpoint with no path, query or credentials, no name or
 // alias twice, and durations that parse.

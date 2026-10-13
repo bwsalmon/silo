@@ -14,7 +14,10 @@ import (
 // silo and source address as for git, and nothing else is. Registry
 // traffic is a data path, as git's is: a sealed silo keeps pulling
 // and pushing to its existing repos (call L65). Authorization never
-// identifies anyone (call L66), and goes no further.
+// identifies anyone (call L66), and goes no further, except Basic
+// credentials on an upstream path, which are the caller's own for the
+// upstream's private content (call L72) and which silod uses for that
+// request only.
 
 // RegistrySilodPath is where the gateway forwards the registry on
 // silod's socket: /v2/<rest> goes to RegistrySilodPath/v2/<rest>.
@@ -38,10 +41,15 @@ func (g *Gateway) serveRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var repo *imagerepos.Name
+	auth := ""
 	if name, _, ok := imagerepos.SplitPath(r.URL.Path); ok {
 		if n, ok := imagerepos.ParseName(name, r.URL.Query().Get("ns")); ok && n.Local() {
 			repo = &n
+		} else if ok {
+			if a := r.Header.Get("Authorization"); len(a) > 6 && strings.EqualFold(a[:6], "basic ") {
+				auth = a
+			}
 		}
 	}
-	g.forwardPort80(w, r, g.regProxy, repo)
+	g.forwardPort80(w, r, g.regProxy, repo, auth)
 }

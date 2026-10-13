@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -19,6 +20,9 @@ type fetcher struct {
 	objects map[string][]byte // by digest
 	index   string
 	deny    string
+	// private wants credentials, user and pass, for every call.
+	private bool
+	creds   []*registry.Credentials
 	calls   []string
 	pullIDs map[string]bool
 }
@@ -42,9 +46,13 @@ func newFetcher(content *registry.Memory) *fetcher {
 	return f
 }
 
-func (f *fetcher) PullThrough(_ context.Context, c fenceapi.Caller, name, ref, pullID string) (string, []byte, string, error) {
+func (f *fetcher) PullThrough(_ context.Context, c fenceapi.Caller, name, ref, pullID string, creds *registry.Credentials) (string, []byte, string, error) {
 	f.calls = append(f.calls, "manifest "+name+" "+ref)
 	f.pullIDs[pullID] = true
+	f.creds = append(f.creds, creds)
+	if f.private && (creds == nil || creds.Username != "user" || creds.Password != "pass") {
+		return "", nil, "", &registry.Error{Status: 401, Code: "UNAUTHORIZED", Message: "authentication required"}
+	}
 	if c.Silo == f.deny {
 		return "", nil, "", &registry.Error{Status: 403, Code: "DENIED", Message: "silo: egress to registry-1.docker.io is not allowed for /team-b"}
 	}
@@ -67,9 +75,10 @@ func (f *fetcher) PullThrough(_ context.Context, c fenceapi.Caller, name, ref, p
 	return mt.MediaType, b, d, nil
 }
 
-func (f *fetcher) FetchThrough(_ context.Context, c fenceapi.Caller, name, digest, pullID string) error {
+func (f *fetcher) FetchThrough(_ context.Context, c fenceapi.Caller, name, digest, pullID string, creds *registry.Credentials) error {
 	f.calls = append(f.calls, "blob "+name+" "+digest)
 	f.pullIDs[pullID] = true
+	f.creds = append(f.creds, creds)
 	f.content.Put(f.objects[digest])
 	return nil
 }
@@ -108,4 +117,27 @@ func TestPullThroughFetcher(t *testing.T) {
 	}
 	f.deny = e.b
 	e.fail(http.StatusForbidden, "egress to registry-1.docker.io is not allowed", e.b, "POST", "/v1.47/images/create?fromImage=alpine&tag=3", nil)
+}
+
+// A pull's X-Registry-Auth reaches the fetcher, on every call; a private
+// image without credentials is Docker's 401, which the CLI answers by
+// asking for a login.
+func TestPullThroughFetcherCredentials(t *testing.T) {
+	e := newEnv(t)
+	f := newFetcher(e.content)
+	f.private = true
+	e.facade.opts.Fetcher = f
+	path := "/v1.47/images/create?fromImage=alpine&tag=3"
+	if code, out := e.do(e.a, "POST", path, nil, nil); code != 401 || out["message"] != "unauthorized: authentication required" {
+		t.Fatalf("no credentials: %d %v", code, out)
+	}
+	auth := base64.URLEncoding.EncodeToString([]byte(`{"username":"user","password":"pass","serveraddress":"https://index.docker.io/v1/"}`))
+	if code, b, _ := e.raw(e.a, "POST", path, nil, map[string]string{"X-Registry-Auth": auth}); code != 200 {
+		t.Fatalf("with credentials: %d %s", code, b)
+	}
+	for i, c := range f.creds[1:] {
+		if c == nil || c.Username != "user" {
+			t.Fatalf("call %d (%s) had no credentials", i+1, f.calls[i+1])
+		}
+	}
 }
