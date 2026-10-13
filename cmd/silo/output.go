@@ -88,6 +88,7 @@ func writeSilo(w *tw, s *client.Silo) {
 	w.row("Isolation:", fmt.Sprintf("%s, default %s (own: %s, default %s)", orNone(s.Isolation.Effective.Allowed),
 		orDash(s.Isolation.Effective.Default), orNone(s.Isolation.Own.Allowed), orDash(s.Isolation.Own.Default)))
 	w.row("Ingress:", fmt.Sprintf("%s (own: %s)", s.Ingress.Effective, s.Ingress.Own))
+	w.row("Repos mirror:", fmt.Sprintf("%s, from %s (own: %s)", onOff(s.Repos.Effective.Mirror), s.Repos.EffectiveFrom, onOff(s.Repos.Own.Mirror)))
 	w.row("Grant policy:", fmt.Sprintf("%s (own: %s)", kvs(s.GrantPolicy.Effective), kvs(s.GrantPolicy.Own)))
 	if a := s.AgentPolicy.Effective; len(a.Credentials)+len(a.Adapters)+len(a.Models) > 0 || a.MaxLease != "" {
 		w.row("Agent policy:", fmt.Sprintf("credentials %s, adapters %s, models %s, max lease %s",
@@ -275,4 +276,11 @@ func isTimeout(err error) bool {
 	}
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }

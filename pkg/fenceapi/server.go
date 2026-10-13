@@ -154,6 +154,9 @@ type Options struct {
 	// CredentialKey is silo-credential-key, the AES-256 key the stored
 	// credentials are sealed with; without it none can be added or used.
 	CredentialKey []byte
+	// Repos keeps silo repos on disk (local-git.md); with none, creating
+	// one is FAILED_PRECONDITION.
+	Repos RepoHost
 }
 
 // Server serves silo/v1.
@@ -444,12 +447,23 @@ var handlers = map[string]func(s *Server, q *request, c control.FenceCall){
 	control.OpLinksDelete: func(s *Server, q *request, c control.FenceCall) {
 		s.mutating(q, func(q *request) (any, error) { return s.deleteLink(q, c.Ref, c.ID) }, true)
 	},
+	control.OpReposList: func(s *Server, q *request, c control.FenceCall) { s.listRepos(q, c.Ref) },
+	control.OpReposGet:  func(s *Server, q *request, c control.FenceCall) { s.getRepo(q, c.Ref, c.ID) },
+	control.OpReposCreate: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.createRepo(q, c.Ref) }, true)
+	},
+	control.OpReposPatch: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.patchRepo(q, c.Ref, c.ID) }, true)
+	},
+	control.OpReposDelete: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.deleteRepo(q, c.Ref, c.ID) }, true)
+	},
 }
 
 // builtCollections are the sub-resources served so far; the rest of
 // control.Collections are UNIMPLEMENTED.
 var builtCollections = map[string]bool{"children": true, "members": true, "audit": true, "manageGrants": true,
-	"exports": true, "imports": true, "offers": true, "links": true, "agents": true}
+	"exports": true, "imports": true, "offers": true, "links": true, "agents": true, "repos": true}
 
 // route dispatches c, the parsed call to rest, the path after
 // /silo/v1/.

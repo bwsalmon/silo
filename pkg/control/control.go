@@ -150,6 +150,13 @@ const (
 	OpLinksList   = "silos.links.list"
 	OpLinksCreate = "silos.links.create"
 	OpLinksDelete = "silos.links.delete"
+	// Repos (local-git.md, §2 "Operations", call L41), under
+	// silos/{silo}/repos.
+	OpReposList   = "silos.repos.list"
+	OpReposCreate = "silos.repos.create"
+	OpReposGet    = "silos.repos.get"
+	OpReposPatch  = "silos.repos.patch"
+	OpReposDelete = "silos.repos.delete"
 )
 
 // fenceOps classifies every fence operation.
@@ -214,6 +221,12 @@ var fenceOps = map[string]Class{
 	OpLinksList:   Reading,
 	OpLinksCreate: Mutation,
 	OpLinksDelete: Mutation,
+
+	OpReposList:   Reading,
+	OpReposCreate: Mutation,
+	OpReposGet:    Reading,
+	OpReposPatch:  Mutation,
+	OpReposDelete: Mutation,
 }
 
 // FenceOps returns every fence operation the table knows, with its
@@ -252,6 +265,7 @@ func FenceClass(op string) Class { return fenceOps[op] }
 var Collections = map[string]bool{
 	"children": true, "members": true, "audit": true,
 	"exports": true, "imports": true, "offers": true, "links": true, "manageGrants": true, "agents": true,
+	"repos": true,
 }
 
 // AllocatorCollections are the custom-allocator collections v1
@@ -468,6 +482,10 @@ func ParseFence(method, rest string) FenceCall {
 		if method == http.MethodDelete {
 			c.Op = OpLinksDelete
 		}
+	case c.Collection == "repos" && len(segs) == 1:
+		c.Op = map[string]string{http.MethodGet: OpReposList, http.MethodPost: OpReposCreate}[method]
+	case c.Collection == "repos" && len(segs) == 2:
+		c.Op = map[string]string{http.MethodGet: OpReposGet, http.MethodPatch: OpReposPatch, http.MethodDelete: OpReposDelete}[method]
 	}
 	return c
 }

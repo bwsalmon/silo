@@ -29,6 +29,7 @@ type CreateRequest struct {
 	AgentPolicy    *AgentPolicy      `json:"agent_policy"`
 	Isolation      *Isolation        `json:"isolation"`
 	Ingress        string            `json:"ingress"`
+	Repos          *ReposPolicy      `json:"repos"`
 	Labels         map[string]string `json:"labels"`
 }
 
@@ -148,7 +149,7 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 			return err
 		}
 		own := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Agent: peff.Agent, Control: peff.Control,
-			Isolation: peff.Isolation, Ingress: IngressNone}
+			Isolation: peff.Isolation, Ingress: IngressNone, Repos: peff.Repos}
 		for k, v := range peff.Grant {
 			own.Grant[k] = v
 		}
@@ -174,6 +175,9 @@ func (s *Server) create(q *request, parentRef string) (any, error) {
 		}
 		if req.Ingress != "" {
 			own.Ingress = req.Ingress
+		}
+		if req.Repos != nil {
+			own.Repos = *req.Repos
 		}
 		if err := checkPolicies(own); err != nil {
 			return err
@@ -378,7 +382,13 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			return err
 		}
 		if rel == relSelf {
-			if err := narrower(old, next); err != nil {
+			chk := *next
+			if t.IsRoot() {
+				// The root has no ancestor to widen its repos policy, so
+				// it may turn mirroring back on itself.
+				chk.Repos = old.Repos
+			}
+			if err := narrower(old, &chk); err != nil {
 				return err
 			}
 		}
@@ -393,8 +403,8 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			if has("control") && !controlSet {
 				next.Control = peff.Control
 			}
-			// A control, isolation or ingress left alone is not held to
-			// the parent's: an ancestor tightening keeps the
+			// A control, isolation, ingress or repos policy left alone is
+			// not held to the parent's: an ancestor tightening keeps the
 			// descendants' own settings, so they come back when it
 			// loosens again.
 			chk := *next
@@ -406,6 +416,9 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			}
 			if !has("ingress") {
 				chk.Ingress = IngressNone
+			}
+			if !has("repos") {
+				chk.Repos = ReposPolicy{}
 			}
 			if err := looser(peff, &chk); err != nil {
 				return err
@@ -508,7 +521,7 @@ func (s *Server) patch(q *request, ref string) (any, error) {
 			changed["labels"] = l
 		}
 		policyChanged := false
-		for _, f := range []string{"egress", "grant_policy", "agent_policy", "isolation", "ingress"} {
+		for _, f := range []string{"egress", "grant_policy", "agent_policy", "isolation", "ingress", "repos"} {
 			if has(f) {
 				policyChanged = true
 				changed[f] = true
@@ -594,6 +607,7 @@ func patchPolicies(old *policies, body map[string]json.RawMessage) (*policies, e
 		Control:   old.Control,
 		Isolation: Isolation{Allowed: append([]string{}, old.Isolation.Allowed...), Default: old.Isolation.Default},
 		Ingress:   old.Ingress,
+		Repos:     old.Repos,
 	}
 	for k, v := range old.Grant {
 		next.Grant[k] = v
@@ -689,6 +703,17 @@ func patchPolicies(old *policies, body map[string]json.RawMessage) (*policies, e
 	if raw, ok := body["ingress"]; ok {
 		if err := json.Unmarshal(raw, &next.Ingress); err != nil {
 			return nil, bad("ingress", err)
+		}
+	}
+	if raw, ok := body["repos"]; ok {
+		var r struct {
+			Mirror *bool `json:"mirror"`
+		}
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, bad("repos", err)
+		}
+		if r.Mirror != nil {
+			next.Repos.Mirror = *r.Mirror
 		}
 	}
 	return next, nil

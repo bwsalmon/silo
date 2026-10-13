@@ -100,6 +100,12 @@ func TestFenceTable(t *testing.T) {
 		{"DELETE", "/silo/v1/self/links/db", OpLinksDelete, Mutation},
 		{"POST", "/silo/v1/silos/team-a/ci/links", OpLinksCreate, Mutation},
 		{"GET", "/silo/v1/self/links/db", "", Mutation},
+		{"GET", "/silo/v1/self/repos", OpReposList, Reading},
+		{"POST", "/silo/v1/silos/team-a/x/repos", OpReposCreate, Mutation},
+		{"GET", "/silo/v1/silos/team-a/x/repos/foo", OpReposGet, Reading},
+		{"PATCH", "/silo/v1/silos/-k7f3qa/repos/foo", OpReposPatch, Mutation},
+		{"DELETE", "/silo/v1/self/repos/foo", OpReposDelete, Mutation},
+		{"PUT", "/silo/v1/self/repos/foo", "", Mutation},
 		// Unknown methods and paths are mutations.
 		{"GET", "/silo/v1/quota:preview", "", Mutation},
 		{"PUT", "/silo/v1/self/exports", "", Mutation},

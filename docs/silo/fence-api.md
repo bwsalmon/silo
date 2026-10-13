@@ -6,7 +6,8 @@ Normative draft, part of the Silo design ([`README.md`](README.md)),
 written in task 1930. The control policy (sealed silos) and `manage`
 grants were added in task 1947. The `isolation` and `ingress` policies
 and the `local` backing and region were added in task 3408, for the
-[local backend](local-backend.md). Marks such as "call 14" refer to
+[local backend](local-backend.md), and [repos](#repos) and the `repos`
+policy in task 3422 ([`local-git.md`](local-git.md)). Marks such as "call 14" refer to
 [Calls made in this draft](README.md#calls-made-in-this-draft).
 
 The fence API is what every backend shares. It manages the tree, the
@@ -55,11 +56,11 @@ facade ([`gcp-backend.md`](gcp-backend.md#the-computev1-facade)).
 | `INVALID_ARGUMENT` | 400 | A malformed field, an unaligned range, a bad name |
 | `PERMISSION_DENIED` | 403 | The caller may not name that silo, or may not do that to it, or a `manage` grant doesn't cover the call (`details` names the grant and what is missing) |
 | `CONTROL_DENIED` | 403 | The caller's own effective `control` policy forbids the call: any call under `none`, a mutating call under `read`. `details` gives the policy and the silo it comes from |
-| `LOOSER_THAN_PARENT` | 403 | The change would give a child more than its parent has: a region, an egress host, a grant policy, a `control` policy, an isolation class or `ingress: host` that the parent lacks |
+| `LOOSER_THAN_PARENT` | 403 | The change would give a child more than its parent has: a region, an egress host, a grant policy, a `control` policy, an isolation class, `ingress: host` or `repos.mirror` that the parent lacks |
 | `QUOTA_EXCEEDED` | 403 | Not enough free quota in the parent (or, for a facade call, in the silo) |
 | `RESOURCE_EXHAUSTED` | 429 | No free aligned slot of that size, the block cap, the depth cap, or the fence's rule budget |
-| `NOT_FOUND` | 404 | No such silo, grant or record visible to the caller |
-| `ALREADY_EXISTS` | 409 | A sibling with that name, or a grant with that name |
+| `NOT_FOUND` | 404 | No such silo, grant, repo or record visible to the caller |
+| `ALREADY_EXISTS` | 409 | A sibling with that name, or a grant or repo with that name |
 | `FAILED_PRECONDITION` | 409 | The change would strand something: lowering quota below usage, removing a region still in use, releasing a non-empty block, deleting a non-empty silo without `force` |
 | `UNIMPLEMENTED` | 501 | A backing this deployment doesn't support (`vpc` and `project` in v1, and a child's backing other than its parent's) |
 | `UNAVAILABLE` | 503 | silod is restarting, its database is unreachable, or the cloud is refusing calls |
@@ -112,7 +113,8 @@ the target is: a sealed ancestor can't change its descendants either.
     },
     "global": {
       "subnetworks": {"granted": 10, "delegated": 0, "used": 1},
-      "agent_sessions": {"granted": 4, "delegated": 1, "used": 1}
+      "agent_sessions": {"granted": 4, "delegated": 1, "used": 1},
+      "repos": {"granted": 10, "delegated": 0, "used": 2}
     }
   },
   "model_budget": {"period": "month", "granted_usd": "200.00", "delegated_usd": "40.00", "used_usd": "40.00"},
@@ -127,6 +129,7 @@ the target is: a sealed ancestor can't change its descendants either.
   "control": {"own": "full", "effective": "full", "effective_from": "/team-a/ci"},
   "isolation": {"own": {"allowed": ["vm", "sandbox"], "default": "vm"}, "effective": {"allowed": ["vm"], "default": "vm"}},
   "ingress": {"own": "none", "effective": "none"},
+  "repos": {"own": {"mirror": true}, "effective": {"mirror": false}, "effective_from": "/team-a"},
   "agent_policy": {"own": {}, "effective": {"credentials": ["anthropic-api"], "adapters": ["claude-code"],
     "models": ["claude-*"], "max_lease": "24h"}},
   "owner_agent": null,
@@ -195,6 +198,23 @@ also listen on the host's loopback
 - A child's can be `host` only if its parent's effective value is, or
   `LOOSER_THAN_PARENT`.
 - The root's is `host`, set at install. A child's defaults to `none`.
+
+### The repos policy
+
+**`repos`** is `{"mirror": true|false}`: whether the silo's
+[repos](#repos) are mirrored into the uber repo
+([`local-git.md`, "What egress allowlists mean here"](local-git.md#what-egress-allowlists-mean-here),
+call L54).
+
+- The effective `mirror` is `true` only if the silo's own and every
+  ancestor's is. `effective_from` is the nearest silo up the tree that
+  turned it off, or the root.
+- A child's can be `true` only if its parent's effective value is, or
+  `LOOSER_THAN_PARENT`. A child's defaults to its parent's effective
+  value. A silo may turn its own off, but only an ancestor turns it
+  back on.
+- The root's is `true` unless bootstrap is given another, and the root
+  may change its own either way with `PATCH`.
 
 ## Operations
 
@@ -591,8 +611,9 @@ nothing, since its VMs can't reach the API port.
 ```
 
 - `facade.resources` names facade resource types from
-  [`gcp-backend.md`, Covered](gcp-backend.md#covered). `["*"]` means
-  every type the facade has, including types added later. A call is
+  [`gcp-backend.md`, Covered](gcp-backend.md#covered), and `repos`
+  ([below](#repos)). `["*"]` means every type, including types added
+  later. A call is
   charged to the resource in its path: a boot disk that
   `instances.insert` creates is covered by `instances`. `access` is
   `read` or `write`.
@@ -717,6 +738,67 @@ for a policy refusal, `INVALID_ARGUMENT` for an unpriced model, and
 `RESOURCE_EXHAUSTED` when the control VM has no session slot left.
 
 Deleting a silo with `force` deletes its agents first.
+
+## Repos
+
+A repo is a git repo in a silo: a silo object, created explicitly,
+named per silo, and kept on the silo's backend. The design is in
+[`local-git.md`](local-git.md); this section is its API. Only the local
+backend keeps repos so far: elsewhere creating one is
+`FAILED_PRECONDITION`.
+
+```json
+{
+  "name": "foo",
+  "id": "r-8k2m4q",
+  "silo": "/team-a/x",
+  "default_branch": "main",
+  "clone_url": "http://silo.internal/git/team-a/x/foo.git",
+  "clone_url_by_id": "http://silo.internal/git/-k7f3qa/foo.git",
+  "size_bytes": 1843200,
+  "create_time": "2026-10-12T18:54:00Z",
+  "mirror": {"state": "UNCONFIGURED", "external_prefix": "refs/heads/silo/team-a/x/foo.git/", "last_error": null}
+}
+```
+
+- A `name` is 1 to 63 characters of `[a-z0-9._-]`, starting with a
+  letter or digit, with no `..`, and not ending in `.git` or `.lock`.
+  Two silos can each have the same name.
+- `default_branch` is the repo's `HEAD`: `main` unless create names
+  another (or, for a seeded repo, the seed's), and changed only by
+  `PATCH`.
+- `mirror.state` is `OFF` where the silo's effective
+  [repos policy](#the-repos-policy) keeps it out of the uber repo
+  (`mirror.from` names the silo that does), and `UNCONFIGURED` until
+  the uber repo is set up.
+
+| Call | Does |
+| --- | --- |
+| `POST /silo/v1/silos/{silo}/repos` | Create. Body: `name`, optional `default_branch`, optional `seed` |
+| `GET /silo/v1/silos/{silo}/repos` | List. `?recursive=true` lists the descendants' repos too, each with its silo's path |
+| `GET .../repos/{repo}` | Get one |
+| `PATCH .../repos/{repo}` | Change `default_branch` |
+| `DELETE .../repos/{repo}` | Delete. A long-running operation of kind `repo.delete`, done once the repo is gone from disk |
+
+- **Who may call them** ([`local-git.md` §4](local-git.md#4-the-fence-on-repos),
+  call L43): the silo itself and its ancestors, any of them; the holder
+  of an active `manage` grant on the silo or an ancestor whose
+  `facade.resources` covers `repos`, list and get at `read` and all of
+  them at `write`; anyone else, `NOT_FOUND`. The caller's own control
+  policy then applies: under `read`, list and get only.
+- **Seeding.** `"seed": {"repo": "/team-a/x/foo"}` copies a repo's
+  branches and tags into the new one, server-side. The seed is a path
+  to a repo the **caller** may read, relative to the caller's own silo
+  unless it starts with `/`. One it can't read is `NOT_FOUND`, as one
+  that doesn't exist. The copy is a snapshot; nothing links the two
+  afterwards.
+- **Quota.** Each repo holds one of its silo's `repos` (a global count
+  class) while it exists, so a create past it is `QUOTA_EXCEEDED`. The
+  root's is unlimited unless install names one; a child's is what its
+  parent grants, as for any class.
+- Creates, `PATCH`es and deletes are audited under the silo as
+  `repo.create`, `repo.patch` and `repo.delete`. Deleting a silo with
+  `force` deletes its repos.
 
 ## Members {#SV-25}
 

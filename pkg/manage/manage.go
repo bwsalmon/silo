@@ -85,10 +85,17 @@ var ambient = map[string]bool{
 	"zoneOperations": true, "regionOperations": true, "globalOperations": true, "projects": true,
 }
 
-// Resources are the facade resource types a scope may name: the types
-// gcp-backend.md "Covered" lists, as pkg/control's table has them.
+// Repos is the resource type of silo repos (local-git.md, "Manage
+// grants: the repos resource type"): read clones, fetches, lists and
+// gets them, and write also pushes, creates and deletes them. No facade
+// serves it; the fence API and the git service ask for it.
+const Repos = "repos"
+
+// Resources are the resource types a scope may name: the facade types
+// gcp-backend.md "Covered" lists, as pkg/control's table has them, and
+// repos.
 func Resources() []string {
-	seen := map[string]bool{}
+	seen := map[string]bool{Repos: true}
 	for m := range control.FacadeMethods() {
 		seen[strings.SplitN(m, ".", 2)[0]] = true
 	}

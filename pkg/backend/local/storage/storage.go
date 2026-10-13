@@ -1,7 +1,8 @@
 // Package storage keeps silos' tenant data on the local backend: a
 // subtree per silo, a volume per Docker volume
 // (docs/silo/local-rootless-storage.md, "The storage driver", call
-// L37). The first and only v1 driver is Dir, plain directories; zfs and
+// L37), and a bare git repo per silo repo (docs/silo/local-git.md, "On
+// disk"). The first and only v1 driver is Dir, plain directories; zfs and
 // btrfs come later behind the same interface.
 //
 // Volume sizes are charged against the ledger, not enforced by Dir.
@@ -29,12 +30,14 @@ type Driver interface {
 	// sizes are hard limits, whether Snapshot works. describe shows it.
 	Guarantees() Guarantees
 
-	// Create makes a silo's subtree (ref.Volume empty) or a volume in it,
-	// capped at size where the driver enforces sizes. It is
-	// idempotent and returns the path the runtime mounts.
+	// Create makes a silo's subtree (ref.Volume and ref.Repo empty), or
+	// a volume or a repo's directory in it, capped at size where the
+	// driver enforces sizes. It is idempotent and returns the path the
+	// runtime mounts, or that silod's git runs in.
 	Create(ctx context.Context, ref Ref, size int64) (path string, err error)
 
-	// Delete removes a volume, or a silo's whole subtree. It is idempotent.
+	// Delete removes a volume, a repo, or a silo's whole subtree. It is
+	// idempotent.
 	Delete(ctx context.Context, ref Ref) error
 
 	// Usage reports bytes and inodes in use, for metering and the
@@ -47,17 +50,25 @@ type Driver interface {
 	Snapshot(ctx context.Context, ref Ref, name string) (Snapshot, error)
 }
 
-// Ref names a silo's subtree, or a volume in it.
+// Ref names a silo's subtree, or a volume or a repo in it. At most one
+// of Volume and Repo is set.
 type Ref struct {
 	Silo   string
-	Volume string // empty means the silo's subtree
+	Volume string // empty, with Repo, means the silo's subtree
+	// Repo is a repo's id. Its directory is a bare git repo that
+	// belongs to silod's own uid, never to the silo's: only silod's git
+	// touches it, and nothing mounts it into a container.
+	Repo string
 }
 
 func (r Ref) String() string {
-	if r.Volume == "" {
-		return r.Silo
+	switch {
+	case r.Volume != "":
+		return r.Silo + "/" + r.Volume
+	case r.Repo != "":
+		return r.Silo + "/repos/" + r.Repo
 	}
-	return r.Silo + "/" + r.Volume
+	return r.Silo
 }
 
 // name is what a silo id or a volume id may be: one path element, and
@@ -65,13 +76,19 @@ func (r Ref) String() string {
 var name = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // Valid checks that r names something a driver can keep: a silo, and
-// optionally a volume, each a single path element.
+// optionally a volume or a repo, each a single path element.
 func (r Ref) Valid() error {
 	if !name.MatchString(r.Silo) {
 		return fmt.Errorf("storage: invalid silo id %q", r.Silo)
 	}
 	if r.Volume != "" && !name.MatchString(r.Volume) {
 		return fmt.Errorf("storage: invalid volume id %q", r.Volume)
+	}
+	if r.Repo != "" && !name.MatchString(r.Repo) {
+		return fmt.Errorf("storage: invalid repo id %q", r.Repo)
+	}
+	if r.Volume != "" && r.Repo != "" {
+		return fmt.Errorf("storage: %s/%s names both a volume and a repo", r.Silo, r.Volume)
 	}
 	return nil
 }
