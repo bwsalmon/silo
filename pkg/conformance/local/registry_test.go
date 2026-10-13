@@ -1,7 +1,9 @@
 // Package local holds the conformance suite's local-only structural
-// cases (local-backend.md §13, call L24): today the registry's, of
-// local-registry.md §12, against the local targets, which offer a look
-// at silo-containerd's content store (conformance.Structural).
+// cases (local-backend.md §13, call L24), against the local targets:
+// the registry's, of local-registry.md §12, through a look at
+// silo-containerd's content store (conformance.Structural), and the
+// fence's (fence_test.go): no way from silo-net into the root
+// namespace, and nothing through a port with no pin.
 //
 // §12's other local-only cases are still where their steps put them,
 // as they need a real data directory, a restored store, real uids or a

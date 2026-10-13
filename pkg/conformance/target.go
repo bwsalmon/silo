@@ -3,6 +3,7 @@ package conformance
 import (
 	"errors"
 	"net/http"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -11,10 +12,11 @@ import (
 // (local-backend.md §13, call L24): "gcp", "local/sandbox", "local/vm"
 // and "local/fake". pkg/conformance/targets has them.
 //
-// Today a Target offers only what the registry cases need
-// (local-registry.md §12): the fence cases of this package's GCP
-// harness, behind the silo_conformance tag, are moved behind it by
-// local-backend.md's item 12.
+// A Target offers what the registry cases need (local-registry.md
+// §12) and, through Fence, what the neutral fence cases of
+// pkg/conformance/fence, the Docker facade's of pkg/conformance/docker
+// and the local-only structural ones of pkg/conformance/local need: an
+// install's fence API, and probes made in its silos.
 type Target interface {
 	// Name is the target's name, as cases report it.
 	Name() string
@@ -24,6 +26,82 @@ type Target interface {
 	// registry, and a *NotRunnable when it has one that can't be run
 	// here.
 	Registry(t testing.TB) (Registry, error)
+	// Fence starts a fresh install for t, with an address space, and
+	// stops it when t ends. It returns a *NotRunnable when the backend
+	// can't be installed here, or its probes can't be made.
+	Fence(t testing.TB) (Fence, error)
+}
+
+// Fence is an install a Target offers for the fence cases: its fence
+// API and its facade, called as a silo, and probes in its silos
+// (local-backend.md §13: the GCP target makes them as e2-micro VMs, a
+// local one as containers through the Docker facade, in its class).
+type Fence interface {
+	// Root is the root silo's id.
+	Root() string
+	// API makes a fence API call as caller (the root's members when
+	// caller is the root, nobody when ""), and decodes its JSON answer.
+	API(caller, method, path string, body any) (int, map[string]any)
+	// Docker sends a Docker Engine API request as caller, to its silo's
+	// facade. It returns ErrNotOffered if the target has none.
+	Docker(caller string, req *http.Request) (*http.Response, error)
+	// Probe makes a probe in silo, on a network of the silo's own, and
+	// deletes it when t ends. A probe answers ICMP echo, and TCP and
+	// UDP on every port, so another probe's check of it is decided by
+	// the fence alone.
+	Probe(t testing.TB, silo, name string) Probe
+}
+
+// A Probe is one probe a Fence made.
+type Probe interface {
+	// Addr is the probe's address on its silo's network.
+	Addr() netip.Addr
+	// Run runs checks from the probe and returns its report by check
+	// ID. A target runs the kinds "tcp", "udp" and "icmp" at least, and
+	// reports any other it can't run as a failed check whose detail
+	// starts "unsupported", which cases treat as a skip.
+	Run(checks []Check) map[string]ProbeResult
+	// Spoof runs checks from the probe with src as their source
+	// address, as a tenant with CAP_NET_RAW in its own netns can send
+	// them. It returns ErrNotOffered where the target's probes can't.
+	Spoof(src netip.Addr, checks []Check) (map[string]ProbeResult, error)
+}
+
+// Unsupported is the detail prefix of a check a target can't run.
+const Unsupported = "unsupported"
+
+// Unpinned is what a local target offers beyond Fence for the
+// structural cases: a probe's packets sent through a port that has no
+// pin entry, as a veth the fence wasn't told of would send them.
+type Unpinned interface {
+	FromUnpinnedPort(p Probe, checks []Check) map[string]ProbeResult
+}
+
+// FenceOf is target's install for t, or t skipped, as RegistryOf.
+func FenceOf(t *testing.T, target Target) Fence {
+	t.Helper()
+	f, err := target.Fence(t)
+	var nr *NotRunnable
+	switch {
+	case errors.Is(err, ErrNotOffered):
+		t.Skipf("not offered: %s has no probes", target.Name())
+	case errors.As(err, &nr):
+		t.Skipf("%s: %v", target.Name(), err)
+	case err != nil:
+		t.Fatalf("%s: installing: %v", target.Name(), err)
+	}
+	return f
+}
+
+// ForEachFence runs fn as a subtest per target, with a fresh install
+// of it.
+func ForEachFence(t *testing.T, targets []Target, fn func(t *testing.T, f Fence)) {
+	t.Helper()
+	for _, tg := range targets {
+		t.Run(tg.Name(), func(t *testing.T) {
+			fn(t, FenceOf(t, tg))
+		})
+	}
 }
 
 // ErrNotOffered is a Target's answer for a capability its backend
