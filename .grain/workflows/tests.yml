@@ -158,7 +158,9 @@ jobs:
   # conformance.Target's Fence, and the registry's), the Docker
   # facade's of pkg/conformance/docker and the local-only structural
   # ones of pkg/conformance/local (repos and the mirror's among them,
-  # with real git clients), against every conformance.Target.
+  # with real git clients), and §5's compose and testcontainers flows in
+  # both classes, with what gVisor won't run as expected skips, of
+  # pkg/conformance/compose, against every conformance.Target.
   # "local/fake" runs them in process, judging probes' packets with the
   # nftables evaluator; "gcp" reports them not offered or not runnable
   # here (its own forms run nightly in silo-conformance); "local/sandbox"
@@ -196,7 +198,7 @@ jobs:
           SILO_OCI_CONFORMANCE: /tmp/oci-conformance.test
         run: |
           set +e
-          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ > /tmp/conformance.log 2>&1
+          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ ./pkg/conformance/compose/ > /tmp/conformance.log 2>&1
           status=$?
           cat /tmp/conformance.log
           set -e
