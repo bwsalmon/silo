@@ -15,24 +15,24 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/backend"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/rootcap"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
-	"github.com/bwsalmon/silo/pkg/ledger/rootcap"
 	"github.com/bwsalmon/silo/pkg/store"
 )
 
 // Fence is the fence as a global network firewall policy, which a
-// *fence.Applier applies.
+// *gcefence.Applier applies.
 type Fence struct {
-	*fence.Applier
+	*gcefence.Applier
 }
 
 var _ backend.Fence = Fence{}
 
 // NewFence returns a's Fence.
-func NewFence(a *fence.Applier) Fence { return Fence{a} }
+func NewFence(a *gcefence.Applier) Fence { return Fence{a} }
 
 // Repair is the applier's Repair, with each step as its String.
 func (f Fence) Repair(ctx context.Context) ([]string, error) {
@@ -129,7 +129,7 @@ type Options struct {
 	Host    gce.Client
 	Project string
 	// Fence applies the fence.
-	Fence *fence.Applier
+	Fence *gcefence.Applier
 	// Facade is the compute/v1 facade: the Classes and the ToolVMs.
 	Facade *facade.Server
 	// Capacity configures the root capacity reader, or nil for none

@@ -1,4 +1,4 @@
-package fence
+package gcefence
 
 import (
 	"fmt"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
 	"github.com/bwsalmon/silo/pkg/control"
+	"github.com/bwsalmon/silo/pkg/fence"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -69,9 +70,9 @@ func (t *gtree) children(id string) []*gsilo {
 func (t *gtree) ranges(id string) []netip.Prefix {
 	var out []netip.Prefix
 	for _, b := range t.silos[id].blocks {
-		out = append(out, Minus(b, genGateway, genControl)...)
+		out = append(out, fence.Minus(b, genGateway, genControl)...)
 	}
-	return normalize(out)
+	return fence.Normalize(out)
 }
 
 // free is the space in a silo's blocks that no child holds (and, in
@@ -84,14 +85,14 @@ func (t *gtree) free(id string) []netip.Prefix {
 			for _, cb := range c.blocks {
 				var next []netip.Prefix
 				for _, p := range ps {
-					next = append(next, Minus(p, cb)...)
+					next = append(next, fence.Minus(p, cb)...)
 				}
 				ps = next
 			}
 		}
 		out = append(out, ps...)
 	}
-	return normalize(out)
+	return fence.Normalize(out)
 }
 
 // carve takes a block of bits from id's free space, or false.
@@ -192,13 +193,13 @@ func (t *gtree) effective(id string) string {
 	return control.Strictest(t.effective(s.parent), s.control)
 }
 
-func (t *gtree) sealed(id string) bool { return Sealed(t.effective(id)) }
+func (t *gtree) sealed(id string) bool { return fence.Sealed(t.effective(id)) }
 
-func (t *gtree) input() *Input {
-	in := &Input{Gateway: genGateway, Control: genControl, Root: Minus(genSpace, genGateway, genControl)}
+func (t *gtree) input() *fence.Input {
+	in := &fence.Input{Gateway: genGateway, Control: genControl, Root: fence.Minus(genSpace, genGateway, genControl)}
 	for _, id := range t.ids() {
 		s := t.silos[id]
-		in.Silos = append(in.Silos, Silo{ID: id, Depth: s.depth, Blocks: s.blocks, Sealed: t.sealed(id)})
+		in.Silos = append(in.Silos, fence.Silo{ID: id, Depth: s.depth, Blocks: s.blocks, Sealed: t.sealed(id)})
 	}
 	return in
 }
@@ -223,7 +224,7 @@ func (t *gtree) vms(r *rand.Rand) map[string][]netip.Addr {
 	out := map[string][]netip.Addr{}
 	for _, id := range t.ids() {
 		for _, f := range t.free(id) {
-			last := lastAddr(f)
+			last := fence.LastAddr(f)
 			out[id] = append(out[id], f.Addr(), last)
 			if f.Bits() < 31 {
 				a := f.Addr()
@@ -273,18 +274,18 @@ func (t *gtree) tenantRules() []*compute.Firewall {
 // hostileGrants are grant rules written as badly as a grant could be:
 // allowing every protocol from every silo's space to the control range
 // and to everywhere, both ways.
-func (t *gtree) hostileGrants(r *rand.Rand) []Grant {
+func (t *gtree) hostileGrants(r *rand.Rand) []fence.Grant {
 	anywhere := []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
-	all := []L4{{Protocol: "all"}}
-	var out []Grant
+	all := []fence.L4{{Protocol: "all"}}
+	var out []fence.Grant
 	for i, id := range t.ids() {
 		b := t.ranges(id)
 		out = append(out,
-			Grant{Name: fmt.Sprintf("link-%d-ctl-out", i), Direction: "EGRESS", Src: b, Dst: []netip.Prefix{genControl}, L4: all},
-			Grant{Name: fmt.Sprintf("export-%d-in", i), Direction: "INGRESS", Src: anywhere, Dst: []netip.Prefix{genControl}, L4: all},
+			fence.Grant{Name: fmt.Sprintf("link-%d-ctl-out", i), Direction: "EGRESS", Src: b, Dst: []netip.Prefix{genControl}, L4: all},
+			fence.Grant{Name: fmt.Sprintf("export-%d-in", i), Direction: "INGRESS", Src: anywhere, Dst: []netip.Prefix{genControl}, L4: all},
 		)
 		if r.Intn(2) == 0 {
-			out = append(out, Grant{Name: fmt.Sprintf("link-%d-any-out", i), Direction: "EGRESS", Src: b, Dst: anywhere, L4: all})
+			out = append(out, fence.Grant{Name: fmt.Sprintf("link-%d-any-out", i), Direction: "EGRESS", Src: b, Dst: anywhere, L4: all})
 		}
 	}
 	return out

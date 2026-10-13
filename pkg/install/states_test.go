@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/install"
 	"github.com/bwsalmon/silo/pkg/install/fakecloud"
 	compute "google.golang.org/api/compute/v1"
@@ -147,7 +147,7 @@ var scenarios = []scenario{
 
 // silodRule is a rule silod's fence applier owns (the root's
 // n-intra-in, in depth 0's band): install leaves it alone.
-var silodRule = &compute.FirewallPolicyRule{RuleName: "root-intra-in", Priority: fence.DepthBand(0), Direction: "INGRESS",
+var silodRule = &compute.FirewallPolicyRule{RuleName: "root-intra-in", Priority: gcefence.DepthBand(0), Direction: "INGRESS",
 	Action: "goto_next", Match: &compute.FirewallPolicyRuleMatcher{SrcIpRanges: []string{"10.0.0.0/9"},
 		Layer4Configs: []*compute.FirewallPolicyRuleMatcherLayer4Config{{IpProtocol: "all"}}}}
 
@@ -168,18 +168,18 @@ func drift(t *testing.T, f *fakecloud.Fake) {
 	mustOp(t, f)(f.Compute.SetPrivateIpGoogleAccess(ctx, project, "us-central1", install.ControlSubnetName, true))
 	nat := f.Routers["us-central1/"+install.RouterName].Nats[0]
 	nat.SourceSubnetworkIpRangesToNat, nat.Subnetworks = "ALL_SUBNETWORKS_ALL_IP_RANGES", nil
-	pol, err := f.Compute.GetFirewallPolicy(ctx, project, fence.PolicyName)
+	pol, err := f.Compute.GetFirewallPolicy(ctx, project, gcefence.PolicyName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range pol.Rules {
-		if r.RuleName == fence.RuleCatchOut {
+		if r.RuleName == gcefence.RuleCatchOut {
 			r.Action = "allow"
-			mustOp(t, f)(f.Compute.PatchFirewallPolicyRule(ctx, project, fence.PolicyName, r.Priority, r))
+			mustOp(t, f)(f.Compute.PatchFirewallPolicyRule(ctx, project, gcefence.PolicyName, r.Priority, r))
 		}
 	}
-	mustOp(t, f)(f.Compute.AddFirewallPolicyRule(ctx, project, fence.PolicyName, silodRule))
-	mustOp(t, f)(f.Compute.RemoveFirewallPolicyAssociation(ctx, project, fence.PolicyName, install.NetworkName))
+	mustOp(t, f)(f.Compute.AddFirewallPolicyRule(ctx, project, gcefence.PolicyName, silodRule))
+	mustOp(t, f)(f.Compute.RemoveFirewallPolicyAssociation(ctx, project, gcefence.PolicyName, install.NetworkName))
 	f.Zones[install.ZoneName].Networks = nil
 	for _, r := range f.Records {
 		r.Rrdatas = []string{"10.9.9.9"}

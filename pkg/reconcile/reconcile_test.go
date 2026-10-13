@@ -18,7 +18,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/leader"
 	"github.com/bwsalmon/silo/pkg/ledger"
@@ -44,7 +44,7 @@ type env struct {
 	ctx     context.Context // carries the leader's term
 	db      store.Database
 	gce     *fake.Fake
-	applier *fence.Applier
+	applier *gcefence.Applier
 	srv     *httptest.Server
 	rec     *reconcile.Reconciler
 	root    string
@@ -64,7 +64,7 @@ func newEnv(t *testing.T, opts ...func(*reconcile.Options)) *env {
 	}
 	f := fake.New(fake.Options{Project: project})
 	e := &env{t: t, db: db, gce: f}
-	e.await(f.InsertFirewallPolicy(ctx, project, &compute.FirewallPolicy{Name: fence.PolicyName}))
+	e.await(f.InsertFirewallPolicy(ctx, project, &compute.FirewallPolicy{Name: gcefence.PolicyName}))
 	e.await(f.InsertNetwork(ctx, project, &compute.Network{Name: "silo",
 		NetworkFirewallPolicyEnforcementOrder: "BEFORE_CLASSIC_FIREWALL", ForceSendFields: []string{"AutoCreateSubnetworks"}}))
 	e.await(f.InsertSubnetwork(ctx, project, region, &compute.Subnetwork{Name: "silo-gateway",
@@ -77,7 +77,7 @@ func newEnv(t *testing.T, opts ...func(*reconcile.Options)) *env {
 	}
 	e.ctx = leader.WithTerm(ctx, &leader.Term{Epoch: epoch, Holder: "test"})
 
-	e.applier = &fence.Applier{Store: db, GCE: f, Project: project, Config: fence.DefaultConfig, Poll: 20 * time.Millisecond,
+	e.applier = &gcefence.Applier{Store: db, GCE: f, Project: project, Config: gcefence.DefaultConfig, Poll: 20 * time.Millisecond,
 		Guard: leader.Guard, OnDrift: reconcile.AuditDrift(db, t.Logf)}
 	api := fenceapi.New(db, fenceapi.Options{
 		Fence: e.applier, Budget: e.applier,
@@ -470,7 +470,7 @@ func TestFenceDrift(t *testing.T) {
 		t.Fatalf("drift on a policy just applied: %v", rep.Drift)
 	}
 	rules := func() map[string]*compute.FirewallPolicyRule {
-		pol, err := e.gce.GetFirewallPolicy(ctx, project, fence.PolicyName)
+		pol, err := e.gce.GetFirewallPolicy(ctx, project, gcefence.PolicyName)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -494,13 +494,13 @@ func TestFenceDrift(t *testing.T) {
 	}
 
 	// Someone removes open's API rule and gives sealed one.
-	e.await(e.gce.RemoveFirewallPolicyRule(ctx, project, fence.PolicyName, apiOut.Priority))
+	e.await(e.gce.RemoveFirewallPolicyRule(ctx, project, gcefence.PolicyName, apiOut.Priority))
 	extra := *apiOut
 	extra.RuleName, extra.Priority = sealed+"-api-out", gwOut.Priority+1
 	extra.Match = &compute.FirewallPolicyRuleMatcher{}
 	*extra.Match = *apiOut.Match
 	extra.Match.SrcIpRanges = gwOut.Match.SrcIpRanges
-	e.await(e.gce.AddFirewallPolicyRule(ctx, project, fence.PolicyName, &extra))
+	e.await(e.gce.AddFirewallPolicyRule(ctx, project, gcefence.PolicyName, &extra))
 
 	// The reconcile repairs it, unless the fence's own loop, which
 	// also repairs at its start and on each change, got there first;

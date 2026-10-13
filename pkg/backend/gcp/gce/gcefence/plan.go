@@ -1,10 +1,12 @@
-package fence
+package gcefence
 
 import (
 	"fmt"
+	"net/netip"
 	"reflect"
 	"sort"
 
+	"github.com/bwsalmon/silo/pkg/fence"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -126,9 +128,9 @@ func between(h, w *compute.FirewallPolicyRule) *compute.FirewallPolicyRule {
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return nil
 	}
-	combine := intersect
+	combine := fence.Intersect
 	if w.Action == "deny" {
-		combine = union
+		combine = fence.Union
 	}
 	src, dst := hs, hd
 	// An empty list puts no limit on that end: it must stay empty on
@@ -204,4 +206,16 @@ func sameRanges(a, b []string) bool {
 		return reflect.DeepEqual(a, b)
 	}
 	return reflect.DeepEqual(strs(pa), strs(pb))
+}
+
+func parsePrefixes(ss []string) ([]netip.Prefix, bool) {
+	out := make([]netip.Prefix, 0, len(ss))
+	for _, s := range ss {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, p)
+	}
+	return out, true
 }

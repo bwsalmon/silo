@@ -38,7 +38,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/backend"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/leader"
 	"github.com/bwsalmon/silo/pkg/ledger"
@@ -407,14 +407,14 @@ func (r *Reconciler) fence(ctx context.Context, rep *Report) error {
 	return err
 }
 
-// AuditDrift is a fence.Applier's OnDrift: it logs the drift an apply
+// AuditDrift is a gcefence.Applier's OnDrift: it logs the drift an apply
 // repaired and audits it as fence_drift under the root, in a
 // transaction guarded by the leader epoch.
-func AuditDrift(st store.Store, logf func(string, ...any)) func(context.Context, []fence.Step, bool) {
+func AuditDrift(st store.Store, logf func(string, ...any)) func(context.Context, []gcefence.Step, bool) {
 	if logf == nil {
 		logf = log.Printf
 	}
-	return func(ctx context.Context, steps []fence.Step, repaired bool) {
+	return func(ctx context.Context, steps []gcefence.Step, repaired bool) {
 		var names []string
 		for _, s := range steps {
 			names = append(names, s.String())
