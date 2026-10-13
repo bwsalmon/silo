@@ -1,4 +1,4 @@
-package fence
+package gcefence
 
 import (
 	"fmt"
@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	fe "github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
+	"github.com/bwsalmon/silo/pkg/fence"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -43,7 +44,7 @@ func gatewayPort(p probe, sealed bool) bool {
 	return false
 }
 
-func compileTree(t *testing.T, tr *gtree, grants []Grant, cur []*compute.FirewallPolicyRule) []*compute.FirewallPolicyRule {
+func compileTree(t *testing.T, tr *gtree, grants []fence.Grant, cur []*compute.FirewallPolicyRule) []*compute.FirewallPolicyRule {
 	t.Helper()
 	in := tr.input()
 	in.Grants = grants
@@ -166,7 +167,7 @@ func TestPropertyControlRange(t *testing.T) {
 		tr := randomTree(r, 1+r.Intn(8))
 		rules := compileTree(t, tr, tr.hostileGrants(r), nil)
 		e := evaluator(t, rules, tr.tenantRules())
-		psc := []fe.Endpoint{fe.Outside(genPSC.String()), fe.Outside(genControl.Addr().String()), fe.Outside(lastAddr(genControl).String()),
+		psc := []fe.Endpoint{fe.Outside(genPSC.String()), fe.Outside(genControl.Addr().String()), fe.Outside(fence.LastAddr(genControl).String()),
 			fe.VM(genPSC.String())}
 		for sid, addrs := range tr.vms(r) {
 			for _, a := range addrs {
@@ -248,9 +249,9 @@ func mutate(r *rand.Rand, tr *gtree) mutation {
 				b := s.blocks[i]
 				wide := netip.PrefixFrom(b.Addr(), b.Bits()-1).Masked()
 				// The other half must be free in the parent.
-				other := Minus(wide, b)
+				other := fence.Minus(wide, b)
 				free := m.after.free(s.parent)
-				if len(intersect(other, free)) == 1 && intersect(other, free)[0] == other[0] {
+				if len(fence.Intersect(other, free)) == 1 && fence.Intersect(other, free)[0] == other[0] {
 					s.blocks[i] = wide
 					m.handed = other
 					return m
@@ -338,8 +339,8 @@ func TestPropertyIntermediateStates(t *testing.T) {
 		resealed := m.resealed
 		owners := []*gtree{tr, m.after}
 		opts := fe.CheckOptions{
-			VMOnly: normalize(vmOnly),
-			Empty:  normalize(m.handed),
+			VMOnly: fence.Normalize(vmOnly),
+			Empty:  fence.Normalize(m.handed),
 			Exempt: func(p fe.Packet) bool {
 				if p.Protocol != "tcp" || p.Port != APIPort || !genGateway.Contains(p.Dst.Addr) {
 					return false
@@ -416,7 +417,7 @@ func TestPropertyExports(t *testing.T) {
 			target netip.AddrPort
 		}
 		var exps []export
-		var grants []Grant
+		var grants []fence.Grant
 		for i, sid := range tr.ids() {
 			if len(vms[sid]) == 0 || r.Intn(3) == 0 {
 				continue
@@ -424,7 +425,7 @@ func TestPropertyExports(t *testing.T) {
 			p := probes[r.Intn(12)] // a TCP probe
 			ex := export{sid, netip.AddrPortFrom(vms[sid][r.Intn(len(vms[sid]))], uint16(p.port))}
 			exps = append(exps, ex)
-			grants = append(grants, ExportGrant(fmt.Sprintf("export-x%d-in", i), genGateway, ex.target))
+			grants = append(grants, fence.ExportGrant(fmt.Sprintf("export-x%d-in", i), genGateway, ex.target))
 		}
 		rules := compileTree(t, tr, grants, nil)
 		open := evaluator(t, rules, tr.tenantRules())
@@ -480,7 +481,7 @@ func TestPropertyExports(t *testing.T) {
 type glink struct {
 	a, b             string
 	forward, reverse bool // a may start connections to b, b to a
-	l4               []L4
+	l4               []fence.L4
 }
 
 // opens reports whether l lets a connection on p start in src to dst.
@@ -510,7 +511,7 @@ func (l glink) opens(src, dst string, p probe) bool {
 	return false
 }
 
-var linkRules = [][]L4{
+var linkRules = [][]fence.L4{
 	{{Protocol: "all"}},
 	{{Protocol: "tcp", Ports: []string{"5432"}}},
 	{{Protocol: "tcp", Ports: []string{"22", "8000-8443"}}, {Protocol: "udp", Ports: []string{"53"}}},
@@ -537,15 +538,15 @@ func TestPropertyLinks(t *testing.T) {
 		for _, id := range tr.ids() {
 			blocks[id] = tr.silos[id].blocks
 		}
-		own := OwnSpaces(blocks, genGateway, genControl)
+		own := fence.OwnSpaces(blocks, genGateway, genControl)
 		for _, id := range tr.ids() {
-			if got, want := normalize(own[id]), tr.free(id); fmt.Sprint(got) != fmt.Sprint(want) {
+			if got, want := fence.Normalize(own[id]), tr.free(id); fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("run %d: %s's own space %v, want %v", run, id, got, want)
 			}
 		}
 		ids := tr.ids()
 		var ls []glink
-		var grants []Grant
+		var grants []fence.Grant
 		for i := r.Intn(2 * len(ids)); i >= 0; i-- {
 			a, b := ids[r.Intn(len(ids))], ids[r.Intn(len(ids))]
 			if a == b {
@@ -561,7 +562,7 @@ func TestPropertyLinks(t *testing.T) {
 				l.forward, l.reverse = true, true
 			}
 			ls = append(ls, l)
-			grants = append(grants, LinkGrant(fmt.Sprintf("l%d", i), own[a], own[b], l.forward, l.reverse, l.l4)...)
+			grants = append(grants, fence.LinkGrant(fmt.Sprintf("l%d", i), own[a], own[b], l.forward, l.reverse, l.l4)...)
 		}
 		rules := compileTree(t, tr, grants, nil)
 		e := evaluator(t, rules, tr.tenantRules())

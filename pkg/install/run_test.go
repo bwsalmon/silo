@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/install"
 	"github.com/bwsalmon/silo/pkg/install/fakecloud"
 )
@@ -146,7 +146,7 @@ func TestRerunRepairsDrift(t *testing.T) {
 			t.Errorf("after the repair, %s still plans %v (%v)", p.Step, p.Changes, p.Err)
 		}
 	}
-	pol, err := f.Compute.GetFirewallPolicy(ctx, project, fence.PolicyName)
+	pol, err := f.Compute.GetFirewallPolicy(ctx, project, gcefence.PolicyName)
 	if err != nil {
 		t.Fatal(err)
 	}

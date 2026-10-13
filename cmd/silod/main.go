@@ -42,17 +42,17 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gceclient"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/rootcap"
 	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
 	"github.com/bwsalmon/silo/pkg/gateway"
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/harness"
 	"github.com/bwsalmon/silo/pkg/leader"
-	"github.com/bwsalmon/silo/pkg/ledger/rootcap"
 	"github.com/bwsalmon/silo/pkg/modelproxy"
 	"github.com/bwsalmon/silo/pkg/reconcile"
 	"github.com/bwsalmon/silo/pkg/session"
@@ -438,19 +438,19 @@ func serve(ctx context.Context, args []string) error {
 	// reconcile: from the schema with the leader epoch on.
 	leaderLed := why == "" && v >= store.LeaderSchema
 	var duties []leader.Duty
-	cfg := fence.DefaultConfig
-	var applier *fence.Applier
+	cfg := gcefence.DefaultConfig
+	var applier *gcefence.Applier
 	cfg.GatewayReplicas = *gatewayReplicas
 	// nil but in the conformance build (testswitch_conformance.go).
 	cfg.KeepControlPort = keepControlPortSwitch()
 	go watchTestSwitches(ctx)
-	opts := fenceapi.Options{Ready: func() string { return why }, Budget: fence.Budget{Config: cfg}}
+	opts := fenceapi.Options{Ready: func() string { return why }, Budget: gcefence.Budget{Config: cfg}}
 	if *fenceProject != "" {
 		client, err := gceclient.New(ctx, gcpOptions(*computeEndpoint))
 		if err != nil {
 			return err
 		}
-		applier = &fence.Applier{Store: db, GCE: client, Project: *fenceProject, Config: cfg}
+		applier = &gcefence.Applier{Store: db, GCE: client, Project: *fenceProject, Config: cfg}
 		if leaderLed {
 			// Only the leader applies; every replica's fence calls wait
 			// on WaitApplied for the leader to record their change.

@@ -1,4 +1,4 @@
-package fence_test
+package gcefence_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	fe "github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
 	"github.com/bwsalmon/silo/pkg/store"
 	compute "google.golang.org/api/compute/v1"
@@ -57,7 +57,7 @@ func (e *env) linkRules() []string {
 	var out []string
 	for n, r := range rs {
 		if strings.HasPrefix(n, "link-") {
-			if r.Priority < fence.GrantsBand || r.Priority > fence.GrantsEnd || r.Action != "allow" {
+			if r.Priority < gcefence.GrantsBand || r.Priority > gcefence.GrantsEnd || r.Action != "allow" {
 				e.t.Errorf("%s at %d, %s: want an allow in the grants band", n, r.Priority, r.Action)
 			}
 			out = append(out, n)
@@ -221,10 +221,10 @@ func TestLinkRuleBudget(t *testing.T) {
 	b := e.create(e.root, e.root, "b", 20, nil)
 	rs, _ := e.rules()
 	// Room for one more rule within 90%, not for two.
-	quota := (len(rs)+1)*100/fence.BudgetPercent + 1
+	quota := (len(rs)+1)*100/gcefence.BudgetPercent + 1
 	ctx := context.Background()
 	if err := e.db.Tx(ctx, func(tx store.Tx) error {
-		return fence.SetQuota(ctx, tx, fence.Quota{Rules: quota})
+		return gcefence.SetQuota(ctx, tx, gcefence.Quota{Rules: quota})
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	gceapi "github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -439,7 +440,7 @@ func TestFirewallPinningFence(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		rules, err = fence.Compile(in, fence.DefaultConfig, nil)
+		rules, err = gcefence.Compile(in, gcefence.DefaultConfig, nil)
 		return err
 	}); err != nil {
 		t.Fatal(err)

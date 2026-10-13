@@ -14,7 +14,7 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/internal/pgtest"
 	"github.com/bwsalmon/silo/pkg/leader"
@@ -56,7 +56,7 @@ type replica struct {
 	id    string
 	db    *Store
 	gce   *policyWrites
-	fence *fence.Applier
+	fence *gcefence.Applier
 	api   *httptest.Server
 	terms chan *leader.Term
 	ended chan *leader.Term
@@ -71,7 +71,7 @@ func startReplica(t *testing.T, ctx context.Context, srv *pgtest.Server, id stri
 	t.Cleanup(stop)
 	r := &replica{id: id, db: openMigrated(t, srv, named(id)), gce: &policyWrites{Client: f},
 		terms: make(chan *leader.Term, 4), ended: make(chan *leader.Term, 4)}
-	r.fence = &fence.Applier{Store: r.db, GCE: r.gce, Project: "host-project", Config: fence.DefaultConfig,
+	r.fence = &gcefence.Applier{Store: r.db, GCE: r.gce, Project: "host-project", Config: gcefence.DefaultConfig,
 		Poll: 20 * time.Millisecond, Guard: leader.Guard}
 	api := fenceapi.New(r.db, fenceapi.Options{Fence: r.fence, Budget: r.fence,
 		Caller: func(req *http.Request) (fenceapi.Caller, error) {
@@ -140,7 +140,7 @@ func TestLeaderReplicas(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f := fake.New(fake.Options{Project: "host-project"})
-	op, err := f.InsertFirewallPolicy(ctx, "host-project", &compute.FirewallPolicy{Name: fence.PolicyName})
+	op, err := f.InsertFirewallPolicy(ctx, "host-project", &compute.FirewallPolicy{Name: gcefence.PolicyName})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestLeaderReplicas(t *testing.T) {
 		map[string]any{"name": "team", "address": map[string]any{"prefix_length": 24}})["id"].(string)
 	rules := func() map[string]int {
 		t.Helper()
-		pol, err := f.GetFirewallPolicy(ctx, "host-project", fence.PolicyName)
+		pol, err := f.GetFirewallPolicy(ctx, "host-project", gcefence.PolicyName)
 		if err != nil {
 			t.Fatal(err)
 		}

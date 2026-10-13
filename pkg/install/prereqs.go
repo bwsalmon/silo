@@ -9,7 +9,7 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/agents"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
-	"github.com/bwsalmon/silo/pkg/fence"
+	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 )
 
 // Prereqs is step 1, prereqs (install.md "Prerequisite checks", SV-94):
@@ -173,14 +173,14 @@ func (s *Prereqs) NewObserved() Observed { return &PrereqsObserved{} }
 func (s *Prereqs) Apply(context.Context, []Change) error { return nil }
 
 // PolicyQuota is the firewall policy quota obs implies, which install
-// records for silod's rule budget (fence.SetQuota): the per-policy
+// records for silod's rule budget (gcefence.SetQuota): the per-policy
 // rule-attribute quota, or the documented default where Cloud Quotas
 // doesn't report it.
-func PolicyQuota(obs *PrereqsObserved) fence.Quota {
+func PolicyQuota(obs *PrereqsObserved) gcefence.Quota {
 	if obs.RuleAttributes > 0 {
-		return fence.Quota{Attributes: int(obs.RuleAttributes)}
+		return gcefence.Quota{Attributes: int(obs.RuleAttributes)}
 	}
-	return fence.Quota{Attributes: DefaultRuleAttributes}
+	return gcefence.Quota{Attributes: DefaultRuleAttributes}
 }
 
 func (s *Prereqs) Observe(ctx context.Context) (Observed, error) {
@@ -668,7 +668,7 @@ func (s *Prereqs) checkFirewallPolicy(k *checker, obs *PrereqsObserved) {
 		return
 	}
 	q := PolicyQuota(obs)
-	silos := q.Attributes * fence.BudgetPercent / 100 / attributesPerSilo
+	silos := q.Attributes * gcefence.BudgetPercent / 100 / attributesPerSilo
 	note := ""
 	if obs.RuleAttributes == 0 {
 		note = " (not reported by Cloud Quotas: the documented default)"
