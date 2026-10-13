@@ -42,6 +42,10 @@ type Replica struct {
 	AgentSessions int
 }
 
+// MirrorSchema is the first schema with the outbound mirror's tables
+// (local-git.md §8).
+const MirrorSchema = 26
+
 // HostSchema is the first schema with agents' hosts, the heartbeat's
 // session slots and the harnesses' saved state.
 const HostSchema = 17

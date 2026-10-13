@@ -18,7 +18,7 @@ silo install: project silo-test-project
   image             ok      silo silod@sha256:7dd5524d6d0b
   db                ok      database silo, IAM user silod@silo-test-project.iam
   db-endpoint       ok      silo-db-psc 10.255.254.2 in silo-ctl, zone silo-db
-  migrate           ok      schema 25
+  migrate           ok      schema 26
   control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
                             (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
                             silo-control-lb-ip internal, in silo-gateway
