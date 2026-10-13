@@ -915,6 +915,76 @@ memory, for fast tests ([§13](#13-testing-and-the-conformance-split)).
   and `restore` (Checkpoint/Restore guide), so the driver doesn't offer
   it in v1.
 
+### As built in step 7
+
+`pkg/backend/local/runtime/gvisor` (task 3414) is the sandbox class's
+driver. CI's `nsd` job runs it end to end, as the unprivileged runner
+user, against containerd 2.4 and gVisor 20261005 inside `silo-nsd`
+(`TestSandboxDriver`).
+
+- **containerd's Go client**, in namespace `silo`. A container is a
+  containerd container labelled `dev.silo.class=sandbox` on the runsc
+  shim. `Create` also makes its task (`runsc create`), so a created
+  container already has its sandbox.
+- **Netns wiring before create** is `local.Wire`. `silo-nsd` pins the
+  container's user namespace and netns and wires its veth. The spec
+  then names them, with the range the namespace maps
+  (`runtime.Spec.Root`), and the driver refuses a spec without a user
+  namespace.
+- **The snapshot is remapped inside the holder.** Remapping mounts the
+  snapshot, which silod on the host can't do. So `Create` runs
+  `silod runtime-remap` through the holder, under a lease, and it does
+  what containerd's `WithUserNSRemappedSnapshot` does. The remapped
+  parent is shared by every container of that image in that range.
+- **Logs.** gVisor's shim only does FIFOs: there is no logging binary
+  and no `file://`. `silod runtime-log` is a copier in a session of its
+  own, like conmon. It reads the workload's FIFOs and appends Docker's
+  json-file format to `<dir>/<id>/log.json`, and it outlives silod. It
+  also holds an `OpenStdin` workload's stdin FIFO open between attaches.
+- **Exec** uses containerd's FIFOs in the container's directory. The
+  shim keeps its own write end of an exec's stdin, so the driver calls
+  `CloseIO` once the caller's stdin is done.
+- **Archive** is `tar` run through exec, because with
+  `--overlay2=root:self` the container's writes are in the sandbox, not
+  on the host. The tar comes from a static busybox bind-mounted
+  read-only at `/.silo/busybox` when the driver is given one, and from
+  the image otherwise.
+- **Stats** are the shim's metrics (cgroup v1 or v2), with the pids
+  count as a fallback. A container gets a `cgroupsPath` only when the
+  driver is configured with one. Without delegated cgroups (CI), the
+  shim's options say `ignore-cgroups`, and CPU and memory are what
+  runsc reports for its own cgroup, not the container's.
+- **Adoption.** `List` reads containerd, so it reports what an earlier
+  silod made. `Adopt` restarts the log copier of any container whose
+  sandbox is still alive but whose copier died. The test kills silod's
+  driver and the copier mid-run, then checks that the workload kept
+  running and its output reaches the log again.
+- **Users** must be numeric (`uid[:gid]`, or `root`). Resolving a name
+  needs the image's `/etc/passwd`, which only the holder can mount, so
+  the facade has to resolve names first.
+- **Not done:** the overlay size cap at the container's `disk_gb`, and
+  TTY resize for the workload's own console. Exec's TTY resize is done.
+
+Three things in gVisor's shim had to be worked around:
+
+- **The container-type annotation.** A spec without
+  `io.kubernetes.cri.container-type` is taken for a subcontainer. The
+  shim then gives `runsc create` no stdio and hands the pipes to
+  `runsc start`, which a sandbox's root container ignores, so the
+  workload writes to a closed pipe. That was the `EPIPE` step 16 saw
+  under `ctr`. The driver sets it to `sandbox`: each container is a
+  sandbox of its own.
+- **Exec's process file.** The shim writes it to its temporary
+  directory, mode `0600`, as the holder's root. runsc runs as the
+  container's root and can't read it, so `silod runsc` hands it over.
+- **Fast exits.** A sandbox exits with its root container's status, and
+  only its parent can read that. A workload that exits before
+  `runsc wait` connects comes back as "exit status is unavailable",
+  which the shim reports as 128. So `silod runsc create` leaves a small
+  subreaper behind as the sandbox's parent, which writes the status to
+  `silo-exit` in the bundle. `silod runsc wait` answers from that file
+  when runsc can't.
+
 ### granule driver
 
 - **Runtime.** containerd's runc shim, running the wrapped image with
