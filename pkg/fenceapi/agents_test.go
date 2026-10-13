@@ -96,13 +96,24 @@ type agentEnv struct {
 	team   string // /team: 100 dollars of model budget, 3 sessions
 }
 
-func newAgentEnv(t *testing.T) *agentEnv {
+func newAgentEnv(t *testing.T, mods ...func(*fenceapi.Options)) *agentEnv {
 	t.Helper()
 	vms := &fakeVMs{}
 	runner := &agents.Fake{}
 	e := &agentEnv{vms: vms, runner: runner}
-	e.env = newEnv(t, fenceapi.Options{ToolVMs: vms, Runner: runner, CredentialKey: testCredentialKey,
-		Credentials: agents.StaticCredentials{"anthropic-api": "anthropic", "openai-api": "openai", "spare": "anthropic"}})
+	opts := fenceapi.Options{ToolVMs: vms, Runner: runner, CredentialKey: testCredentialKey,
+		Credentials: agents.StaticCredentials{"anthropic-api": "anthropic", "openai-api": "openai", "spare": "anthropic"}}
+	for _, m := range mods {
+		m(&opts)
+	}
+	var edit func(obj)
+	if opts.Ambient {
+		// A local install's root allows its ambient credentials.
+		edit = func(b obj) {
+			b["agent_policy"] = obj{"credentials": []string{"anthropic-api", "openai-api", "ambient-anthropic", "ambient-openai"}}
+		}
+	}
+	e.env = newEnvBody(t, opts, edit)
 	runner.Connected = e.api.ToolServerConnected
 	if err := e.db.Tx(ctx, func(tx store.Tx) error {
 		return ledger.SetCapacity(ctx, tx, e.root, []ledger.Amount{{Key: fenceapi.AgentSessions, Amount: ledger.Units(10)}})

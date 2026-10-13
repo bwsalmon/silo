@@ -46,6 +46,48 @@ type Silo struct {
 	// RestoreDetected is, on the root of a local backend, the restore
 	// silod found at its start, until silo reconcile --apply.
 	RestoreDetected *RestoreDetected `json:"restore_detected,omitempty"`
+	// Usage is the host resources the silo has used, on the local
+	// backend: its slice's last reading (local-backend.md §11).
+	Usage *ResourceUsage `json:"usage,omitempty"`
+}
+
+// ResourceUsage is one reading of a silo's slice, or of an agent's own
+// cgroups, on the local backend (local-backend.md §11, "Metering"). It
+// is metering, not a charge: quota is the limit.
+type ResourceUsage struct {
+	SampleTime time.Time `json:"sample_time"`
+	// CPUUsec is the CPU time used since the cgroup was made.
+	CPUUsec         uint64 `json:"cpu_usec"`
+	MemoryBytes     uint64 `json:"memory_bytes"`
+	MemoryPeakBytes uint64 `json:"memory_peak_bytes,omitempty"`
+	ReadBytes       uint64 `json:"read_bytes"`
+	WriteBytes      uint64 `json:"write_bytes"`
+}
+
+// UsageMeter is what silos and agents have used of the host.
+type UsageMeter interface {
+	SiloUsage(silo string) (ResourceUsage, bool)
+	AgentUsage(agent string) (ResourceUsage, bool)
+}
+
+func (s *Server) siloUsage(silo string) *ResourceUsage {
+	if s.opts.Usage == nil {
+		return nil
+	}
+	if u, ok := s.opts.Usage.SiloUsage(silo); ok {
+		return &u
+	}
+	return nil
+}
+
+func (s *Server) agentUsage(agent string) *ResourceUsage {
+	if s.opts.Usage == nil {
+		return nil
+	}
+	if u, ok := s.opts.Usage.AgentUsage(agent); ok {
+		return &u
+	}
+	return nil
 }
 
 // Backing is how a silo is isolated (SV-5).
@@ -314,6 +356,7 @@ func (s *Server) describe(q *request, ref string) {
 		writeError(q.w, err)
 		return
 	}
+	out.Usage = s.siloUsage(out.ID)
 	writeJSON(q.w, http.StatusOK, out)
 }
 

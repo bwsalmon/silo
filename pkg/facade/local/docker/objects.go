@@ -56,6 +56,9 @@ type Container struct {
 	// Seq is the object sequence number it was made at (package
 	// objseq), which labels its containerd record.
 	Seq uint64 `json:",omitempty"`
+	// Agent is the agent whose tool container it is, made by silod's
+	// own call for that agent (ToolContainers); "" for a tenant's.
+	Agent string `json:",omitempty"`
 }
 
 // Endpoint is a container's place on one network.

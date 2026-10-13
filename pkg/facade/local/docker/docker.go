@@ -114,6 +114,11 @@ type Options struct {
 	Ready func() string
 	// Version is silod's version, which /version and /info report.
 	Version string
+	// ToolImage is the image an agent's sandbox-class tool container
+	// runs when the agent names none, and VMToolImage a vm-class one's,
+	// which carries silo-tools at runtime.ToolsPath (local-backend.md
+	// §10). Empty, the agent must name one.
+	ToolImage, VMToolImage string
 	// PublishPorts is the range a published port with no HostPort is
 	// given one from; 32768 to 60999, as Docker's, if zero.
 	PublishPorts [2]int

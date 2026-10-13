@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // Codex is the codex adapter: OpenAI's Codex CLI, codex exec, with
@@ -21,7 +22,7 @@ import (
 type Codex struct{}
 
 func (Codex) Name() string              { return "codex" }
-func (Codex) CredentialKinds() []string { return []string{KindAPIKey, KindSubscription} }
+func (Codex) CredentialKinds() []string { return []string{KindAPIKey, KindSubscription, KindAmbient} }
 func (Codex) StatePaths() []string      { return []string{".codex/sessions"} }
 func (Codex) NewSessionID() string      { return "" }
 func (Codex) Parser() Parser            { return &codexParser{} }
@@ -34,10 +35,30 @@ var codexProxyConfig = []string{
 	`model_providers.silo={name="silo",base_url=` + strconv.Quote(modelBase("openai")+"/v1") + `,env_key="OPENAI_API_KEY",wire_api="responses"}`,
 }
 
-// codexConfig are the -c overrides every turn runs with.
-var codexConfig = []string{
+// codexHTTPMCP is a container session's MCP server: the forwarder's
+// /mcp, over rmcp's streamable HTTP client.
+var codexHTTPMCP = []string{
 	`mcp_servers.` + mcpServer + `.url=` + strconv.Quote(Endpoint+"/mcp"),
 	`experimental_use_rmcp_client=true`,
+}
+
+// codexStdioMCP is an ambient session's MCP server: cmd, over stdio.
+func codexStdioMCP(cmd []string) []string {
+	if len(cmd) == 0 {
+		return nil
+	}
+	args := make([]string, 0, len(cmd)-1)
+	for _, a := range cmd[1:] {
+		args = append(args, strconv.Quote(a))
+	}
+	return []string{
+		`mcp_servers.` + mcpServer + `.command=` + strconv.Quote(cmd[0]),
+		`mcp_servers.` + mcpServer + `.args=[` + strings.Join(args, ",") + `]`,
+	}
+}
+
+// codexConfig are the -c overrides every turn runs with.
+var codexConfig = []string{
 	`approval_policy="never"`,
 	`sandbox_mode="read-only"`,
 	`features.shell_tool=false`,
@@ -50,12 +71,23 @@ var codexConfig = []string{
 }
 
 func (Codex) Command(l Launch) Command {
-	argv := []string{"codex", "exec", "--json", "--skip-git-repo-check",
-		"--cd", WorkDir, "--model", l.Model, "--sandbox", "read-only"}
-	config := codexConfig
-	if !l.Subscription {
-		config = append(slices.Clone(codexProxyConfig), codexConfig...)
+	dir := WorkDir
+	if l.Ambient {
+		dir = l.WorkDir
 	}
+	argv := []string{"codex", "exec", "--json", "--skip-git-repo-check",
+		"--cd", dir, "--model", l.Model, "--sandbox", "read-only"}
+	var config []string
+	switch {
+	case l.Ambient:
+		// Its own login and provider, as the agent user has them.
+		config = codexStdioMCP(l.MCP)
+	case l.Subscription:
+		config = slices.Clone(codexHTTPMCP)
+	default:
+		config = append(slices.Clone(codexProxyConfig), codexHTTPMCP...)
+	}
+	config = append(config, codexConfig...)
 	for _, c := range config {
 		argv = append(argv, "-c", c)
 	}
@@ -63,16 +95,24 @@ func (Codex) Command(l Launch) Command {
 		argv = append(argv, "resume", l.SessionID)
 	}
 	argv = append(argv, "--", l.Prompt)
-	env := []string{
-		"HOME=" + Home,
-		"CODEX_HOME=" + Home + "/.codex",
-		"NO_COLOR=1",
+	env := []string{"NO_COLOR=1"}
+	if l.Ambient {
+		// The agent user's own HOME, CODEX_HOME and login: ambient.
+		return Command{Argv: argv, Env: env}
 	}
+	env = append(env, "HOME="+Home, "CODEX_HOME="+Home+"/.codex")
 	if !l.Subscription {
 		env = append(env, "OPENAI_API_KEY="+ProxyKey)
 	}
 	return Command{Argv: argv, Env: env}
 }
+
+// VersionArgv implements Versioned.
+func (Codex) VersionArgv() []string { return []string{"codex", "--version"} }
+
+// MinVersion implements Versioned: the release this adapter's flags
+// were written against.
+func (Codex) MinVersion() string { return "0.46.0" }
 
 type codexParser struct{}
 
