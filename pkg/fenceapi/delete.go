@@ -500,7 +500,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		capacity, err := amounts(ctx, tx, req.Capacity)
+		capacity, err := amounts(ctx, tx, req.Capacity, backing)
 		if err != nil {
 			return err
 		}
