@@ -160,6 +160,10 @@ type Options struct {
 	// Git serves git-remote-silo's connections at the front door; nil
 	// refuses them.
 	Git GitConnector
+	// Mirror is the outbound mirror into the uber repo (local-git.md
+	// §8); nil answers its calls FAILED_PRECONDITION and deletes repos
+	// at once.
+	Mirror Mirror
 }
 
 // Server serves silo/v1.
@@ -269,6 +273,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	q.validateOnly = r.URL.Query().Get("validate_only") == "true"
 	if reconcilePath(rest) {
 		s.reconcile(q, rest)
+		return
+	}
+	if mirrorPath(rest) {
+		s.mirror(q, rest)
 		return
 	}
 	call := control.ParseFence(r.Method, rest)
