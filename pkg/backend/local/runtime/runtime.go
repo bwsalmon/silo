@@ -232,3 +232,17 @@ type Driver interface {
 	// List is every container this driver has, with silod's labels.
 	List(ctx context.Context) ([]Container, error)
 }
+
+// Committer is a driver that can give a container's writable layer, as
+// docker commit needs it (local-registry.md §7, "commit"). The sandbox
+// class is one; the vm class, whose writable layer is a guest disk, is
+// not.
+type Committer interface {
+	// RootfsUpper is the container's writable layer as a tar: the
+	// files it created and changed, and its deletions as whiteouts,
+	// overlayfs's (a 0/0 character device, and the trusted.overlay.opaque
+	// xattr on a directory made opaque) or OCI's (.wh.<name>). The
+	// caller checks and converts them; the tar is never unpacked on the
+	// host.
+	RootfsUpper(ctx context.Context, id string) (io.ReadCloser, error)
+}

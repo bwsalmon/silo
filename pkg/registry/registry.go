@@ -187,6 +187,9 @@ type request struct {
 	r      *http.Request
 	caller fenceapi.Caller
 	name   imagerepos.Name
+	// held is a push by the Docker facade (PushHeld), whose caller's
+	// image record is its proof that it has the blobs.
+	held bool
 }
 
 func (q *request) ctx() context.Context { return q.r.Context() }

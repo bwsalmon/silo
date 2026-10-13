@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
+	"github.com/bwsalmon/silo/pkg/registry"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
 )
@@ -30,8 +33,12 @@ var ctx = context.Background()
 type obj = map[string]any
 
 // images is a fake puller: every reference is a 300 MB image whose
-// config runs /bin/app.
-type images struct{ pulls []string }
+// config runs /bin/app, stored in content (a config, one small layer
+// and a manifest) so that push, save and commit can read it.
+type images struct {
+	pulls   []string
+	content *registry.Memory
+}
 
 func (f *images) Pull(_ context.Context, silo, ref, _ string) (*Pulled, error) {
 	if strings.HasPrefix(ref, "missing") {
@@ -39,10 +46,37 @@ func (f *images) Pull(_ context.Context, silo, ref, _ string) (*Pulled, error) {
 	}
 	f.pulls = append(f.pulls, silo+" "+ref)
 	name, _, _ := strings.Cut(ref, ":")
-	id := fmt.Sprintf("sha256:%064x", len(name))
-	return &Pulled{ID: id, RepoDigest: name + "@" + id, Size: 300 << 20, Created: time.Unix(1700000000, 0),
-		Config: ImageConfig{Cmd: []string{"/bin/app"}, Env: []string{"PATH=/bin", "A=1"},
-			ExposedPorts: map[string]struct{}{"80/tcp": {}}, Volumes: map[string]struct{}{"/data": {}}}}, nil
+	cfg := ImageConfig{Cmd: []string{"/bin/app"}, Env: []string{"PATH=/bin", "A=1"},
+		ExposedPorts: map[string]struct{}{"80/tcp": {}}, Volumes: map[string]struct{}{"/data": {}}}
+	layer := testLayer(map[string]string{"bin/app": "app of " + name, "etc/conf": "base"})
+	cb, _ := json.Marshal(map[string]any{"created": time.Unix(1700000000, 0).UTC(), "architecture": goarch(), "os": "linux",
+		"config": cfg, "rootfs": map[string]any{"type": "layers", "diff_ids": []string{digestOf(layer)}}})
+	mb, _ := json.Marshal(imageManifest{SchemaVersion: 2, MediaType: mediaOCIManifest,
+		Config: &descriptor{MediaType: mediaOCIConfig, Digest: digestOf(cb), Size: int64(len(cb))},
+		Layers: []descriptor{{MediaType: mediaOCILayer, Digest: digestOf(layer), Size: int64(len(layer))}}})
+	for _, b := range [][]byte{cb, layer, mb} {
+		f.content.Put(b)
+	}
+	id := digestOf(cb)
+	return &Pulled{ID: id, RepoDigest: name + "@" + digestOf(mb), Size: 300 << 20, Created: time.Unix(1700000000, 0),
+		Config: cfg, Manifest: digestOf(mb), MediaType: mediaOCIManifest}, nil
+}
+
+// testLayer is a layer tar of files, by path.
+func testLayer(files map[string]string) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	var names []string
+	for n := range files {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	for _, n := range names {
+		tw.WriteHeader(&tar.Header{Name: n, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(files[n])), ModTime: time.Unix(0, 0)})
+		tw.Write([]byte(files[n]))
+	}
+	tw.Close()
+	return buf.Bytes()
 }
 
 // env is silod on SQLite with a local tree, serving the fence API and
@@ -55,9 +89,13 @@ type env struct {
 	vm     *fake.Driver
 	sbx    *fake.Driver
 	images *images
-	facade *Server
-	srv    *httptest.Server
-	vols   string
+	// content is silo-containerd's content store, and reg the local
+	// registry over it.
+	content *registry.Memory
+	reg     *registry.Service
+	facade  *Server
+	srv     *httptest.Server
+	vols    string
 
 	root, a, ci, b, ro, sandboxOnly string
 }
@@ -75,11 +113,14 @@ func newEnv(t *testing.T) *env {
 	caller := func(r *http.Request) (fenceapi.Caller, error) {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaInternal}, nil
 	}
-	e := &env{t: t, db: db, vm: fake.New(runtime.VM), sbx: fake.New(runtime.Sandbox), images: &images{}, vols: t.TempDir()}
+	content := registry.NewMemory()
+	e := &env{t: t, db: db, vm: fake.New(runtime.VM), sbx: fake.New(runtime.Sandbox), images: &images{content: content},
+		content: content, vols: t.TempDir()}
 	e.vm.Volumes, e.sbx.Volumes = e.vols, e.vols
-	e.facade = New(db, Options{Drivers: []runtime.Driver{e.vm, e.sbx}, Storage: &storage.Dir{Root: e.vols},
-		Images: e.images, Caller: caller, Version: "test"})
 	api := fenceapi.New(db, fenceapi.Options{Caller: caller})
+	e.reg = registry.New(registry.Options{Store: db, API: api, Content: content})
+	e.facade = New(db, Options{Drivers: []runtime.Driver{e.vm, e.sbx}, Storage: &storage.Dir{Root: e.vols},
+		Images: e.images, Content: content, Registry: e.reg, Login: login, Caller: caller, Version: "test"})
 	mux := http.NewServeMux()
 	mux.Handle("/silo/", api)
 	mux.Handle("/silod/", api)
@@ -88,9 +129,10 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { e.srv.Close(); e.facade.Close(); api.Close() })
 
 	code, root := e.do("", "POST", "/silod/bootstrap", obj{
-		"backing":  obj{"kind": "local"},
-		"capacity": obj{"global": obj{"vcpu_m": 32000, "memory_mb": 32768, "disk_gb": 1000, "containers": 50, "networks": 20, "volumes": 20}},
-		"admins":   []string{"user:admin@example.com"},
+		"backing":      obj{"kind": "local"},
+		"capacity":     obj{"global": obj{"vcpu_m": 32000, "memory_mb": 32768, "disk_gb": 1000, "containers": 50, "networks": 20, "volumes": 20, "image_repos": 100}},
+		"grant_policy": obj{"exports": "allow"},
+		"admins":       []string{"user:admin@example.com"},
 	}, nil)
 	if code != 200 {
 		t.Fatalf("bootstrap: %d %v", code, root)
@@ -107,7 +149,7 @@ func newEnv(t *testing.T) *env {
 		}
 		return out["id"].(string)
 	}
-	quota := obj{"global": obj{"vcpu_m": 4000, "memory_mb": 2048, "disk_gb": 100, "containers": 5, "networks": 3, "volumes": 3}}
+	quota := obj{"global": obj{"vcpu_m": 4000, "memory_mb": 2048, "disk_gb": 100, "containers": 5, "networks": 3, "volumes": 3, "image_repos": 5}}
 	e.a = mk("-"+e.root, "team-a", obj{"quota": quota})
 	e.ci = mk("team-a", "ci", obj{"address": obj{"prefix_length": 24}, "quota": obj{"global": obj{"containers": 1, "disk_gb": 30, "vcpu_m": 1000, "memory_mb": 512, "networks": 1, "volumes": 1}}})
 	e.b = mk("-"+e.root, "team-b", obj{"quota": quota})
@@ -257,10 +299,10 @@ func TestVersionsAndRoutes(t *testing.T) {
 	e.fail(404, "page not found", e.a, "PATCH", "/v1.47/containers/json", nil)
 	e.fail(503, "This node is not a swarm manager", e.a, "GET", "/v1.47/swarm", nil)
 	e.fail(503, "This node is not a swarm manager", e.a, "POST", "/v1.47/services/create", nil)
-	e.fail(501, "building images is not supported", e.a, "POST", "/v1.47/build", nil)
+	e.fail(501, "build in a container with kaniko or BuildKit and push to registry.silo.internal", e.a, "POST", "/v1.47/build", nil)
 	e.fail(501, "not supported", e.a, "POST", "/v1.47/containers/abc/update", nil)
-	e.fail(501, "not supported", e.a, "GET", "/v1.47/images/library/alpine/get", nil)
-	e.fail(501, "not supported", e.a, "POST", "/v1.47/images/ghcr.io/o/r/push", nil)
+	e.fail(501, "not supported", e.a, "GET", "/v1.47/containers/abc/export", nil)
+	e.fail(501, "pushes go to registry.silo.internal only; this host copies nothing to external registries", e.a, "POST", "/v1.47/images/ghcr.io/o/r/push", nil)
 	e.fail(501, "not supported", e.a, "GET", "/v1.47/plugins", nil)
 	e.fail(501, "image import", e.a, "POST", "/v1.47/images/create?fromSrc=-", nil)
 	e.fail(501, "not served by this facade yet", e.a, "POST", "/v1.47/containers/abc/exec", nil)
