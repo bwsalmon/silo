@@ -434,6 +434,105 @@ func TestCachePullThrough(t *testing.T) {
 	}
 }
 
+// The index is per sharing domain (call L73): after a shared-domain
+// pull, an isolated silo's pull of the same image makes an upstream
+// request for every blob, though the bytes are on disk; a silo inside
+// that isolated subtree then hits on its fetches, the rest of the host
+// doesn't see them, a nested isolated silo misses again, and facade
+// pulls follow the same rule.
+func TestCacheSharingDomains(t *testing.T) {
+	ce := newCacheEnv(t)
+	all := obj{"allow": []string{"registry.test", "auth.test", "cdn.test"}}
+	i := ce.mk(ce.root, "-"+ce.root, "team-i", obj{"egress": all, "images": obj{"sharing": "isolated"}})
+	ix := ce.mk(ce.root, "team-i", "x", obj{"egress": all})
+	iy := ce.mk(ce.root, "team-i", "y", obj{"egress": all, "images": obj{"sharing": "isolated"}})
+	j := ce.mk(ce.root, "team-a", "j", obj{"egress": all, "images": obj{"sharing": "isolated"}})
+	blobs := []string{ce.config, ce.layer}
+	pull := func(silo, ref, want string) {
+		t.Helper()
+		if r := ce.req(silo, "GET", "/v2/docker.io/library/alpine/manifests/"+ref, "", nil); r.code != 200 {
+			t.Fatalf("GET alpine:%s: %d %s", ref, r.code, r.body)
+		}
+		for _, b := range blobs {
+			r := ce.req(silo, "GET", "/v2/docker.io/library/alpine/blobs/"+b, "", nil)
+			if r.code != 200 {
+				t.Fatalf("GET %s: %d %s", b, r.code, r.body)
+			}
+			if rec := ce.last(fenceapi.KindRegistryCache); rec["result"] != want || rec["_silo"] != silo {
+				t.Fatalf("%s's record: %v, want %s", b, rec, want)
+			}
+		}
+	}
+	// fetches is how many times the upstream has sent the manifest and
+	// each blob.
+	fetches := func(want int) {
+		t.Helper()
+		if n := ce.up.count("registry.test GET /v2/library/alpine/manifests/" + ce.manifest); n != want {
+			t.Errorf("manifest GETs: %d, want %d", n, want)
+		}
+		for _, b := range blobs {
+			if n := ce.up.count("cdn.test GET /b/" + b); n != want {
+				t.Errorf("%s: CDN GETs: %d, want %d", b, n, want)
+			}
+		}
+	}
+
+	pull(ce.a, "3", "miss")
+	fetches(1)
+	pull(i, "3", "miss")
+	fetches(2)
+	if rec := ce.last(fenceapi.KindRegistryCache); rec["domain"] != "/team-i" {
+		t.Fatalf("an isolated silo's record: %v", rec)
+	}
+	// A silo that is isolated only by its parent is in the parent's
+	// domain.
+	pull(ix, ce.manifest, "hit")
+	fetches(2)
+	if rec := ce.last(fenceapi.KindRegistryCache); rec["domain"] != "/team-i" {
+		t.Fatalf("the inherited domain's record: %v", rec)
+	}
+	// The isolated domain's fetches make no hits outside it.
+	pull(ce.d, ce.manifest, "hit")
+	fetches(2)
+	if rec := ce.last(fenceapi.KindRegistryCache); rec["domain"] != "/" {
+		t.Fatalf("the host's record: %v", rec)
+	}
+	// Nested isolation is a domain of its own.
+	pull(iy, ce.manifest, "miss")
+	fetches(3)
+
+	// The facade's pull: the same rule.
+	c := fenceapi.Caller{Silo: j, Via: fenceapi.ViaOrigin}
+	if _, _, d, err := ce.reg.PullThrough(context.Background(), c, "docker.io/library/alpine", "3", "pull-j"); err != nil || d != ce.manifest {
+		t.Fatalf("PullThrough: %v %s", err, d)
+	}
+	for _, b := range blobs {
+		if err := ce.reg.FetchThrough(context.Background(), c, "docker.io/library/alpine", b, "pull-j"); err != nil {
+			t.Fatal(err)
+		}
+		if rec := ce.last(fenceapi.KindRegistryCache); rec["result"] != "miss" || rec["domain"] != "/team-a/j" {
+			t.Fatalf("the facade fetch's record: %v", rec)
+		}
+	}
+	fetches(4)
+
+	// Each domain's entries are its own silo-cache records, and
+	// eviction drops them all: the host's, team-i's, team-i/y's and
+	// team-a/j's manifest and two blobs.
+	if imgs, err := ce.content.ListImages(context.Background(), registry.CacheNamespace); err != nil || len(imgs) != 12 {
+		t.Fatalf("silo-cache records: %d %v, want 12", len(imgs), err)
+	}
+	ev, err := ce.reg.EvictCache(context.Background(), "docker.io", "", "")
+	if err != nil || ev.Entries != 12 {
+		t.Fatalf("EvictCache: %+v %v, want 12 entries", ev, err)
+	}
+	if imgs, _ := ce.content.ListImages(context.Background(), registry.CacheNamespace); len(imgs) != 0 {
+		t.Fatalf("silo-cache records after evicting: %d", len(imgs))
+	}
+	pull(ix, ce.manifest, "miss")
+	fetches(5)
+}
+
 // The configuration is the root's: shown with install's defaults until
 // set, set only by root members, and checked.
 func TestCacheSettings(t *testing.T) {
