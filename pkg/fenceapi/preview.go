@@ -84,7 +84,7 @@ func (s *Server) preview(q *request) (any, error) {
 			if rel == relSelf {
 				return errorf(PermissionDenied, "only an ancestor may change %s's allocation", home.Path)
 			}
-			as, err := amounts(ctx, tx, a.Quota)
+			as, err := amounts(ctx, tx, a.Quota, "")
 			if err != nil {
 				return err
 			}

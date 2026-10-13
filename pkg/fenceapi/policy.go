@@ -668,3 +668,14 @@ func formatDuration(d time.Duration) string {
 	}
 	return d.String()
 }
+
+// EffectiveIsolation is the effective isolation and ingress policies of
+// the silo whose ancestry is chain (root first), for the Docker facade,
+// which places containers in a class and publishes ports by them.
+func EffectiveIsolation(ctx context.Context, tx store.Tx, chain []*tree.Silo) (iso Isolation, ingress string, err error) {
+	eff, err := effectiveOf(ctx, tx, chain, nil)
+	if err != nil {
+		return Isolation{}, "", err
+	}
+	return eff.Isolation, eff.Ingress, nil
+}
