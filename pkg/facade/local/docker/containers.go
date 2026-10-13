@@ -16,6 +16,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/objseq"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
+	"github.com/bwsalmon/silo/pkg/control"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store"
 )
@@ -323,7 +324,7 @@ func (s *Server) containerCreate(q *request) error {
 		}
 	}
 	c := &Container{ID: newID(), Name: name, Class: class, Image: b.Image, DiskGB: DefaultDiskGB,
-		VCPUm: DefaultVCPUm, MemoryMB: DefaultMemoryMB}
+		VCPUm: DefaultVCPUm, MemoryMB: DefaultMemoryMB, Agent: agentCall(q.ctx())}
 	if c.Name == "" {
 		c.Name = "silo_" + c.ID[:12]
 	}
@@ -707,6 +708,13 @@ func (s *Server) makeContainer(ctx context.Context, silo string, c *Container, m
 	if e := c.firstEndpoint(); e != nil {
 		spec.Labels[runtime.LabelAddr] = e.Addr.String()
 	}
+	if c.Agent != "" {
+		// An agent's tool container: in the sandbox class silo-tools is
+		// silod's own file, mounted read-only; the vm class's tool image
+		// carries it.
+		spec.Labels[runtime.LabelAgent] = c.Agent
+		spec.SiloTools = c.Class == runtime.Sandbox
+	}
 	if c.Seq != 0 {
 		spec.Labels[runtime.LabelSeq] = objseq.Format(c.Seq)
 	}
@@ -784,6 +792,9 @@ func (s *Server) get(q *request) (*Container, error) {
 		c, err = s.container(q.ctx(), tx, q.target.ID, q.params["id"])
 		return err
 	})
+	if err == nil && q.route.class() == control.Mutation {
+		err = s.refuseToolContainer(q, c)
+	}
 	return c, err
 }
 
@@ -1263,7 +1274,7 @@ func (s *Server) containerPrune(q *request) error {
 	deleted := []string{}
 	for _, c := range cs {
 		labels, _ := c.Config["Labels"].(map[string]any)
-		if st := s.state(q.ctx(), c).State; st == runtime.Running || st == runtime.Paused || !f.labels(stringMap(labels)) {
+		if st := s.state(q.ctx(), c).State; st == runtime.Running || st == runtime.Paused || !f.labels(stringMap(labels)) || c.Agent != "" {
 			continue
 		}
 		if err := s.removeContainer(q.ctx(), q.target.ID, c, false, q); err != nil {

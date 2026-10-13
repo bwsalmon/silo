@@ -78,6 +78,14 @@ type Runner struct {
 	Limits Limits
 	// Adapters are the adapters it runs; Adapters if nil.
 	Adapters map[string]Adapter
+	// MCP is set on the local backend, whose harnesses run on silod's
+	// own host with the agent user's ambient permissions
+	// (local-backend.md §10, call L17): it is the command an ambient
+	// session's CLI starts as its MCP server, given the session
+	// socket's path (silod mcp-stdio). With it the Runner runs ambient
+	// sessions only, through a Runtime that runs CLIs on the host
+	// (Scopes); without it, it runs none.
+	MCP func(socket string) []string
 	// SyncEvery is how often it looks for sessions to start; 5s if 0.
 	SyncEvery time.Duration
 	// RetryAfter is how long after a failed start it tries again; 5s
@@ -109,6 +117,8 @@ type live struct {
 	// was given, and unsaved a refreshed login that couldn't be
 	// written back yet, which its next turn is given instead.
 	given, unsaved map[string][]byte
+	// version is an ambient session's CLI version, once checked.
+	version string
 }
 
 func (r *Runner) adapter(name string) (Adapter, bool) {
@@ -417,13 +427,29 @@ func (r *Runner) turn(ctx context.Context, l *live) (bool, error) {
 		r.event(ctx, agent, fenceapi.EventError, map[string]any{"message": "the session's login: " + err.Error()})
 		return false, err
 	}
-	launch.Subscription = files != nil
-	spec := NewSpec(r.Layout, agent, l.slot, a, a.Command(launch), r.Limits)
-	if files != nil {
-		spec.Subscribe(r.Layout, cred.Provider, files)
-	}
-	if l.restore && len(saved.State) > 0 {
-		spec.Restore = saved.State
+	var spec Spec
+	switch ambient := cred.Kind == agents.CredentialAmbient; {
+	case ambient != (r.MCP != nil):
+		why := "credential " + cred.Name + " is ambient, which only a local backend's host runs"
+		if r.MCP != nil {
+			why = "this silod runs harnesses on its own host, with the agent user's ambient login, so takes only an ambient credential, not " + cred.Kind + " " + cred.Name
+		}
+		return r.startFailed(ctx, l, prompt, why)
+	case ambient:
+		if err := r.checkVersion(ctx, l, a); err != nil {
+			return r.startFailed(ctx, l, prompt, err.Error())
+		}
+		launch.Ambient, launch.MCP, launch.WorkDir = true, r.MCP(r.Layout.Socket(agent)), r.Layout.Private(agent)
+		spec = HostSpec(agent, a.Command(launch), r.Limits)
+	default:
+		launch.Subscription = files != nil
+		spec = NewSpec(r.Layout, agent, l.slot, a, a.Command(launch), r.Limits)
+		if files != nil {
+			spec.Subscribe(r.Layout, cred.Provider, files)
+		}
+		if l.restore && len(saved.State) > 0 {
+			spec.Restore = saved.State
+		}
 	}
 	h := &handler{r: r, ctx: ctx, agent: agent, p: a.Parser()}
 	res, err := r.Runtime.Turn(ctx, spec, h.line)
@@ -435,22 +461,7 @@ func (r *Runner) turn(ctx context.Context, l *live) (bool, error) {
 		if err != nil {
 			why = err.Error()
 		}
-		r.event(ctx, agent, fenceapi.EventError, map[string]any{"message": "the harness didn't start: " + why})
-		l.carry = prompt
-		failed, ferr := r.Control.SessionStartFailed(ctx, agent, why)
-		if ferr != nil {
-			return false, ferr
-		}
-		if failed {
-			go r.Stop(context.WithoutCancel(ctx), agent)
-			return false, errFailed
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-time.After(dur(r.RetryAfter, 5*time.Second)):
-		}
-		return true, nil
+		return r.startFailed(ctx, l, prompt, why)
 	}
 	l.carry, l.notice, l.restore = "", "", false
 	r.writeBack(ctx, l, res.Login)
@@ -470,6 +481,71 @@ func (r *Runner) turn(ctx context.Context, l *live) (bool, error) {
 		}
 	}
 	return r.Control.EndTurn(ctx, agent)
+}
+
+// startFailed records that l's harness didn't start, for why, keeping
+// prompt for the next try; the MaxStartFailures-th time in a row its
+// agent is FAILED and the session stopped. It reports whether to try
+// again at once (after RetryAfter).
+func (r *Runner) startFailed(ctx context.Context, l *live, prompt, why string) (bool, error) {
+	agent := l.s.Agent
+	r.event(ctx, agent, fenceapi.EventError, map[string]any{"message": "the harness didn't start: " + why})
+	l.carry = prompt
+	failed, ferr := r.Control.SessionStartFailed(ctx, agent, why)
+	if ferr != nil {
+		return false, ferr
+	}
+	if failed {
+		go r.Stop(context.WithoutCancel(ctx), agent)
+		return false, errFailed
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-time.After(dur(r.RetryAfter, 5*time.Second)):
+	}
+	return true, nil
+}
+
+// HostVersions is a Runtime that can say which version of a CLI its
+// host has (Scopes).
+type HostVersions interface {
+	Version(ctx context.Context, argv []string) (string, error)
+}
+
+// VersionRecorder records the CLI version a session runs
+// (*fenceapi.Server's SessionVersion).
+type VersionRecorder interface {
+	SessionVersion(ctx context.Context, agent, version string) error
+}
+
+// checkVersion checks, once a session, that the host's CLI for adapter
+// a is no older than the oldest whose flags a knows (local-backend.md
+// §10), and records the version in the agent's harness.version and its
+// audit.
+func (r *Runner) checkVersion(ctx context.Context, l *live, a Adapter) error {
+	if l.version != "" {
+		return nil
+	}
+	va, ok := a.(Versioned)
+	hv, ok2 := r.Runtime.(HostVersions)
+	if !ok || !ok2 {
+		return nil
+	}
+	v, err := hv.Version(ctx, va.VersionArgv())
+	if err != nil {
+		return err
+	}
+	if OlderVersion(v, va.MinVersion()) {
+		return fmt.Errorf("the host's %s is %s; the %s adapter needs %s or later", va.VersionArgv()[0], v, a.Name(), va.MinVersion())
+	}
+	l.version = v
+	if vr, ok := r.Control.(VersionRecorder); ok {
+		if err := vr.SessionVersion(ctx, l.s.Agent, v); err != nil {
+			log.Printf("harness: %s: recording its CLI version: %v", l.s.Agent, err)
+		}
+	}
+	return nil
 }
 
 // login is the credential of l's session and, for a subscription, the

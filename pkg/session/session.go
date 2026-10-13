@@ -93,6 +93,12 @@ type Sockets struct {
 	// Model is the model proxy, served at /model/<provider>/; with none,
 	// it is UNAVAILABLE.
 	Model ModelProxy
+	// Peer, if set, checks every connection to a socket before it is
+	// served, beside the socket's file mode: on the local backend,
+	// where every session's harness runs as the same user, that its
+	// peer is in the session's own scope (ScopePeer, local-backend.md
+	// call L18).
+	Peer PeerCheck
 
 	mu   sync.Mutex
 	open map[string]*socket
@@ -130,12 +136,17 @@ func (s *Sockets) Open(agent, silo string) (string, error) {
 		return "", err
 	}
 	// Only silod, and the session's container it is mounted into, may
-	// connect: whoever can is the agent.
+	// connect: whoever can is the agent. On the local backend the
+	// harness is silod's own user, and Peer tells the sessions apart.
 	if err := os.Chmod(path, 0o600); err != nil {
 		l.Close()
 		return "", err
 	}
 	srv := &http.Server{Handler: s.Handler(agent, silo), ReadHeaderTimeout: 10 * time.Second}
+	served := l
+	if s.Peer != nil {
+		served = &peerListener{Listener: l, agent: agent, check: s.Peer}
+	}
 	s.mu.Lock()
 	if s.open == nil {
 		s.open = map[string]*socket{}
@@ -143,7 +154,7 @@ func (s *Sockets) Open(agent, silo string) (string, error) {
 	s.open[agent] = &socket{path: path, l: l, srv: srv}
 	s.mu.Unlock()
 	go func() {
-		if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(served); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("session socket %s: %v", path, err)
 		}
 	}()

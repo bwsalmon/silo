@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/harness"
 	"github.com/bwsalmon/silo/pkg/leader"
@@ -104,4 +106,55 @@ func moveSessionsDuty(api *fenceapi.Server) leader.Duty {
 		}
 		return nil
 	}}
+}
+
+// mcpStdio is silod mcp-stdio: an ambient session's MCP server, which
+// its harness CLI starts (harness.MCPStdio).
+func mcpStdio(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("mcp-stdio", flag.ExitOnError)
+	socket := fs.String("socket", "", "the session socket")
+	fs.Parse(args)
+	if *socket == "" {
+		return errors.New("give --socket")
+	}
+	return harness.MCPStdio(ctx, *socket, os.Stdin, os.Stdout)
+}
+
+// ambientRunner is the local backend's harness Runner (local-backend.md
+// §10): harnesses run on this host as silod's user, each turn in its
+// session's systemd scope, reaching their sockets through silod
+// mcp-stdio. It runs up to agentSessions sessions, or half the host's
+// vCPUs (at least one). Unless they were given, the sockets are made
+// under $XDG_RUNTIME_DIR/silo/sessions, and the sessions' working
+// directories under the data directory's cache/sessions.
+func ambientRunner(fs *flag.FlagSet, dd *datadir.Dir, host string, agentSessions int, sessionDir, stateDir *string) (*harness.Runner, error) {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["session-dir"] {
+		rt := os.Getenv("XDG_RUNTIME_DIR")
+		if rt == "" {
+			return nil, errors.New("--ambient-agents: give --session-dir, or set XDG_RUNTIME_DIR")
+		}
+		*sessionDir = filepath.Join(rt, "silo", "sessions")
+	}
+	if !set["session-state-dir"] {
+		*stateDir = filepath.Join(dd.Cache(), "sessions")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	if host == "" {
+		host, _ = os.Hostname()
+	}
+	slots := agentSessions
+	if slots <= 0 {
+		slots = max(1, runtime.NumCPU()/2)
+	}
+	return &harness.Runner{Host: host, Slots: slots,
+		Runtime: &harness.Scopes{StateDir: *stateDir},
+		Layout:  harness.Layout{SocketDir: *sessionDir, StateDir: *stateDir},
+		MCP: func(socket string) []string {
+			return []string{exe, "mcp-stdio", "--socket", socket}
+		}}, nil
 }
