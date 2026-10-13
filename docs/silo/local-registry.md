@@ -1437,6 +1437,21 @@ earlier depends on them. Each can be filed on its own, in this order.
 28. **Grants on the registry:** exports and imports in the access path,
     manage-grant scopes, and closing connections within a second on
     revocation and expiry. Depends on 27.
+
+    *Landed in task 3481.* Step 27's `RegistryAccess` already gave
+    imports their pulls and manage grants their scopes; a grant whose
+    scope leaves out `registry` now answers the same 404 as no grant
+    (it was a 500). The gateway's tables carry `RegistryImports`, the
+    ACTIVE imports of registry exports, and when one leaves them
+    (withdrawn, suspended, or its silo gone) the gateway cuts off the
+    importer's port 80 registry calls to the exporter's repos, whose
+    names it parses with `imagerepos.SplitPath`; calls to other silos'
+    repos go on. A manage grant that ends cuts off its holder's port 80
+    calls, git's and the registry's, as git's did. silod looks for
+    expired grants every 500ms, not every 10s, so that expiry is
+    within the second too. The §12 cases for exports and manage grants
+    are in `pkg/registry` and, through the gateway, in
+    `pkg/gateway/registrygrants_test.go`.
 29. **The host front door for registry clients:** the loopback listener,
     the `inet_diag` uid lookup and its verification across kernels, and
     `--registry-host-port`. Depends on 27.
