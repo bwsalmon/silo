@@ -72,14 +72,15 @@ func newForwarder(tr http.RoundTripper, what, prefix, silodPath string) *httputi
 // its source IP, with its silo and address. Git's Authorization header
 // means nothing here, and goes no further.
 func (g *Gateway) serveGit(w http.ResponseWriter, r *http.Request) {
-	g.forwardPort80(w, r, g.gitProxy, nil)
+	g.forwardPort80(w, r, g.gitProxy, nil, "")
 }
 
 // forwardPort80 sends a port 80 request to silod through p, from a caller
 // known by its source IP, with its silo and address, cut off when the
 // caller's manage grants end, or, for a registry call to repo, when an
-// import of repo's silo's ends.
-func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httputil.ReverseProxy, repo *imagerepos.Name) {
+// import of repo's silo's ends. The caller's Authorization is dropped;
+// auth, if set, is sent in its place.
+func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httputil.ReverseProxy, repo *imagerepos.Name, auth string) {
 	t, silo, ip, err := g.portOrigin(r)
 	if err != nil {
 		writeToolsError(w, err)
@@ -91,6 +92,9 @@ func (g *Gateway) forwardPort80(w http.ResponseWriter, r *http.Request, p *httpu
 		}
 	}
 	r.Header.Del("Authorization")
+	if auth != "" {
+		r.Header.Set("Authorization", auth)
+	}
 	r.Header.Set(OriginHeader, FormatOrigin(silo, t.Version))
 	r.Header.Set(OriginAddressHeader, ip.String())
 	ctx, cancel := context.WithCancel(r.Context())

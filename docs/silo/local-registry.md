@@ -1588,6 +1588,58 @@ earlier depends on them. Each can be filed on its own, in this order.
     - checking which upstreams count a `HEAD` as a pull.
 
     Depends on 31.
+
+    *Landed in task 3485:* `pkg/registry/private.go`, with each cache
+    object's class in `registry_cache_objects.private` and
+    `classified_at` (migration 0028). A miss is fetched anonymously
+    first, shared in flight as before; an upstream answer of 401 or 403
+    makes it private, and the caller's credentials then fetch it alone.
+    A miss uses an anonymous `GET` rather than a `HEAD`: a refused `GET`
+    counts as no pull, and a successful one is the fetch. A tag is
+    revalidated anonymously first and then with the credentials, and a
+    credentialed tag `HEAD` that names a digest counts as that digest's
+    revalidation. A cached object classified longer ago than
+    `public_ttl` is asked again with an anonymous `HEAD`, which doesn't
+    follow a blob's redirect (a redirect from the API host is public);
+    an unreachable upstream leaves the class as it was. A private
+    manifest needs a `HEAD` by digest with the caller's credentials on
+    every request, which grants an authorisation for `auth_ttl` in
+    `Service.authz`, holding the digests the manifest references and no
+    credential. A child manifest that an authorised index lists is
+    served without credentials. A private blob is served only through
+    an authorisation, and an authorised miss fetches it with the
+    request's own credentials, never shared. Without credentials, a
+    private manifest is 401 `UNAUTHORIZED` with `WWW-Authenticate: Basic
+    realm="registry.silo.internal"`, and a blob 404 `BLOB_UNKNOWN`. A
+    refusal of the caller's credentials is passed back as 401 or 403.
+    Credentials are `registry.Credentials`, which format as
+    `[credentials]` whatever the verb. They come from `Authorization`
+    on an upstream path, which the gateway now forwards only there and
+    only when it is Basic, or from the facade's `X-Registry-Auth`
+    (`RegistryAuth`), passed to `PullThrough` and `FetchThrough`. The
+    facade answers 401 with Docker's `unauthorized: authentication
+    required`. `registry.cache` records say `auth=credentials` and
+    `private`. `TestCachePrivateCanary` presents a canary password and
+    has the upstream issue a canary token, then searches the log, every
+    row of every table (the audit's included), every file in the data
+    directory and the cached objects for them, in plain and in base64.
+
+    *`HEAD` as a pull, from the upstreams' published documentation
+    (not measured here, as a sandbox can't reach them):* Docker Hub
+    counts manifest `GET`s and says a `HEAD` is not counted. ghcr.io and
+    quay.io publish no pull-count limit that would tell a `HEAD` from a
+    `GET`. gcr.io is served by Artifact Registry, whose quota counts
+    requests, a `HEAD` among them, but not pulls. So on none of the four
+    install upstreams does the anonymous classification `HEAD` cost a
+    pull. Measuring this against the live registries belongs with the
+    conformance suite.
+
+    *Left:* `identitytoken` in `X-Registry-Auth`, Docker's OAuth refresh
+    token, isn't used yet; a pull that carries only that is treated as
+    anonymous. Authorisations are per silod process, so with several
+    replicas a blob request can reach a replica that holds no
+    authorisation for it and get a 404, until the client retries the
+    manifest there.
 33. **Sharing domains:** the cache index per domain, full fetches for
     misses in an isolated domain, and facade pulls on the same rule.
     Depends on 25 and 31.

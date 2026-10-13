@@ -47,7 +47,7 @@ silo install: project silo-test-project
   db                ok      database silo, IAM user silod@silo-test-project.iam
   db-endpoint       create  silo-db-psc (address) internal, in silo-ctl
                             silo-db-psc (forwarding rule) to a-silo-db-t3st (silo-db-t3st)
-  migrate           ok      schema 27
+  migrate           ok      schema 28
   control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
                             (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
   root              create  / blocks 172.16.0.0/12 (minus 172.31.254.0/23)

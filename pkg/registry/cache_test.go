@@ -21,7 +21,19 @@ import (
 // testUpstream is a registry at registry.test that wants an anonymous
 // token from auth.test, and redirects every blob GET to a second host,
 // cdn (cdn.test unless a test moves it), which serves the bytes.
+//
+// It also has a private repo, private/app, whose manifests and blobs
+// are in private and which the registry serves (blobs without a
+// redirect) only with privToken, the token auth.test gives for user
+// and pass. An anonymous token for it is given and refused, as Docker
+// Hub does. alpinePrivate makes library/alpine private too.
 type testUpstream struct {
+	private        map[string][]byte // manifests by tag and digest, blobs by digest
+	user, pass     string
+	privToken      string
+	alpinePrivate  bool
+	privateHolding bool // hold applies to private blob GETs, not the CDN's
+
 	mu        sync.Mutex
 	manifests map[string][]byte // by tag and by digest
 	blobs     map[string][]byte
@@ -47,17 +59,66 @@ func (u *testUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Host != "registry.test" || r.Header.Get("Authorization") != "" {
 		u.requests[r.Host+" "+r.Method+" "+r.URL.Path]++
 	}
-	cdn, hold, held := u.cdn, u.hold, u.held
+	cdn, hold, held, privHold := u.cdn, u.hold, u.held, u.privateHolding
 	u.mu.Unlock()
 	switch {
 	case r.Host == "auth.test" && r.URL.Path == "/token":
-		if r.URL.Query().Get("service") != "registry.test" || !strings.HasPrefix(r.URL.Query().Get("scope"), "repository:library/alpine:pull") {
+		scope := r.URL.Query().Get("scope")
+		if r.URL.Query().Get("service") != "registry.test" ||
+			(!strings.HasPrefix(scope, "repository:library/alpine:pull") && !strings.HasPrefix(scope, "repository:private/app:pull")) {
 			http.Error(w, "bad token request "+r.URL.RawQuery, 400)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"token": "anon-token"})
+		tok := "anon-token"
+		if user, pass, ok := r.BasicAuth(); ok {
+			u.mu.Lock()
+			good := user == u.user && pass == u.pass && u.user != ""
+			u.mu.Unlock()
+			if !good {
+				http.Error(w, "bad credentials", 401)
+				return
+			}
+			tok = u.privToken
+		}
+		json.NewEncoder(w).Encode(map[string]string{"token": tok})
+	case r.Host == "registry.test" && strings.HasPrefix(r.URL.Path, "/v2/private/app/"):
+		if r.Header.Get("Authorization") != "Bearer "+u.privToken {
+			w.Header().Set("Www-Authenticate", `Bearer realm="http://auth.test/token",service="registry.test",scope="repository:private/app:pull"`)
+			w.WriteHeader(401)
+			return
+		}
+		rest := strings.TrimPrefix(r.URL.Path, "/v2/private/app/")
+		ref, manifest := strings.CutPrefix(rest, "manifests/")
+		if !manifest {
+			ref = strings.TrimPrefix(rest, "blobs/")
+			if hold != nil && privHold {
+				held <- struct{}{}
+				<-hold
+			}
+		}
+		u.mu.Lock()
+		b, ok := u.private[ref]
+		u.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if manifest {
+			w.Header().Set("Content-Type", registry.MediaOCIManifest)
+			w.Header().Set("Docker-Content-Digest", registry.Digest("sha256", b))
+		}
+		if r.Method == "HEAD" {
+			return
+		}
+		w.Write(b)
 	case r.Host == "registry.test":
-		if r.Header.Get("Authorization") != "Bearer anon-token" {
+		u.mu.Lock()
+		want := "Bearer anon-token"
+		if u.alpinePrivate {
+			want = "Bearer " + u.privToken
+		}
+		u.mu.Unlock()
+		if r.Header.Get("Authorization") != want {
 			w.Header().Set("Www-Authenticate", `Bearer realm="http://auth.test/token",service="registry.test",scope="repository:library/alpine:pull"`)
 			w.WriteHeader(401)
 			return
@@ -89,7 +150,7 @@ func (u *testUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "the token went to the CDN", 400)
 			return
 		}
-		if hold != nil {
+		if hold != nil && !privHold {
 			held <- struct{}{}
 			<-hold
 		}
@@ -417,11 +478,11 @@ func TestCacheStaleTag(t *testing.T) {
 func TestCachePullThrough(t *testing.T) {
 	ce := newCacheEnv(t)
 	c := fenceapi.Caller{Silo: ce.a, Via: fenceapi.ViaOrigin}
-	mt, b, d, err := ce.reg.PullThrough(context.Background(), c, "docker.io/library/alpine", "3", "pull-1")
+	mt, b, d, err := ce.reg.PullThrough(context.Background(), c, "docker.io/library/alpine", "3", "pull-1", nil)
 	if err != nil || d != ce.manifest || mt != registry.MediaOCIManifest || registry.Digest("sha256", b) != d {
 		t.Fatalf("PullThrough: %v %s %s", err, d, mt)
 	}
-	if err := ce.reg.FetchThrough(context.Background(), c, "docker.io/library/alpine", ce.layer, "pull-1"); err != nil {
+	if err := ce.reg.FetchThrough(context.Background(), c, "docker.io/library/alpine", ce.layer, "pull-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	if rec := ce.last(fenceapi.KindRegistryCache); rec["pull_id"] != "pull-1" || rec["object"] != "blob" {
@@ -429,7 +490,7 @@ func TestCachePullThrough(t *testing.T) {
 	}
 	cc := fenceapi.Caller{Silo: ce.c, Via: fenceapi.ViaOrigin}
 	var re *registry.Error
-	if err := ce.reg.FetchThrough(context.Background(), cc, "docker.io/library/alpine", ce.layer, "pull-2"); !errors.As(err, &re) || re.Status != 403 {
+	if err := ce.reg.FetchThrough(context.Background(), cc, "docker.io/library/alpine", ce.layer, "pull-2", nil); !errors.As(err, &re) || re.Status != 403 {
 		t.Fatalf("c: FetchThrough: %v", err)
 	}
 }

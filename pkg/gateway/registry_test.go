@@ -38,7 +38,9 @@ func (e *env) registry80(ip netip.Addr, host, method, path string, headers ...st
 // silod's registry, as the caller's silo by origin, and nothing else
 // does: /v2/ under any other Host is a 404, and the registry's Host
 // reaches nothing but /v2/ (local-registry.md, "The address", call
-// L56). Authorization never reaches silod (call L66).
+// L56). Authorization never reaches silod (call L66), except Basic
+// credentials on an upstream path, the caller's own for the upstream
+// (call L72).
 func TestRegistryHostRouting(t *testing.T) {
 	reached := make(chan string, 10)
 	reg := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +57,19 @@ func TestRegistryHostRouting(t *testing.T) {
 		}
 		if got := <-reached; got != e.a+" origin /v2/team-a/app/tags/list auth=" {
 			t.Fatalf("%s reached the registry as %q", host, got)
+		}
+	}
+	for _, c := range []struct{ path, auth, want string }{
+		{"/v2/docker.io/library/alpine/manifests/3", "Basic dTpw", "Basic dTpw"},
+		{"/v2/library/alpine/manifests/3?ns=docker.io", "basic dTpw", "basic dTpw"},
+		{"/v2/docker.io/library/alpine/manifests/3", "Bearer x", ""},
+		{"/v2/team-a/app/manifests/3", "Basic dTpw", ""},
+	} {
+		if code, body := e.registry80(ip, "registry.silo.internal", "GET", c.path, "Authorization", c.auth); code != 200 || body != "registry" {
+			t.Fatalf("%s: %d %q", c.path, code, body)
+		}
+		if got := <-reached; !strings.HasSuffix(got, " auth="+c.want) {
+			t.Fatalf("%s with %q reached the registry as %q", c.path, c.auth, got)
 		}
 	}
 	for _, c := range []struct{ host, path string }{

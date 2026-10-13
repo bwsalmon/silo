@@ -36,6 +36,8 @@ type env struct {
 	srv     *httptest.Server
 	now     time.Time
 	root    string
+	// dir is the data directory: the database's files.
+	dir string
 }
 
 func newEnv(t *testing.T, capacity obj) *env {
@@ -46,7 +48,8 @@ func newEnv(t *testing.T, capacity obj) *env {
 // newEnvWith is newEnv with extra fields in the bootstrap call.
 func newEnvWith(t *testing.T, capacity, bootstrap obj) *env {
 	t.Helper()
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "silo.db"))
+	dir := t.TempDir()
+	db, err := sqlite.Open(filepath.Join(dir, "silo.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +57,7 @@ func newEnvWith(t *testing.T, capacity, bootstrap obj) *env {
 	if err := db.Migrate(ctx, db.Latest()); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, db: db, content: registry.NewMemory(), now: time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)}
+	e := &env{t: t, db: db, dir: dir, content: registry.NewMemory(), now: time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)}
 	caller := func(r *http.Request) fenceapi.Caller {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaOrigin}
 	}

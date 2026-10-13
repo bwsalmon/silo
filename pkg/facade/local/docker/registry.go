@@ -42,10 +42,11 @@ var _ LocalRegistry = (*registry.Service)(nil)
 // call L70), which every facade pull from an external registry goes
 // through: as the caller, checked against its egress policy on hits as
 // on misses, and audited as registry.cache records carrying the pull's
-// pull_id. *registry.Service is it.
+// pull_id. creds are the pull's X-Registry-Auth, for private upstream
+// content (call L72), used for the call only. *registry.Service is it.
 type Fetcher interface {
-	PullThrough(ctx context.Context, c fenceapi.Caller, name, ref, pullID string) (mediaType string, manifest []byte, digest string, err error)
-	FetchThrough(ctx context.Context, c fenceapi.Caller, name, digest, pullID string) error
+	PullThrough(ctx context.Context, c fenceapi.Caller, name, ref, pullID string, creds *registry.Credentials) (mediaType string, manifest []byte, digest string, err error)
+	FetchThrough(ctx context.Context, c fenceapi.Caller, name, digest, pullID string, creds *registry.Credentials) error
 }
 
 var _ Fetcher = (*registry.Service)(nil)
@@ -292,13 +293,14 @@ func (s *Server) pullCache(q *request, ref, pullID string) (*Pulled, error) {
 		return nil, invalid("silo: %s: not a registry the cache's fetcher can name", ref)
 	}
 	unknown := notFound("manifest for %s not found: manifest unknown: manifest unknown", ref)
+	creds := registry.RegistryAuth(q.r.Header.Get("X-Registry-Auth"))
 	pull := func(at string) (string, []byte, string, error) {
-		mt, b, d, err := s.opts.Fetcher.PullThrough(q.ctx(), q.caller, upstream, at, pullID)
+		mt, b, d, err := s.opts.Fetcher.PullThrough(q.ctx(), q.caller, upstream, at, pullID, creds)
 		var re *registry.Error
 		if errors.As(err, &re) && re.Status == http.StatusNotFound {
 			return "", nil, "", unknown
 		}
-		return mt, b, d, err
+		return mt, b, d, dockerUnauthorized(err)
 	}
 	mt, b, digest, err := pull(at)
 	if err != nil {
@@ -325,8 +327,8 @@ func (s *Server) pullCache(q *request, ref, pullID string) (*Pulled, error) {
 		return nil, invalid("silo: %s: an index's child is an index", ref)
 	}
 	for _, d := range m.blobs() {
-		if err := s.opts.Fetcher.FetchThrough(q.ctx(), q.caller, upstream, d.Digest, pullID); err != nil {
-			return nil, err
+		if err := s.opts.Fetcher.FetchThrough(q.ctx(), q.caller, upstream, d.Digest, pullID, creds); err != nil {
+			return nil, dockerUnauthorized(err)
 		}
 	}
 	p, err := s.pulledFrom(q.ctx(), mt, b, name+"@"+digest)
@@ -334,6 +336,17 @@ func (s *Server) pullCache(q *request, ref, pullID string) (*Pulled, error) {
 		return nil, invalid("silo: %s: %v", ref, err)
 	}
 	return p, nil
+}
+
+// dockerUnauthorized is the cache's 401, private content without
+// credentials or with credentials the upstream refused, as Docker says
+// it; the CLI answers it by asking for a login.
+func dockerUnauthorized(err error) error {
+	var re *registry.Error
+	if errors.As(err, &re) && re.Status == http.StatusUnauthorized {
+		return errorf(http.StatusUnauthorized, "unauthorized: authentication required")
+	}
+	return err
 }
 
 // newPullID is a facade pull's id, which its image.pull record and the
