@@ -245,7 +245,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"silo: the cache is read-only; push to %s/<silo path>/<repo>", imagerepos.Host))
 			return
 		}
-		s.serveCache(q, m[2])
+		s.serveCache(q, rest)
 		return
 	}
 	switch {
