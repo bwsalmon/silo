@@ -157,3 +157,13 @@ func TestValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestImageCacheSize(t *testing.T) {
+	base := "ExecStart=/s serve --backend=local --data-dir /d --migrate --socket %t/silo/silo.sock"
+	for gb, want := range map[float64]string{0: base, 25.5: base + " --image-cache-size 25.5"} {
+		m := unitMap(t, Config{Mode: Rootless, Silod: "/s", DataDir: "/d", ImageCacheSizeGB: gb})
+		if !slices.Contains(lines(m[Silod]), want) {
+			t.Errorf("%v GiB: silod.service has no line %q:\n%s", gb, want, m[Silod])
+		}
+	}
+}

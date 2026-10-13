@@ -136,6 +136,8 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.Silod, "silod", "", "the silod binary the units run (default the one beside silo, else on PATH)")
 	fs.IntVar(&cfg.RegistryHostPort, "registry-host-port", localinstall.DefaultRegistryHostPort,
 		fmt.Sprintf("serve the registry to host clients (crane, skopeo, oras) on 127.0.0.1 at this port, such as %d; 0 turns it off", hostdoor.Port))
+	fs.Float64Var(&cfg.ImageCacheSizeGB, "image-cache-size", 0,
+		fmt.Sprintf("the registry cache's budget in GiB, carved from the root's disk and charged to nobody (default 10%% of the data filesystem, at least %d)", localinstall.MinImageCacheGB))
 	fs.StringVar(&cfg.AddressSpace, "address-space", "", "the root silo's address block (default 10.0.0.0/8)")
 	fs.Float64Var(&cfg.CPUOvercommit, "cpu-overcommit", localinstall.DefaultCPUOvercommit,
 		fmt.Sprintf("the root's vcpu_m as a multiple of the host's CPUs less one, up to %g; memory and disk are not overcommitted", localinstall.MaxCPUOvercommit))
@@ -145,6 +147,9 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	fs.StringVar(&output, "o", "table", "short for --output")
 	if err := c.installFlags(fs, args); err != nil {
 		return err
+	}
+	if cfg.ImageCacheSizeGB < 0 {
+		return usagef("--image-cache-size %v: want a size in GiB", cfg.ImageCacheSizeGB)
 	}
 	c.output = output
 	if cfg.CPUOvercommit < 1 || cfg.CPUOvercommit > localinstall.MaxCPUOvercommit {

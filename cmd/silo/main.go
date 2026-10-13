@@ -106,6 +106,9 @@ commands:
   registry cache set [--upstream name=endpoint[,alias...]]... [--stale-tag-max d]
                                     change them; each silo's egress still
                                     decides what it may get from the cache
+  registry cache evict [<upstream>[/<repo>[@digest]]]
+                                    drop cache entries now (root); bytes a silo
+                                    or a repo references stay
   audit [silo] [--since --kind --subtree]
   agent create <silo>/agents/<name> --credential --model --budget --tool-zone --tool-subnet
                                     make an agent and its tool VM
@@ -242,7 +245,7 @@ var commands = map[string]command{
 		"list": (*cli).registryList, "get": (*cli).registryGet, "tags": (*cli).registryTags, "url": (*cli).registryURL,
 		"delete": (*cli).registryDelete, "prune": (*cli).registryPrune,
 		"cache": group("registry cache", map[string]command{
-			"status": (*cli).registryCacheStatus, "set": (*cli).registryCacheSet,
+			"status": (*cli).registryCacheStatus, "set": (*cli).registryCacheSet, "evict": (*cli).registryCacheEvict,
 		}),
 	}),
 	"audit": (*cli).audit,

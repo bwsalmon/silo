@@ -59,6 +59,11 @@ type Config struct {
 	// RegistryHostPort is the registry's port for host clients on
 	// 127.0.0.1 (--registry-host-port); 0 turns it off.
 	RegistryHostPort int
+	// ImageCacheSizeGB is the registry cache's budget, in GiB
+	// (--image-cache-size): carved from the root's disk capacity and
+	// charged to nobody. 0 is DefaultImageCacheGB of the data
+	// directory's filesystem.
+	ImageCacheSizeGB float64
 	// AddressSpace is the root's block (--address-space); empty is
 	// silod's default, 10.0.0.0/8.
 	AddressSpace string
@@ -69,6 +74,32 @@ type Config struct {
 	// and DeleteData is its --delete-data.
 	Uninstall  bool
 	DeleteData bool
+}
+
+// MinImageCacheGB is the smallest default cache budget, in GiB.
+const MinImageCacheGB = 10
+
+// imageCacheGB is c's cache budget: --image-cache-size, or
+// DefaultImageCacheGB of the data directory's filesystem.
+func imageCacheGB(c Config, h Host) float64 {
+	if c.ImageCacheSizeGB > 0 {
+		return c.ImageCacheSizeGB
+	}
+	if fs, err := h.Statfs(existing(h, c.DataDir)); err == nil {
+		return DefaultImageCacheGB(int64(fs.Size))
+	}
+	return MinImageCacheGB
+}
+
+// DefaultImageCacheGB is --image-cache-size's default for a data
+// filesystem of fsBytes (local-registry.md, "Eviction and the cache
+// budget", call L74): 10% of it, and at least MinImageCacheGB.
+func DefaultImageCacheGB(fsBytes int64) float64 {
+	gb := float64(fsBytes) / 10 / (1 << 30)
+	if gb < MinImageCacheGB {
+		return MinImageCacheGB
+	}
+	return gb
 }
 
 // DefaultRegistryHostPort is --registry-host-port's default: on, at
@@ -328,7 +359,8 @@ func Steps(c Config, h Host) []install.Step {
 // unitsConfig is c's units.Config: silo-buildkitd only where buildkitd
 // is installed, and the pinned gVisor first on the runtimes' PATH.
 func unitsConfig(c Config, h Host, report rootless.Report) units.Config {
-	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort}
+	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort,
+		ImageCacheSizeGB: imageCacheGB(c, h)}
 	if _, ok := pinned(h); ok {
 		uc.RuntimePath = []string{RuntimesDir(c)}
 	}

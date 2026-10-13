@@ -174,7 +174,15 @@ type Options struct {
 	// §8); nil answers its calls FAILED_PRECONDITION and deletes repos
 	// at once.
 	Mirror Mirror
+	// Registry is the registry service, which the image repo deletes
+	// tell what went (local-registry.md §10); nil removes rows only,
+	// refunding what they charged, and has no cache to evict.
+	Registry ImageRegistry
 }
+
+// SetRegistry sets Options.Registry, for a registry made after the
+// fence API.
+func (s *Server) SetRegistry(r ImageRegistry) { s.opts.Registry = r }
 
 // Server serves silo/v1.
 type Server struct {
@@ -291,6 +299,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if cachePath(rest) {
 		s.registryCache(q)
+		return
+	}
+	if cacheEvictPath(rest) {
+		s.registryCacheEvict(q)
 		return
 	}
 	if rest == "mirror:which" {

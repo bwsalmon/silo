@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -149,12 +150,16 @@ func (s *rootStep) overcommit() float64 {
 }
 
 // capacity is the root's capacity from o's host totals (call L20).
+// disk_gb leaves out the reserve and the registry cache's budget
+// (local-registry.md call L74), which is charged to nobody, so that
+// every byte on disk is charged to some silo or inside the budget.
 func (s *rootStep) capacity(o *rootObserved) map[string]int64 {
 	mem := o.MemoryMB - max(2048, o.MemoryMB/10)
+	cache := int64(math.Ceil(imageCacheGB(s.c, s.h)))
 	out := map[string]int64{
 		"vcpu_m":    int64(float64(max(0, o.CPUs-1)*1000) * s.overcommit()),
 		"memory_mb": max(0, mem),
-		"disk_gb":   o.DiskGB - (o.DiskGB+9)/10,
+		"disk_gb":   max(0, o.DiskGB-(o.DiskGB+9)/10-cache),
 	}
 	for k, v := range RootCounts {
 		out[k] = v

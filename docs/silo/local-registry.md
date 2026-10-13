@@ -1523,9 +1523,9 @@ earlier depends on them. Each can be filed on its own, in this order.
     path with 404); a short read lease per request; the grace hour's
     blobs survive only as long as silod's process, since they are kept
     in memory (their leases expire on their own, and the next push
-    re-reckons the repo's charge). A fence API manifest delete refunds
-    the bytes the next time the registry reckons the repo, which step
-    34's deletion work settles. The Docker facade puts no proxy
+    re-reckons the repo's charge). A fence API manifest delete refunded
+    the bytes only the next time the registry reckoned the repo, until
+    step 34 settled it. The Docker facade puts no proxy
     variables in containers' environment yet, so there was no
     `NO_PROXY` there to add the name to; whatever adds them names
     `registry.silo.internal` beside `silo.internal`.
@@ -1677,6 +1677,50 @@ earlier depends on them. Each can be filed on its own, in this order.
     - restore handling for `silo-registry` records.
 
     Depends on 27 and 31.
+
+    *Landed in task 3487, over `registry.Memory`:* `registry.Content`
+    takes a namespace on `PutImage` and `DeleteImage`, and gained
+    `ListImages`, `Namespaces` and `Collect`, containerd's GC, which
+    `Memory` does as a mark and sweep over every namespace's records
+    and the unexpired leases blobs were committed under. Each cache
+    fetch records its object as a `silo-cache` entry,
+    `<upstream>/<repo>@<digest>` (step 33 adds the domain), before its
+    fetch lease ends, and every hit or miss records its access time.
+    After a miss, `Service.Evict` counts the cache-only bytes (cache
+    entries' blobs that no record outside `silo-cache` references) and,
+    over the budget, drops cache-only entries least recently used first
+    down to 90% of it, then collects. The budget is the configuration's
+    `size_limit_gb`: `silo install --backend local --image-cache-size`
+    (default 10% of the data filesystem, at least 10 GiB) puts it on
+    silod's unit, and silod sets it if the configuration never was;
+    install's root step leaves the budget out of the root's `disk_gb`,
+    beside the reserve. `silo registry cache evict
+    [<upstream>[/<repo>[@digest]]]` is `POST
+    /silo/v1/registry/cache:evict`, root members with full control,
+    audited as `registry.cache.evict`. The fence API's deletes tell the
+    registry (`fenceapi.Options.Registry`, `ImageRegistry`) what went: a
+    manifest delete now refunds at once (`Reckon`), a repo delete marks
+    the repo `DELETING` in a transaction of its own and a repeat delete
+    finishes one left so, and a repo, manifest or silo delete removes
+    the `silo-registry` records after it commits and collects
+    (`Removed`). Registry records are now numbered from the object
+    sequence (`objseq.Next`), not the change log. `Service.Reconcile`,
+    which the leader's reconcile runs as `Options.Registry`, re-creates
+    a missing record whose content exists and reports
+    `image_manifest_missing` when it doesn't, removes a record with no
+    row numbered at or below the store's sequence (a delete's leftover)
+    as `registry_drift`, and reports a record with no row numbered above
+    it as `registry.orphan`, labelled `dev.silo.orphan` so that it stays
+    one: never served, never deleted. The §12 cases are in
+    `pkg/registry/gc_test.go` (`TestCacheBudgetLRU`,
+    `TestDeleteCollects`, `TestRestoreOrphan`, `TestRegistryDrift`);
+    wiping `cache/` is datadir's `TestWipingCacheKeepsContainerd`.
+
+    *Left:* everything waits on step 27b's containerd `registry.Content`
+    and silod's wiring of the registry, which is also what gives the
+    leader's reconcile its `Registry` and the fence API its; until then
+    silod's evict is `FAILED_PRECONDITION`. `local.DetectRestore` doesn't
+    yet count `silo-registry` labels in the disk's sequence.
 35. **Builders, run for real.** kaniko (from the Chainguard fork) and
     rootless BuildKit, in `sandbox` and in `vm`, each building a
     Dockerfile with a `RUN` step that `chown`s a file to another user,

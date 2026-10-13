@@ -319,7 +319,7 @@ func TestRootlessInstall(t *testing.T) {
 		!slices.Equal(b.Isolation.Allowed, []string{"sandbox", "vm"}) || b.Isolation.Default != "vm" {
 		t.Errorf("bootstrap: %+v, isolation %+v", b, b.Isolation)
 	}
-	for class, want := range map[string]string{"vcpu_m": "14000", "memory_mb": "14336", "disk_gb": "90", "containers": "1000"} {
+	for class, want := range map[string]string{"vcpu_m": "14000", "memory_mb": "14336", "disk_gb": "80", "containers": "1000"} {
 		if got := b.Capacity["global"][class]; got != want {
 			t.Errorf("capacity %s = %s, want %s", class, got, want)
 		}
@@ -517,8 +517,28 @@ func TestRegistryHostPort(t *testing.T) {
 	if err := install.Apply(ctx, steps, &progress); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(f.files["/units/silod.service"], " --registry-host-listen 127.0.0.1:5115\n") {
+	if !strings.Contains(f.files["/units/silod.service"], " --registry-host-listen 127.0.0.1:5115 --image-cache-size 10\n") {
 		t.Errorf("silod.service:\n%s", f.files["/units/silod.service"])
+	}
+}
+
+// The cache budget is 10% of the data filesystem, at least 10 GiB, and
+// comes out of the root's disk_gb (local-registry.md, call L74), as
+// TestRootlessInstall's disk_gb shows.
+func TestImageCacheBudget(t *testing.T) {
+	for fs, want := range map[int64]float64{50 << 30: 10, 1000 << 30: 100} {
+		if got := DefaultImageCacheGB(fs); got != want {
+			t.Errorf("DefaultImageCacheGB(%d GiB) = %v, want %v", fs>>30, got, want)
+		}
+	}
+	c := rootlessConfig()
+	f := newFake()
+	if got := imageCacheGB(c, f.host(1000, &bytes.Buffer{})); got != 10 {
+		t.Errorf("the default budget on 100 GiB: %v GiB", got)
+	}
+	c.ImageCacheSizeGB = 25
+	if got := imageCacheGB(c, f.host(1000, &bytes.Buffer{})); got != 25 {
+		t.Errorf("--image-cache-size 25: %v GiB", got)
 	}
 }
 

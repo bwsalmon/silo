@@ -215,3 +215,22 @@ func (c *Client) SetRegistryCache(ctx context.Context, s CacheSettings) (*CacheS
 	err := c.Do(ctx, http.MethodPut, "registry/cache", nil, s, &out)
 	return &out, err
 }
+
+// CacheEviction is what silo registry cache evict did: the entries it
+// dropped, the cache-only bytes that freed, and the cache-only bytes
+// left against the budget.
+type CacheEviction struct {
+	Entries     int   `json:"entries"`
+	FreedBytes  int64 `json:"freed_bytes"`
+	CacheBytes  int64 `json:"cache_bytes"`
+	BudgetBytes int64 `json:"budget_bytes"`
+}
+
+// EvictRegistryCache drops the cache's entries for ref,
+// <upstream>[/<repo>[@digest]], now; "" is every entry. Only root
+// members with full control may.
+func (c *Client) EvictRegistryCache(ctx context.Context, ref string) (*CacheEviction, error) {
+	var out CacheEviction
+	err := c.Do(ctx, http.MethodPost, "registry/cache:evict", nil, map[string]string{"ref": ref}, &out)
+	return &out, err
+}

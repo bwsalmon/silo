@@ -109,15 +109,22 @@ func (s *Server) imageRepo(ctx context.Context, tx store.Tx, q *request, ref, na
 		return nil, nil, err
 	}
 	t := chain[len(chain)-1]
-	if kind != "" {
+	if kind == opDeleteImageRepo {
+		q.note(t, KindRegistryDelete)
+	} else if kind != "" {
 		q.note(t, kind)
 	}
 	r, err := imagerepos.ByName(ctx, tx, t.ID, name)
-	if errors.Is(err, imagerepos.ErrNotFound) || err == nil && r.State == imagerepos.StateDeleting {
+	if errors.Is(err, imagerepos.ErrNotFound) || err == nil && r.State == imagerepos.StateDeleting && kind != opDeleteImageRepo {
 		return nil, nil, imageRepoNotFound(t, name)
 	}
 	return chain, r, err
 }
+
+// opDeleteImageRepo is imageRepo's kind for a repo delete, which finds
+// a repo already DELETING, so that a delete that stopped halfway can be
+// repeated. It is audited as KindRegistryDelete.
+const opDeleteImageRepo = "registry.delete.repo"
 
 // CreateImageRepo makes the image repo name in the last silo of chain,
 // as a first push does (local-registry.md, "Created by the first push",
@@ -342,7 +349,10 @@ func (s *Server) deleteImageManifest(q *request, ref, name, digest string) (any,
 		return nil, errorf(InvalidArgument, "digest %q: want sha256:<64 hex> or sha512:<128 hex>", digest).with("field", "digest")
 	}
 	var out *ImageRepoObject
+	var removed []string
+	var repo string
 	err := s.tx(ctx, func(tx store.Tx) error {
+		removed = nil
 		chain, r, err := s.imageRepo(ctx, tx, q, ref, name, true, KindRegistryDelete)
 		if err != nil {
 			return err
@@ -362,6 +372,10 @@ func (s *Server) deleteImageManifest(q *request, ref, name, digest string) (any,
 		if err != nil {
 			return err
 		}
+		if err := s.reckonImageRepo(ctx, tx, chain, r, after); err != nil {
+			return err
+		}
+		removed, repo = gone, r.ID
 		if err := Audit(ctx, tx, t, q.caller, KindRegistryDelete, q.requestID, "OK",
 			map[string]any{"image_repo": r.Name, "id": r.ID, "reference": digest, "manifests": gone,
 				"refunded_bytes": imagerepos.Charged(before) - imagerepos.Charged(after)}); err != nil {
@@ -372,23 +386,53 @@ func (s *Server) deleteImageManifest(q *request, ref, name, digest string) (any,
 		}
 		return s.finish(ctx, tx, q, out)
 	})
+	if err == nil {
+		s.removedImages(ctx, repo, removed)
+	}
 	return s.done(q, out, 0, err)
 }
 
 // deleteImageRepo is DELETE .../imageRepos/{repo}: the repo and
-// everything in it, as an operation. With no content store records to
-// remove yet (local-registry.md, §4), it is done at once.
+// everything in it, as an operation (local-registry.md, "Deleting tags,
+// manifests and repos"). The repo is marked DELETING first, in a
+// transaction of its own, so that every registry request on it is a
+// 404 from then on; then its rows go, refunding what they charged, and
+// then its silo-registry records, so that containerd's GC collects
+// what no other repo, image or cache entry references. A delete that
+// stops after the mark is repeated by deleting the repo again.
 func (s *Server) deleteImageRepo(q *request, ref, name string) (any, error) {
 	ctx := q.r.Context()
+	if !q.validateOnly {
+		err := s.tx(ctx, func(tx store.Tx) error {
+			_, r, err := s.imageRepo(ctx, tx, q, ref, name, true, opDeleteImageRepo)
+			if err != nil || r.State == imagerepos.StateDeleting {
+				return err
+			}
+			return imagerepos.SetState(ctx, tx, r.ID, imagerepos.StateDeleting)
+		})
+		if err != nil {
+			return s.done(q, nil, 0, err)
+		}
+	}
 	var out any
+	var removed []string
+	var repo string
 	err := s.tx(ctx, func(tx store.Tx) error {
-		chain, r, err := s.imageRepo(ctx, tx, q, ref, name, true, KindRegistryDelete)
+		chain, r, err := s.imageRepo(ctx, tx, q, ref, name, true, opDeleteImageRepo)
 		if err != nil {
 			return err
 		}
 		t := chain[len(chain)-1]
 		if err := lockChain(ctx, tx, chain); err != nil {
 			return err
+		}
+		ms, err := imagerepos.Manifests(ctx, tx, r.ID)
+		if err != nil {
+			return err
+		}
+		removed, repo = nil, r.ID
+		for _, m := range ms {
+			removed = append(removed, m.Digest)
 		}
 		if err := dropImageRepo(ctx, tx, t, r, q.caller, q.requestID, nil); err != nil {
 			return err
@@ -417,6 +461,9 @@ func (s *Server) deleteImageRepo(q *request, ref, name string) (any, error) {
 	})
 	if err == errValidateOnly {
 		return out, nil
+	}
+	if err == nil {
+		s.removedImages(ctx, repo, removed)
 	}
 	return s.done(q, out, 0, err)
 }
@@ -450,7 +497,9 @@ func dropImageRepo(ctx context.Context, tx store.Tx, t *tree.Silo, r *imagerepos
 // force (local-registry.md, "Deleting a silo"): there is no outbound
 // copy, so nothing is archived.
 func (s *Server) deleteImageReposIn(ctx context.Context, t *tree.Silo, c Caller) error {
-	return s.tx(ctx, func(tx store.Tx) error {
+	removed := map[string][]string{}
+	err := s.tx(ctx, func(tx store.Tx) error {
+		clear(removed)
 		rs, err := imagerepos.Of(ctx, tx, t.ID)
 		if err != nil || len(rs) == 0 {
 			return err
@@ -463,10 +512,25 @@ func (s *Server) deleteImageReposIn(ctx context.Context, t *tree.Silo, c Caller)
 			return err
 		}
 		for _, r := range rs {
+			ms, err := imagerepos.Manifests(ctx, tx, r.ID)
+			if err != nil {
+				return err
+			}
+			removed[r.ID] = []string{}
+			for _, m := range ms {
+				removed[r.ID] = append(removed[r.ID], m.Digest)
+			}
 			if err := dropImageRepo(ctx, tx, t, r, c, "", map[string]any{"reason": "silo deleted"}); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	for repo, ds := range removed {
+		s.removedImages(ctx, repo, ds)
+	}
+	return nil
 }

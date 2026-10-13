@@ -44,10 +44,25 @@ type Content interface {
 	Lease(ctx context.Context, id string, expire time.Time) error
 	// DeleteLease ends a lease; what it alone held is GC's.
 	DeleteLease(ctx context.Context, id string) error
-	// PutImage creates or replaces an image record in silo-registry.
-	PutImage(ctx context.Context, img Image) error
-	// DeleteImage removes an image record of silo-registry.
-	DeleteImage(ctx context.Context, name string) error
+	// PutImage creates or replaces an image record in namespace ns:
+	// Namespace for a repo's manifest, CacheNamespace for a cache
+	// entry.
+	PutImage(ctx context.Context, ns string, img Image) error
+	// DeleteImage removes an image record of namespace ns. One that
+	// isn't there is not an error.
+	DeleteImage(ctx context.Context, ns, name string) error
+	// ListImages lists namespace ns's image records, by name.
+	ListImages(ctx context.Context, ns string) ([]Image, error)
+	// Namespaces lists every namespace that holds image records:
+	// silo-registry, silo-cache and each silo's silo-<id> (call L7),
+	// whose records keep pulled images and containers' snapshots.
+	Namespaces(ctx context.Context) ([]string, error)
+	// Collect runs the content store's garbage collection, as
+	// containerd's does after a deletion (local-registry.md, §10
+	// "Garbage collection"): every blob that no image record of any
+	// namespace reaches and no lease holds is removed. silod never
+	// deletes a blob itself; it removes roots and then collects.
+	Collect(ctx context.Context) error
 }
 
 // Ingest is an upload's bytes on their way into the store.
@@ -67,8 +82,9 @@ type Ingest interface {
 	Close() error
 }
 
-// Image is one silo-registry record: <repo id>@<digest>, whose target
-// is the manifest, and whose labels carry dev.silo.seq. Refs are the
+// Image is one image record. In silo-registry it is <repo id>@<digest>,
+// whose target is the manifest, and whose labels carry dev.silo.seq; in
+// silo-cache it is a cache entry, <upstream>/<repo>@<digest>. Refs are the
 // digests the manifest references, which containerd's implementation
 // labels the manifest's content with (containerd.io/gc.ref.content.*),
 // so that GC keeps exactly what some repo references.
@@ -89,17 +105,24 @@ var ErrDigest = errors.New("registry: digest mismatch")
 
 // Memory is an in-memory Content, for tests and the fake driver.
 type Memory struct {
+	// Now is the clock leases expire by; time.Now if nil.
+	Now func() time.Time
+
 	mu      sync.Mutex
 	blobs   map[string][]byte
 	ingests map[string]*memIngest
 	leases  map[string]time.Time
-	images  map[string]Image
+	// images are the records, by namespace and name.
+	images map[string]map[string]Image
+	// leased is the lease each blob was committed under, which holds
+	// it from GC while the lease lasts.
+	leased map[string]string
 }
 
 // NewMemory returns an empty Memory.
 func NewMemory() *Memory {
 	return &Memory{blobs: map[string][]byte{}, ingests: map[string]*memIngest{}, leases: map[string]time.Time{},
-		images: map[string]Image{}}
+		images: map[string]map[string]Image{}, leased: map[string]string{}}
 }
 
 func (m *Memory) Size(_ context.Context, digest string) (int64, error) {
@@ -127,7 +150,7 @@ func (m *Memory) Ingest(_ context.Context, ref, lease string) (Ingest, error) {
 	defer m.mu.Unlock()
 	in := m.ingests[ref]
 	if in == nil {
-		in = &memIngest{m: m, ref: ref}
+		in = &memIngest{m: m, ref: ref, lease: lease}
 		m.ingests[ref] = in
 	}
 	return in, nil
@@ -154,30 +177,94 @@ func (m *Memory) DeleteLease(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *Memory) PutImage(_ context.Context, img Image) error {
+func (m *Memory) PutImage(_ context.Context, ns string, img Image) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.images[img.Name] = img
+	if m.images[ns] == nil {
+		m.images[ns] = map[string]Image{}
+	}
+	m.images[ns][img.Name] = img
 	return nil
 }
 
-func (m *Memory) DeleteImage(_ context.Context, name string) error {
+func (m *Memory) DeleteImage(_ context.Context, ns, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.images, name)
+	delete(m.images[ns], name)
+	return nil
+}
+
+func (m *Memory) ListImages(_ context.Context, ns string) ([]Image, error) {
+	return m.Records(ns), nil
+}
+
+func (m *Memory) Namespaces(context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for ns, imgs := range m.images {
+		if len(imgs) > 0 {
+			out = append(out, ns)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Collect is containerd's mark and sweep over Memory: a blob is kept if
+// some record of any namespace is it or references it, or the lease it
+// was committed under is still open and unexpired.
+func (m *Memory) Collect(context.Context) error {
+	now := time.Now()
+	if m.Now != nil {
+		now = m.Now()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	live := map[string]bool{}
+	for _, imgs := range m.images {
+		for _, img := range imgs {
+			live[img.Digest] = true
+			for _, r := range img.Refs {
+				live[r] = true
+			}
+		}
+	}
+	for d := range m.blobs {
+		if l, ok := m.leased[d]; ok {
+			if exp, open := m.leases[l]; open && now.Before(exp) {
+				continue
+			}
+		}
+		if !live[d] {
+			delete(m.blobs, d)
+			delete(m.leased, d)
+		}
+	}
 	return nil
 }
 
 // Images lists the silo-registry records, by name.
-func (m *Memory) Images() []Image {
+func (m *Memory) Images() []Image { return m.Records(Namespace) }
+
+// Records lists namespace ns's records, by name.
+func (m *Memory) Records(ns string) []Image {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Image
-	for _, img := range m.images {
+	for _, img := range m.images[ns] {
 		out = append(out, img)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// Has reports whether the content store holds digest's bytes.
+func (m *Memory) Has(digest string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.blobs[digest]
+	return ok
 }
 
 // Leases lists the open leases and when each expires.
@@ -202,9 +289,10 @@ func (m *Memory) Put(b []byte) string {
 }
 
 type memIngest struct {
-	m   *Memory
-	ref string
-	buf []byte
+	m     *Memory
+	ref   string
+	lease string
+	buf   []byte
 }
 
 func (in *memIngest) Write(p []byte) (int, error) {
@@ -245,6 +333,9 @@ func (in *memIngest) Commit(_ context.Context, size int64, digest string) error 
 	}
 	if _, ok := in.m.blobs[digest]; !ok {
 		in.m.blobs[digest] = in.buf
+	}
+	if in.lease != "" {
+		in.m.leased[digest] = in.lease
 	}
 	delete(in.m.ingests, in.ref)
 	return nil
