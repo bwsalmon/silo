@@ -308,7 +308,6 @@ func TestVersionsAndRoutes(t *testing.T) {
 	e.fail(501, "pushes go to registry.silo.internal only; this host copies nothing to external registries", e.a, "POST", "/v1.47/images/ghcr.io/o/r/push", nil)
 	e.fail(501, "not supported", e.a, "GET", "/v1.47/plugins", nil)
 	e.fail(501, "image import", e.a, "POST", "/v1.47/images/create?fromSrc=-", nil)
-	e.fail(501, "not served by this facade yet", e.a, "POST", "/v1.47/containers/abc/exec", nil)
 	// No caller is 403 on everything but /_ping.
 	e.fail(403, "carries no caller", "", "GET", "/v1.47/info", nil)
 }

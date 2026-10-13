@@ -792,7 +792,7 @@ func (s *Server) get(q *request) (*Container, error) {
 		c, err = s.container(q.ctx(), tx, q.target.ID, q.params["id"])
 		return err
 	})
-	if err == nil && q.route.class() == control.Mutation {
+	if err == nil && q.class() == control.Mutation {
 		err = s.refuseToolContainer(q, c)
 	}
 	return c, err
@@ -1167,9 +1167,9 @@ func (s *Server) containerRename(q *request) error {
 	return noContent(q)
 }
 
-// containerResize is a TTY resize: the workload's terminal follows the
-// attach stream's, which a later step serves, so there is nothing to
-// resize yet.
+// containerResize is a TTY resize of the workload's console, which the
+// driver interface has no call for, so there is nothing to resize; an
+// exec's TTY is resized by POST /exec/{id}/resize.
 func (s *Server) containerResize(q *request) error {
 	if _, err := s.get(q); err != nil {
 		return err
@@ -1254,6 +1254,9 @@ func (s *Server) removeContainer(ctx context.Context, silo string, c *Container,
 	s.mu.Unlock()
 	for _, v := range gone {
 		s.deleteVolumeDir(ctx, silo, v)
+	}
+	if err == nil {
+		s.forgetExecs(c.ID)
 	}
 	return err
 }

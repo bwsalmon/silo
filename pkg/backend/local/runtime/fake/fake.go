@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"sort"
 	"strings"
@@ -479,7 +480,8 @@ func (d *Driver) RootfsUpper(_ context.Context, id string) (io.ReadCloser, error
 	return io.NopCloser(&buf), nil
 }
 
-// CopyOut implements runtime.Driver.
+// CopyOut implements runtime.Driver. A path it doesn't have is
+// fs.ErrNotExist.
 func (d *Driver) CopyOut(_ context.Context, id, p string) (io.ReadCloser, error) {
 	p = path.Clean(p)
 	d.mu.Lock()
@@ -499,7 +501,7 @@ func (d *Driver) CopyOut(_ context.Context, id, p string) (io.ReadCloser, error)
 		return nil, err
 	}
 	if len(names) == 0 {
-		return nil, fmt.Errorf("fake: %s: no such file in %s", p, id)
+		return nil, fmt.Errorf("fake: %s in %s: %w", p, id, fs.ErrNotExist)
 	}
 	sort.Strings(names)
 	var buf bytes.Buffer
