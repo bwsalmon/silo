@@ -40,9 +40,15 @@ import (
 // hop. The upstream list is not an allowlist.
 //
 // Tags are revalidated on every request; digests aren't. Concurrent
-// misses on one object share one upstream fetch. Private content, the
-// cache index per sharing domain, and eviction are later steps (32 to
-// 34).
+// misses on one object share one upstream fetch.
+//
+// The index is per sharing domain (call L73): the nearest silo, the
+// caller or an ancestor, that sets images.sharing isolated itself, or
+// the whole host. A hit is decided by the caller's domain's entries,
+// never by the content store, so a miss in an isolated domain is a
+// full upstream fetch even when the bytes are on disk, and the
+// duplicate is dropped at commit. Facade pulls are requests like any
+// other. Private content and eviction are later steps (32 and 34).
 
 // Egress carries the cache's upstream requests through the gateway's
 // egress proxy as a silo.
@@ -131,12 +137,35 @@ type cacheObject struct {
 	fetchedAt time.Time
 }
 
-func (s *Service) cacheObject(ctx context.Context, tx store.Tx, up, repo, digest, kind string) (*cacheObject, error) {
+// cacheIndex is where a sharing domain's entries are (call L73): the
+// whole host's in registry_cache_objects and registry_cache_tags, and
+// an isolated domain's in the registry_cache_domain_ tables, under its
+// ID.
+type cacheIndex struct {
+	objects, tags string
+	cols, marks   string // the domain column and its placeholder, if any
+	where         string
+	key           []any
+}
+
+func indexOf(domain string) cacheIndex {
+	if domain == "" {
+		return cacheIndex{objects: "registry_cache_objects", tags: "registry_cache_tags"}
+	}
+	return cacheIndex{objects: "registry_cache_domain_objects", tags: "registry_cache_domain_tags",
+		cols: "domain, ", marks: "?, ", where: "domain = ? AND ", key: []any{domain}}
+}
+
+func (x cacheIndex) args(a ...any) []any { return append(append([]any(nil), x.key...), a...) }
+
+// cacheObject is domain's entry for digest of up's repo, or nil.
+func (s *Service) cacheObject(ctx context.Context, tx store.Tx, domain, up, repo, digest, kind string) (*cacheObject, error) {
+	x := indexOf(domain)
 	var o cacheObject
 	var hosts string
 	var fetched int64
-	err := tx.QueryRow(ctx, `SELECT digest, media_type, size, hosts, fetched_at FROM registry_cache_objects
-		WHERE upstream = ? AND repo = ? AND digest = ? AND kind = ?`, up, repo, digest, kind).
+	err := tx.QueryRow(ctx, `SELECT digest, media_type, size, hosts, fetched_at FROM `+x.objects+`
+		WHERE `+x.where+`upstream = ? AND repo = ? AND digest = ? AND kind = ?`, x.args(up, repo, digest, kind)...).
 		Scan(&o.digest, &o.mediaType, &o.size, &hosts, &fetched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -151,39 +180,42 @@ func (s *Service) cacheObject(ctx context.Context, tx store.Tx, up, repo, digest
 	return &o, nil
 }
 
-func (s *Service) putCacheObject(ctx context.Context, up, repo, kind string, o *cacheObject) error {
+func (s *Service) putCacheObject(ctx context.Context, domain, up, repo, kind string, o *cacheObject) error {
 	hosts, err := json.Marshal(o.hosts)
 	if err != nil {
 		return err
 	}
+	x := indexOf(domain)
 	now := store.Millis(s.opts.Now())
 	return s.opts.Store.Tx(ctx, func(tx store.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO registry_cache_objects
-			(upstream, repo, digest, kind, media_type, size, hosts, fetched_at, accessed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (upstream, repo, digest) DO UPDATE SET kind = excluded.kind, media_type = excluded.media_type,
+		_, err := tx.Exec(ctx, `INSERT INTO `+x.objects+`
+			(`+x.cols+`upstream, repo, digest, kind, media_type, size, hosts, fetched_at, accessed_at) VALUES (`+x.marks+`?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (`+x.cols+`upstream, repo, digest) DO UPDATE SET kind = excluded.kind, media_type = excluded.media_type,
 			size = excluded.size, hosts = excluded.hosts, fetched_at = excluded.fetched_at, accessed_at = excluded.accessed_at`,
-			up, repo, o.digest, kind, o.mediaType, o.size, string(hosts), now, now)
+			x.args(up, repo, o.digest, kind, o.mediaType, o.size, string(hosts), now, now)...)
 		return err
 	})
 }
 
-// cacheTag is a tag's last revalidated digest, and when.
-func (s *Service) cacheTag(ctx context.Context, tx store.Tx, up, repo, tag string) (string, time.Time, bool, error) {
+// cacheTag is a tag's digest as domain last revalidated it, and when.
+func (s *Service) cacheTag(ctx context.Context, tx store.Tx, domain, up, repo, tag string) (string, time.Time, bool, error) {
+	x := indexOf(domain)
 	var d string
 	var at int64
-	err := tx.QueryRow(ctx, `SELECT digest, validated_at FROM registry_cache_tags WHERE upstream = ? AND repo = ? AND tag = ?`,
-		up, repo, tag).Scan(&d, &at)
+	err := tx.QueryRow(ctx, `SELECT digest, validated_at FROM `+x.tags+` WHERE `+x.where+`upstream = ? AND repo = ? AND tag = ?`,
+		x.args(up, repo, tag)...).Scan(&d, &at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", time.Time{}, false, nil
 	}
 	return d, time.UnixMilli(at), err == nil, err
 }
 
-func (s *Service) putCacheTag(ctx context.Context, up, repo, tag, digest string) error {
+func (s *Service) putCacheTag(ctx context.Context, domain, up, repo, tag, digest string) error {
+	x := indexOf(domain)
 	return s.opts.Store.Tx(ctx, func(tx store.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO registry_cache_tags (upstream, repo, tag, digest, validated_at) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (upstream, repo, tag) DO UPDATE SET digest = excluded.digest, validated_at = excluded.validated_at`,
-			up, repo, tag, digest, store.Millis(s.opts.Now()))
+		_, err := tx.Exec(ctx, `INSERT INTO `+x.tags+` (`+x.cols+`upstream, repo, tag, digest, validated_at) VALUES (`+x.marks+`?, ?, ?, ?, ?)
+			ON CONFLICT (`+x.cols+`upstream, repo, tag) DO UPDATE SET digest = excluded.digest, validated_at = excluded.validated_at`,
+			x.args(up, repo, tag, digest, store.Millis(s.opts.Now()))...)
 		return err
 	})
 }
@@ -205,6 +237,11 @@ type cacheReq struct {
 	levels   []egress.Policy
 	paths    []string
 	siloPath string
+	// domain is the caller's sharing domain's ID, "" for the whole
+	// host, and domainPath its path: the index it hits in and
+	// records its fetches in.
+	domain     string
+	domainPath string
 
 	// What the audit record says.
 	result string
@@ -232,6 +269,9 @@ func (s *Service) begin(ctx context.Context, cr *cacheReq) error {
 			return err
 		}
 		cr.siloPath = cr.paths[len(cr.paths)-1]
+		if cr.domain, cr.domainPath, err = fenceapi.SharingDomain(ctx, tx, cr.caller.Silo); err != nil {
+			return err
+		}
 		up, ok := cr.cfg.Upstream(cr.name.Upstream)
 		switch {
 		case ok:
@@ -301,7 +341,7 @@ func (s *Service) hit(ctx context.Context, cr *cacheReq, o *cacheObject, kind st
 		return cr.refuse(h.Host)
 	}
 	o.hosts = now
-	if err := s.putCacheObject(ctx, cr.name.Upstream, cr.name.UpstreamRepo, kindBlob, o); err != nil {
+	if err := s.putCacheObject(ctx, cr.domain, cr.name.Upstream, cr.name.UpstreamRepo, kindBlob, o); err != nil {
 		log.Printf("registry: cache: recording %s@%s's new redirect hosts: %v", cr.name, o.digest, err)
 	}
 	return nil
@@ -528,7 +568,8 @@ type flight struct {
 // once runs fetch for key unless another request is already fetching
 // it, in which case it waits for that fetch. shared is whether the
 // result is another request's. Public content only: private fetches
-// are never shared (call L72, step 32).
+// are never shared (call L72, step 32). key names the caller's sharing
+// domain, so a request never waits on another domain's fetch (L73).
 func (s *Service) once(key string, fetch func() (*cacheObject, error)) (o *cacheObject, shared bool, err error) {
 	s.mu.Lock()
 	if f, ok := s.flights[key]; ok {
@@ -598,7 +639,7 @@ func (s *Service) fetchManifest(ctx context.Context, cr *cacheReq, f *fetcher, r
 		return nil, err
 	}
 	o := &cacheObject{digest: d, mediaType: mt, size: int64(len(b)), hosts: f.hosts, fetchedAt: s.opts.Now()}
-	return o, s.putCacheObject(ctx, cr.name.Upstream, cr.name.UpstreamRepo, kindManifest, o)
+	return o, s.putCacheObject(ctx, cr.domain, cr.name.Upstream, cr.name.UpstreamRepo, kindManifest, o)
 }
 
 // fetchBlob fetches digest from the upstream as the caller, following
@@ -622,7 +663,7 @@ func (s *Service) fetchBlob(ctx context.Context, cr *cacheReq, f *fetcher, diges
 		}
 	}
 	o := &cacheObject{digest: digest, size: n, hosts: f.hosts, fetchedAt: s.opts.Now()}
-	return o, s.putCacheObject(ctx, cr.name.Upstream, cr.name.UpstreamRepo, kindBlob, o)
+	return o, s.putCacheObject(ctx, cr.domain, cr.name.Upstream, cr.name.UpstreamRepo, kindBlob, o)
 }
 
 // store writes r's bytes into the content store as digest, under a
@@ -691,7 +732,7 @@ func (s *Service) cacheManifest(ctx context.Context, cr *cacheReq) (*cacheObject
 		var o *cacheObject
 		err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
 			var err error
-			o, err = s.cacheObject(ctx, tx, up, repo, digest, kindManifest)
+			o, err = s.cacheObject(ctx, tx, cr.domain, up, repo, digest, kindManifest)
 			return err
 		})
 		return o, err
@@ -722,7 +763,7 @@ func (s *Service) cacheManifest(ctx context.Context, cr *cacheReq) (*cacheObject
 	if err != nil {
 		return nil, err
 	}
-	o, err = s.fetchShared(kindManifest+" "+up+"/"+repo+"@"+digest, func() (*cacheObject, error) {
+	o, err = s.fetchShared(cr.domain+" "+kindManifest+" "+up+"/"+repo+"@"+digest, func() (*cacheObject, error) {
 		return s.fetchManifest(ctx, cr, f, digest)
 	})
 	cr.auth = f.auth
@@ -764,7 +805,7 @@ func (s *Service) revalidate(ctx context.Context, cr *cacheReq) (string, error) 
 	}()
 	cr.auth, cr.hosts = f.auth, f.hosts
 	if err == nil {
-		return digest, s.putCacheTag(ctx, up, repo, tag, digest)
+		return digest, s.putCacheTag(ctx, cr.domain, up, repo, tag, digest)
 	}
 	var ue *upstreamErr
 	if !errors.As(err, &ue) || !ue.unreachable {
@@ -774,7 +815,7 @@ func (s *Service) revalidate(ctx context.Context, cr *cacheReq) (string, error) 
 	var ok bool
 	if serr := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
 		var err error
-		digest, at, ok, err = s.cacheTag(ctx, tx, up, repo, tag)
+		digest, at, ok, err = s.cacheTag(ctx, tx, cr.domain, up, repo, tag)
 		return err
 	}); serr != nil {
 		return "", serr
@@ -823,7 +864,7 @@ func (s *Service) cacheBlob(ctx context.Context, cr *cacheReq, digest string) (*
 	var o *cacheObject
 	if err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
 		var err error
-		o, err = s.cacheObject(ctx, tx, up, repo, digest, kindBlob)
+		o, err = s.cacheObject(ctx, tx, cr.domain, up, repo, digest, kindBlob)
 		return err
 	}); err != nil {
 		return nil, err
@@ -837,7 +878,7 @@ func (s *Service) cacheBlob(ctx context.Context, cr *cacheReq, digest string) (*
 	if err != nil {
 		return nil, err
 	}
-	o, err = s.fetchShared(kindBlob+" "+up+"/"+repo+"@"+digest, func() (*cacheObject, error) {
+	o, err = s.fetchShared(cr.domain+" "+kindBlob+" "+up+"/"+repo+"@"+digest, func() (*cacheObject, error) {
 		return s.fetchBlob(ctx, cr, f, digest)
 	})
 	cr.auth = f.auth
@@ -867,7 +908,7 @@ func (s *Service) auditCache(ctx context.Context, cr *cacheReq, kind string, req
 		status = http.StatusInternalServerError
 	}
 	fields := map[string]any{"upstream": cr.name.Upstream, "repo": cr.name.UpstreamRepo, "reference": cr.ref,
-		"object": kind, "method": cr.method, "egress": decision, "hosts": hosts, "auth": cr.auth, "status": status}
+		"object": kind, "method": cr.method, "egress": decision, "hosts": hosts, "auth": cr.auth, "status": status, "domain": cr.domainPath}
 	if cr.result != "" {
 		fields["result"] = cr.result
 	}

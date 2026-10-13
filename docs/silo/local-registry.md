@@ -13,6 +13,7 @@ fake content store; containerd's half is step 27b. Task 3483 landed
 step 30's facade endpoints over the same fake. Task 3484 landed step
 31's pull-through cache for public content, over the same fake and a
 test upstream ([§13](#13-staged-implementation-plan) says what is left).
+Task 3486 landed step 33's cache index per sharing domain.
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -1576,8 +1577,8 @@ earlier depends on them. Each can be filed on its own, in this order.
     way for silod to say which silo a request is for (on its silod
     socket, as `Silo-Origin` is), and silod's wiring of the cache with
     step 27b's. The cache's `silo-cache` image records and GC labels
-    are step 34's, with eviction; the cache index per sharing domain is
-    step 33's.
+    are step 34's, with eviction; the cache index per sharing domain
+    landed in step 33.
 32. **Private upstream content:**
     - anonymous classification and `public_ttl`;
     - revalidation by digest with the caller's credentials;
@@ -1591,6 +1592,25 @@ earlier depends on them. Each can be filed on its own, in this order.
 33. **Sharing domains:** the cache index per domain, full fetches for
     misses in an isolated domain, and facade pulls on the same rule.
     Depends on 25 and 31.
+
+    *Landed in task 3486, over `registry.Memory`:* every cache request
+    resolves the caller's domain with `fenceapi.SharingDomain`, the
+    nearest silo below the root that sets `isolated` itself, or the
+    whole host (which is also the domain when only the root isolates,
+    since every silo is in it). The whole host's entries stay in
+    `registry_cache_objects` and `registry_cache_tags`; an isolated
+    domain's are in `registry_cache_domain_objects` and
+    `registry_cache_domain_tags`, keyed by the domain silo's ID, so the
+    migration only adds. Hits, tag revalidation and stale tags read the
+    caller's domain's rows only; a miss is the caller's full upstream
+    fetch, verified, and the content store's commit drops the
+    duplicate for the copy on disk. In-flight fetches are shared only
+    within a domain. `registry.cache` records carry `domain`, the
+    domain's path. Facade pulls go through the same requests, so they
+    follow the rule unchanged. *Left, for step 34:* an isolated
+    domain's rows outlive the silo's deletion or its turning `shared`
+    again, until eviction and silo deletion's registry step drop
+    them.
 34. **Cache budget, eviction, GC and deletion:**
     - the budget in root capacity, `--image-cache-size`;
     - LRU eviction of cache-only entries, `cache evict`;
