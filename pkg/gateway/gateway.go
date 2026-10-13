@@ -146,6 +146,7 @@ type Gateway struct {
 
 	git      gitState
 	gitProxy *httputil.ReverseProxy
+	regProxy *httputil.ReverseProxy
 }
 
 // New returns a Gateway that reaches silod through opts.Dial.
@@ -182,6 +183,7 @@ func New(opts Options) *Gateway {
 	g.exportsInit()
 	g.toolsProxy = g.newToolsProxy(tr)
 	g.gitProxy = g.newGitProxy(tr)
+	g.regProxy = newForwarder(tr, "registry", "", RegistrySilodPath)
 	g.exportTransport = &http.Transport{DialContext: opts.DialExport, MaxIdleConns: 64, IdleConnTimeout: 90 * time.Second}
 	// Facade and fence calls wait for silod (waitDial); their own
 	// connections, so that the tables' stream doesn't wait with them.
@@ -421,6 +423,21 @@ func (g *Gateway) auditDenied(r *http.Request, rec AuditRecord) {
 // ToolsSilodPath. /x/ is HTTP exports, /git/ the git service (git.go),
 // and /r/ is reserved for served resources (after v1).
 func (g *Gateway) HTTP() http.Handler {
+	mux := g.httpMux()
+	// A request whose Host is registry.silo.internal goes to the
+	// registry and nothing else, and no other Host reaches it, so /v2/
+	// is a 404 anywhere else (local-registry.md, "The address", call
+	// L56).
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if IsRegistryHost(r.Host) {
+			g.serveRegistry(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func (g *Gateway) httpMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc(ToolsAttachPath, g.serveToolsAttach)
 	mux.HandleFunc(ToolsBinaryPath, g.serveToolsBinary)
