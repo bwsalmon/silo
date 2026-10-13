@@ -41,6 +41,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/client"
 )
 
@@ -94,6 +95,8 @@ commands:
   uninstall --project p             remove what install set up
   proxy [--listen localhost:8642]   serve the facade and fence API on localhost,
                                     through the front door, for gcloud and terraform
+  unshare [--probe] [-- cmd...]     run cmd as root in the local backend's namespace
+                                    holder, or check this host's prerequisites
 
 A silo is named by its path (/team-a/ci), by its id (k7f3qa), or as
 self. An agent is named <silo>/agents/<name> (/team-a/agents/fixer), or by
@@ -189,6 +192,7 @@ var commands = map[string]command{
 	"install":     (*cli).install,
 	"uninstall":   (*cli).uninstall,
 	"proxy":       (*cli).proxy,
+	"unshare":     (*cli).unshare,
 }
 
 // group is a command with subcommands, as "block add".

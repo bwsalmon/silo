@@ -261,6 +261,30 @@ silod's account, which controls the fence. So:
   user namespace, it can still wire the veth between `silo-net` and the
   container's netns (*verify* with runc and runsc joining an existing
   user namespace by path).
+- **What the step-15 spike found** (`pkg/backend/local/nsd/testdata/spike.sh`,
+  run by CI's `nsd` job as an unprivileged user):
+  - netlink and nftables messages from silod, capless in the host's
+    namespaces, are accepted in `silo-net` through sockets the holder
+    opened and passed. That settles the `netlink_ns_capable` *verify*
+    above on the CI kernel (Debian 12, 6.1).
+  - **runc** joins the pinned user namespace and netns by path.
+    runc before 1.2 also wants the joined namespace's mapping repeated
+    in `uidMappings`/`gidMappings`; 1.2 and later warn if it is.
+  - **runsc can't join a user namespace by path.** Its gofer calls
+    `setns` from a multi-threaded process and gets `EINVAL`. It works
+    when runsc is **started inside** the pinned user namespace, with
+    only the netns in the spec, which is gVisor's caller-configured
+    mode (call L30). netstack then scrapes the veth's address. So the
+    gVisor driver (item 7/16) has to start the runsc shim inside each
+    container's user namespace, for example through `silo-nsd`'s
+    `join` stage, not just name the namespace in the spec.
+  - A container's root filesystem has to be on a mount made inside the
+    holder's mount namespace, as containerd's snapshot mounts are. On a
+    directory inherited from the host's mount namespace, runc's
+    `remount-propagation` of the rootfs gets `EPERM` in this setup.
+  - Pins live in `$XDG_RUNTIME_DIR/silo/netns/` on a tmpfs the holder
+    mounts in its own mount namespace, rather than `/run/silo/netns`,
+    which an unprivileged user can't create.
 - **The mapping is part of the state.** Files in volumes are owned by
   subuids on disk. If `/etc/subuid` changed between runs, every
   volume's owners would shift. silod records its mapping in the store

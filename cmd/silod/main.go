@@ -39,6 +39,8 @@ import (
 	"github.com/bwsalmon/silo/pkg/agents"
 	"github.com/bwsalmon/silo/pkg/backend"
 	"github.com/bwsalmon/silo/pkg/backend/gcp"
+	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
+	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gceclient"
@@ -73,6 +75,7 @@ commands:
   gateway   run the gateway
   pause     hold a network namespace until stopped
   sessiond  launch agents' harness session containers for silod
+  nsd       silo-nsd, the local backend's rootless namespace holder
   harness-init
             a session container's entrypoint: forward the session
             socket to the loopback, and run the harness
@@ -97,6 +100,12 @@ func main() {
 		<-ctx.Done()
 	case "sessiond":
 		err = runSessiond(ctx, os.Args[2:])
+	case "nsd":
+		// silo-nsd, the local backend's namespace holder.
+		var exe string
+		if exe, err = os.Executable(); err == nil {
+			err = nsd.Main(ctx, exe, os.Args[2:])
+		}
 	case "harness-init":
 		var code int
 		code, err = harnessInit(ctx, os.Args[2:])
