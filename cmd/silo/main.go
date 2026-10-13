@@ -87,6 +87,12 @@ commands:
                                     a deletion would have orphaned
   repo restore-ref [silo/]<name> <archive> <branch>
                                     make a branch from an archive ref
+  repo external [silo/]<name> [--branch b | --tag t]
+                                    where it is in the uber repo
+  repo which <ref>                  the repo an uber-repo ref is of
+  repo external-clone [silo/]<name> [dir] [--branch b] [--url u]
+                                    clone it from the uber repo, with its
+                                    silo submodules fetched from there too
   registry list [--recursive] [silo]
                                     list a silo's image repos
   registry get|tags [silo/]<name>   read an image repo, or its tags and manifests
@@ -113,6 +119,12 @@ commands:
                                     override a price (root only; --delete removes it)
   reconcile [--apply]               show the reconcile's mode, or leave report-only
                                     after a restore (root only)
+  mirror set --url u --credential-file f [--prefix silo] [--index-branch main | --no-index]
+                                    mirror every repo into an uber repo (root only)
+  mirror status [--all]             the repos that aren't in sync, and why
+  mirror retry [repo]               run a repo's pass now, or retry every repo
+  mirror adopt <repo> [--ref r] [--keep-external]
+                                    resolve refs the uber repo diverged on
   install --project p --regions r,... --admin user:...
                                     set Silo up in a project (docs/silo/install.md)
   install --backend local [--system] set the local backend up on this machine: user
@@ -215,6 +227,7 @@ var commands = map[string]command{
 	"repo": group("repo", map[string]command{
 		"create": (*cli).repoCreate, "list": (*cli).repoList, "get": (*cli).repoGet, "delete": (*cli).repoDelete, "url": (*cli).repoURL,
 		"clone": (*cli).repoClone, "archives": (*cli).repoArchives, "restore-ref": (*cli).repoRestoreRef,
+		"external": (*cli).repoExternal, "which": (*cli).repoWhich, "external-clone": (*cli).repoExternalClone,
 	}),
 	RemoteHelper: (*cli).gitRemote,
 	"registry": group("registry", map[string]command{
@@ -230,10 +243,13 @@ var commands = map[string]command{
 		"list": (*cli).credentialList, "remove": (*cli).credentialRemove}),
 	"model-price": group("model-price", map[string]command{"list": (*cli).modelPriceList, "set": (*cli).modelPriceSet}),
 	"reconcile":   (*cli).reconcile,
-	"install":     (*cli).install,
-	"uninstall":   (*cli).uninstall,
-	"proxy":       (*cli).proxy,
-	"unshare":     (*cli).unshare,
+	"mirror": group("mirror", map[string]command{
+		"set": (*cli).mirrorSet, "status": (*cli).mirrorStatus, "retry": (*cli).mirrorRetry, "adopt": (*cli).mirrorAdopt,
+	}),
+	"install":   (*cli).install,
+	"uninstall": (*cli).uninstall,
+	"proxy":     (*cli).proxy,
+	"unshare":   (*cli).unshare,
 }
 
 // group is a command with subcommands, as "block add".

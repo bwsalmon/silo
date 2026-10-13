@@ -164,6 +164,8 @@ const (
 	OpReposArchives   = "silos.repos.archives"
 	OpReposRestoreRef = "silos.repos.restoreRef"
 	OpReposGit        = "silos.repos.git"
+	// Where a repo is in the uber repo (local-git.md, §9).
+	OpReposExternal = "silos.repos.external"
 	// Image repos (local-registry.md, §3 "Operations", call L58), under
 	// silos/{silo}/imageRepos. There is no create: a first push makes
 	// one.
@@ -247,6 +249,7 @@ var fenceOps = map[string]Class{
 	OpReposArchives:            Reading,
 	OpReposRestoreRef:          Mutation,
 	OpReposGit:                 Reading,
+	OpReposExternal:            Reading,
 	OpImageReposList:           Reading,
 	OpImageReposGet:            Reading,
 	OpImageReposDelete:         Mutation,
@@ -525,6 +528,11 @@ func ParseFence(method, rest string) FenceCall {
 		c.Extra = false
 		if method == http.MethodGet {
 			c.Op = OpReposArchives
+		}
+	case c.Collection == "repos" && len(segs) == 3 && segs[2] == "external" && !strings.Contains(c.ID, ":"):
+		c.Extra = false
+		if method == http.MethodGet {
+			c.Op = OpReposExternal
 		}
 	case c.Collection == "imageRepos" && len(segs) == 1:
 		if method == http.MethodGet {

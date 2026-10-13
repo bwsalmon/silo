@@ -451,8 +451,9 @@ func (s *Server) patchRepo(q *request, ref, name string) (any, error) {
 }
 
 // deleteRepo is DELETE .../repos/{repo}: an operation that is done once
-// the repo is off the disk. With no mirror to archive its refs into
-// yet, that is at once (local-git.md, "Deleting a repo or a silo").
+// the repo is off the disk. With a mirror that takes it over, that is
+// once the mirror has archived its refs in the uber repo; otherwise at
+// once (local-git.md, "Deleting a repo or a silo").
 func (s *Server) deleteRepo(q *request, ref, name string) (any, error) {
 	ctx := q.r.Context()
 	var out any
@@ -497,6 +498,18 @@ func (s *Server) deleteRepo(q *request, ref, name string) (any, error) {
 			return err
 		}
 		gone = r
+		if s.opts.Mirror != nil {
+			// The mirror archives the repo's refs in the uber repo
+			// first, then removes it and finishes the operation
+			// (local-git.md, "Deleting a repo or a silo", call L49).
+			handed, err := s.opts.Mirror.Deleting(ctx, tx, t, r, opID)
+			if err != nil {
+				return err
+			}
+			if handed {
+				gone = nil
+			}
+		}
 		op, err := readOp(ctx, tx, `id = ?`, opID)
 		if err != nil {
 			return err
@@ -509,6 +522,9 @@ func (s *Server) deleteRepo(q *request, ref, name string) (any, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if gone == nil {
+		return out, nil // the mirror's now
 	}
 	// The row is gone; now the files. A failure leaves the operation
 	// DELETE_FAILED, naming the directory that is left.
@@ -562,7 +578,8 @@ func dropRepo(ctx context.Context, tx store.Tx, t *tree.Silo, r *repos.Repo, c C
 }
 
 // deleteReposIn deletes silo t's repos, as t is deleted: their rows and
-// charges, and then their directories.
+// charges, and then their directories, but for those the mirror takes
+// over to archive first.
 func (s *Server) deleteReposIn(ctx context.Context, t *tree.Silo, c Caller) error {
 	var gone []*repos.Repo
 	err := s.tx(ctx, func(tx store.Tx) error {
@@ -582,8 +599,17 @@ func (s *Server) deleteReposIn(ctx context.Context, t *tree.Silo, c Caller) erro
 			if err := dropRepo(ctx, tx, t, r, c, "", map[string]any{"reason": "silo deleted"}); err != nil {
 				return err
 			}
+			if s.opts.Mirror != nil {
+				handed, err := s.opts.Mirror.Deleting(ctx, tx, t, r, "")
+				if err != nil {
+					return err
+				}
+				if handed {
+					continue
+				}
+			}
+			gone = append(gone, r)
 		}
-		gone = rs
 		return nil
 	})
 	if err != nil {

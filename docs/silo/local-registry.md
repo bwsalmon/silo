@@ -8,7 +8,8 @@ rest of the local backend, the steps in the
 Task 3450 landed the first part of step 25: image repos in the store
 and the fence API, the `image_repos` class, the `registry` scope type
 and `silo registry` ([§13](#13-staged-implementation-plan) says what of
-step 25 is left).
+step 25 is left). Task 3480 landed step 27's registry handler over a
+fake content store; containerd's half is step 27b.
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -1395,6 +1396,43 @@ earlier depends on them. Each can be filed on its own, in this order.
     Tested with the distribution-spec conformance suite, crane, skopeo
     and oras against silod in-process. Depends on 25, 26, and on 15 for
     the listener in `silo-net`.
+
+    *Landed in task 3480, over a fake content store:* `pkg/registry`,
+    the handler, over `registry.Content`, an interface shaped like
+    containerd's content API (blobs by digest, ingests, leases, and
+    `silo-registry` image records named `<repo id>@<digest>` with
+    `dev.silo.seq` and the manifest's references), with an in-memory
+    `Memory` that every test runs on. The access table is the fence
+    API's `RegistryAccess` (imports included, through step 25b's
+    `ImportOfImageRepo`), and the catalog its `RegistryCatalog`.
+    `Service.blob` is the one blob-access function: HEAD and GET of a
+    blob, a mount's `from` and a manifest's references all go through
+    it. A repo charges `local/disk_gb` on its `image_repo:<id>` ledger
+    object (the one its `image_repos` count is on, so a repo delete
+    refunds both), in millionths of a GiB, rounded up: its manifests'
+    distinct blobs, its grace-hour blobs and its uploads in progress. A
+    chunk the silo has no room for is truncated back out of the ingest
+    and refused with 413 `DENIED`, so an upload never overshoots. The
+    gateway routes port 80 by `Host` (`IsRegistryHost`) to silod's
+    `RegistrySilodPath`, `registry.silo.internal` answers with
+    `silo.internal`'s address, and `silo-tools`' default `NO_PROXY`
+    names it. A `registry` CI job runs the conformance suite (all of it
+    passes but blob delete, which is 405 here, and a mount without
+    `from`, which is a session by design), crane, skopeo and oras
+    against the handler.
+
+    *Left, filed as step 27b:* containerd's implementation of
+    `registry.Content` in silod and wiring the service into silod's
+    `SilodOptions.Registry` (until then silod answers the registry's
+    path with 404); a short read lease per request; the grace hour's
+    blobs survive only as long as silod's process, since they are kept
+    in memory (their leases expire on their own, and the next push
+    re-reckons the repo's charge). A fence API manifest delete refunds
+    the bytes the next time the registry reckons the repo, which step
+    34's deletion work settles. The Docker facade puts no proxy
+    variables in containers' environment yet, so there was no
+    `NO_PROXY` there to add the name to; whatever adds them names
+    `registry.silo.internal` beside `silo.internal`.
 28. **Grants on the registry:** exports and imports in the access path,
     manage-grant scopes, and closing connections within a second on
     revocation and expiry. Depends on 27.

@@ -10,6 +10,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/imagerepos"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
 )
@@ -125,7 +126,7 @@ type Answer struct {
 // Names are the gateway's own names and addresses, which Lookup
 // answers for every caller.
 type Names struct {
-	API    netip.Addr // silo.internal
+	API    netip.Addr // silo.internal and registry.silo.internal
 	Docker netip.Addr // docker.silo.internal, and <silo id>.docker.silo.internal
 }
 
@@ -139,7 +140,7 @@ type Names struct {
 func (s *Server) Lookup(ctx context.Context, tx store.Tx, names Names, silo string, from netip.Addr, name string) (Answer, error) {
 	name = strings.TrimSuffix(strings.ToLower(name), ".")
 	switch {
-	case name == "silo.internal":
+	case name == "silo.internal", name == imagerepos.Host:
 		return Answer{Addrs: []netip.Addr{names.API}}, nil
 	case name == Domain:
 		return Answer{Addrs: []netip.Addr{names.Docker}}, nil

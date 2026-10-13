@@ -1056,6 +1056,34 @@ can be filed on its own, in this order.
     Tested against a local uber repo served by `git http-backend`, with
     a fault-injecting proxy in front (refusals, timeouts, a rejected
     lease, a 2 GB-style size refusal). Depends on 20.
+
+    **Built (task 3424),** in `pkg/mirror`, with migration 0026
+    (`mirror_refs`, `mirror_repos`, `mirror_diverged`) and the
+    configuration in `settings` as `mirror.*`. Where it differs from
+    §8:
+    - The probe branch is `refs/heads/<prefix>/_silo-probe`. `.silo-probe`
+      isn't a valid ref name (a component can't start with a dot), and
+      no silo or repo can be named `_silo-probe`.
+    - `quarantine.git` is in `cache/mirror/`, not `mirror/`: it keeps
+      nothing that can't be fetched again, and the data directory's
+      layout is unchanged.
+    - The dirty set is the change log: `repo` and `repo.push` changes
+      make a repo dirty, `silo` and `policy` changes make every repo
+      dirty, and `mirror_repos.mirrored_seq` is what a pass covered.
+    - An adopted external tip is archived under
+      `.../<ts>-<seq>/external/<branch>` (`external/tags/<tag>` for a
+      tag). Archives the mirror makes itself (of a deleted repo's refs)
+      have a sequence of `m<n>`.
+    - No live ref is updated or deleted unless the push keeps its old
+      tip. So after `adopt --keep-external`, a local tip that doesn't
+      fast-forward the external one is held back as diverged again.
+    - Deleting a silo with `force` hands each repo to the mirror but
+      doesn't wait for it: the silo goes, and its repos are in
+      `pending_deletes` until archived.
+    - Not done yet: install's `--mirror-*` flags; the repo object's
+      `mirror.state`, which still says only `OFF` or `UNCONFIGURED`;
+      and `repos_pending_delete` in the root's `describe` (it is in
+      `silo mirror status`).
 22. **The submodule index, and checking GitHub.**
     - `mirror/index.git`, the generated tree, `.gitmodules` and
       README;
@@ -1072,9 +1100,92 @@ can be filed on its own, in this order.
     - rulesets.
 
     The run's findings are written back into this page. Depends on 21.
+
+    **The index is built (task 3425),** in `pkg/mirror/index.go`. Where
+    it differs from [§7](#how-it-is-written):
+    - The index's own state is three settings: `mirror.index_tip`, the
+      last commit silod pushed (the lease); `mirror.index_diverged`, why
+      it stopped; and `mirror.index_error`, the last pass's failure. So
+      there is no migration. `silo mirror status` shows all three.
+    - The tree is laid out with a throwaway index file
+      (`update-index --index-info`, then `write-tree`) rather than
+      `mktree` per directory. The trees are the same.
+    - The pass runs once the debounce (10 s) has passed since the first
+      repo pass of a batch, and no repo pass is running. It makes no
+      commit if the tree hasn't changed. A failed pass backs off like a
+      repo's.
+    - Turning the index off is `silo mirror set --no-index` (`no_index`
+      in the API). An empty `--index-branch` already means `main`.
+    - A diverged index stays stopped until `silo mirror set` runs
+      again. `set` makes the same check as on first contact: the branch
+      must be absent, or its tip must carry `Silo-Index: 1`. So after a
+      human's commit, the operator picks another `--index-branch`,
+      passes `--no-index`, or puts back a silod commit by hand. That is
+      this page's provisional answer to
+      [open question 26](#open-questions).
+    - `set` reads the tip of a branch it may not own by fetching only
+      that commit (`--depth=1`) into a throwaway repo. Only a tip that
+      carries the trailer is fetched into `mirror/index.git`.
+    - A repo whose default branch is diverged keeps the gitlink of what
+      silod last pushed there.
+    - The gitlinks are relative to the uber repo's default branch
+      (`HEAD`). silod can't set it. For `git clone` without `-b` to
+      check out the index, the uber repo's default branch has to be the
+      index branch. On GitHub that is a repository setting.
+
+    **The GitHub check hasn't been run.** Task 3425's sandbox had no
+    GitHub access: no `github-sandbox` credential, and no route to
+    github.com. Every *verify* item on this page is still open:
+    - how GitHub shows and links a `url = ./` submodule (§7);
+    - fetching a gitlinked SHA that only `refs/silo-archive/...` or a
+      non-default branch reaches, with `--single-branch` (§6, §8);
+    - whether GitHub accepts a push to a custom `refs/<prefix>-archive/`
+      namespace (§8, [open question 25](#open-questions));
+    - the 100 MB file, 2 GB push and repository-size limits, and the
+      3-tag / 5,000-branch event thresholds;
+    - code search not descending into submodules, and how large a
+      directory listing can get before it is truncated;
+    - whether a ruleset that forbids force-pushes or deletions fails the
+      `_silo-probe` steps in a way `silo mirror set` reports.
+    Until it is run, nothing new should depend on these claims.
 23. **Mapping back.** `silo repo external`, `silo repo which`, and
     `silo repo external-clone` with the submodule-URL fix-up. Depends on
     21, and on 22 for the index line.
+
+    **Built (task 3426),** in `pkg/mirror/external.go` and
+    `cmd/silo/external.go`. Where it differs from
+    [§9](#9-mapping-back-the-ref-layout-and-silo-repo-external):
+    - The calls are `GET .../repos/{repo}/external` (`branch=` or
+      `tag=` for one ref), for whoever may read the repo, and
+      `GET mirror:which?ref=`. The mirror implements them as
+      `fenceapi.Externals`, beside `fenceapi.Mirror`.
+    - `which` takes a ref in full, a branch as GitHub shows it
+      (`silo/team-a/x/foo.git/main`), a GitHub `tree/` URL, or an index
+      entry (`main:team-a/x/foo.git` or `main/team-a/x/foo.git`).
+    - A repo that is gone is shown to a caller who may read the repos of
+      the deepest silo still on its path, since that caller could have
+      read the repo. Anyone else gets `NOT_FOUND`, as for a repo they
+      may not read. Its silo id comes from `mirror_repos` while silod
+      still has the ref's record. Otherwise it comes from the index:
+      the newest commit in `mirror/index.git` that added or dropped the
+      repo's README row (`git log -S`), or that commit's parent.
+    - The archive count is the archive refs silod has pushed for the
+      repo (`mirror_refs`), not a listing of the uber repo. The
+      `mirror ... at` time is when silod last moved one of the repo's
+      refs.
+    - The `mirror` line shows `silo mirror status`'s state for the
+      repo. The repo object's `mirror.state` still says only `OFF` or
+      `UNCONFIGURED` (item 21).
+    - `external-clone` uses the URL `silo mirror set` was given, with
+      any password taken out; `--url` overrides it, for someone who
+      reaches the uber repo another way. It rewrites only submodules
+      whose URL starts `http://silo.internal/git/`, sets their URL in
+      `.git/config` and not in `.gitmodules`, and runs
+      `git submodule update --init --single-branch` at each level.
+      Tested with a single-branch `file://` clone, where a pinned SHA is
+      reachable only from another branch.
+    - None of it has been run against GitHub (item 22's check is still
+      open).
 24. **Conformance.** Local-structural cases in `local-conformance`
     (item 12):
     - a sibling gets 404 on clone and push;

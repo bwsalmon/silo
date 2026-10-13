@@ -621,6 +621,13 @@ func TestNetworks(t *testing.T) {
 	if got := ans(e.a, webBridge, e.ci+".docker.silo.internal"); got != "[10.255.255.2]" {
 		t.Errorf("silo name: %s", got)
 	}
+	// The registry is silo.internal's address, for every silo
+	// (local-registry.md, call L56).
+	for _, silo := range []string{e.a, e.b} {
+		if got := ans(silo, webBridge, "registry.silo.internal."); got != "[10.255.255.1]" {
+			t.Errorf("registry.silo.internal: %s", got)
+		}
+	}
 
 	e.ok(e.a, "POST", "/v1.47/networks/app/disconnect", obj{"Container": "web"})
 	e.ok(e.a, "DELETE", "/v1.47/containers/db?force=1", nil)

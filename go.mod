@@ -12,6 +12,7 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/typeurl/v2 v2.3.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/google/go-containerregistry v0.22.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/opencontainers/runtime-spec v1.3.0
 	golang.org/x/net v0.60.0
@@ -37,6 +38,8 @@ require (
 	github.com/containerd/plugin v1.1.0 // indirect
 	github.com/containerd/ttrpc v1.2.9 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
+	github.com/docker/cli v29.7.2+incompatible // indirect
+	github.com/docker/docker-credential-helpers v0.9.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
@@ -77,6 +80,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260825221802-da73d73af1c5 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
+	gotest.tools/v3 v3.5.2 // indirect
 	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

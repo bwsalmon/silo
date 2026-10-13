@@ -160,6 +160,10 @@ type Options struct {
 	// Git serves git-remote-silo's connections at the front door; nil
 	// refuses them.
 	Git GitConnector
+	// Mirror is the outbound mirror into the uber repo (local-git.md
+	// §8); nil answers its calls FAILED_PRECONDITION and deletes repos
+	// at once.
+	Mirror Mirror
 }
 
 // Server serves silo/v1.
@@ -269,6 +273,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	q.validateOnly = r.URL.Query().Get("validate_only") == "true"
 	if reconcilePath(rest) {
 		s.reconcile(q, rest)
+		return
+	}
+	if mirrorPath(rest) {
+		s.mirror(q, rest)
+		return
+	}
+	if rest == "mirror:which" {
+		s.which(q)
 		return
 	}
 	call := control.ParseFence(r.Method, rest)
@@ -466,6 +478,7 @@ var handlers = map[string]func(s *Server, q *request, c control.FenceCall){
 		s.mutating(q, func(q *request) (any, error) { return s.restoreRef(q, c.Ref, c.ID) }, true)
 	},
 	control.OpReposGit:       func(s *Server, q *request, c control.FenceCall) { s.gitConnect(q, c.Ref, c.ID) },
+	control.OpReposExternal:  func(s *Server, q *request, c control.FenceCall) { s.externalRepo(q, c.Ref, c.ID) },
 	control.OpImageReposList: func(s *Server, q *request, c control.FenceCall) { s.listImageRepos(q, c.Ref) },
 	control.OpImageReposGet:  func(s *Server, q *request, c control.FenceCall) { s.getImageRepo(q, c.Ref, c.ID) },
 	control.OpImageReposTags: func(s *Server, q *request, c control.FenceCall) { s.imageRepoTags(q, c.Ref, c.ID) },
