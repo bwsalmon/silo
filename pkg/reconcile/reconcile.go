@@ -25,7 +25,11 @@
 //   - compiles the fence again and applies the difference. A policy
 //     that had drifted from what was recorded as applied is repaired
 //     and audited as fence_drift (AuditDrift, which silod makes the
-//     applier's OnDrift, so drift any apply finds is audited).
+//     applier's OnDrift, so drift any apply finds is audited);
+//   - compares the registry's manifest rows with its silo-registry
+//     records (Options.Registry, local-registry.md §10): registry_drift,
+//     image_manifest_missing, and records newer than a restored store,
+//     reported as orphans and never deleted.
 //
 // Every write it makes calls leader.Guard: only the current leader's
 // reconcile writes anything.
@@ -45,6 +49,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/leader"
 	"github.com/bwsalmon/silo/pkg/ledger"
+	"github.com/bwsalmon/silo/pkg/registry"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
 )
@@ -81,6 +86,8 @@ type Options struct {
 	Inventory backend.Inventory
 	// Fence applies the fence, or nil for no fence.
 	Fence backend.Fence
+	// Registry is the local registry, or nil for none.
+	Registry Registry
 	// ReportOnly makes this process's reconcile report-only whatever the
 	// database says (silod serve --reconcile=report-only).
 	ReportOnly bool
@@ -88,6 +95,13 @@ type Options struct {
 	Grace, ChargeGrace time.Duration
 	// Logf logs; nil is log.Printf.
 	Logf func(format string, args ...any)
+}
+
+// Registry is the local registry's half of the reconcile
+// (local-registry.md, §10 "Garbage collection"); *registry.Service is
+// it.
+type Registry interface {
+	Reconcile(ctx context.Context, reportOnly bool) (*registry.DriftReport, error)
 }
 
 // Reconciler runs the reconcile.
@@ -131,6 +145,8 @@ type Report struct {
 	Recounted []string
 	// Drift are the fence steps that repaired drift.
 	Drift []string
+	// Registry is what the registry's reconcile found, if it ran.
+	Registry *registry.DriftReport
 }
 
 // Run reconciles once. ctx must carry the leader's term (leader.Guard).
@@ -177,6 +193,15 @@ func (r *Reconciler) Run(ctx context.Context) (*Report, error) {
 	if r.o.Fence != nil {
 		if err := r.fence(ctx, rep); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	if r.o.Registry != nil {
+		err := r.o.Store.Tx(ctx, func(tx store.Tx) error { return leader.Guard(ctx, tx) })
+		if err == nil {
+			rep.Registry, err = r.o.Registry.Reconcile(ctx, rep.ReportOnly)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("registry: %w", err))
 		}
 	}
 	return rep, errors.Join(errs...)

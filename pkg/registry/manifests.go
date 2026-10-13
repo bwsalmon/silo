@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/objseq"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/imagerepos"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -316,7 +317,13 @@ func (s *Service) putManifest(q *request, ref string) {
 			}
 		}
 		data, _ := json.Marshal(map[string]string{"repo": t.Repo.ID, "digest": digest, "what": "put"})
-		if seq, err = tx.Append(ctx, ManifestChangeKind, t.Repo.ID+"@"+digest, string(data)); err != nil {
+		if _, err = tx.Append(ctx, ManifestChangeKind, t.Repo.ID+"@"+digest, string(data)); err != nil {
+			return err
+		}
+		// The record is numbered from the object sequence, so that a
+		// store restored to before this push is older than its label
+		// (§4, "Restore").
+		if seq, err = objseq.Next(ctx, tx); err != nil {
 			return err
 		}
 		delta, err := s.charge(ctx, tx, t)
@@ -335,7 +342,7 @@ func (s *Service) putManifest(q *request, ref string) {
 	// the config, layers and child manifests, from containerd's GC.
 	img := Image{Name: repo.ID + "@" + digest, Digest: digest, MediaType: mt, Size: int64(len(b)), Refs: refs,
 		Labels: map[string]string{SeqLabel: strconv.FormatUint(seq, 10)}}
-	if err := s.opts.Content.PutImage(context.WithoutCancel(ctx), img); err != nil {
+	if err := s.opts.Content.PutImage(context.WithoutCancel(ctx), Namespace, img); err != nil {
 		log.Printf("registry: recording %s in %s: %v", img.Name, Namespace, err)
 	}
 	q.w.Header().Set("Location", "/v2/"+q.name.String()+"/manifests/"+digest)
@@ -387,11 +394,7 @@ func (s *Service) deleteManifest(q *request, ref string) {
 		writeErr(q.w, q.r, err)
 		return
 	}
-	for _, d := range gone {
-		if err := s.opts.Content.DeleteImage(context.WithoutCancel(ctx), repo+"@"+d); err != nil {
-			log.Printf("registry: removing %s@%s from %s: %v", repo, d, Namespace, err)
-		}
-	}
+	s.Removed(context.WithoutCancel(ctx), repo, gone)
 	q.w.WriteHeader(http.StatusAccepted)
 }
 

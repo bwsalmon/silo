@@ -174,7 +174,15 @@ type Options struct {
 	// §8); nil answers its calls FAILED_PRECONDITION and deletes repos
 	// at once.
 	Mirror Mirror
+	// Registry is the registry service, which the image repo deletes
+	// tell what went (local-registry.md §10); nil removes rows only,
+	// refunding what they charged, and has no cache to evict.
+	Registry ImageRegistry
 }
+
+// SetRegistry sets Options.Registry, for a registry made after the
+// fence API.
+func (s *Server) SetRegistry(r ImageRegistry) { s.opts.Registry = r }
 
 // Server serves silo/v1.
 type Server struct {
@@ -293,6 +301,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.registryCache(q)
 		return
 	}
+	if cacheEvictPath(rest) {
+		s.registryCacheEvict(q)
+		return
+	}
 	if rest == "mirror:which" {
 		s.which(q)
 		return
@@ -320,21 +332,30 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// root says whether bootstrap is still open, for install's root
-	// step, which may call health before it is anyone's member.
-	var rooted bool
+	// step, which may call health before it is anyone's member. root_id
+	// is the root's id, which the local install's docker context names
+	// the root's Docker socket by (local-backend.md §4): an id is no
+	// secret, being in every host socket's path.
+	var rootID string
 	err := s.st.Tx(r.Context(), func(tx store.Tx) error {
-		_, err := tree.Root(r.Context(), tx)
+		root, err := tree.Root(r.Context(), tx)
 		if errors.Is(err, tree.ErrNotFound) {
 			return nil
 		}
-		rooted = err == nil
+		if err == nil {
+			rootID = root.ID
+		}
 		return err
 	})
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "store: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "root": rooted})
+	body := map[string]any{"status": "ok", "root": rootID != ""}
+	if rootID != "" {
+		body["root_id"] = rootID
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // reserved reports whether rest (the path after /silo/v1/) is one of

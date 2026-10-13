@@ -53,14 +53,17 @@ const (
 )
 
 // Namespace is the containerd namespace of the registry's image
-// records, and SeqLabel the label on each that restore reads (§4).
+// records, CacheNamespace the cache's, and SeqLabel the label on each
+// registry record that restore reads (§4): the object sequence number
+// (package objseq) its push was given.
 const (
-	Namespace = "silo-registry"
-	SeqLabel  = "dev.silo.seq"
+	Namespace      = "silo-registry"
+	CacheNamespace = "silo-cache"
+	SeqLabel       = "dev.silo.seq"
 )
 
 // ManifestChangeKind is the change-log kind of a manifest a push
-// records; its sequence number is the silo-registry record's SeqLabel.
+// records.
 const ManifestChangeKind = "image_manifest"
 
 // DiskClass is the class a repo's bytes are charged to: the local
@@ -108,6 +111,8 @@ type Service struct {
 	// silo, upstream and repo, then manifest digest (private.go). They
 	// are held here only.
 	authz map[string]map[string]authorisation
+	// evictMu is held by one eviction at a time.
+	evictMu sync.Mutex
 }
 
 type graceBlob struct {

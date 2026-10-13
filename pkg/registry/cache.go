@@ -640,7 +640,7 @@ func (s *Service) fetchManifest(ctx context.Context, cr *cacheReq, f *fetcher, r
 		json.Unmarshal(b, &probe)
 		mt = probe.MediaType
 	}
-	if err := s.store(ctx, d, int64(len(b)), strings.NewReader(string(b))); err != nil {
+	if err := s.store(ctx, cacheEntry(cr.name.Upstream, cr.name.UpstreamRepo, d), mt, d, int64(len(b)), strings.NewReader(string(b))); err != nil {
 		return nil, err
 	}
 	o := &cacheObject{digest: d, mediaType: mt, size: int64(len(b)), hosts: f.hosts, fetchedAt: s.opts.Now(),
@@ -661,7 +661,7 @@ func (s *Service) fetchBlob(ctx context.Context, cr *cacheReq, f *fetcher, diges
 		return nil, statusErr(resp, "blob "+digest)
 	}
 	n := resp.ContentLength
-	if err := s.store(ctx, digest, n, resp.Body); err != nil {
+	if err := s.store(ctx, cacheEntry(cr.name.Upstream, cr.name.UpstreamRepo, digest), "", digest, n, resp.Body); err != nil {
 		return nil, err
 	}
 	if n < 0 {
@@ -675,8 +675,10 @@ func (s *Service) fetchBlob(ctx context.Context, cr *cacheReq, f *fetcher, diges
 }
 
 // store writes r's bytes into the content store as digest, under a
-// lease for the fetch. size -1 is unknown.
-func (s *Service) store(ctx context.Context, digest string, size int64, r io.Reader) error {
+// lease for the fetch, and records them as the cache entry named entry
+// in silo-cache, which keeps them from GC once the lease ends (§8,
+// "Eviction and the cache budget"). size -1 is unknown.
+func (s *Service) store(ctx context.Context, entry, mediaType, digest string, size int64, r io.Reader) error {
 	ref := "silo-cache-" + randomID()
 	lease := "silo-cache/" + ref
 	if err := s.opts.Content.Lease(ctx, lease, s.opts.Now().Add(s.opts.Grace)); err != nil {
@@ -702,7 +704,8 @@ func (s *Service) store(ctx context.Context, digest string, size int64, r io.Rea
 		}
 		return err
 	}
-	return nil
+	return s.opts.Content.PutImage(context.WithoutCancel(ctx), CacheNamespace,
+		Image{Name: entry, Digest: digest, MediaType: mediaType, Size: size})
 }
 
 // probeBlob asks the upstream for o as the caller, with its
@@ -1091,9 +1094,14 @@ func (s *Service) cacheRequest(ctx context.Context, cr *cacheReq, kind string) (
 		return nil, err
 	}
 	if kind == kindManifest {
-		return s.cacheManifest(ctx, cr)
+		o, err = s.cacheManifest(ctx, cr)
+	} else {
+		o, err = s.cacheBlob(ctx, cr, cr.ref)
 	}
-	return s.cacheBlob(ctx, cr, cr.ref)
+	if err == nil {
+		s.touch(ctx, cr, o.digest)
+	}
+	return o, err
 }
 
 // PullThrough is a facade pull's manifest through the cache (§8, "What

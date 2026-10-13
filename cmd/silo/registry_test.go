@@ -139,4 +139,11 @@ func TestRegistryCacheCommands(t *testing.T) {
 	d.json(d.root, &a, "create", "/team-a", "--address", "/16")
 	res = d.silo(a.ID, "registry", "cache", "status")
 	contains(t, "a child's status", res.stderr, "PERMISSION_DENIED")
+	res = d.silo(a.ID, "registry", "cache", "evict")
+	contains(t, "a child's evict", res.stderr, "PERMISSION_DENIED")
+	res = d.silo(d.root, "registry", "cache", "evict", "docker.io/library/alpine@nope")
+	contains(t, "a bad evict ref", res.stderr, "INVALID_ARGUMENT")
+	// This silod serves no registry yet (step 27b wires it).
+	res = d.silo(d.root, "registry", "cache", "evict", "docker.io/library/alpine")
+	contains(t, "evict with no registry", res.stderr, "FAILED_PRECONDITION")
 }
