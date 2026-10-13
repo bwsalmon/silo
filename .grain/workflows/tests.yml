@@ -84,7 +84,7 @@ jobs:
           mkdir -p /tmp/gvisor && cd /tmp/gvisor
           curl -sfLO https://storage.googleapis.com/gvisor/releases/release/20261005/x86_64/gvisor.tar.bz2
           echo "79869ae9a589355a46d46fdac068d9a954e741741ffe77c64e38c56ea955498c1cb04e9bce44e1cce5155333e6b76bee72347c6661bb7c78fd2fe3aad198c8fe  gvisor.tar.bz2" | sha512sum -c -
-          tar xjf gvisor.tar.bz2 runsc
+          tar xjf gvisor.tar.bz2
           ./runsc --version
           grep "^$(id -un):" /etc/subuid /etc/subgid
 
