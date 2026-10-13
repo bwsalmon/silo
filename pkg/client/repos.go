@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -156,4 +158,100 @@ func (c *Client) DeleteRepo(ctx context.Context, ref, name string, m Mutation) (
 		return nil, err
 	}
 	return &out, nil
+}
+
+// RepoArchive is one of a repo's local archive refs (local-git.md,
+// "Local archive refs", call L48): a tip a force-push or a deletion
+// would have orphaned.
+type RepoArchive struct {
+	// Name is the ref's name under refs/silo-archive/, which
+	// restore-ref takes.
+	Name   string    `json:"name"`
+	Ref    string    `json:"ref"`
+	Commit string    `json:"commit"`
+	Time   time.Time `json:"time"`
+}
+
+// RepoArchives lists ref's repo name's local archive refs.
+func (c *Client) RepoArchives(ctx context.Context, ref, name string) ([]RepoArchive, error) {
+	p, err := c.SiloPath(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Archives []RepoArchive `json:"archives"`
+	}
+	if err := c.Do(ctx, http.MethodGet, p+"/repos/"+url.PathEscape(name)+"/archives", nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Archives, nil
+}
+
+// Restored is what restore-ref made.
+type Restored struct {
+	Repo    string `json:"repo"`
+	Archive string `json:"archive"`
+	Branch  string `json:"branch"`
+	Commit  string `json:"commit"`
+}
+
+// RestoreRef makes branch in ref's repo name at archive's commit.
+func (c *Client) RestoreRef(ctx context.Context, ref, name, archive, branch string, m Mutation) (*Restored, error) {
+	p, err := c.SiloPath(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	var out Restored
+	if err := c.Do(ctx, http.MethodPost, p+"/repos/"+url.PathEscape(name)+":restoreRef", m.query(nil),
+		map[string]string{"archive": archive, "branch": branch}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GitConnect opens a connection that speaks git's own protocol to
+// service (git-upload-pack or git-receive-pack) in ref's repo name:
+// what git-remote-silo's connect capability needs. protocol is git's
+// GIT_PROTOCOL, passed on if it is set.
+func (c *Client) GitConnect(ctx context.Context, ref, name, service, protocol string) (io.ReadWriteCloser, error) {
+	p, err := c.SiloPath(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	base := *c.base
+	base.RawQuery, base.Fragment = "", ""
+	u := base.String() + p + "/repos/" + url.PathEscape(name) + ":git?" + url.Values{"service": {service}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "git")
+	req.Header.Set("User-Agent", c.ua)
+	if protocol != "" {
+		req.Header.Set("Git-Protocol", protocol)
+	}
+	// No timeout: the connection lasts as long as git needs it.
+	resp, err := (&http.Client{Transport: c.hc.Transport}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		if rw, ok := resp.Body.(io.ReadWriteCloser); ok {
+			return rw, nil
+		}
+		resp.Body.Close()
+		return nil, fmt.Errorf("%s: the connection can't carry git", u)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var env struct {
+		Error *Error `json:"error"`
+	}
+	if json.Unmarshal(b, &env) == nil && env.Error != nil && env.Error.Code != "" {
+		env.Error.Status = resp.StatusCode
+		return nil, env.Error
+	}
+	return nil, &Error{Status: resp.StatusCode, Code: fmt.Sprintf("HTTP_%d", resp.StatusCode),
+		Message: fmt.Sprintf("connecting to %s: %s", service, strings.TrimSpace(string(b)))}
 }

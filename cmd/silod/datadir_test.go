@@ -128,7 +128,7 @@ func TestNothingPersistentOutsideTheDataDir(t *testing.T) {
 			t.Errorf("silod wrote %s, outside the data directory", p)
 		}
 	}
-	for _, want := range []string{"data/layout.json", "data/state/silo.db", "data/keys", "data/silos", "data/cache"} {
+	for _, want := range []string{"data/layout.json", "data/state/silo.db", "data/keys", "data/silos", "data/containerd", "data/cache", "data/cache/snapshots"} {
 		if _, ok := after[want]; !ok {
 			t.Errorf("%s missing", want)
 		}

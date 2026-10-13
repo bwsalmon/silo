@@ -10,19 +10,25 @@ package exports
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/store"
 )
 
-// Protocols.
+// Protocols. A registry export (local-registry.md, "Registry exports",
+// call L64) has no target: it names image repos of the exporter's, which
+// the registry lets its importers pull, and neither the fence nor the
+// gateway carries anything for it.
 const (
-	HTTP = "http"
-	TCP  = "tcp"
+	HTTP     = "http"
+	TCP      = "tcp"
+	Registry = "registry"
 )
 
 // Import states. An offer that hasn't been accepted has no import, and
@@ -64,7 +70,25 @@ type Export struct {
 	Instance      string // "" for an ip:port target
 	Zone          string
 	ProxyProtocol bool
+	Repos         []string // a registry export's repo names and prefixes ending in "*"
 	Created       time.Time
+}
+
+// Covers reports whether e is a registry export that covers the
+// exporter's image repo called repo: one of its Repos is the name, or a
+// prefix ending in "*" that the name starts with. A prefix covers repos
+// created after the export, and never a descendant's: repo is a name in
+// the exporter's own silo.
+func (e *Export) Covers(repo string) bool {
+	if e.Protocol != Registry {
+		return false
+	}
+	for _, r := range e.Repos {
+		if p, ok := strings.CutSuffix(r, "*"); ok && strings.HasPrefix(repo, p) || r == repo {
+			return true
+		}
+	}
+	return false
 }
 
 // Target is the export's ip:port, invalid while it has no address.
@@ -93,7 +117,7 @@ type Import struct {
 	Created  time.Time
 }
 
-const exportCols = `id, exporter, name, owner, protocol, target_ip, target_port, instance, zone, proxy_protocol, created_at`
+const exportCols = `id, exporter, name, owner, protocol, target_ip, target_port, instance, zone, proxy_protocol, repos, created_at`
 
 func scanExports(rows *sql.Rows, err error) ([]*Export, error) {
 	if err != nil {
@@ -104,9 +128,16 @@ func scanExports(rows *sql.Rows, err error) ([]*Export, error) {
 	for rows.Next() {
 		var e Export
 		var at int64
+		var repos string
 		if err := rows.Scan(&e.ID, &e.Exporter, &e.Name, &e.Owner, &e.Protocol, &e.TargetIP, &e.TargetPort,
-			&e.Instance, &e.Zone, &e.ProxyProtocol, &at); err != nil {
+			&e.Instance, &e.Zone, &e.ProxyProtocol, &repos, &at); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(repos), &e.Repos); err != nil {
+			return nil, fmt.Errorf("export %s repos: %w", e.ID, err)
+		}
+		if len(e.Repos) == 0 {
+			e.Repos = nil
 		}
 		e.Created = store.Time(at)
 		out = append(out, &e)
@@ -132,9 +163,13 @@ func Create(ctx context.Context, tx store.Tx, e *Export) error {
 		return err
 	}
 	e.Created = now
-	_, err = tx.Exec(ctx, `INSERT INTO exports (`+exportCols+`, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	repos, err := json.Marshal(append([]string{}, e.Repos...))
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO exports (`+exportCols+`, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Exporter, e.Name, e.Owner, e.Protocol, e.TargetIP, e.TargetPort, e.Instance, e.Zone, e.ProxyProtocol,
-		store.Millis(now), store.Millis(now))
+		string(repos), store.Millis(now), store.Millis(now))
 	return err
 }
 
@@ -341,8 +376,12 @@ func DeleteImport(ctx context.Context, tx store.Tx, id string) error {
 
 // Address is where an importer reaches an export through the gateway:
 // http://silo.internal/x/<exporter-id>/<name>/ for http, and
-// silo.internal:<port> for tcp.
+// silo.internal:<port> for tcp. A registry export has none: its
+// importer pulls the exporter's own repo names from the registry.
 func Address(e *Export, i *Import) string {
+	if e.Protocol == Registry {
+		return ""
+	}
 	if e.Protocol == TCP {
 		return "silo.internal:" + strconv.Itoa(i.Port)
 	}

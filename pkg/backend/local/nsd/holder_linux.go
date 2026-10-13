@@ -82,7 +82,9 @@ type Config struct {
 	State string
 	// PinDir is where containers' namespaces are pinned. The holder
 	// mounts a tmpfs over it in its private mount namespace, so the
-	// pins are invisible, and harmless, outside.
+	// pins are invisible, and harmless, outside. runsc, started inside
+	// a container's user namespace, opens the netns pin as a subuid:
+	// for it, every ancestor of PinDir must be searchable by others.
 	PinDir string
 	// Silos is the data directory's silos/, kept by the dir driver.
 	// Empty serves no storage.

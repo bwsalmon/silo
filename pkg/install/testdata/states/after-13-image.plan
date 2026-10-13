@@ -21,7 +21,7 @@ silo install: project silo-test-project
   db-endpoint       create  silo-db-psc (address) internal, in silo-ctl
                             silo-db-psc (forwarding rule) to a-silo-db-t3st (silo-db-t3st)
                             silo-db private zone for t3st.us-central1.sql.goog., A silo-db-psc
-  migrate           apply   schema 0 -> 23
+  migrate           apply   schema 0 -> 24
   control           create  silo-control e2-standard-2 cos-stable, silod and gateway containers
                             (silod@sha256:7dd5524d6d0b), at silo-gateway-ip
   root              create  / blocks 10.0.0.0/8 (minus 10.255.254.0/23)

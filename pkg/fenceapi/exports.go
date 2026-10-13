@@ -6,12 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/exports"
 	"github.com/bwsalmon/silo/pkg/ids"
+	"github.com/bwsalmon/silo/pkg/imagerepos"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
@@ -96,24 +98,29 @@ type ExportObject struct {
 	Target        any        `json:"target"`
 	Address       string     `json:"address_ip,omitempty"`
 	ProxyProtocol bool       `json:"proxy_protocol"`
+	Repos         []string   `json:"repos,omitempty"`
 	To            []ExportTo `json:"to"`
 	CreateTime    time.Time  `json:"create_time"`
 }
 
 // ImportObject is an import, as its importer sees it, or an offer not
-// yet accepted (state PENDING, no id or address).
+// yet accepted (state PENDING, no id or address). A registry import's
+// Repos are the names its importer pulls by: the exporter's own,
+// registry.silo.internal/<exporter path>/<repo>, a prefix keeping its
+// "*".
 type ImportObject struct {
-	ID            string `json:"id,omitempty"`
-	Export        string `json:"export"` // <exporter path>/<name>
-	ExportID      string `json:"export_id"`
-	Exporter      string `json:"exporter"`
-	Importer      string `json:"importer"`
-	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	ProxyProtocol bool   `json:"proxy_protocol"`
-	State         string `json:"state"`
-	Address       string `json:"address,omitempty"`
-	Port          int    `json:"port,omitempty"`
+	ID            string   `json:"id,omitempty"`
+	Export        string   `json:"export"` // <exporter path>/<name>
+	ExportID      string   `json:"export_id"`
+	Exporter      string   `json:"exporter"`
+	Importer      string   `json:"importer"`
+	Name          string   `json:"name"`
+	Protocol      string   `json:"protocol"`
+	ProxyProtocol bool     `json:"proxy_protocol"`
+	State         string   `json:"state"`
+	Address       string   `json:"address,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	Repos         []string `json:"repos,omitempty"`
 }
 
 func exportObject(ctx context.Context, tx store.Tx, e *exports.Export) (*ExportObject, error) {
@@ -122,13 +129,16 @@ func exportObject(ctx context.Context, tx store.Tx, e *exports.Export) (*ExportO
 		return nil, err
 	}
 	o := &ExportObject{ID: e.ID, Name: e.Name, Exporter: e.Exporter, ExporterPath: ex.Path, Owner: e.Owner,
-		Protocol: e.Protocol, ProxyProtocol: e.ProxyProtocol, To: []ExportTo{}, CreateTime: e.Created}
-	if e.Instance != "" {
+		Protocol: e.Protocol, ProxyProtocol: e.ProxyProtocol, Repos: e.Repos, To: []ExportTo{}, CreateTime: e.Created}
+	switch {
+	case e.Protocol == exports.Registry:
+		// No target: its repos are what it exports.
+	case e.Instance != "":
 		o.Target = exportTarget{Instance: e.Instance, Zone: e.Zone, Port: e.TargetPort}
 		if t := e.Target(); t.IsValid() {
 			o.Address = t.String()
 		}
-	} else {
+	default:
 		o.Target = e.Target().String()
 	}
 	offers, err := exports.Offers(ctx, tx, e.ID)
@@ -161,6 +171,9 @@ func importObject(ctx context.Context, tx store.Tx, e *exports.Export, importer 
 	if ex.IsRoot() {
 		o.Export = "/" + e.Name
 	}
+	for _, r := range e.Repos {
+		o.Repos = append(o.Repos, imagerepos.Ref(ex.Path, r))
+	}
 	if im != nil {
 		o.ID, o.State, o.Address, o.Port = im.ID, im.State, exports.Address(e, im), im.Port
 	}
@@ -188,6 +201,7 @@ type offerRequest struct {
 	Protocol      string          `json:"protocol"`
 	To            []string        `json:"to"`
 	ProxyProtocol bool            `json:"proxy_protocol"`
+	Repos         []string        `json:"repos"`
 }
 
 // parseTarget reads an export's target: "ip:port", or an instance,
@@ -255,8 +269,22 @@ func (s *Server) offerExport(q *request, ref string) (any, error) {
 			return nil, errorf(InvalidArgument, "proxy_protocol is for tcp exports").with("field", "proxy_protocol")
 		}
 	case exports.TCP:
+	case exports.Registry:
+		if req.ProxyProtocol {
+			return nil, errorf(InvalidArgument, "proxy_protocol is for tcp exports").with("field", "proxy_protocol")
+		}
+		if len(req.Target) != 0 && string(req.Target) != "null" {
+			return nil, errorf(InvalidArgument, "a registry export has no target; repos names what it exports").with("field", "target")
+		}
+		var err error
+		if req.Repos, err = checkRegistryRepos(req.Repos); err != nil {
+			return nil, err
+		}
 	default:
-		return nil, errorf(InvalidArgument, "protocol %q: want http or tcp", req.Protocol).with("field", "protocol")
+		return nil, errorf(InvalidArgument, "protocol %q: want http, tcp or registry", req.Protocol).with("field", "protocol")
+	}
+	if req.Protocol != exports.Registry && len(req.Repos) > 0 {
+		return nil, errorf(InvalidArgument, "repos is for registry exports").with("field", "repos")
 	}
 	if len(req.To) == 0 {
 		return nil, errorf(InvalidArgument, "to names no silo").with("field", "to")
@@ -274,12 +302,14 @@ func (s *Server) offerExport(q *request, ref string) (any, error) {
 			return errorf(PermissionDenied, "%s's effective grant_policy doesn't allow exports", t.Path).with("kind", GrantExports)
 		}
 		e := &exports.Export{ID: ids.New(), Exporter: t.ID, Name: req.Name, Owner: exports.OwnerTenant,
-			Protocol: req.Protocol, ProxyProtocol: req.ProxyProtocol}
-		if err := s.parseTarget(ctx, t, req.Target, e); err != nil {
-			return err
-		}
-		if err := checkOwnTarget(ctx, tx, t, e.TargetIP); err != nil {
-			return err
+			Protocol: req.Protocol, ProxyProtocol: req.ProxyProtocol, Repos: req.Repos}
+		if e.Protocol != exports.Registry {
+			if err := s.parseTarget(ctx, t, req.Target, e); err != nil {
+				return err
+			}
+			if err := checkOwnTarget(ctx, tx, t, e.TargetIP); err != nil {
+				return err
+			}
 		}
 		old, err := exports.ByName(ctx, tx, t.ID, req.Name)
 		switch {
@@ -290,7 +320,7 @@ func (s *Server) offerExport(q *request, ref string) (any, error) {
 		case err != nil:
 			return err
 		case old.Protocol != e.Protocol || old.TargetIP != e.TargetIP || old.TargetPort != e.TargetPort ||
-			old.Instance != e.Instance || old.ProxyProtocol != e.ProxyProtocol:
+			old.Instance != e.Instance || old.ProxyProtocol != e.ProxyProtocol || !slices.Equal(old.Repos, e.Repos):
 			return errorf(AlreadyExists, "%s already exports %s, to another target; withdraw it first", t.Path, req.Name).with("name", req.Name)
 		default:
 			// The same export offered again, to more silos.
@@ -315,9 +345,13 @@ func (s *Server) offerExport(q *request, ref string) (any, error) {
 			}
 			to = append(to, p)
 		}
-		if err := Audit(ctx, tx, t, q.caller, KindExportOffer, q.requestID, "OK", map[string]any{
-			"export": e.ID, "name": e.Name, "protocol": e.Protocol, "target": e.Target().String(), "to": to,
-		}); err != nil {
+		f := map[string]any{"export": e.ID, "name": e.Name, "protocol": e.Protocol, "to": to}
+		if e.Protocol == exports.Registry {
+			f["repos"] = e.Repos
+		} else {
+			f["target"] = e.Target().String()
+		}
+		if err := Audit(ctx, tx, t, q.caller, KindExportOffer, q.requestID, "OK", f); err != nil {
 			return err
 		}
 		if _, err = appendExportChange(ctx, tx, ExportChange{Export: e.ID, Exporter: t.ID, What: "offer"}); err != nil {

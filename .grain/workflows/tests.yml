@@ -65,7 +65,9 @@ jobs:
   # pkg/backend/local/nsd's own tests, and pkg/backend/local/rootless's
   # (step 16: containerd in the holder, crun keeping the kvm group, runsc
   # inside a container's user namespace), which skip in the `go` job (no
-  # newuidmap there) and are required here by SILO_REQUIRE_NSD.
+  # newuidmap there) and are required here by SILO_REQUIRE_NSD, and
+  # pkg/backend/local/netfence's, which load the compiled fence with the
+  # real nft.
   nsd:
     name: nsd
     paths-ignore: *not-read-by-the-go-program
@@ -75,8 +77,10 @@ jobs:
     timeout-minutes: 30
     steps:
       # A pinned gVisor release, checked against its published sha512.
-      # containerd 2.x and ctr come with the runner image; Debian 12's own
-      # containerd (1.6) can't read silod's version-3 configuration.
+      # containerd 2.x and ctr come with the runner image: Debian 12's own
+      # containerd (1.6) can't read silod's version-3 configuration, and
+      # its crun (1.8) is too old for containerd 2's specs, though not
+      # for the specs the rootless tests run it on.
       - name: Install uidmap, nftables, runc, crun and runsc
         infrastructure: true
         run: |
@@ -102,7 +106,7 @@ jobs:
         env:
           SILO_REQUIRE_NSD: "1"
           SILO_NSD_RUNSC: /tmp/gvisor/runsc
-        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/rootless/... ./cmd/silo/
+        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./cmd/silo/
 
   # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server

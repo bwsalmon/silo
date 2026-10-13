@@ -62,6 +62,7 @@ type allocFlags struct {
 	agentPolicy                    string
 	backing, ingress               string
 	reposMirror                    string
+	imagesSharing                  string
 	isolation, isolationDefault    string
 }
 
@@ -82,6 +83,7 @@ func addAllocFlags(fs *flag.FlagSet) *allocFlags {
 	fs.StringVar(&a.isolationDefault, "isolation-default", "", "the isolation class a container gets when it names none (default the strongest allowed)")
 	fs.StringVar(&a.ingress, "ingress", "", "host or none: whether published ports also listen on the host's loopback (create: default none)")
 	fs.StringVar(&a.reposMirror, "repos-mirror", "", "true or false: whether the silo's repos are mirrored into the uber repo (create: default the parent's)")
+	fs.StringVar(&a.imagesSharing, "images-sharing", "", "shared or isolated: whether the silo shares image cache hits with the rest of the host (create: default shared, within any isolated ancestor's domain)")
 	fs.StringVar(&a.labels, "labels", "", "key=value,... (patch replaces them all)")
 	return a
 }
@@ -135,6 +137,9 @@ func (a *allocFlags) createRequest() (client.CreateRequest, error) {
 			return req, usagef("--repos-mirror %q: want true or false", a.reposMirror)
 		}
 		req.Repos = &client.ReposPolicy{Mirror: v}
+	}
+	if set["images-sharing"] {
+		req.Images = &client.ImagesPolicy{Sharing: a.imagesSharing}
 	}
 	if set["agent-policy"] {
 		req.AgentPolicy = &client.AgentPolicy{}
@@ -225,6 +230,9 @@ func (a *allocFlags) patchBody() (client.Patch, error) {
 			return nil, usagef("--repos-mirror %q: want true or false", a.reposMirror)
 		}
 		p["repos"] = map[string]any{"mirror": v}
+	}
+	if set["images-sharing"] {
+		p["images"] = map[string]any{"sharing": a.imagesSharing}
 	}
 	if set["ingress"] {
 		p["ingress"] = a.ingress

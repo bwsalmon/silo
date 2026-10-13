@@ -363,12 +363,15 @@ pulled again. A pushed image can't: the registry holds its only copy. So
 - **`cache/` stays safe to wipe.** That is the point of the move: an
   operator who empties `cache/` to get disk back loses writable layers
   and wraps, as part 2 says, and never a pushed image.
-- **Layout version 2.** `pkg/backend/local/datadir` writes layout 1
-  today and has no containerd directory yet. If this lands before the
-  gVisor driver (plan item 7) first creates one, layout 2 simply adds
-  `containerd/`. If it lands after, silod's forward migration moves
-  `cache/containerd/` to `containerd/` (one rename on one filesystem)
-  and points the snapshotter at `cache/snapshots/`.
+- **Layout version 2.** `pkg/backend/local/datadir` writes layout 2,
+  with `containerd/` and `cache/snapshots/` (`Dir.Containerd` and
+  `Dir.Snapshots`, the root and `root_path` the gVisor driver, plan
+  item 7, gives silo-containerd). It landed before that driver, so no
+  data directory had a containerd root yet, but the forward migration
+  handles one anyway: it moves `cache/containerd/` to `containerd/`
+  (one rename on one filesystem) and the overlayfs snapshotter's state
+  in it, `io.containerd.snapshotter.v1.overlayfs/`, to
+  `cache/snapshots/` (another).
 - **Restore** (call L40): each `silo-registry` record carries the
   object sequence label (`dev.silo.seq`). A record newer than the
   restored store is an orphan: reported, never deleted, and not served
@@ -1353,10 +1356,30 @@ earlier depends on them. Each can be filed on its own, in this order.
     `disk_gb` charge itself is made by step 27's push path, which has
     the bytes. *Left:* registry exports and their imports, and the
     `images.sharing` policy, filed as step 25b.
+
+    *Landed in step 25b (task 3478):* registry exports, `protocol:
+    "registry"` with `repos` and no target, stored in `exports.repos`
+    (migration 0024), offered, accepted, suspended and withdrawn as
+    every export is, and left alone by the fence and the gateway, which
+    carry nothing for them; `silo export offer --protocol registry
+    --repos`. The registry's questions are
+    `fenceapi.MayReadImported` (and `ImportOfImageRepo`, for the audit
+    record's import) and `fenceapi.ImportedImageRepos`, which step 27's
+    `GET /v2/_catalog` lists beside the caller's own and descendants'
+    repos. The fence API's `GET .../imageRepos` stays per silo, as
+    [Listing](#listing) puts imports in the catalog only. And
+    `images.sharing`, `{"sharing": "shared"|"isolated"}` on create,
+    PATCH and bootstrap, shown own and effective with
+    `effective_from`, the sharing domain step 31's cache index is
+    keyed by; `--images-sharing` on `silo create` and `silo patch`. A
+    new silo's own value is `shared`, so it is in its parent's domain
+    until it isolates itself.
 26. **containerd's root out of `cache/`** (call L60): layout 2,
     `containerd/` and `cache/snapshots/`, the migration from layout 1,
     and the data table. Depends on 14. Best landed before 7, so that
     the gVisor driver creates containerd in the right place first.
+
+    *Landed in task 3479*, before 7.
 27. **The registry service for local repos.**
     - `registry.silo.internal` in the gateway's DNS and in `NO_PROXY`;
     - `Host` routing on port 80;

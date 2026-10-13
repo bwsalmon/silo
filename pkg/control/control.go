@@ -157,6 +157,13 @@ const (
 	OpReposGet    = "silos.repos.get"
 	OpReposPatch  = "silos.repos.patch"
 	OpReposDelete = "silos.repos.delete"
+	// The git service's calls on the fence API (local-git.md, "Local
+	// archive refs" and "Where it listens"): a repo's archive refs, a
+	// branch made from one, and git-remote-silo's connection at the
+	// front door, which carries fetches and pushes.
+	OpReposArchives   = "silos.repos.archives"
+	OpReposRestoreRef = "silos.repos.restoreRef"
+	OpReposGit        = "silos.repos.git"
 	// Image repos (local-registry.md, §3 "Operations", call L58), under
 	// silos/{silo}/imageRepos. There is no create: a first push makes
 	// one.
@@ -237,6 +244,9 @@ var fenceOps = map[string]Class{
 	OpReposPatch:  Mutation,
 	OpReposDelete: Mutation,
 
+	OpReposArchives:            Reading,
+	OpReposRestoreRef:          Mutation,
+	OpReposGit:                 Reading,
 	OpImageReposList:           Reading,
 	OpImageReposGet:            Reading,
 	OpImageReposDelete:         Mutation,
@@ -501,7 +511,21 @@ func ParseFence(method, rest string) FenceCall {
 	case c.Collection == "repos" && len(segs) == 1:
 		c.Op = map[string]string{http.MethodGet: OpReposList, http.MethodPost: OpReposCreate}[method]
 	case c.Collection == "repos" && len(segs) == 2:
-		c.Op = map[string]string{http.MethodGet: OpReposGet, http.MethodPatch: OpReposPatch, http.MethodDelete: OpReposDelete}[method]
+		id, verb, _ := strings.Cut(c.ID, ":")
+		c.ID = id
+		switch {
+		case verb == "":
+			c.Op = map[string]string{http.MethodGet: OpReposGet, http.MethodPatch: OpReposPatch, http.MethodDelete: OpReposDelete}[method]
+		case verb == "restoreRef" && method == http.MethodPost:
+			c.Op = OpReposRestoreRef
+		case verb == "git" && method == http.MethodGet:
+			c.Op = OpReposGit
+		}
+	case c.Collection == "repos" && len(segs) == 3 && segs[2] == "archives" && !strings.Contains(c.ID, ":"):
+		c.Extra = false
+		if method == http.MethodGet {
+			c.Op = OpReposArchives
+		}
 	case c.Collection == "imageRepos" && len(segs) == 1:
 		if method == http.MethodGet {
 			c.Op = OpImageReposList

@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -79,6 +80,13 @@ commands:
   repo list [--recursive] [silo]    list a silo's repos
   repo get|delete [silo/]<name>     read or delete a repo
   repo url [silo/]<name> [--by-id]  the URL the caller clones it by
+  repo clone [silo/]<name> [dir]    on the host: git clone silo::<path>,
+                                    through git-remote-silo (silo, linked
+                                    under that name on $PATH)
+  repo archives [silo/]<name>       its archive refs: tips a force-push or
+                                    a deletion would have orphaned
+  repo restore-ref [silo/]<name> <archive> <branch>
+                                    make a branch from an archive ref
   registry list [--recursive] [silo]
                                     list a silo's image repos
   registry get|tags [silo/]<name>   read an image repo, or its tags and manifests
@@ -132,7 +140,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	c := &cli{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, getenv: os.Getenv}
-	os.Exit(c.run(ctx, os.Args[1:]))
+	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == RemoteHelper {
+		// git runs silo by this name for silo:: URLs.
+		args = append([]string{RemoteHelper}, args...)
+	}
+	os.Exit(c.run(ctx, args))
 }
 
 // cli is one invocation of silo, with what tests replace.
@@ -199,7 +212,9 @@ var commands = map[string]command{
 	}),
 	"repo": group("repo", map[string]command{
 		"create": (*cli).repoCreate, "list": (*cli).repoList, "get": (*cli).repoGet, "delete": (*cli).repoDelete, "url": (*cli).repoURL,
+		"clone": (*cli).repoClone, "archives": (*cli).repoArchives, "restore-ref": (*cli).repoRestoreRef,
 	}),
+	RemoteHelper: (*cli).gitRemote,
 	"registry": group("registry", map[string]command{
 		"list": (*cli).registryList, "get": (*cli).registryGet, "tags": (*cli).registryTags, "url": (*cli).registryURL,
 		"delete": (*cli).registryDelete, "prune": (*cli).registryPrune,

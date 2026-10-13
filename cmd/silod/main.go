@@ -4,7 +4,10 @@
 //	silod serve     serve the silo/v1 fence API (docs/silo/fence-api.md)
 //	                and, given --host-project, the compute/v1 facade
 //	                (docs/silo/gcp-backend.md); --front-door-listen adds
-//	                the front door (docs/silo/gateway.md, SV-88)
+//	                the front door (docs/silo/gateway.md, SV-88);
+//	                --backend=local serves one machine's local backend
+//	                (docs/silo/local-backend.md) on --data-dir's SQLite
+//	                store, with the fence in silo-nsd's silo-net
 //	silod migrate   apply schema migrations (docs/silo/state.md, SV-53)
 //	silod gateway   the gateway (docs/silo/gateway.md): the API port,
 //	                port 80 and the egress proxy, in front of silod's
@@ -30,6 +33,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,8 +48,10 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gceclient"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/gcefence"
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/rootcap"
+	"github.com/bwsalmon/silo/pkg/backend/local"
 	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
 	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
+	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
@@ -54,6 +60,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
 	"github.com/bwsalmon/silo/pkg/gateway"
+	"github.com/bwsalmon/silo/pkg/gitserve"
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/harness"
 	"github.com/bwsalmon/silo/pkg/leader"
@@ -116,6 +123,9 @@ func main() {
 		if exe, err = os.Executable(); err == nil {
 			err = rootless.RunscMain(exe, os.Args[2:])
 		}
+	case gitserve.HookArg:
+		// The git service's pre-receive hook, which receive-pack runs.
+		os.Exit(gitserve.HookMain(os.Args[2:], os.Stdin, os.Stderr))
 	case "harness-init":
 		var code int
 		code, err = harnessInit(ctx, os.Args[2:])
@@ -369,6 +379,10 @@ func serve(ctx context.Context, args []string) error {
 	rootMemory := fs.Int64("root-memory", 0, "install's --root-memory, in MiB: the root's memory_mb in each region, which the hourly root capacity refresh sets (0 is unlimited)")
 	imageStorage := fs.Int64("image-storage-gb", 0, "the root's image_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	snapshotStorage := fs.Int64("snapshot-storage-gb", 0, "the root's snapshot_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
+	backendKind := fs.String("backend", "gcp", "the backend: gcp, or local (one machine; needs --data-dir, whose SQLite store is its production store, and silo-nsd)")
+	nsdState := fs.String("nsd-state", "", "with --backend=local: the namespace holder's state file (default $XDG_RUNTIME_DIR/silo/nsd.state)")
+	nftPath := fs.String("nft", "nft", "with --backend=local: the nft command, run in silo-net through the holder")
+	localGateway := fs.String("local-gateway", "10.255.255.1,10.255.255.2", "with --backend=local: silo.internal's and docker.silo.internal's addresses on gw0, comma-separated")
 	fs.Parse(args)
 	if *socket == "" && *listen == "" && *gatewaySocket == "" && *frontDoorAddr == "" && *gatewayTLS == "" {
 		return errors.New("give --socket, --listen, --gateway-socket, --gateway-tls-listen, --front-door-listen, or several")
@@ -387,6 +401,20 @@ func serve(ctx context.Context, args []string) error {
 	dd, err := sf.openDataDir(fs)
 	if err != nil {
 		return err
+	}
+	switch *backendKind {
+	case "gcp":
+	case local.Kind:
+		// One host is one silod, so SQLite in the data directory is
+		// the store (local-backend.md call L22), not Cloud SQL.
+		if dd == nil {
+			return errors.New("--backend=local needs --data-dir: the local backend's store is the data directory's SQLite database")
+		}
+		if *hostProject != "" || *fenceProject != "" {
+			return errors.New("--backend=local: --host-project and --fence-project are the GCP backend's")
+		}
+	default:
+		return fmt.Errorf("--backend=%s: want gcp or local", *backendKind)
 	}
 	db, sp, err := openStore(ctx, sf)
 	if err != nil {
@@ -421,6 +449,7 @@ func serve(ctx context.Context, args []string) error {
 	// storage driver (local-git.md, "On disk"); without one, silod
 	// makes no repos.
 	var repoHost fenceapi.RepoHost
+	var git *gitserve.Service
 	if dd != nil && why == "" && v >= store.HeartbeatSchema {
 		// The dir driver is the only one; the local backend (step 5 of
 		// local-backend.md §15) takes it from here.
@@ -429,7 +458,21 @@ func serve(ctx context.Context, args []string) error {
 			return err
 		}
 		log.Printf("data directory %s (id %s); storage driver %s: %s", dd.Path, dd.ID, drv.Name(), drv.Guarantees())
-		repoHost = &gitstore.Host{Storage: drv}
+		// silod's own hooks, rewritten at every start: re-creatable, so
+		// in cache/.
+		hooks := filepath.Join(dd.Cache(), "git-hooks")
+		if err := gitserve.WriteHooks(hooks); err != nil {
+			return fmt.Errorf("writing the git hooks: %w", err)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		gh := &gitstore.Host{Storage: drv, HooksDir: hooks}
+		repoHost = gh
+		// No disk_gb class on this backend yet: pushes are not held to
+		// one until there is (local-git.md, "Quota").
+		git = gitserve.New(gitserve.Options{Host: gh, Hook: exe})
 	}
 	replica := store.Replica{ID: replicaID(), Release: release, Latest: db.Latest(), Started: time.Now(), Address: *advertise}
 	if replica.Address == "" {
@@ -469,6 +512,9 @@ func serve(ctx context.Context, args []string) error {
 	cfg.KeepControlPort = keepControlPortSwitch()
 	go watchTestSwitches(ctx)
 	opts := fenceapi.Options{Ready: func() string { return why }, Budget: gcefence.Budget{Config: cfg}, Repos: repoHost}
+	if git != nil {
+		opts.Git = git
+	}
 	if *fenceProject != "" {
 		client, err := gceclient.New(ctx, gcpOptions(*computeEndpoint))
 		if err != nil {
@@ -515,7 +561,14 @@ func serve(ctx context.Context, args []string) error {
 		bo.Capacity = &rootcap.Config{Project: *hostProject, RootMemoryMB: *rootMemory, ImageStorageGB: *imageStorage,
 			SnapshotStorageGB: *snapshotStorage, Guard: leader.Guard}
 	}
-	be := gcp.New(bo)
+	var be backend.Backend
+	if *backendKind == local.Kind {
+		if be, err = localBackend(db, *nsdState, *nftPath, *localGateway, leaderLed); err != nil {
+			return err
+		}
+	} else {
+		be = gcp.New(bo)
+	}
 	if be.Fence != nil {
 		opts.Fence, opts.Budget = be.Fence, be.Fence
 		if leaderLed {
@@ -567,6 +620,11 @@ func serve(ctx context.Context, args []string) error {
 	}
 	api := fenceapi.New(db, opts)
 	defer api.Close()
+	var gitHandler http.Handler
+	if git != nil {
+		git.SetAPI(api)
+		gitHandler = git
+	}
 	connected := api.ToolServerConnected
 	if runner != nil {
 		runner.Control, runner.Logins = api, api
@@ -669,7 +727,7 @@ func serve(ctx context.Context, args []string) error {
 			// heartbeat doesn't carry yet.
 			Agent: api.ToolChannelAgent,
 			Hub:   hub,
-		}, ToolVMAgent: api.ToolVMAgentAt})
+		}, ToolVMAgent: api.ToolVMAgentAt, Git: gitHandler})
 	}
 	if *gatewayTLS != "" {
 		// Gateway replicas: only a client whose certificate the leader
@@ -790,6 +848,39 @@ func replicaID() string {
 // silod migrate reads before a contract step and the leader reads to
 // adopt the operations of a replica that died, and deletes it when ctx
 // ends. sessions is the replica's count of open connections.
+// localBackend is the local backend over db, with the fence loaded into
+// silo-net through the namespace holder whose state file is state.
+// There are no runtime drivers yet, so nothing is listed, deleted or
+// resolved, and no network is in the fence's topology: tenants' sets
+// are complete, and no bridge is let through to the gateway.
+func localBackend(db store.Store, state, nft, gateway string, leaderLed bool) (backend.Backend, error) {
+	if state == "" {
+		rt := os.Getenv("XDG_RUNTIME_DIR")
+		if rt == "" {
+			return backend.Backend{}, errors.New("--backend=local: give --nsd-state, or set XDG_RUNTIME_DIR")
+		}
+		state = filepath.Join(rt, "silo", "nsd.state")
+	}
+	var topo netfence.Topology
+	addrs := strings.Split(gateway, ",")
+	if len(addrs) != 2 {
+		return backend.Backend{}, fmt.Errorf("--local-gateway %q: want silo.internal's and docker.silo.internal's addresses", gateway)
+	}
+	for i, p := range []*netip.Addr{&topo.API, &topo.Docker} {
+		a, err := netip.ParseAddr(strings.TrimSpace(addrs[i]))
+		if err != nil || !a.Is4() {
+			return backend.Backend{}, fmt.Errorf("--local-gateway %q: %q is not an IPv4 address", gateway, addrs[i])
+		}
+		*p = a
+	}
+	o := local.Options{Store: db, NFT: local.HolderNFT(state, nft), Topology: netfence.Static(topo)}
+	if leaderLed {
+		o.Guard = leader.Guard
+		o.OnDrift = reconcile.AuditDriftNames(db, nil)
+	}
+	return local.New(o), nil
+}
+
 func heartbeat(ctx context.Context, db store.Store, r store.Replica, sessions *atomic.Int64, runner *harness.Runner) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
