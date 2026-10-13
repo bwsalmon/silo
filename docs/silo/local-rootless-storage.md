@@ -291,6 +291,10 @@ silod's account, which controls the fence. So:
     more than the holder does. `TestHolder` runs both runtimes.
     `$XDG_RUNTIME_DIR` is `0700` under systemd, so a pin directory
     under it is not reachable by runsc. Step 16 settled it (next item).
+    The holder **refuses to start** with a `--pins` that has a
+    directory above it others can't search, naming that directory
+    (`nsd.Unreachable`), rather than leaving runsc to fail with
+    `EACCES` at the first `sandbox` container.
   - **The holder has a private `/run`** (step 16). In its own mount
     namespace it moves the host's `/run` to `/run/host`, mounts a
     tmpfs on `/run`, and links every host entry back
@@ -300,7 +304,11 @@ silod's account, which controls the fence. So:
     own, mode `0711`. Pins live in `/run/silo/netns` on a tmpfs there,
     which a container's root can reach; containerd's state is
     `/run/containerd`, where its shims put their sockets whatever the
-    configuration says. Only the sockets silod dials
+    configuration says. That is where containers' rootfs live too: each
+    bundle, with the rootfs containerd mounts in it, is under
+    `/run/containerd`, so its ancestors are searchable. The snapshots
+    behind it stay in the data directory's `0700` `cache/snapshots/`,
+    which only overlayfs reads, with the holder's credentials. Only the sockets silod dials
     (`containerd.sock`, `buildkitd.sock`, `nsd.sock`) are in
     `$XDG_RUNTIME_DIR/silo`.
 - **The mapping is part of the state.** Files in volumes are owned by

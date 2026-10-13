@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -84,7 +85,8 @@ type Config struct {
 	// mounts a tmpfs over it in its private mount namespace, so the
 	// pins are invisible, and harmless, outside. runsc, started inside
 	// a container's user namespace, opens the netns pin as a subuid:
-	// for it, every ancestor of PinDir must be searchable by others.
+	// for it, every ancestor of PinDir must be searchable by others,
+	// and Run refuses a PinDir that isn't (Unreachable).
 	PinDir string
 	// Silos is the data directory's silos/, kept by the dir driver.
 	// Empty serves no storage.
@@ -123,6 +125,11 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := unix.Mount("tmpfs", cfg.PinDir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "mode=0755"); err != nil {
 		return fmt.Errorf("nsd: tmpfs on %s: %w", cfg.PinDir, err)
 	}
+	if dir, mode, err := Unreachable(cfg.PinDir); err != nil {
+		return err
+	} else if dir != "" {
+		return fmt.Errorf("nsd: pin directory %s: %s (mode %04o) is not searchable by others, so runsc, which opens its netns pin as the container's root, would get EACCES; use the default %s, or a directory whose every ancestor is o+x", cfg.PinDir, dir, mode, DefaultPinDir)
+	}
 	if cfg.Silos != "" {
 		if err := os.MkdirAll(cfg.Silos, 0o700); err != nil {
 			return err
@@ -160,6 +167,37 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	return s.Serve(ctx, l)
+}
+
+// Unreachable returns the first directory on path, after resolving
+// its symlinks, that a user with no claim on it can't search, and that
+// directory's mode; or "" when every one is o+x. A container's root is
+// such a user: a subuid, for which every directory of silod's user is
+// "other". So whatever runc's init or runsc opens as that root (runsc's
+// netns pin, a rootfs) has to have no such directory above it.
+func Unreachable(path string) (string, os.FileMode, error) {
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", 0, err
+	}
+	p, err = filepath.Abs(p)
+	if err != nil {
+		return "", 0, err
+	}
+	for d := "/"; ; {
+		fi, err := os.Stat(d)
+		if err != nil {
+			return "", 0, err
+		}
+		if fi.Mode().Perm()&0o001 == 0 {
+			return d, fi.Mode().Perm(), nil
+		}
+		if d == p {
+			return "", 0, nil
+		}
+		rest, _ := filepath.Rel(d, p)
+		d = filepath.Join(d, strings.SplitN(rest, string(filepath.Separator), 2)[0])
+	}
 }
 
 // PrivateRun are the directories of /run that belong to the holder's
