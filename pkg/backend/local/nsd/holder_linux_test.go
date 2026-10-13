@@ -79,9 +79,88 @@ func holderMapping(t *testing.T) Mapping {
 	return HolderMapping(os.Getuid(), os.Getgid(), sub("/etc/subuid", os.Getuid()), sub("/etc/subgid", os.Getgid()))
 }
 
+// requireOrSkip skips t, or fails it under SILO_REQUIRE_NSD.
+func requireOrSkip(t *testing.T, why string) {
+	t.Helper()
+	if os.Getenv("SILO_REQUIRE_NSD") != "" {
+		t.Fatalf("SILO_REQUIRE_NSD is set, but %s", why)
+	}
+	t.Skip(why)
+}
+
+// inHolder runs script with bash inside the holder's namespaces, as
+// their root, through JoinCommand, and returns its output. The script
+// is written to dir, which the holder must be able to read.
+func inHolder(t *testing.T, holderPid int, dir, script string, env ...string) string {
+	t.Helper()
+	f, err := os.CreateTemp(dir, "script-*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("set -eu\n" + script)
+	f.Close()
+	cmd := JoinCommand(holderPid, os.Args[0])
+	cmd.Env = append(append(cmd.Env, env...), "_SILO_NSD_TEST_EXEC=bash "+f.Name())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("in the holder: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+// writeBundle writes an OCI bundle's config.json in bundle from `runc
+// spec`'s default: rootfs as its root, `sh -c args` as its process, and
+// namespaces in place of its network and user namespaces.
+func writeBundle(t *testing.T, runc, bundle, rootfs, args string, namespaces ...map[string]any) {
+	t.Helper()
+	if out, err := exec.Command(runc, "spec", "-b", bundle).CombinedOutput(); err != nil {
+		t.Fatalf("runc spec: %v: %s", err, out)
+	}
+	path := filepath.Join(bundle, "config.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(b, &spec); err != nil {
+		t.Fatal(err)
+	}
+	process := spec["process"].(map[string]any)
+	process["terminal"] = false
+	process["args"] = []string{"/bin/sh", "-c", args}
+	spec["root"] = map[string]any{"path": rootfs, "readonly": false}
+	linux := spec["linux"].(map[string]any)
+	delete(linux, "resources")
+	var nss []any
+	for _, n := range linux["namespaces"].([]any) {
+		if typ := n.(map[string]any)["type"]; typ != "network" && typ != "user" {
+			nss = append(nss, n)
+		}
+	}
+	for _, n := range namespaces {
+		nss = append(nss, n)
+	}
+	linux["namespaces"] = nss
+	if b, err = json.Marshal(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func startHolder(t *testing.T) (*Client, Config, int, Mapping) {
 	m := holderMapping(t)
 	dir := t.TempDir()
+	// runsc, started inside a container's user namespace, opens the
+	// netns pin as the container's root, a subuid to which every
+	// directory of this user's is "other": t.TempDir's 0700 would hide
+	// it (EACCES).
+	for _, d := range []string{dir, filepath.Dir(dir)} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := Config{
 		Socket: filepath.Join(dir, "nsd.sock"), State: filepath.Join(dir, "nsd.state"),
 		PinDir: filepath.Join(dir, "netns"), Silos: filepath.Join(dir, "silos"),
@@ -254,6 +333,84 @@ func TestHolder(t *testing.T) {
 		if err := c.DeleteContainer("c1", "vc1"); err != nil {
 			t.Fatalf("deleting again: %v", err)
 		}
+	})
+
+	t.Run("runc and runsc in a container's namespaces", func(t *testing.T) {
+		runc, err := exec.LookPath("runc")
+		if err != nil {
+			requireOrSkip(t, "runc is not installed")
+		}
+		busybox, err := exec.LookPath("busybox")
+		if err != nil {
+			requireOrSkip(t, "busybox is not installed")
+		}
+		ns, err := c.Container("c3", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.DeleteContainer("c3", "vc3")
+		if err := c.Veth(Veth{Container: "c3", Name: "vc3", Bridge: "gw0",
+			Addrs: []netip.Prefix{netip.MustParsePrefix("10.99.0.3/16")}}); err != nil {
+			t.Fatal(err)
+		}
+		// The container's root, uid 1 in the holder, has to reach the
+		// bundle: make the test's directories searchable.
+		dir := t.TempDir()
+		for _, d := range []string{dir, filepath.Dir(dir)} {
+			if err := os.Chmod(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rootfs := filepath.Join(dir, "rootfs")
+		for _, d := range []string{rootfs, filepath.Join(dir, "state"), filepath.Join(dir, "runc"), filepath.Join(dir, "runsc")} {
+			if err := os.Mkdir(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		const args = "id; cat /proc/self/uid_map; ip addr show eth0"
+		writeBundle(t, runc, filepath.Join(dir, "runc"), rootfs, args,
+			map[string]any{"type": "user", "path": ns.User}, map[string]any{"type": "network", "path": ns.Net})
+		writeBundle(t, runc, filepath.Join(dir, "runsc"), rootfs, args,
+			map[string]any{"type": "network", "path": ns.Net})
+
+		// The rootfs is a mount made in the holder's mount namespace, as
+		// containerd's snapshot mounts are, owned by the container's
+		// root. The runtimes' state is on a tmpfs there too, so that
+		// nothing the test can't remove is left on the host.
+		inHolder(t, pid, dir, `
+			mount -t tmpfs -o mode=0755 tmpfs "$ROOTFS"
+			mount -t tmpfs -o mode=0755 tmpfs "$(dirname "$ROOTFS")"/state
+			mkdir -p "$ROOTFS"/bin "$ROOTFS"/proc "$ROOTFS"/dev "$ROOTFS"/sys "$ROOTFS"/tmp
+			cp "$BUSYBOX" "$ROOTFS"/bin/busybox
+			for t in sh ip cat id; do ln -s busybox "$ROOTFS"/bin/$t; done
+			chown -R 1:1 "$ROOTFS"
+		`, "ROOTFS="+rootfs, "BUSYBOX="+busybox)
+
+		t.Run("runc joining the user namespace and netns by path", func(t *testing.T) {
+			out := inHolder(t, pid, dir, `exec "$RUNC" --root "$DIR"/state/runc run -b "$DIR"/runc c3-runc`,
+				"RUNC="+runc, "DIR="+dir)
+			if !strings.Contains(out, "uid=0 gid=0") || !strings.Contains(out, "inet 10.99.0.3/16") ||
+				!strings.Contains(strings.Join(strings.Fields(out), " "), "0 1 65536") {
+				t.Fatalf("runc's container is not in c3's namespaces:\n%s", out)
+			}
+		})
+
+		t.Run("runsc started inside the user namespace", func(t *testing.T) {
+			runsc := os.Getenv("SILO_NSD_RUNSC")
+			if runsc == "" {
+				t.Skip("SILO_NSD_RUNSC does not name a runsc binary")
+			}
+			// runsc's gofer can't setns into a user namespace, so it is
+			// started inside one, naming only the netns in its spec.
+			out := inHolder(t, pid, dir, `
+				mkdir "$DIR"/state/runsc && chown 1:1 "$DIR"/state/runsc
+				exec nsenter --user="$USERNS" -- "$RUNSC" --root "$DIR"/state/runsc --ignore-cgroups \
+					--network=sandbox --platform=systrap run -bundle "$DIR"/runsc c3-runsc
+			`, "RUNSC="+runsc, "DIR="+dir, "USERNS="+ns.User)
+			if !strings.Contains(out, "uid=0 gid=0") || !strings.Contains(out, "inet 10.99.0.3/16") {
+				t.Fatalf("runsc's sandbox is not in c3's namespaces:\n%s", out)
+			}
+		})
 	})
 
 	t.Run("storage behind the RPC", func(t *testing.T) {

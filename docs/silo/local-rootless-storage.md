@@ -278,10 +278,20 @@ silod's account, which controls the fence. So:
     gVisor driver (item 7/16) has to start the runsc shim inside each
     container's user namespace, for example through `silo-nsd`'s
     `join` stage, not just name the namespace in the spec.
-  - A container's root filesystem has to be on a mount made inside the
-    holder's mount namespace, as containerd's snapshot mounts are. On a
-    directory inherited from the host's mount namespace, runc's
-    `remount-propagation` of the rootfs gets `EPERM` in this setup.
+  - **Everything a container's own root opens has to be reachable by
+    a subuid.** runc's init and runsc run as the container's root, a
+    subuid, to which every directory owned by silod's user is "other";
+    such a user has no capability over it. So the rootfs, and for runsc
+    the netns pin it opens itself, need every ancestor directory
+    searchable (`o+x`). A rootfs under a `0700` directory fails
+    `remount-propagation` with `permission denied` (`EACCES`, not
+    `EPERM`: it is the path lookup that fails, not the mount), whether
+    or not the rootfs is a mount of its own. runc opens the namespaces it
+    joins by path as the holder's root, before joining, so it needs no
+    more than the holder does. `TestHolder` runs both runtimes.
+    `$XDG_RUNTIME_DIR` is `0700` under systemd, so the default pin
+    directory is not reachable by runsc yet. The gVisor driver (item
+    7/16) has to settle where the pins and its rootfs live.
   - Pins live in `$XDG_RUNTIME_DIR/silo/netns/` on a tmpfs the holder
     mounts in its own mount namespace, rather than `/run/silo/netns`,
     which an unprivileged user can't create.
