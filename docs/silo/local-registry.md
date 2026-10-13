@@ -1616,8 +1616,8 @@ earlier depends on them. Each can be filed on its own, in this order.
     `size_limit_gb`: `silo install --backend local --image-cache-size`
     (default 10% of the data filesystem, at least 10 GiB) puts it on
     silod's unit, and silod sets it if the configuration never was;
-    `RootDiskGB` is the root's `disk_gb` with the budget carved out, for
-    the local capacity reader. `silo registry cache evict
+    install's root step leaves the budget out of the root's `disk_gb`,
+    beside the reserve. `silo registry cache evict
     [<upstream>[/<repo>[@digest]]]` is `POST
     /silo/v1/registry/cache:evict`, root members with full control,
     audited as `registry.cache.evict`. The fence API's deletes tell the
@@ -1643,9 +1643,7 @@ earlier depends on them. Each can be filed on its own, in this order.
     and silod's wiring of the registry, which is also what gives the
     leader's reconcile its `Registry` and the fence API its; until then
     silod's evict is `FAILED_PRECONDITION`. `local.DetectRestore` doesn't
-    yet count `silo-registry` labels in the disk's sequence, and the
-    local backend's capacity reader that would use `RootDiskGB` isn't
-    written.
+    yet count `silo-registry` labels in the disk's sequence.
 35. **Builders, run for real.** kaniko (from the Chainguard fork) and
     rootless BuildKit, in `sandbox` and in `vm`, each building a
     Dockerfile with a `RUN` step that `chown`s a file to another user,

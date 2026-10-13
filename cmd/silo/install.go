@@ -121,9 +121,11 @@ func backendFlag(args []string) (backend string, rest []string) {
 // Tests replace it.
 var newLocalHost = localinstall.LocalHost
 
-// installLocal is silo install --backend local: the local backend's
-// units, rootless as the current user, or with --system under a silo
-// account (docs/silo/local-rootless-storage.md, calls L33 and L34).
+// installLocal is silo install --backend local (docs/silo/local-backend.md
+// call L23): the prerequisite checks, the pinned gVisor, the local
+// backend's units, rootless as the current user, or with --system under
+// a silo account (docs/silo/local-rootless-storage.md, calls L33 and
+// L34), the root silo, and a docker context for it.
 func (c *cli) installLocal(ctx context.Context, args []string) error {
 	var cfg localinstall.Config
 	var system, dryRun, yes bool
@@ -136,6 +138,9 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 		fmt.Sprintf("serve the registry to host clients (crane, skopeo, oras) on 127.0.0.1 at this port, such as %d; 0 turns it off", hostdoor.Port))
 	fs.Float64Var(&cfg.ImageCacheSizeGB, "image-cache-size", 0,
 		fmt.Sprintf("the registry cache's budget in GiB, carved from the root's disk and charged to nobody (default 10%% of the data filesystem, at least %d)", localinstall.MinImageCacheGB))
+	fs.StringVar(&cfg.AddressSpace, "address-space", "", "the root silo's address block (default 10.0.0.0/8)")
+	fs.Float64Var(&cfg.CPUOvercommit, "cpu-overcommit", localinstall.DefaultCPUOvercommit,
+		fmt.Sprintf("the root's vcpu_m as a multiple of the host's CPUs less one, up to %g; memory and disk are not overcommitted", localinstall.MaxCPUOvercommit))
 	fs.BoolVar(&dryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&yes, "yes", false, "don't ask for confirmation")
 	fs.StringVar(&output, "output", "table", "the plan's format: table or json")
@@ -147,6 +152,9 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 		return usagef("--image-cache-size %v: want a size in GiB", cfg.ImageCacheSizeGB)
 	}
 	c.output = output
+	if cfg.CPUOvercommit < 1 || cfg.CPUOvercommit > localinstall.MaxCPUOvercommit {
+		return usagef("--cpu-overcommit %g: want 1 to %g", cfg.CPUOvercommit, localinstall.MaxCPUOvercommit)
+	}
 	if output != "table" && output != "json" {
 		return usagef("--output %q: want table or json", output)
 	}
@@ -174,8 +182,61 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	})
 }
 
+// uninstallLocal is silo uninstall --backend local: install's steps
+// undone in reverse order. It stops every container and removes the
+// docker context, the units and the pinned runtimes; the data directory,
+// and the root and tree in its store, are kept unless --delete-data.
+func (c *cli) uninstallLocal(ctx context.Context, args []string) error {
+	cfg := localinstall.Config{Uninstall: true}
+	var system, dryRun, yes bool
+	var output string
+	fs := flag.NewFlagSet("silo uninstall --backend local", flag.ContinueOnError)
+	fs.BoolVar(&system, "system", false, "the system install's: run as root")
+	fs.StringVar(&cfg.DataDir, "data-dir", "", "the data directory (default ~/.local/share/silo, or /var/lib/silo with --system)")
+	fs.BoolVar(&cfg.DeleteData, "delete-data", false, "also delete the data directory: the store, and every silo's volumes, logs, repos and images")
+	fs.BoolVar(&dryRun, "dry-run", false, "print the plan and change nothing")
+	fs.BoolVar(&yes, "yes", false, "don't ask for confirmation")
+	fs.StringVar(&output, "output", "table", "the plan's format: table or json")
+	fs.StringVar(&output, "o", "table", "short for --output")
+	if err := c.installFlags(fs, args); err != nil {
+		return err
+	}
+	c.output = output
+	if output != "table" && output != "json" {
+		return usagef("--output %q: want table or json", output)
+	}
+	if output == "json" && !dryRun {
+		return usagef("--output json is for --dry-run")
+	}
+	cfg.Mode = units.Rootless
+	if system {
+		cfg.Mode = units.System
+	}
+	cfg, err := localinstall.Defaults(cfg)
+	if err != nil {
+		return err
+	}
+	h := newLocalHost()
+	h.Progress = c.stdout
+	steps := localinstall.Steps(cfg, h)
+	plans := install.PlanRemoveAll(ctx, steps)
+	prompt := "Delete everything above marked delete?"
+	if cfg.DeleteData {
+		prompt = fmt.Sprintf("Delete everything above marked delete, including the data directory %s with the store and every silo's data?", cfg.DataDir)
+	}
+	return c.plan(fmt.Sprintf("silo uninstall: local backend, %s, data directory %s", cfg.Mode, cfg.DataDir), plans, dryRun, yes, prompt,
+		func() error { return install.Remove(ctx, steps, c.stdout) })
+}
+
 // uninstall is silo uninstall: install's steps undone in reverse order.
 func (c *cli) uninstall(ctx context.Context, args []string) error {
+	if backend, rest := backendFlag(args); backend == "local" {
+		return c.uninstallLocal(ctx, rest)
+	} else if backend != "" && backend != "gcp" {
+		return usagef("--backend %q: want gcp or local", backend)
+	} else {
+		args = rest
+	}
 	cfg := install.Defaults()
 	fs := flag.NewFlagSet("silo uninstall", flag.ContinueOnError)
 	fs.StringVar(&cfg.Project, "project", "", "the host project (required)")
