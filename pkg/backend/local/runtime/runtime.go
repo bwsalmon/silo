@@ -35,6 +35,9 @@ const (
 	LabelSilo = "dev.silo.silo" // the owning silo's id
 	LabelName = "dev.silo.name" // the container's name in its silo
 	LabelAddr = "dev.silo.addr" // its address on its first network
+	// LabelSeq is the object sequence number it was made at (package
+	// objseq), by which silod notices a store older than the disk.
+	LabelSeq = "dev.silo.seq"
 )
 
 // Probe is whether the host can run a class now.

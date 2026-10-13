@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/objseq"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/ledger/address"
@@ -148,6 +149,9 @@ func (s *Server) makeNetwork(ctx context.Context, tx store.Tx, q *request, n *Ne
 		return nil, err
 	}
 	n.Created = now
+	if n.Seq, err = objseq.Next(ctx, tx); err != nil {
+		return nil, err
+	}
 	charges, err := s.charge(ctx, tx, q, Object(q.target.ID, kindNetwork, n.ID), line{ClassNetworks, 1})
 	if err != nil {
 		return nil, err

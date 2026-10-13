@@ -58,6 +58,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
+	"github.com/bwsalmon/silo/pkg/facade/local/docker"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
 	"github.com/bwsalmon/silo/pkg/gateway"
@@ -406,6 +407,7 @@ func serve(ctx context.Context, args []string) error {
 	imageStorage := fs.Int64("image-storage-gb", 0, "the root's image_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	snapshotStorage := fs.Int64("snapshot-storage-gb", 0, "the root's snapshot_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	backendKind := fs.String("backend", "gcp", "the backend: gcp, or local (one machine; needs --data-dir, whose SQLite store is its production store, and silo-nsd)")
+	afterRestore := fs.Bool("after-restore", false, "with --backend=local: the data directory was restored, cache included, so start the reconcile report-only whatever the object sequence says")
 	nsdState := fs.String("nsd-state", "", "with --backend=local: the namespace holder's state file (default $XDG_RUNTIME_DIR/silo/nsd.state)")
 	nftPath := fs.String("nft", "nft", "with --backend=local: the nft command, run in silo-net through the holder")
 	localGateway := fs.String("local-gateway", "10.255.255.1,10.255.255.2", "with --backend=local: silo.internal's and docker.silo.internal's addresses on gw0, comma-separated")
@@ -430,6 +432,9 @@ func serve(ctx context.Context, args []string) error {
 	}
 	switch *backendKind {
 	case "gcp":
+		if *afterRestore {
+			return errors.New("--after-restore is the local backend's: on GCP, give silod migrate --reconcile-report-only")
+		}
 	case local.Kind:
 		// One host is one silod, so SQLite in the data directory is
 		// the store (local-backend.md call L22), not Cloud SQL.
@@ -605,11 +610,31 @@ func serve(ctx context.Context, args []string) error {
 	}
 	var be backend.Backend
 	if *backendKind == local.Kind {
-		if be, err = localBackend(db, *nsdState, *nftPath, *localGateway, leaderLed); err != nil {
+		// The holder's storage driver comes with silod's use of it for
+		// volumes; until then, the data directory's silos/ read
+		// directly, as the repos are.
+		var sd storage.Driver
+		if why == "" {
+			sd = &storage.Dir{Root: dd.Silos()}
+		}
+		if be, err = localBackend(db, sd, *nsdState, *nftPath, *localGateway, leaderLed); err != nil {
 			return err
 		}
 		if err := bindHolder(ctx, db, *nsdState); err != nil {
 			return err
+		}
+		if why == "" {
+			// Before the reconcile's first run: a store older than the
+			// disk makes it report-only (local-rootless-storage.md call
+			// L40).
+			r, err := local.DetectRestore(ctx, db, nil, sd, *afterRestore)
+			if err != nil {
+				return fmt.Errorf("--backend=local: checking for a restore: %w", err)
+			}
+			if r != nil {
+				log.Printf("restore detected (store at object %d, disk at %d, forced %v): the reconcile is report-only until silo reconcile --apply",
+					r.StoreSeq, r.DiskSeq, r.Forced)
+			}
 		}
 	} else {
 		be = gcp.New(bo)
@@ -895,10 +920,12 @@ func replicaID() string {
 // ends. sessions is the replica's count of open connections.
 // localBackend is the local backend over db, with the fence loaded into
 // silo-net through the namespace holder whose state file is state.
-// There are no runtime drivers yet, so nothing is listed, deleted or
-// resolved, and no network is in the fence's topology: tenants' sets
-// are complete, and no bridge is let through to the gateway.
-func localBackend(db store.Store, state, nft, gateway string, leaderLed bool) (backend.Backend, error) {
+// There are no runtime drivers yet, so no container is listed, deleted
+// or resolved, and no network is in the fence's topology: tenants' sets
+// are complete, and no bridge is let through to the gateway. sd, if
+// set, puts the silos' subtrees and volumes in the inventory, and those
+// without rows are reported as orphans.
+func localBackend(db store.Store, sd storage.Driver, state, nft, gateway string, leaderLed bool) (backend.Backend, error) {
 	if state == "" {
 		rt := os.Getenv("XDG_RUNTIME_DIR")
 		if rt == "" {
@@ -918,7 +945,8 @@ func localBackend(db store.Store, state, nft, gateway string, leaderLed bool) (b
 		}
 		*p = a
 	}
-	o := local.Options{Store: db, NFT: local.HolderNFT(state, nft), Topology: netfence.Static(topo)}
+	o := local.Options{Store: db, NFT: local.HolderNFT(state, nft), Topology: netfence.Static(topo),
+		Storage: sd, Records: docker.Records}
 	if leaderLed {
 		o.Guard = leader.Guard
 		o.OnDrift = reconcile.AuditDriftNames(db, nil)
