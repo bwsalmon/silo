@@ -243,3 +243,94 @@ func writeImageRepos(w *tw, rs []*client.ImageRepo) {
 		w.row(r.Silo, r.Name, strconv.Itoa(r.Tags), strconv.Itoa(r.Manifests), strconv.FormatInt(r.ChargedBytes, 10), r.Ref)
 	}
 }
+
+// registryCacheStatus is silo registry cache status: the pull-through
+// cache's configuration (local-registry.md, "Configuration"). The
+// root's only.
+func (c *cli) registryCacheStatus(ctx context.Context, args []string) error {
+	fs := c.flags("registry cache status")
+	if _, err := c.parse(fs, args, 0, 0, ""); err != nil {
+		return err
+	}
+	st, err := c.api.RegistryCache(ctx)
+	if err != nil {
+		return err
+	}
+	return c.printCache(st)
+}
+
+// registryCacheSet is silo registry cache set: it changes what its
+// flags name and keeps the rest. --upstream, given at all, replaces the
+// whole list. The upstream list is not an allowlist: each silo's own
+// egress still decides what it may get from the cache.
+func (c *cli) registryCacheSet(ctx context.Context, args []string) error {
+	fs := c.flags("registry cache set")
+	var ups stringList
+	fs.Var(&ups, "upstream", "name=endpoint[,alias...], repeated; replaces the upstream list")
+	none := fs.Bool("no-upstreams", false, "configure no upstreams at all")
+	stale := fs.String("stale-tag-max", "", "how long a tag is served when its upstream can't be reached (24h)")
+	size := fs.Float64("size-limit-gb", -1, "the cache's size limit in GB")
+	public := fs.String("public-ttl", "", "how long a public classification holds (24h)")
+	auth := fs.String("auth-ttl", "", "how long a private pull's authorisation holds (300s)")
+	if _, err := c.parse(fs, args, 0, 0, "[--upstream name=endpoint[,alias...]]... [--no-upstreams] [--stale-tag-max d] [--size-limit-gb n] [--public-ttl d] [--auth-ttl d]"); err != nil {
+		return err
+	}
+	if *none && len(ups) > 0 {
+		return usagef("--upstream and --no-upstreams don't go together")
+	}
+	st, err := c.api.RegistryCache(ctx)
+	if err != nil {
+		return err
+	}
+	if len(ups) > 0 || *none {
+		st.Upstreams = []client.CacheUpstream{}
+	}
+	for _, u := range ups {
+		name, rest, ok := strings.Cut(u, "=")
+		if !ok || name == "" || rest == "" {
+			return usagef("--upstream %q: want name=endpoint[,alias...]", u)
+		}
+		parts := strings.Split(rest, ",")
+		st.Upstreams = append(st.Upstreams, client.CacheUpstream{Name: name, Endpoint: parts[0], Aliases: parts[1:]})
+	}
+	if *stale != "" {
+		st.StaleTagMax = *stale
+	}
+	if *size >= 0 {
+		st.SizeLimitGB = *size
+	}
+	if *public != "" {
+		st.PublicTTL = *public
+	}
+	if *auth != "" {
+		st.AuthTTL = *auth
+	}
+	out, err := c.api.SetRegistryCache(ctx, *st)
+	if err != nil {
+		return err
+	}
+	return c.printCache(out)
+}
+
+func (c *cli) printCache(st *client.CacheSettings) error {
+	return c.print(st, func(w *tw) {
+		if len(st.Upstreams) == 0 {
+			w.row("Upstreams:", "none")
+		}
+		for i, u := range st.Upstreams {
+			label := ""
+			if i == 0 {
+				label = "Upstreams:"
+			}
+			v := u.Name + " at " + u.Endpoint
+			if len(u.Aliases) > 0 {
+				v += " (also " + strings.Join(u.Aliases, ", ") + ")"
+			}
+			w.row(label, v)
+		}
+		w.row("Size limit:", strconv.FormatFloat(st.SizeLimitGB, 'f', -1, 64)+" GB")
+		w.row("Stale tags:", "served for up to "+st.StaleTagMax+" when the upstream can't be reached")
+		w.row("Public TTL:", st.PublicTTL)
+		w.row("Auth TTL:", st.AuthTTL)
+	})
+}

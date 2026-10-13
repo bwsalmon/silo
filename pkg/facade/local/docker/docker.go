@@ -81,7 +81,12 @@ type Options struct {
 	// over its charge.
 	Storage storage.Driver
 	Meter   *storage.Meter
-	// Images pulls images. Nil refuses pulls.
+	// Fetcher is the pull-through cache's fetcher, which every pull
+	// from a registry other than registry.silo.internal goes through,
+	// as the caller, held to its egress (local-registry.md, §8).
+	Fetcher Fetcher
+	// Images pulls images where there is no Fetcher, as the fake driver
+	// does. Nil, with no Fetcher, refuses pulls.
 	Images Images
 	// Content is silo-containerd's content store, which save reads, and
 	// load and commit write. Nil refuses them.
