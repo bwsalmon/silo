@@ -21,4 +21,8 @@ for name, ns in (
 ):
     os.makedirs(os.path.join(b, name), exist_ok=True)
     s = dict(spec, linux=dict(spec["linux"], namespaces=ns))
+    if name == "runc":
+        # runc before 1.2 wants the joined namespace's mapping repeated.
+        m = [{"containerID": 0, "hostID": 1, "size": 65536}]
+        s["linux"]["uidMappings"] = s["linux"]["gidMappings"] = m
     json.dump(s, open(os.path.join(b, name, "config.json"), "w"), indent=1)
