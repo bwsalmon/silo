@@ -57,6 +57,10 @@ type Options struct {
 	NFT netfence.NFT
 	// FenceConfig tunes the fence's compiler.
 	FenceConfig netfence.Config
+	// Objects removes what the Docker facade keeps for a silo being
+	// deleted (docker.Server.DeleteSilo), after its containers. Nil
+	// removes nothing.
+	Objects func(ctx context.Context, silo string) error
 	// Topology is silo-net's gateway addresses, networks and ports.
 	// Nil is no networks, so that no tenant address is let through.
 	Topology netfence.TopologySource
@@ -74,8 +78,8 @@ func New(o Options) backend.Backend {
 		b.Fence = &netfence.Applier{Store: o.Store, NFT: o.NFT, Config: o.FenceConfig, Grants: o.Grants,
 			Topology: o.Topology, Guard: o.Guard, OnDrift: o.OnDrift}
 	}
-	if len(o.Drivers) > 0 || o.Storage != nil {
-		c := Containers{Drivers: o.Drivers, Storage: o.Storage, Store: o.Store, Records: o.Records}
+	if len(o.Drivers) > 0 || o.Storage != nil || o.Objects != nil {
+		c := Containers{Drivers: o.Drivers, Storage: o.Storage, Store: o.Store, Records: o.Records, Objects: o.Objects}
 		b.Inventory, b.Contents, b.Targets = c, c, c
 	}
 	return b
@@ -122,6 +126,9 @@ type Containers struct {
 	// without a row Unrecorded.
 	Store   store.Store
 	Records RecordsFunc
+	// Objects removes the facade's networks, volumes and image records
+	// of a silo being deleted, with their charges (Options.Objects).
+	Objects func(ctx context.Context, silo string) error
 }
 
 var (
@@ -236,8 +243,10 @@ func (Containers) Pending(context.Context, store.Tx) (map[string]bool, error) {
 }
 
 // DeleteContents implements fenceapi.SiloDeleter: it stops and removes
-// the silo's containers (§12 "Teardown", step 1). Networks, volumes,
-// image records and cgroups come with the facade that makes them.
+// the silo's containers (§12 "Teardown", step 1), and then, through
+// Objects, the facade's rows for them and for the silo's networks,
+// volumes and image records, with their charges. Cgroups are not yet
+// removed.
 func (c Containers) DeleteContents(ctx context.Context, silo *tree.Silo) error {
 	for _, d := range c.Drivers {
 		cs, err := d.List(ctx)
@@ -251,6 +260,11 @@ func (c Containers) DeleteContents(ctx context.Context, silo *tree.Silo) error {
 			if err := remove(ctx, d, ct.ID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
 				return fmt.Errorf("local: deleting container %s of %s: %w", ct.ID, silo.ID, err)
 			}
+		}
+	}
+	if c.Objects != nil {
+		if err := c.Objects(ctx, silo.ID); err != nil {
+			return fmt.Errorf("local: deleting the Docker objects of %s: %w", silo.ID, err)
 		}
 	}
 	return nil

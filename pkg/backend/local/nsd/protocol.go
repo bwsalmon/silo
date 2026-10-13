@@ -59,6 +59,7 @@ type Request struct {
 
 	Name    string         `json:"name,omitempty"`   // bridge, del_link, veth (host side)
 	Bridge  string         `json:"bridge,omitempty"` // veth
+	Peer    string         `json:"peer,omitempty"`   // veth: the container side's name, eth0 if ""
 	Addrs   []netip.Prefix `json:"addrs,omitempty"`  // bridge; veth (container side)
 	MAC     string         `json:"mac,omitempty"`    // veth (container side)
 	Gateway netip.Addr     `json:"gateway,omitzero"` // veth: default route in the container

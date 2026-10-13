@@ -691,16 +691,9 @@ func (s *Server) makeContainer(ctx context.Context, silo string, c *Container, m
 	if err := d.Prepare(ctx, c.ImageID); err != nil {
 		return err
 	}
-	netns := "/run/silo/netns/" + c.ID
-	if s.opts.Wire != nil {
-		var err error
-		if netns, err = s.opts.Wire(ctx, c); err != nil {
-			return err
-		}
-	}
 	spec := runtime.Spec{ID: c.ID, Silo: silo, Image: c.ImageID, Process: c.Process,
 		Resources: runtime.Resources{VCPUm: c.VCPUm, MemoryMB: c.MemoryMB, DiskGB: c.DiskGB},
-		NetNS:     netns, StopSignal: stop,
+		NetNS:     "/run/silo/netns/" + c.ID, StopSignal: stop,
 		Labels: map[string]string{runtime.LabelSilo: silo, runtime.LabelName: c.Name}}
 	if pl, ok := c.HostConfig["PidsLimit"].(float64); ok && pl > 0 {
 		spec.Resources.PIDs = int64(pl)
@@ -730,7 +723,34 @@ func (s *Server) makeContainer(ctx context.Context, silo string, c *Container, m
 			spec.Mounts = append(spec.Mounts, runtime.Mount{Kind: runtime.MountTmpfs, Target: m.Target, SizeMB: m.SizeMB})
 		}
 	}
-	return d.Create(ctx, spec)
+	if s.opts.Wire != nil {
+		nets := map[string]*Network{}
+		err := s.st.Tx(ctx, func(tx store.Tx) error {
+			ns, err := s.networks(ctx, tx, silo)
+			for _, n := range ns {
+				nets[n.ID] = n
+			}
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if err := s.opts.Wire(ctx, c, nets, &spec); err != nil {
+			return err
+		}
+	}
+	if err := d.Create(ctx, spec); err != nil {
+		s.unwire(ctx, c)
+		return err
+	}
+	return nil
+}
+
+// unwire undoes Wire for c, whose container the driver no longer has.
+func (s *Server) unwire(ctx context.Context, c *Container) {
+	if s.opts.Unwire != nil {
+		_ = s.opts.Unwire(context.WithoutCancel(ctx), c)
+	}
 }
 
 // firstEndpoint is the container's endpoint on its first network, by
@@ -863,7 +883,12 @@ func (s *Server) start(q *request) error {
 	if err != nil {
 		return err
 	}
+	if err := s.listen(q, c); err != nil {
+		s.refundLater(q.ctx(), runObject(q.target.ID, c.ID))
+		return err
+	}
 	if err := s.drivers[c.Class].Start(q.ctx(), c.ID); err != nil {
+		s.unlisten(c.ID)
 		s.refundLater(q.ctx(), runObject(q.target.ID, c.ID))
 		c.Error = err.Error()
 		_ = s.save(q, c, map[string]any{"error": c.Error}, nil)
@@ -947,6 +972,7 @@ func (s *Server) watch(silo string, c *Container) {
 // settle records a container that has stopped: it refunds its run
 // charge and notes when it finished, or removes it if it asked to be.
 func (s *Server) settle(ctx context.Context, silo, id string) {
+	s.unlisten(id)
 	var auto *Container
 	s.mu.Lock()
 	_ = s.st.Tx(ctx, func(tx store.Tx) error {
@@ -1208,6 +1234,8 @@ func (s *Server) removeContainer(ctx context.Context, silo string, c *Container,
 			return err
 		}
 	}
+	s.unlisten(c.ID)
+	s.unwire(ctx, c)
 	var gone []string
 	s.mu.Lock()
 	err := s.st.Tx(ctx, func(tx store.Tx) error {

@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"slices"
@@ -49,7 +50,7 @@ func Topology(api, docker netip.Addr) netfence.TopologySource {
 					if err != nil {
 						return nil, err
 					}
-					t.Ports = append(t.Ports, netfence.Port{Name: vethName(c.ID, e.NetworkID), Network: e.NetworkID,
+					t.Ports = append(t.Ports, netfence.Port{Name: VethName(c.ID, e.NetworkID), Network: e.NetworkID,
 						MAC: mac, Addr: e.Addr})
 				}
 			}
@@ -58,9 +59,9 @@ func Topology(api, docker netip.Addr) netfence.TopologySource {
 	}
 }
 
-// vethName is the host end of a container's veth on a network's
+// VethName is the host end of a container's veth on a network's
 // bridge: 15 bytes at most, as the kernel allows.
-func vethName(container, network string) string { return "sv" + container[:7] + network[:6] }
+func VethName(container, network string) string { return "sv" + container[:7] + network[:6] }
 
 // Published is one published port the gateway listens on.
 type Published struct {
@@ -92,29 +93,89 @@ func (s *Server) Published(ctx context.Context, tx store.Tx) ([]Published, error
 	for _, silo := range sortedKeys(ctrs) {
 		ingress := ""
 		for _, c := range ctrs[silo] {
-			if len(c.Ports) == 0 || s.state(ctx, c).State != runtime.Running {
-				continue
-			}
-			e := c.firstEndpoint()
-			if e == nil {
+			if len(c.Ports) == 0 || c.firstEndpoint() == nil || s.state(ctx, c).State != runtime.Running {
 				continue
 			}
 			if ingress == "" {
-				chain, err := tree.Ancestry(ctx, tx, silo)
-				if err != nil {
-					return nil, err
-				}
-				if _, ingress, err = fenceapi.EffectiveIsolation(ctx, tx, chain); err != nil {
+				if ingress, err = ingressOf(ctx, tx, silo); err != nil {
 					return nil, err
 				}
 			}
-			for _, p := range c.Ports {
-				out = append(out, Published{Silo: silo, Proto: p.Proto, Port: p.Public,
-					Target: netip.AddrPortFrom(e.Addr, uint16(p.Private)), Host: ingress == fenceapi.IngressHost, Container: c.ID})
-			}
+			out = append(out, published(silo, c, ingress)...)
 		}
 	}
 	return out, nil
+}
+
+// published are c's published ports, in a silo whose effective ingress
+// is ingress.
+func published(silo string, c *Container, ingress string) []Published {
+	e := c.firstEndpoint()
+	if e == nil {
+		return nil
+	}
+	var out []Published
+	for _, p := range c.Ports {
+		out = append(out, Published{Silo: silo, Proto: p.Proto, Port: p.Public,
+			Target: netip.AddrPortFrom(e.Addr, uint16(p.Private)), Host: ingress == fenceapi.IngressHost, Container: c.ID})
+	}
+	return out
+}
+
+// ingressOf is silo's effective ingress policy.
+func ingressOf(ctx context.Context, tx store.Tx, silo string) (string, error) {
+	chain, err := tree.Ancestry(ctx, tx, silo)
+	if err != nil {
+		return "", err
+	}
+	_, ingress, err := fenceapi.EffectiveIsolation(ctx, tx, chain)
+	return ingress, err
+}
+
+// ErrPortTaken is a Listeners' answer for a host port that something
+// else on the host already listens on, which the start refuses (409).
+var ErrPortTaken = errors.New("port is already allocated")
+
+// Listeners are the gateway's published-port listeners (Options.Listeners).
+type Listeners interface {
+	// Open listens on a container's published ports as it starts: on
+	// docker.silo.internal, and on the host's loopback for those with
+	// Host set. An error wrapping ErrPortTaken refuses the start with
+	// 409. On any error, it has opened nothing.
+	Open(ctx context.Context, ps []Published) error
+	// Close closes a container's listeners, if it has any.
+	Close(container string)
+}
+
+// listen opens the call's container's listeners as it starts.
+func (s *Server) listen(q *request, c *Container) error {
+	if s.opts.Listeners == nil || len(c.Ports) == 0 || c.firstEndpoint() == nil {
+		return nil
+	}
+	var ingress string
+	err := s.st.Tx(q.ctx(), func(tx store.Tx) error {
+		var err error
+		ingress, err = ingressOf(q.ctx(), tx, q.target.ID)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	ps := published(q.target.ID, c, ingress)
+	if err := s.opts.Listeners.Open(q.ctx(), ps); err != nil {
+		if errors.Is(err, ErrPortTaken) {
+			return conflict("silo: %v", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// unlisten closes a container's listeners as it stops or goes.
+func (s *Server) unlisten(container string) {
+	if s.opts.Listeners != nil {
+		s.opts.Listeners.Close(container)
+	}
 }
 
 // Answer is what the gateway's DNS answers for a name: the addresses,
@@ -185,4 +246,21 @@ func (s *Server) Lookup(ctx context.Context, tx store.Tx, names Names, silo stri
 	}
 	slices.SortFunc(out, func(a, b netip.Addr) int { return a.Compare(b) })
 	return Answer{Addrs: out}, nil
+}
+
+// Endpoints are c's endpoints in the order its links are made: the
+// first (firstEndpoint), which has the default route, then the rest by
+// network name.
+func (c *Container) Endpoints() []*Endpoint {
+	first := c.firstEndpoint()
+	if first == nil {
+		return nil
+	}
+	out := []*Endpoint{first}
+	for _, k := range sortedKeys(c.Networks) {
+		if e := c.Networks[k]; e != first {
+			out = append(out, e)
+		}
+	}
+	return out
 }

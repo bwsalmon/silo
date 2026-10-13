@@ -373,14 +373,19 @@ func (s *Server) deleteContainer(id, veth string) error {
 	return s.unpin(id)
 }
 
-// veth wires a container: a veth from req.Bridge in silo-net to eth0 in
-// the container's netns, with its addresses, MAC and default route.
+// veth wires a container: a veth from req.Bridge in silo-net to
+// req.Peer (eth0 if "") in the container's netns, with its addresses,
+// MAC and default route.
 func (s *Server) veth(req Request) error {
 	if !containerID.MatchString(req.Container) {
 		return fmt.Errorf("nsd: invalid container id %q", req.Container)
 	}
-	if !linkName.MatchString(req.Name) || !linkName.MatchString(req.Bridge) {
-		return fmt.Errorf("nsd: invalid link names %q, %q", req.Name, req.Bridge)
+	peer := req.Peer
+	if peer == "" {
+		peer = "eth0"
+	}
+	if !linkName.MatchString(req.Name) || !linkName.MatchString(req.Bridge) || !linkName.MatchString(peer) {
+		return fmt.Errorf("nsd: invalid link names %q, %q, %q", req.Name, req.Bridge, peer)
 	}
 	var hw net.HardwareAddr
 	if req.MAC != "" {
@@ -396,7 +401,7 @@ func (s *Server) veth(req Request) error {
 	}
 	defer nsf.Close()
 	err = s.withRtnl(func(r *rtnl) error {
-		if err := r.veth(req.Name, "eth0", int(nsf.Fd())); err != nil {
+		if err := r.veth(req.Name, peer, int(nsf.Fd())); err != nil {
 			return err
 		}
 		if err := r.master(req.Name, req.Bridge); err != nil {
@@ -413,16 +418,16 @@ func (s *Server) veth(req Request) error {
 	}
 	defer cr.Close()
 	if hw != nil {
-		if err := cr.mac("eth0", hw); err != nil {
+		if err := cr.mac(peer, hw); err != nil {
 			return err
 		}
 	}
 	for _, a := range req.Addrs {
-		if err := cr.addr("eth0", a); err != nil {
+		if err := cr.addr(peer, a); err != nil {
 			return err
 		}
 	}
-	for _, l := range []string{"lo", "eth0"} {
+	for _, l := range []string{"lo", peer} {
 		if err := cr.up(l); err != nil {
 			return err
 		}
