@@ -95,11 +95,17 @@ type Config struct {
 	// AllowUID is the peer uid served, in the holder's namespace: 0,
 	// silod's user.
 	AllowUID uint32
+	// Adopt is a holder started by Adopt, inside namespaces a previous
+	// holder made: /run and PinDir are already its private tmpfs, and
+	// the pins on it, silo-net and gw0 are taken over as they are.
+	Adopt bool
 }
 
-// State is what nsd.state holds.
+// State is what nsd.state holds: the holder's pid, and its namespaces,
+// which a restarted holder adopts (call L33).
 type State struct {
-	Pid int `json:"pid"`
+	Pid int   `json:"pid"`
+	NS  NSIDs `json:"ns"`
 }
 
 // Run is the holder, inside the namespaces Start made: it gives itself
@@ -114,14 +120,23 @@ func Run(ctx context.Context, cfg Config) error {
 	if len(m.UID) == 0 || m.UID[0].Inside != 0 || os.Getuid() != 0 {
 		return errors.New("nsd: Run must be started by Start, as root of its own user namespace")
 	}
-	if err := privateRun(); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(cfg.PinDir, 0o755); err != nil {
-		return err
-	}
-	if err := unix.Mount("tmpfs", cfg.PinDir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "mode=0755"); err != nil {
-		return fmt.Errorf("nsd: tmpfs on %s: %w", cfg.PinDir, err)
+	if cfg.Adopt {
+		// The previous holder's private /run and pin tmpfs are this
+		// mount namespace's already; making them again would hide the
+		// pins that keep containers' namespaces alive.
+		if _, err := os.Stat("/run/host"); err != nil {
+			return fmt.Errorf("nsd: adopting: this mount namespace has no private /run (%w)", err)
+		}
+	} else {
+		if err := privateRun(); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(cfg.PinDir, 0o755); err != nil {
+			return err
+		}
+		if err := unix.Mount("tmpfs", cfg.PinDir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "mode=0755"); err != nil {
+			return fmt.Errorf("nsd: tmpfs on %s: %w", cfg.PinDir, err)
+		}
 	}
 	if cfg.Silos != "" {
 		if err := os.MkdirAll(cfg.Silos, 0o700); err != nil {
@@ -154,7 +169,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer os.Remove(cfg.Socket)
 	if cfg.State != "" {
-		b, _ := json.Marshal(State{Pid: os.Getpid()})
+		ids, err := ReadNSIDs(os.Getpid())
+		if err != nil {
+			return err
+		}
+		b, _ := json.Marshal(State{Pid: os.Getpid(), NS: ids})
 		if err := os.WriteFile(cfg.State, b, 0o600); err != nil {
 			return err
 		}

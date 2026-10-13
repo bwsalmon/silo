@@ -2,11 +2,14 @@ package nsd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -56,6 +59,7 @@ func Main(ctx context.Context, exe string, args []string) error {
 		}
 	}
 	if os.Getenv("_SILO_NSD_INNER") != "" {
+		cfg.Adopt = os.Getenv("_SILO_NSD_ADOPT") != ""
 		return Run(ctx, cfg)
 	}
 	if failed := Failed(Probe()); len(failed) > 0 {
@@ -69,7 +73,7 @@ func Main(ctx context.Context, exe string, args []string) error {
 	if err != nil {
 		return err
 	}
-	cmd, err := Start(exe, append([]string{"nsd"}, args...), append(os.Environ(), "_SILO_NSD_INNER=1"), m, os.Stdout, os.Stderr)
+	cmd, err := startOrAdopt(exe, append([]string{"nsd"}, args...), cfg, m)
 	if err != nil {
 		return err
 	}
@@ -82,6 +86,30 @@ func Main(ctx context.Context, exe string, args []string) error {
 		cmd.Process.Signal(os.Interrupt)
 		return <-done
 	}
+}
+
+// startOrAdopt starts the holder: inside the namespaces the previous
+// holder left, if anything is still in them (a restart of silo-nsd,
+// with containerd and its shims still running), and in fresh ones
+// otherwise (the first start, or after a reboot) (call L33).
+func startOrAdopt(exe string, args []string, cfg Config, m Mapping) (*exec.Cmd, error) {
+	env := append(os.Environ(), "_SILO_NSD_INNER=1")
+	if b, err := os.ReadFile(cfg.State); err == nil {
+		var st State
+		if err := json.Unmarshal(b, &st); err != nil {
+			return nil, fmt.Errorf("nsd: %s: %w", cfg.State, err)
+		}
+		cmd, pid, err := Adopt(exe, args, env, st, cfg.Socket, m, os.Stdout, os.Stderr)
+		if err == nil {
+			log.Printf("nsd: adopting the namespaces of the previous holder (%d) through process %d", st.Pid, pid)
+			return cmd, nil
+		}
+		if !errors.Is(err, ErrNothingToAdopt) {
+			return nil, err
+		}
+		log.Printf("nsd: nothing is left in the previous holder's namespaces; making fresh ones")
+	}
+	return Start(exe, args, env, m, os.Stdout, os.Stderr)
 }
 
 // hostMapping is HolderMapping for the current user from /etc/subuid
