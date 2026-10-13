@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Dir is the dir driver: a directory per silo under Root, a directory
@@ -106,7 +108,104 @@ func (d *Dir) Delete(ctx context.Context, ref Ref) error {
 	if err := os.RemoveAll(p); err != nil {
 		return fmt.Errorf("storage: %w", err)
 	}
+	if ref.Volume != "" {
+		// The label after the volume: a volume that is half gone keeps
+		// it.
+		l, _ := d.labelPath(ref)
+		if err := os.Remove(l); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("storage: %w", err)
+		}
+	}
 	return nil
+}
+
+// labelPath is where ref's label is kept.
+func (d *Dir) labelPath(ref Ref) (string, error) {
+	if err := ref.Valid(); err != nil {
+		return "", err
+	}
+	switch {
+	case ref.Repo != "":
+		return "", fmt.Errorf("storage: %s: repos are not labelled", ref)
+	case ref.Volume != "":
+		return filepath.Join(d.Root, ref.Silo, "volumes", "."+ref.Volume+SeqFile), nil
+	}
+	return filepath.Join(d.Root, ref.Silo, SeqFile), nil
+}
+
+// Label writes ref's label, unless it has one. The label belongs to
+// the process, not to the silo's ids, so the silo can't change it.
+func (d *Dir) Label(ctx context.Context, ref Ref, seq uint64) error {
+	p, err := d.labelPath(ref)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	_, err = f.WriteString(strconv.FormatUint(seq, 10) + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(p)
+		return fmt.Errorf("storage: %w", err)
+	}
+	return nil
+}
+
+// List reads every silo's subtree under Root, and the volumes in it,
+// with their labels. Entries that aren't a silo's or a volume's
+// directory are skipped.
+func (d *Dir) List(ctx context.Context) ([]Entry, error) {
+	silos, err := os.ReadDir(d.Root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: %w", err)
+	}
+	var out []Entry
+	for _, s := range silos {
+		ref := Ref{Silo: s.Name()}
+		if !s.IsDir() || ref.Valid() != nil {
+			continue
+		}
+		out = append(out, Entry{Ref: ref, Seq: d.readLabel(ref)})
+		vols, err := os.ReadDir(filepath.Join(d.Root, s.Name(), "volumes"))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("storage: %w", err)
+		}
+		for _, v := range vols {
+			ref := Ref{Silo: s.Name(), Volume: v.Name()}
+			if !v.IsDir() || ref.Valid() != nil {
+				continue
+			}
+			out = append(out, Entry{Ref: ref, Seq: d.readLabel(ref)})
+		}
+	}
+	return out, nil
+}
+
+// readLabel is ref's label, 0 if it has none or it can't be read.
+func (d *Dir) readLabel(ref Ref) uint64 {
+	p, err := d.labelPath(ref)
+	if err != nil {
+		return 0
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return n
 }
 
 // Usage walks ref's directory. A file with several links in it is

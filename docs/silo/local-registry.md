@@ -10,7 +10,9 @@ and the fence API, the `image_repos` class, the `registry` scope type
 and `silo registry` ([§13](#13-staged-implementation-plan) says what of
 step 25 is left). Task 3480 landed step 27's registry handler over a
 fake content store; containerd's half is step 27b. Task 3483 landed
-step 30's facade endpoints over the same fake.
+step 30's facade endpoints over the same fake. Task 3484 landed step
+31's pull-through cache for public content, over the same fake and a
+test upstream ([§13](#13-staged-implementation-plan) says what is left).
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -546,9 +548,24 @@ The split is git's ([call L44](local-git.md#sealed-and-read-silos-call-l44)):
   - *Verify* (plan item 29): that `inet_diag` reports the owning uid of
     a loopback peer to an unprivileged silod, and in which kernel
     versions.
+    *Verified in task 3482* on Debian 12's 6.1 kernel, as an
+    unprivileged user: an exact `SOCK_DIAG_BY_FAMILY` lookup of the
+    peer's socket (`inet_diag_req_v2`, no `NLM_F_DUMP`, no cookie)
+    returns its owner's uid, and a sudo'd client running as `nobody`
+    is told apart from the test's own uid. In the kernel's source the
+    TCP lookup has no capability check, `inet_diag_req_v2` is 3.3's,
+    and the uid has been translated into the asker's user namespace
+    since about 3.8 (an unmapped uid would read as 65534, the overflow uid,
+    so silod and its callers must share a user namespace, as they do
+    on the host). Two cases report no owner and are refused as a peer
+    that can't be found: a peer gone with a reset (`ENOENT`), and one
+    left only as a `TIME_WAIT` remnant, which the kernel reports *as
+    uid 0*. Taking that for root is the one way this lookup could go
+    wrong, so the answer's state is checked, as are its addresses and
+    ports.
   - The port is set at install (`--registry-host-port`, `0` turns it
-    off). Whether it should be on by default is
-    [open question 37](#open-questions).
+    off), and is on by default, at 5115
+    ([open question 37](#open-questions), answered).
 - **No registry credential is ever needed for a local repo**, inside or
   outside. `docker login registry.silo.internal` succeeds and stores
   nothing silod uses ([§7](#7-the-docker-facade)).
@@ -1455,6 +1472,21 @@ earlier depends on them. Each can be filed on its own, in this order.
 29. **The host front door for registry clients:** the loopback listener,
     the `inet_diag` uid lookup and its verification across kernels, and
     `--registry-host-port`. Depends on 27.
+
+    *Landed in task 3482:* `pkg/hostdoor`, the listener (each accepted
+    connection's peer looked up with `inet_diag`, and closed unread
+    if it can't be found) and its handler, which maps the uid per
+    request through the member table, whose identities now include
+    `uid:<n>`, via `frontdoor.MemberSilo`, the GCP front door's own
+    mapping. silod serves it with `--registry-host-listen` (loopback
+    addresses only, local backend only), and `silo install --backend
+    local --registry-host-port <port>` puts that on silod's unit.
+    `--registry-host-port` defaults to 5115, on, as open question 37
+    was answered. Until step 27b wires the registry service into
+    silod, the host port maps its callers and answers 404 to a
+    mapped one. Nothing maps the installing user's uid to the root
+    yet; that is the local install's root-silo step (local-backend.md
+    §12, step 4).
 30. **The Docker facade:**
     - `push` to the local registry;
     - pulls of local repos without egress;
@@ -1506,6 +1538,46 @@ earlier depends on them. Each can be filed on its own, in this order.
 
     Tested against a local test upstream with redirects to a second
     host. Depends on 27 and 30.
+
+    *Landed in task 3484, over `registry.Memory`:* the configuration
+    in settings as `registry.cache` (install's four upstreams until
+    set), `GET`/`PUT /silo/v1/registry/cache` for root members (`PUT`
+    with full control, audited as `registry.cache.set`), and `silo
+    registry cache status|set`. The cache is `pkg/registry/cache.go`:
+    upstream paths and `?ns=` through `imagerepos.ParseName`, its index
+    in `registry_cache_objects` and `registry_cache_tags` (migration
+    0027), keyed by upstream repo, so a blob is served only in the repo
+    it was fetched for. Each fetch does the anonymous token exchange
+    and follows redirects itself, recording the API host, the token
+    realm's host and every redirect host with the object. Every
+    request, hit or miss, is checked against the caller's effective
+    egress (`fenceapi.EffectiveEgress`) for each of them: a denied host
+    is 403 `DENIED` naming it, and a blob refused only for a redirect
+    host is re-checked once by a GET whose body isn't read. Misses go
+    through `Options.Egress`, a round tripper per calling silo, and
+    concurrent misses on one object share one fetch, a waiter whose
+    shared fetch failed making its own. Tags are revalidated by a
+    manifest `HEAD` on every request, served `stale` up to
+    `stale_tag_max` when the upstream can't be reached and 503 after;
+    digests aren't revalidated. Each request writes `registry.cache`
+    as the calling silo (with `hit`/`miss`/`stale`, the egress
+    decision, the hosts and `auth=none`/`anonymous`), and a refusal
+    `registry.denied` too. The facade's pulls from any other registry
+    go through `registry.Service.PullThrough` and `FetchThrough`
+    (facade `Options.Fetcher`), with the pull's `pull_id` on both the
+    `facade.call` record and the `registry.cache` records; the old
+    `Options.Images` puller is used only where there is no fetcher, as
+    in the fake driver. An upstream that wants credentials is 404
+    `NAME_UNKNOWN` until step 32.
+
+    *Left:* the production `registry.Egress`. The gateway's egress
+    proxy names its caller by source address, so silod can't yet send
+    a request through it as a silo; the gateway needs an authenticated
+    way for silod to say which silo a request is for (on its silod
+    socket, as `Silo-Origin` is), and silod's wiring of the cache with
+    step 27b's. The cache's `silo-cache` image records and GC labels
+    are step 34's, with eviction; the cache index per sharing domain is
+    step 33's.
 32. **Private upstream content:**
     - anonymous classification and `public_ttl`;
     - revalidation by digest with the caller's credentials;
@@ -1692,6 +1764,8 @@ L76. **containerd's collector is the only one.** silod removes roots
     speed, and timing padding is hard to get right.
 37. **The host registry port.** Should `127.0.0.1:5115` be on by default?
     `docker push` through the facade's socket needs no port at all.
+    *Answered in task 3482: on.* Install opens it unless given
+    `--registry-host-port 0`; a uid mapped to no silo gets 403 from it.
 38. **Retention.** Should a repo have a policy that deletes untagged
     manifests after a time, or keeps only the last N tags? v1 keeps
     everything until deleted.

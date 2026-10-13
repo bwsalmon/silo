@@ -320,6 +320,16 @@ func (d *remoteDriver) Usage(ctx context.Context, ref storage.Ref) (storage.Usag
 	return *resp.Usage, nil
 }
 
+func (d *remoteDriver) Label(ctx context.Context, ref storage.Ref, seq uint64) error {
+	_, _, err := d.c.call(Request{Op: OpVolLabel, Volume: &ref, Seq: seq})
+	return err
+}
+
+func (d *remoteDriver) List(ctx context.Context) ([]storage.Entry, error) {
+	resp, _, err := d.c.call(Request{Op: OpVolList})
+	return resp.Entries, err
+}
+
 func (d *remoteDriver) Snapshot(ctx context.Context, ref storage.Ref, name string) (storage.Snapshot, error) {
 	return storage.Snapshot{}, storage.ErrSnapshotUnsupported
 }

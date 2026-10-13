@@ -43,6 +43,9 @@ type Silo struct {
 	CreateTime    time.Time                         `json:"create_time"`
 	Labels        map[string]string                 `json:"labels"`
 	Children      []*Silo                           `json:"children,omitempty"`
+	// RestoreDetected is, on the root of a local backend, the restore
+	// silod found at its start, until silo reconcile --apply.
+	RestoreDetected *RestoreDetected `json:"restore_detected,omitempty"`
 	// Usage is the host resources the silo has used, on the local
 	// backend: its slice's last reading (local-backend.md §11).
 	Usage *ResourceUsage `json:"usage,omitempty"`
@@ -336,6 +339,11 @@ func (s *Server) describe(q *request, ref string) {
 		}
 		if out, err = s.object(ctx, tx, chain); err != nil {
 			return err
+		}
+		if len(chain) == 1 {
+			if out.RestoreDetected, err = ReadRestoreDetected(ctx, tx); err != nil {
+				return err
+			}
 		}
 		if v := q.r.URL.Query().Get("view"); v == "subtree" {
 			return s.subtree(ctx, tx, chain, out)

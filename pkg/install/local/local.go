@@ -32,6 +32,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/units"
+	"github.com/bwsalmon/silo/pkg/hostdoor"
 	"github.com/bwsalmon/silo/pkg/install"
 )
 
@@ -49,7 +50,16 @@ type Config struct {
 	User string
 	// Silod is the silod binary the units run.
 	Silod string
+	// RegistryHostPort is the registry's port for host clients on
+	// 127.0.0.1 (--registry-host-port); 0 turns it off.
+	RegistryHostPort int
 }
+
+// DefaultRegistryHostPort is --registry-host-port's default: on, at
+// hostdoor.Port (local-registry.md's open question 37, answered on), so
+// crane, skopeo and oras reach localhost:5115 after install with no
+// flag. A uid mapped to no silo gets nothing from it.
+const DefaultRegistryHostPort = hostdoor.Port
 
 // Runner runs a command and returns its combined output. Tests replace
 // it.
@@ -215,7 +225,7 @@ func Steps(c Config, h Host) []install.Step {
 // unitsConfig is c's units.Config: silo-buildkitd only where buildkitd
 // is installed.
 func unitsConfig(c Config, report rootless.Report) units.Config {
-	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir}
+	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort}
 	if c.Mode == units.System {
 		uc.User = c.User
 	}

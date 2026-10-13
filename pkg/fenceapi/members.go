@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/store"
@@ -21,11 +22,16 @@ type Member struct {
 	UpdateTime time.Time `json:"update_time"`
 }
 
-var identityPattern = regexp.MustCompile(`^(user|serviceAccount):[^@\s/]+@[^@\s/]+\.[^@\s/]+$`)
+var identityPattern = regexp.MustCompile(`^((user|serviceAccount):[^@\s/]+@[^@\s/]+\.[^@\s/]+|uid:(0|[1-9][0-9]{0,9}))$`)
 
 // ValidIdentity reports whether id is user:<email> or
-// serviceAccount:<email>.
+// serviceAccount:<email>, a GCP front door's identities, or uid:<n>, a
+// local host user's, as the host's front doors read it from the kernel
+// (SO_PEERCRED, or inet_diag on the registry's host port).
 func ValidIdentity(id string) bool { return identityPattern.MatchString(id) }
+
+// UIDIdentity is the member identity of host uid: uid:<n>, in decimal.
+func UIDIdentity(uid uint32) string { return "uid:" + strconv.FormatUint(uint64(uid), 10) }
 
 // mayMap reports whether a caller may map members of t: a proper
 // ancestor of t, or, for the root, which has none, the root itself
@@ -36,7 +42,7 @@ func mayMap(rel relation, t *tree.Silo) bool {
 
 func setMember(ctx context.Context, tx store.Tx, identity string, t *tree.Silo) error {
 	if !ValidIdentity(identity) {
-		return errorf(InvalidArgument, "identity %q: want user:<email> or serviceAccount:<email>", identity).with("field", "identity")
+		return errorf(InvalidArgument, "identity %q: want user:<email>, serviceAccount:<email> or uid:<n>", identity).with("field", "identity")
 	}
 	now, err := tx.Now(ctx)
 	if err != nil {

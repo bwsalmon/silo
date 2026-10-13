@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/objseq"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
@@ -451,6 +452,9 @@ func (s *Server) containerCreate(q *request) error {
 			return err
 		}
 		c.Created = now
+		if c.Seq, err = objseq.Next(ctx, tx); err != nil {
+			return err
+		}
 		if err := put(ctx, tx, q.target.ID, kindContainer, c.ID, c.Name, c); err != nil {
 			return err
 		}
@@ -702,6 +706,9 @@ func (s *Server) makeContainer(ctx context.Context, silo string, c *Container, m
 	}
 	if e := c.firstEndpoint(); e != nil {
 		spec.Labels[runtime.LabelAddr] = e.Addr.String()
+	}
+	if c.Seq != 0 {
+		spec.Labels[runtime.LabelSeq] = objseq.Format(c.Seq)
 	}
 	for _, m := range c.Mounts {
 		switch m.Type {

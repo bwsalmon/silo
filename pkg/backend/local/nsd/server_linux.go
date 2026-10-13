@@ -201,7 +201,13 @@ func (s *Server) handle(req Request) (Response, []*os.File, error) {
 			return Response{}, nil, fmt.Errorf("nsd: invalid link name %q", req.Name)
 		}
 		return Response{}, nil, s.withRtnl(func(r *rtnl) error { return r.delLink(req.Name) })
-	case OpVolCreate, OpVolDelete, OpVolUsage:
+	case OpVolList:
+		if s.Storage == nil {
+			return Response{}, nil, errors.New("nsd: no storage driver")
+		}
+		es, err := s.Storage.List(ctx)
+		return Response{Entries: es}, nil, err
+	case OpVolCreate, OpVolDelete, OpVolUsage, OpVolLabel:
 		if s.Storage == nil {
 			return Response{}, nil, errors.New("nsd: no storage driver")
 		}
@@ -218,6 +224,8 @@ func (s *Server) handle(req Request) (Response, []*os.File, error) {
 			return Response{Path: p}, nil, err
 		case OpVolDelete:
 			return Response{}, nil, s.Storage.Delete(ctx, ref)
+		case OpVolLabel:
+			return Response{}, nil, s.Storage.Label(ctx, ref, req.Seq)
 		default:
 			u, err := s.Storage.Usage(ctx, ref)
 			return Response{Usage: &u}, nil, err

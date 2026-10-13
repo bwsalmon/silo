@@ -22,6 +22,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend"
 	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
+	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
@@ -30,8 +31,14 @@ import (
 // Kind is the backend's name, as --backend takes it.
 const Kind = "local"
 
-// KindContainers is the inventory's one kind of object so far.
-const KindContainers = "containers"
+// The inventory's kinds of object: containers in every class, and the
+// storage driver's volumes and silo subtrees. A volume's scope is its
+// silo.
+const (
+	KindContainers = "containers"
+	KindVolumes    = "volumes"
+	KindSubtrees   = "subtrees"
+)
 
 // Options are what New builds a backend from. Each part is built only
 // where what it needs is given.
@@ -39,6 +46,13 @@ type Options struct {
 	Store store.Store
 	// Drivers are the classes this host runs.
 	Drivers []runtime.Driver
+	// Storage keeps silos' subtrees and volumes, which the inventory
+	// lists beside the containers. Nil lists none.
+	Storage storage.Driver
+	// Records reads which containers and volumes the store has rows
+	// for (docker.Records), so that the inventory can mark the others
+	// Unrecorded. Nil marks none.
+	Records RecordsFunc
 	// NFT loads the fence into silo-net. Nil applies no fence.
 	NFT netfence.NFT
 	// FenceConfig tunes the fence's compiler.
@@ -60,8 +74,8 @@ func New(o Options) backend.Backend {
 		b.Fence = &netfence.Applier{Store: o.Store, NFT: o.NFT, Config: o.FenceConfig, Grants: o.Grants,
 			Topology: o.Topology, Guard: o.Guard, OnDrift: o.OnDrift}
 	}
-	if len(o.Drivers) > 0 {
-		c := Containers{Drivers: o.Drivers}
+	if len(o.Drivers) > 0 || o.Storage != nil {
+		c := Containers{Drivers: o.Drivers, Storage: o.Storage, Store: o.Store, Records: o.Records}
 		b.Inventory, b.Contents, b.Targets = c, c, c
 	}
 	return b
@@ -94,10 +108,20 @@ func BindMapping(ctx context.Context, st store.Store, mapping string) error {
 	})
 }
 
-// Containers are the drivers' containers, as the reconcile, a silo's
-// delete and an export's target see them.
+// RecordsFunc reads, in tx, the ids of the containers the store has
+// rows for, and its volumes by storage.Ref's String (silo/volume).
+type RecordsFunc func(ctx context.Context, tx store.Tx) (containers, volumes map[string]bool, err error)
+
+// Containers are the drivers' containers, and the storage driver's
+// volumes and subtrees, as the reconcile, a silo's delete and an
+// export's target see them.
 type Containers struct {
 	Drivers []runtime.Driver
+	Storage storage.Driver
+	// Store and Records, when both are set, mark a container or volume
+	// without a row Unrecorded.
+	Store   store.Store
+	Records RecordsFunc
 }
 
 var (
@@ -106,10 +130,16 @@ var (
 	_ backend.Targets   = Containers{}
 )
 
-// List implements backend.Inventory: every container in every class.
-// The host is one region, so regions doesn't narrow it. Containers
-// carry no ledger object yet (the Docker facade charges them), so the
-// listing covers no ledger prefix.
+// List implements backend.Inventory: every container in every class,
+// then every subtree and volume. The host is one region, so regions
+// doesn't narrow it. Containers carry no ledger object yet (the Docker
+// facade charges them), so the listing covers no ledger prefix.
+//
+// A container or a volume whose silo is labelled but which the store
+// has no row for is Unrecorded: after a restore, one made after the
+// copy (local-rootless-storage.md call L40). The rows are read after
+// the objects are listed, and the facade writes a row before it makes
+// the object, so one being made as this runs is never caught.
 func (c Containers) List(ctx context.Context, _ []string) (*backend.Listing, error) {
 	l := &backend.Listing{}
 	for _, d := range c.Drivers {
@@ -123,13 +153,55 @@ func (c Containers) List(ctx context.Context, _ []string) (*backend.Listing, err
 				Silo: silo, Labelled: silo != "", InVPC: true})
 		}
 	}
+	if c.Storage != nil {
+		es, err := c.Storage.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("local: listing volumes: %w", err)
+		}
+		for _, e := range es {
+			o := backend.Object{Kind: KindSubtrees, Name: e.Ref.Silo, Silo: e.Ref.Silo, Labelled: true}
+			if e.Ref.Volume != "" {
+				o = backend.Object{Kind: KindVolumes, Scope: e.Ref.Silo, Name: e.Ref.Volume, Silo: e.Ref.Silo, Labelled: true}
+			}
+			l.Objects = append(l.Objects, o)
+		}
+	}
+	if c.Store == nil || c.Records == nil {
+		return l, nil
+	}
+	var ctrs, vols map[string]bool
+	err := c.Store.Tx(ctx, func(tx store.Tx) error {
+		var err error
+		ctrs, vols, err = c.Records(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range l.Objects {
+		o := &l.Objects[i]
+		switch {
+		case o.Silo == "":
+		case o.Kind == KindContainers:
+			o.Unrecorded = !ctrs[o.Name]
+		case o.Kind == KindVolumes:
+			o.Unrecorded = !vols[storage.Ref{Silo: o.Silo, Volume: o.Name}.String()]
+		}
+	}
 	return l, nil
 }
 
 // Delete implements backend.Inventory: it kills the container if it
 // runs, and deletes it. One that is gone already is not an error.
 func (c Containers) Delete(ctx context.Context, o backend.Object) (string, error) {
-	if o.Kind != KindContainers {
+	switch {
+	case (o.Kind == KindVolumes || o.Kind == KindSubtrees) && c.Storage != nil:
+		ref := storage.Ref{Silo: o.Silo}
+		if o.Kind == KindVolumes {
+			ref = storage.Ref{Silo: o.Scope, Volume: o.Name}
+		}
+		return "", c.Storage.Delete(ctx, ref)
+	case o.Kind != KindContainers:
 		return "", fmt.Errorf("local: no objects of kind %q", o.Kind)
 	}
 	for _, d := range c.Drivers {

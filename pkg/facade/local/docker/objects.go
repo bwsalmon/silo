@@ -53,6 +53,9 @@ type Container struct {
 	RestartCount    int
 	// Error is why it couldn't start, last time it didn't.
 	Error string
+	// Seq is the object sequence number it was made at (package
+	// objseq), which labels its containerd record.
+	Seq uint64 `json:",omitempty"`
 }
 
 // Endpoint is a container's place on one network.
@@ -95,6 +98,8 @@ type Network struct {
 	Labels   map[string]string
 	// Attachable is kept for inspect; every network is.
 	Attachable bool
+	// Seq is the object sequence number it was made at.
+	Seq uint64 `json:",omitempty"`
 }
 
 // Gateway is the network's gateway address, its first: the bridge holds
@@ -111,6 +116,9 @@ type Volume struct {
 	Labels    map[string]string
 	Size      int64 // bytes, as charged
 	Anonymous bool
+	// Seq is the object sequence number it was made at, which labels
+	// its directory and, if it made it, its silo's subtree.
+	Seq uint64 `json:",omitempty"`
 }
 
 // ImageRecord is an image a silo pulled or tagged.

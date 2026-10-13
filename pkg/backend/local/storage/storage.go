@@ -44,6 +44,18 @@ type Driver interface {
 	// over-quota check.
 	Usage(ctx context.Context, ref Ref) (Usage, error)
 
+	// Label records seq, the object sequence number ref was made at
+	// (package objseq), in SeqFile: in a silo's subtree, and beside a
+	// volume, where the volume's own container can't change it. A ref
+	// labelled already keeps its first label, so the subtree that every
+	// later volume's create makes again stays dated by the first.
+	Label(ctx context.Context, ref Ref, seq uint64) error
+
+	// List is every silo subtree and volume the driver keeps, with its
+	// label, 0 for none: what a reconcile reports as orphans, and what
+	// silod reads at start to find a store older than the disk.
+	List(ctx context.Context) ([]Entry, error)
+
 	// Snapshot is reserved for backups. It makes a read-only,
 	// point-in-time copy of a volume or a subtree under name. Every v1
 	// driver returns ErrSnapshotUnsupported. No v1 code path calls it.
@@ -122,6 +134,19 @@ type Usage struct {
 	// Inodes is how many files, directories and links it holds,
 	// itself included.
 	Inodes int64 `json:"inodes"`
+}
+
+// SeqFile is the name of a label Driver.Label writes: in a subtree,
+// <silo>/.silo-seq, and for a volume <silo>/volumes/.<volume>.silo-seq.
+// Neither name can be a silo's or a volume's, which start with a
+// letter or a digit.
+const SeqFile = ".silo-seq"
+
+// Entry is a subtree or a volume, as List found it.
+type Entry struct {
+	Ref Ref
+	// Seq is its label, or 0 if it has none.
+	Seq uint64
 }
 
 // Snapshot is a read-only, point-in-time copy made by Driver.Snapshot.

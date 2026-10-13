@@ -168,8 +168,11 @@ func (s *Server) imageCreate(q *request) error {
 		return s.refuse(q, err)
 	}
 	var p *Pulled
+	pullID := newPullID()
 	if _, _, local := localName(ref); local {
 		p, err = s.pullLocal(q, ref)
+	} else if s.opts.Fetcher != nil {
+		p, err = s.pullCache(q, ref, pullID)
 	} else if s.opts.Images == nil {
 		err = unavailable("silo: this silod pulls no images")
 	} else {
@@ -180,7 +183,7 @@ func (s *Server) imageCreate(q *request) error {
 	}
 	s.mu.Lock()
 	err = s.st.Tx(q.ctx(), func(tx store.Tx) error {
-		_, err := s.recordPull(q.ctx(), tx, q, p, []string{ref}, map[string]any{"image": ref})
+		_, err := s.recordPull(q.ctx(), tx, q, p, []string{ref}, map[string]any{"image": ref, "pull_id": pullID})
 		return err
 	})
 	s.mu.Unlock()

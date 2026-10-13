@@ -289,6 +289,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mirror(q, rest)
 		return
 	}
+	if cachePath(rest) {
+		s.registryCache(q)
+		return
+	}
 	if rest == "mirror:which" {
 		s.which(q)
 		return

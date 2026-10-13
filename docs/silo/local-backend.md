@@ -2068,6 +2068,8 @@ before item 7.
 
     Depends on 7 and 14. No backup command: that is
     [later](local-rootless-storage.md#later).
+    Built in task 3419. What it built, and what it left to the facade's
+    wiring in silod, is under call L40 in part 2.
 19. **Repos in the fence API, the store and `silo repo`**
     ([part 3, §2](local-git.md#2-repos-as-silo-objects)):
     - the repo object, its operations and `silo repo create|list|get|delete|url`;

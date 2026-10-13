@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,18 @@ type LocalRegistry interface {
 }
 
 var _ LocalRegistry = (*registry.Service)(nil)
+
+// Fetcher is the pull-through cache's fetcher (local-registry.md, §8,
+// call L70), which every facade pull from an external registry goes
+// through: as the caller, checked against its egress policy on hits as
+// on misses, and audited as registry.cache records carrying the pull's
+// pull_id. *registry.Service is it.
+type Fetcher interface {
+	PullThrough(ctx context.Context, c fenceapi.Caller, name, ref, pullID string) (mediaType string, manifest []byte, digest string, err error)
+	FetchThrough(ctx context.Context, c fenceapi.Caller, name, digest, pullID string) error
+}
+
+var _ Fetcher = (*registry.Service)(nil)
 
 // The audit kind of a facade push, beside the registry's registry.push
 // (local-registry.md, "Audit", call L67).
@@ -253,6 +266,82 @@ func (s *Server) pullLocal(q *request, ref string) (*Pulled, error) {
 		return nil, invalid("silo: %s: %v", ref, err)
 	}
 	return p, nil
+}
+
+// pullCache pulls ref, a familiar reference to an external registry,
+// through the cache's fetcher as the caller: the manifest (an index's
+// child for this host's platform), then its config and layers, each
+// into the content store. A short name is Docker Hub's.
+func (s *Server) pullCache(q *request, ref, pullID string) (*Pulled, error) {
+	if s.opts.Content == nil {
+		return nil, errNoContent
+	}
+	name, at := ref, "latest"
+	if n, d, ok := strings.Cut(ref, "@"); ok {
+		name, at = n, d
+	} else if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		name, at = ref[:i], ref[i+1:]
+	}
+	upstream := name
+	if first, _, _ := strings.Cut(name, "/"); !strings.ContainsAny(first, ".:") || !strings.Contains(name, "/") {
+		upstream = "docker.io/" + name
+	}
+	if n, ok := imagerepos.ParseName(upstream, ""); ok && !n.Local() {
+		upstream = n.String()
+	} else {
+		return nil, invalid("silo: %s: not a registry the cache's fetcher can name", ref)
+	}
+	unknown := notFound("manifest for %s not found: manifest unknown: manifest unknown", ref)
+	pull := func(at string) (string, []byte, string, error) {
+		mt, b, d, err := s.opts.Fetcher.PullThrough(q.ctx(), q.caller, upstream, at, pullID)
+		var re *registry.Error
+		if errors.As(err, &re) && re.Status == http.StatusNotFound {
+			return "", nil, "", unknown
+		}
+		return mt, b, d, err
+	}
+	mt, b, digest, err := pull(at)
+	if err != nil {
+		return nil, err
+	}
+	if isIndex(mt) {
+		m, err := parseManifest(b, mt)
+		if err != nil {
+			return nil, invalid("silo: %s: %v", ref, err)
+		}
+		child, ok := platformChild(m)
+		if !ok {
+			return nil, notFound("no matching manifest for linux/%s in the manifest list entries", goarch())
+		}
+		if mt, b, _, err = pull(child.Digest); err != nil {
+			return nil, err
+		}
+	}
+	m, err := parseManifest(b, mt)
+	if err != nil {
+		return nil, invalid("silo: %s: %v", ref, err)
+	}
+	if isIndex(m.MediaType) {
+		return nil, invalid("silo: %s: an index's child is an index", ref)
+	}
+	for _, d := range m.blobs() {
+		if err := s.opts.Fetcher.FetchThrough(q.ctx(), q.caller, upstream, d.Digest, pullID); err != nil {
+			return nil, err
+		}
+	}
+	p, err := s.pulledFrom(q.ctx(), mt, b, name+"@"+digest)
+	if err != nil {
+		return nil, invalid("silo: %s: %v", ref, err)
+	}
+	return p, nil
+}
+
+// newPullID is a facade pull's id, which its image.pull record and the
+// registry.cache records it causes carry.
+func newPullID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return "pull-" + hex.EncodeToString(b)
 }
 
 // recordPull makes or updates the target's record of p, tagged ref

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/objseq"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -108,6 +109,9 @@ func (s *Server) makeVolume(ctx context.Context, tx store.Tx, q *request, v *Vol
 		return nil, err
 	}
 	v.Created = now
+	if v.Seq, err = objseq.Next(ctx, tx); err != nil {
+		return nil, err
+	}
 	charges, err := s.charge(ctx, tx, q, Object(q.target.ID, kindVolume, v.Name), line{ClassVolumes, 1}, line{ClassDiskGB, gib(v.Size)})
 	if err != nil {
 		return nil, err
@@ -116,16 +120,28 @@ func (s *Server) makeVolume(ctx context.Context, tx store.Tx, q *request, v *Vol
 }
 
 // createVolumeDir makes v's directory through the storage driver: the
-// silo's subtree first, which is idempotent.
+// silo's subtree first, which is idempotent. Each is labelled with v's
+// sequence number, which a subtree labelled already ignores.
 func (s *Server) createVolumeDir(ctx context.Context, silo string, v *Volume) error {
 	if s.opts.Storage == nil {
 		return unavailable("silo: this silod keeps no volumes")
 	}
-	if _, err := s.opts.Storage.Create(ctx, storage.Ref{Silo: silo}, 0); err != nil {
-		return err
+	for _, ref := range []storage.Ref{{Silo: silo}, {Silo: silo, Volume: v.Name}} {
+		size := int64(0)
+		if ref.Volume != "" {
+			size = v.Size
+		}
+		if _, err := s.opts.Storage.Create(ctx, ref, size); err != nil {
+			return err
+		}
+		if v.Seq == 0 {
+			continue
+		}
+		if err := s.opts.Storage.Label(ctx, ref, v.Seq); err != nil {
+			return err
+		}
 	}
-	_, err := s.opts.Storage.Create(ctx, storage.Ref{Silo: silo, Volume: v.Name}, v.Size)
-	return err
+	return nil
 }
 
 // volumePath is where v's directory is, for a mount.

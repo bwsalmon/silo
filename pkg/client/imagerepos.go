@@ -182,3 +182,36 @@ func ImageRef(siloPath, siloID, name string, byID bool) string {
 	}
 	return RegistryHost + path.Join("/", siloPath, name)
 }
+
+// CacheUpstream is one upstream of the pull-through cache
+// (local-registry.md, "Configuration").
+type CacheUpstream struct {
+	Name     string   `json:"name"`
+	Endpoint string   `json:"endpoint"`
+	Aliases  []string `json:"aliases,omitempty"`
+}
+
+// CacheSettings is the pull-through cache's configuration, the root's.
+type CacheSettings struct {
+	Upstreams   []CacheUpstream `json:"upstreams"`
+	SizeLimitGB float64         `json:"size_limit_gb"`
+	StaleTagMax string          `json:"stale_tag_max"`
+	PublicTTL   string          `json:"public_ttl"`
+	AuthTTL     string          `json:"auth_ttl"`
+}
+
+// RegistryCache reads the cache's configuration. Only the root silo's
+// callers may.
+func (c *Client) RegistryCache(ctx context.Context) (*CacheSettings, error) {
+	var out CacheSettings
+	err := c.Do(ctx, http.MethodGet, "registry/cache", nil, nil, &out)
+	return &out, err
+}
+
+// SetRegistryCache replaces the cache's configuration. Only root
+// members with full control may.
+func (c *Client) SetRegistryCache(ctx context.Context, s CacheSettings) (*CacheSettings, error) {
+	var out CacheSettings
+	err := c.Do(ctx, http.MethodPut, "registry/cache", nil, s, &out)
+	return &out, err
+}
