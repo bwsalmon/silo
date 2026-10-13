@@ -19,6 +19,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/client"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
+	"github.com/bwsalmon/silo/pkg/gitserve"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
 )
 
@@ -47,10 +48,21 @@ func startSilod(t *testing.T) *silod {
 		t.Fatal(err)
 	}
 	runner := &agents.Fake{AutoConnect: true}
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	if err := gitserve.WriteHooks(hooks); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &gitstore.Host{Storage: &storage.Dir{Root: silos}, HooksDir: hooks}
+	git := gitserve.New(gitserve.Options{Host: host, Hook: exe})
 	api := fenceapi.New(db, fenceapi.Options{Caller: func(r *http.Request) (fenceapi.Caller, error) {
 		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: fenceapi.ViaInternal}, nil
 	}, ToolVMs: toolVMs{}, Runner: runner, Credentials: agents.StaticCredentials{"anthropic-api": "anthropic"},
-		CredentialKey: bytes.Repeat([]byte{1}, 32), Repos: &gitstore.Host{Storage: &storage.Dir{Root: silos}}})
+		CredentialKey: bytes.Repeat([]byte{1}, 32), Repos: host, Git: git})
+	git.SetAPI(api)
 	runner.Connected = api.ToolServerConnected
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() { srv.Close(); api.Close() })

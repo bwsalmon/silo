@@ -28,7 +28,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
@@ -73,9 +72,6 @@ type Options struct {
 	// its grant is refused by the hook (local-git.md, "Quota").
 	Disk func(ctx context.Context, silo string) (used, limit int64, err error)
 }
-
-// waitDelay is how long git's input may stay open after git exits.
-const waitDelay = 2 * time.Second
 
 // Service is silod's git service.
 type Service struct {
@@ -292,11 +288,8 @@ func (s *Service) push(ctx context.Context, t *fenceapi.GitTarget, dir string, e
 	}
 	cmd := s.opts.Host.Command(ctx, dir, env, append(append(pre, "receive-pack"), append(args, ".")...)...)
 	var stderr strings.Builder
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, &stderr
-	// A client that keeps its connection open after git is done holds
-	// nothing up.
-	cmd.WaitDelay = waitDelay
-	if err := cmd.Run(); err != nil && ctx.Err() == nil {
+	cmd.Stdout, cmd.Stderr = out, &stderr
+	if err := run(cmd, in); err != nil && ctx.Err() == nil {
 		log.Printf("gitserve: receive-pack in %s: %v: %s", t.GitPath(), err, stderr.String())
 	}
 	// The refs may have moved even if the client has gone: what moved
@@ -398,9 +391,8 @@ func (s *Service) Connect(w http.ResponseWriter, r *http.Request, t *fenceapi.Gi
 	}
 	cmd := s.opts.Host.Command(ctx, dir, proto, "upload-pack", ".")
 	var stderr strings.Builder
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, conn, &stderr
-	cmd.WaitDelay = waitDelay
-	if err := cmd.Run(); err != nil {
+	cmd.Stdout, cmd.Stderr = conn, &stderr
+	if err := run(cmd, in); err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
 			log.Printf("gitserve: upload-pack in %s: %v", t.GitPath(), err)
@@ -409,3 +401,21 @@ func (s *Service) Connect(w http.ResponseWriter, r *http.Request, t *fenceapi.Gi
 }
 
 var _ fenceapi.GitConnector = (*Service)(nil)
+
+// run runs cmd with in on its stdin, through a pipe of its own: Wait
+// returns once git exits, even while in, a connection the client keeps
+// open, is still blocked in a read.
+func run(cmd *exec.Cmd, in io.Reader) error {
+	w, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		io.Copy(w, in)
+		w.Close()
+	}()
+	return cmd.Wait()
+}
