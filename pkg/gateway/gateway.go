@@ -143,6 +143,9 @@ type Gateway struct {
 
 	ex              exportState
 	exportTransport *http.Transport
+
+	git      gitState
+	gitProxy *httputil.ReverseProxy
 }
 
 // New returns a Gateway that reaches silod through opts.Dial.
@@ -178,6 +181,7 @@ func New(opts Options) *Gateway {
 	g := &Gateway{opts: opts, conns: map[net.Conn]struct{}{}, egress: map[*egressConn]struct{}{}, newer: make(chan struct{}), client: &http.Client{Transport: tr}}
 	g.exportsInit()
 	g.toolsProxy = g.newToolsProxy(tr)
+	g.gitProxy = g.newGitProxy(tr)
 	g.exportTransport = &http.Transport{DialContext: opts.DialExport, MaxIdleConns: 64, IdleConnTimeout: 90 * time.Second}
 	// Facade and fence calls wait for silod (waitDial); their own
 	// connections, so that the tables' stream doesn't wait with them.
@@ -220,6 +224,7 @@ func (g *Gateway) SetTables(t *Tables) bool {
 	g.mu.Unlock()
 	if old != nil {
 		g.closeTightened(old, t)
+		g.closeGit(old, t)
 	}
 	g.closeNarrowed(t)
 	g.revokeExports(t)
@@ -413,13 +418,14 @@ func (g *Gateway) auditDenied(r *http.Request, rec AuditRecord) {
 // /compute/v1/ and /silo/v1/ are 404 naming port 8080, except the two
 // agent tool endpoints, which have handlers of their own (tools.go):
 // the binary is a file, and an attach goes only to silod's
-// ToolsSilodPath. /x/ is HTTP exports and /r/ is reserved for served
-// resources (after v1).
+// ToolsSilodPath. /x/ is HTTP exports, /git/ the git service (git.go),
+// and /r/ is reserved for served resources (after v1).
 func (g *Gateway) HTTP() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(ToolsAttachPath, g.serveToolsAttach)
 	mux.HandleFunc(ToolsBinaryPath, g.serveToolsBinary)
 	mux.HandleFunc("/x/", g.serveExport)
+	mux.HandleFunc("/git/", g.serveGit)
 	mux.HandleFunc("/r/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "silo: /r/ is reserved for served resources, which come after v1", http.StatusNotFound)
 	})

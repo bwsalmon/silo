@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
 	"github.com/bwsalmon/silo/pkg/gateway"
+	"github.com/bwsalmon/silo/pkg/gitserve"
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/harness"
 	"github.com/bwsalmon/silo/pkg/leader"
@@ -107,6 +109,9 @@ func main() {
 		if exe, err = os.Executable(); err == nil {
 			err = nsd.Main(ctx, exe, os.Args[2:])
 		}
+	case gitserve.HookArg:
+		// The git service's pre-receive hook, which receive-pack runs.
+		os.Exit(gitserve.HookMain(os.Args[2:], os.Stdin, os.Stderr))
 	case "harness-init":
 		var code int
 		code, err = harnessInit(ctx, os.Args[2:])
@@ -412,6 +417,7 @@ func serve(ctx context.Context, args []string) error {
 	// storage driver (local-git.md, "On disk"); without one, silod
 	// makes no repos.
 	var repoHost fenceapi.RepoHost
+	var git *gitserve.Service
 	if dd != nil && why == "" && v >= store.HeartbeatSchema {
 		// The dir driver is the only one; the local backend (step 5 of
 		// local-backend.md §15) takes it from here.
@@ -420,7 +426,21 @@ func serve(ctx context.Context, args []string) error {
 			return err
 		}
 		log.Printf("data directory %s (id %s); storage driver %s: %s", dd.Path, dd.ID, drv.Name(), drv.Guarantees())
-		repoHost = &gitstore.Host{Storage: drv}
+		// silod's own hooks, rewritten at every start: re-creatable, so
+		// in cache/.
+		hooks := filepath.Join(dd.Cache(), "git-hooks")
+		if err := gitserve.WriteHooks(hooks); err != nil {
+			return fmt.Errorf("writing the git hooks: %w", err)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		gh := &gitstore.Host{Storage: drv, HooksDir: hooks}
+		repoHost = gh
+		// No disk_gb class on this backend yet: pushes are not held to
+		// one until there is (local-git.md, "Quota").
+		git = gitserve.New(gitserve.Options{Host: gh, Hook: exe})
 	}
 	replica := store.Replica{ID: replicaID(), Release: release, Latest: db.Latest(), Started: time.Now(), Address: *advertise}
 	if replica.Address == "" {
@@ -460,6 +480,9 @@ func serve(ctx context.Context, args []string) error {
 	cfg.KeepControlPort = keepControlPortSwitch()
 	go watchTestSwitches(ctx)
 	opts := fenceapi.Options{Ready: func() string { return why }, Budget: gcefence.Budget{Config: cfg}, Repos: repoHost}
+	if git != nil {
+		opts.Git = git
+	}
 	if *fenceProject != "" {
 		client, err := gceclient.New(ctx, gcpOptions(*computeEndpoint))
 		if err != nil {
@@ -558,6 +581,11 @@ func serve(ctx context.Context, args []string) error {
 	}
 	api := fenceapi.New(db, opts)
 	defer api.Close()
+	var gitHandler http.Handler
+	if git != nil {
+		git.SetAPI(api)
+		gitHandler = git
+	}
 	connected := api.ToolServerConnected
 	if runner != nil {
 		runner.Control, runner.Logins = api, api
@@ -660,7 +688,7 @@ func serve(ctx context.Context, args []string) error {
 			// heartbeat doesn't carry yet.
 			Agent: api.ToolChannelAgent,
 			Hub:   hub,
-		}, ToolVMAgent: api.ToolVMAgentAt})
+		}, ToolVMAgent: api.ToolVMAgentAt, Git: gitHandler})
 	}
 	if *gatewayTLS != "" {
 		// Gateway replicas: only a client whose certificate the leader

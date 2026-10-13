@@ -14,8 +14,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/repos"
@@ -53,6 +55,9 @@ type Host struct {
 	// repo's core.hooksPath names, never the repo's own. "" names
 	// /dev/null, which holds no hooks.
 	HooksDir string
+
+	mu    sync.Mutex
+	locks map[string]*repoLock // by repo id, while held or waited on
 }
 
 func (h *Host) ref(silo, id string) storage.Ref { return storage.Ref{Silo: silo, Repo: id} }
@@ -239,4 +244,151 @@ func (h *Host) git(ctx context.Context, dir string, args ...string) (string, err
 		return "", fmt.Errorf("gitstore: git %s: %w", args[0], err)
 	}
 	return out.String(), nil
+}
+
+// Lock takes silo's repo id's lock, which serializes its pushes and
+// anything else that changes its refs (local-git.md, "How a request
+// is served"). Fetches never take it. The returned function releases
+// it.
+func (h *Host) Lock(id string) (unlock func()) {
+	h.mu.Lock()
+	if h.locks == nil {
+		h.locks = map[string]*repoLock{}
+	}
+	l := h.locks[id]
+	if l == nil {
+		l = &repoLock{}
+		h.locks[id] = l
+	}
+	l.users++
+	h.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		h.mu.Lock()
+		if l.users--; l.users == 0 {
+			delete(h.locks, id)
+		}
+		h.mu.Unlock()
+	}
+}
+
+type repoLock struct {
+	mu    sync.Mutex
+	users int // holders and waiters, under Host.mu
+}
+
+// Refs reads every ref of silo's repo id, hidden ones included, by
+// name.
+func (h *Host) Refs(ctx context.Context, silo, id string) (map[string]string, error) {
+	p, err := h.Path(silo, id)
+	if err != nil {
+		return nil, err
+	}
+	out, err := h.git(ctx, p, "for-each-ref", "--format=%(objectname) %(refname)")
+	if err != nil {
+		return nil, err
+	}
+	refs := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if sha, name, ok := strings.Cut(line, " "); ok {
+			refs[name] = sha
+		}
+	}
+	return refs, nil
+}
+
+// Size measures silo's repo id on disk.
+func (h *Host) Size(ctx context.Context, silo, id string) (int64, error) {
+	u, err := h.Storage.Usage(ctx, h.ref(silo, id))
+	return u.Bytes, err
+}
+
+// Maintain runs git maintenance run --auto in silo's repo id, as the
+// git service does after a push, under the repo's lock. Nothing is
+// pruned that any ref reaches, archive refs included.
+func (h *Host) Maintain(ctx context.Context, silo, id string) error {
+	p, err := h.Path(silo, id)
+	if err != nil {
+		return err
+	}
+	_, err = h.git(ctx, p, h.configArgs("maintenance", "run", "--auto", "--quiet")...)
+	return err
+}
+
+// configArgs is args with silod's config before them, as -c options,
+// so that it holds whatever the repo's own config says.
+func (h *Host) configArgs(args ...string) []string {
+	var out []string
+	for _, kv := range h.Config() {
+		out = append(out, "-c", kv[0]+"="+kv[1])
+	}
+	return append(out, args...)
+}
+
+// Command is git with silod's config and its scrubbed environment,
+// in the bare repo at dir, running args; extra is added to the
+// environment. The git service runs upload-pack and receive-pack so.
+func (h *Host) Command(ctx context.Context, dir string, extra []string, args ...string) *exec.Cmd {
+	bin := h.Git
+	if bin == "" {
+		bin = "git"
+	}
+	cmd := exec.CommandContext(ctx, bin, h.configArgs(args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(Env(), extra...)
+	return cmd
+}
+
+// Archives lists silo's repo id's local archive refs, oldest first.
+func (h *Host) Archives(ctx context.Context, silo, id string) ([]repos.Archive, error) {
+	refs, err := h.Refs(ctx, silo, id)
+	if err != nil {
+		return nil, err
+	}
+	out := []repos.Archive{}
+	for name, sha := range refs {
+		rest, ok := strings.CutPrefix(name, HideRefs)
+		if !ok {
+			continue
+		}
+		t, ref, ok := repos.ParseArchive(rest)
+		if !ok {
+			continue
+		}
+		out = append(out, repos.Archive{Name: rest, Ref: ref, Commit: sha, Time: t})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// RestoreRef makes branch, which must not exist, at the commit of
+// silo's repo id's archive ref archive (a name Archives lists), under
+// the repo's lock. It returns the commit.
+func (h *Host) RestoreRef(ctx context.Context, silo, id, archive, branch string) (string, error) {
+	if !repos.ValidBranch(branch) {
+		return "", fmt.Errorf("gitstore: invalid branch %q", branch)
+	}
+	unlock := h.Lock(id)
+	defer unlock()
+	refs, err := h.Refs(ctx, silo, id)
+	if err != nil {
+		return "", err
+	}
+	sha, ok := refs[HideRefs+strings.TrimPrefix(archive, HideRefs)]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", repos.ErrNoArchive, archive)
+	}
+	if _, ok := refs["refs/heads/"+branch]; ok {
+		return "", fmt.Errorf("%w: %s", repos.ErrRefExists, branch)
+	}
+	p, err := h.Path(silo, id)
+	if err != nil {
+		return "", err
+	}
+	// The zero old value makes git refuse a branch made meanwhile.
+	if _, err := h.git(ctx, p, "update-ref", "refs/heads/"+branch, sha, strings.Repeat("0", len(sha))); err != nil {
+		return "", err
+	}
+	return sha, nil
 }
