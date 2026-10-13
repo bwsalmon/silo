@@ -15,6 +15,9 @@ const (
 	KindMirrorAdopt    = "mirror.adopt"
 	KindMirrorStalled  = "mirror_stalled"
 	KindMirrorDiverged = "mirror_diverged"
+	// KindMirrorIndexDiverged is the submodule index's branch found with
+	// a commit silod didn't write; silod stops writing it (§7).
+	KindMirrorIndexDiverged = "mirror_index_diverged"
 )
 
 // The states of a repo's mirror once there is one (local-git.md, "The
@@ -37,6 +40,9 @@ type MirrorSettings struct {
 	Credential  string `json:"credential,omitempty"`
 	Prefix      string `json:"prefix,omitempty"`
 	IndexBranch string `json:"index_branch,omitempty"`
+	// NoIndex turns the submodule index off: the branch is left as it
+	// is and no longer updated.
+	NoIndex bool `json:"no_index,omitempty"`
 }
 
 // MirrorStatus is GET /silo/v1/mirror: the mirror's configuration and
@@ -48,6 +54,13 @@ type MirrorStatus struct {
 	IndexBranch string `json:"index_branch,omitempty"`
 	// Credential is the credential's kind, ssh or https, never itself.
 	Credential string `json:"credential,omitempty"`
+	// IndexTip is the last submodule index commit silod pushed.
+	// IndexDiverged says why silod stopped writing the index, if it
+	// has: someone else pushed to its branch; silo mirror set resumes
+	// it. IndexError is the last index pass's failure.
+	IndexTip      string `json:"index_tip,omitempty"`
+	IndexDiverged string `json:"index_diverged,omitempty"`
+	IndexError    string `json:"index_error,omitempty"`
 	// Paused says why no passes run, if none do: report-only mode
 	// after a restore (local-git.md, "After a restore").
 	Paused string `json:"paused,omitempty"`

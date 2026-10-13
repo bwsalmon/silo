@@ -113,7 +113,7 @@ commands:
                                     override a price (root only; --delete removes it)
   reconcile [--apply]               show the reconcile's mode, or leave report-only
                                     after a restore (root only)
-  mirror set --url u --credential-file f [--prefix silo] [--index-branch main]
+  mirror set --url u --credential-file f [--prefix silo] [--index-branch main | --no-index]
                                     mirror every repo into an uber repo (root only)
   mirror status [--all]             the repos that aren't in sync, and why
   mirror retry [repo]               run a repo's pass now, or retry every repo

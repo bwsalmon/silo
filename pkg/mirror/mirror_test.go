@@ -64,6 +64,7 @@ type env struct {
 	m     *mirror.Mirror
 	silos map[string]*tree.Silo
 	work  string // a scratch repo to make commits in
+	dir   string // the test's data directory
 }
 
 func newEnv(t *testing.T, o mirror.Options) *env {
@@ -81,7 +82,7 @@ func newEnv(t *testing.T, o mirror.Options) *env {
 	if err := db.Migrate(ctx, db.Latest()); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, db: db, silos: map[string]*tree.Silo{}, proxy: &proxy{}}
+	e := &env{t: t, db: db, silos: map[string]*tree.Silo{}, proxy: &proxy{}, dir: dir}
 	e.proxy.mode.Store("")
 	err = db.Tx(ctx, func(tx store.Tx) error {
 		root, err := tree.CreateRoot(ctx, tx, "root", tree.BackingLocal, nil)
