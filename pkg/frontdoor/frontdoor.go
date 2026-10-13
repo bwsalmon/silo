@@ -113,7 +113,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		silo, err := h.member(r.Context(), id)
+		silo, err := MemberSilo(r.Context(), h.st, id)
 		if err != nil {
 			refuse(w, path, http.StatusServiceUnavailable, "silo: reading the member table: "+err.Error())
 			return
@@ -127,11 +127,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.opts.API.ServeHTTP(w, r.WithContext(fenceapi.ContextWithCaller(r.Context(), caller)))
 }
 
-// member is the silo identity is mapped to, or "" if none (or if its
-// silo is gone).
-func (h *handler) member(ctx context.Context, identity string) (string, error) {
+// MemberSilo is the silo identity is mapped to, or "" if none (or if
+// its silo is gone): how every front door, this one and the host's
+// registry port (package hostdoor), maps its caller.
+func MemberSilo(ctx context.Context, st store.Store, identity string) (string, error) {
 	var silo string
-	err := h.st.Tx(ctx, func(tx store.Tx) error {
+	err := st.Tx(ctx, func(tx store.Tx) error {
 		id, err := fenceapi.MemberSilo(ctx, tx, identity)
 		if err != nil || id == "" {
 			return err

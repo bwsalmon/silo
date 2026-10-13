@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/units"
+	"github.com/bwsalmon/silo/pkg/hostdoor"
 	"github.com/bwsalmon/silo/pkg/install"
 	installgcp "github.com/bwsalmon/silo/pkg/install/gcp"
 	localinstall "github.com/bwsalmon/silo/pkg/install/local"
@@ -131,6 +132,8 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	fs.BoolVar(&system, "system", false, "the system install: run as root, create the silo account, and write system units with User=silo")
 	fs.StringVar(&cfg.DataDir, "data-dir", "", "the data directory (default ~/.local/share/silo, or /var/lib/silo with --system)")
 	fs.StringVar(&cfg.Silod, "silod", "", "the silod binary the units run (default the one beside silo, else on PATH)")
+	fs.IntVar(&cfg.RegistryHostPort, "registry-host-port", localinstall.DefaultRegistryHostPort,
+		fmt.Sprintf("serve the registry to host clients (crane, skopeo, oras) on 127.0.0.1 at this port, such as %d; 0 turns it off", hostdoor.Port))
 	fs.BoolVar(&dryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&yes, "yes", false, "don't ask for confirmation")
 	fs.StringVar(&output, "output", "table", "the plan's format: table or json")
@@ -144,6 +147,9 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	}
 	if output == "json" && !dryRun {
 		return usagef("--output json is for --dry-run: an install prints its plan as a table")
+	}
+	if cfg.RegistryHostPort < 0 || cfg.RegistryHostPort > 65535 {
+		return usagef("--registry-host-port %d: want a port, or 0 to turn the host port off", cfg.RegistryHostPort)
 	}
 	cfg.Mode = units.Rootless
 	if system {

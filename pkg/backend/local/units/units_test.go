@@ -63,6 +63,18 @@ func TestRootless(t *testing.T) {
 	}
 }
 
+// The registry's host port is a flag on silod's ExecStart, and only
+// when it is on.
+func TestRegistryHostPort(t *testing.T) {
+	base := "ExecStart=/s serve --backend=local --data-dir /d --migrate --socket %t/silo/silo.sock"
+	for port, want := range map[int]string{0: base, 5115: base + " --registry-host-listen 127.0.0.1:5115"} {
+		m := unitMap(t, Config{Mode: Rootless, Silod: "/s", DataDir: "/d", RegistryHostPort: port})
+		if !slices.Contains(lines(m[Silod]), want) {
+			t.Errorf("port %d: silod.service has no line %q:\n%s", port, want, m[Silod])
+		}
+	}
+}
+
 func TestSystem(t *testing.T) {
 	c := Config{Mode: System, Silod: "/usr/bin/silod", DataDir: "/var/lib/silo"}
 	m := unitMap(t, c)
@@ -119,6 +131,7 @@ func TestValidate(t *testing.T) {
 		{Mode: Rootless, Silod: "/s", DataDir: "rel"},
 		{Mode: Rootless, Silod: "/s", DataDir: "/my data"},
 		{Mode: System, Silod: "/s", DataDir: "/d", User: "a%b"},
+		{Mode: Rootless, Silod: "/s", DataDir: "/d", RegistryHostPort: 65536},
 	} {
 		if _, err := Units(c); err == nil {
 			t.Errorf("Units(%+v) succeeded", c)

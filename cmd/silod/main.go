@@ -65,6 +65,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/gitserve"
 	"github.com/bwsalmon/silo/pkg/gwtls"
 	"github.com/bwsalmon/silo/pkg/harness"
+	"github.com/bwsalmon/silo/pkg/hostdoor"
 	"github.com/bwsalmon/silo/pkg/leader"
 	"github.com/bwsalmon/silo/pkg/mirror"
 	"github.com/bwsalmon/silo/pkg/modelproxy"
@@ -399,6 +400,7 @@ func serve(ctx context.Context, args []string) error {
 	gatewayRegistry := fs.String("gateway-registry", "", "with --gateway-tls-listen: serve gateway replicas, which have no token, reads of this image repository (<host>/<path>) with silod's own credentials")
 	homeRegion := fs.String("home-region", "", "the home region, where the gateway replicas' MIG is (with --gateway-replicas)")
 	frontDoorAddr := fs.String("front-door-listen", "", fmt.Sprintf("serve the front door on this TCP address (install's is :%d): callers with a Google ID token, mapped by the member table", frontdoor.Port))
+	registryHostAddr := fs.String("registry-host-listen", "", fmt.Sprintf("with --backend=local: serve the registry to host clients on this loopback TCP address (install's is 127.0.0.1:%d, from --registry-host-port), each connection as its peer uid's member silo, by inet_diag", hostdoor.Port))
 	frontDoorAudience := fs.String("front-door-audience", "", "the audience a front-door ID token must carry (default silo:<--host-project>)")
 	controlReplicas := fs.Int("control-replicas", 1, "how many silod replicas share the store; above 1 needs --store=postgres")
 	reconcileMode := fs.String("reconcile", "", "report-only: the reconcile only reports orphans, whatever the database says (default: as the database says)")
@@ -414,6 +416,17 @@ func serve(ctx context.Context, args []string) error {
 	fs.Parse(args)
 	if *socket == "" && *listen == "" && *gatewaySocket == "" && *frontDoorAddr == "" && *gatewayTLS == "" {
 		return errors.New("give --socket, --listen, --gateway-socket, --gateway-tls-listen, --front-door-listen, or several")
+	}
+	if *registryHostAddr != "" {
+		if *backendKind != local.Kind {
+			return errors.New("--registry-host-listen is the local backend's")
+		}
+		// The peer's uid is the kernel's word only for a peer on this
+		// host: loopback, and nothing else.
+		ap, err := netip.ParseAddrPort(*registryHostAddr)
+		if err != nil || !ap.Addr().IsLoopback() {
+			return fmt.Errorf("--registry-host-listen %q: want a loopback address and port, such as %s", *registryHostAddr, hostdoor.Addr(hostdoor.Port))
+		}
 	}
 	if *frontDoorAddr != "" && *frontDoorAudience == "" {
 		if *hostProject == "" {
@@ -782,6 +795,17 @@ func serve(ctx context.Context, args []string) error {
 		}
 		log.Printf("serving the front door on %s, for ID tokens with audience %s", l.Addr(), *frontDoorAudience)
 		go func() { errc <- fsrv.Serve(l) }()
+	}
+	if *registryHostAddr != "" {
+		// The registry service isn't wired into silod yet (step 27b):
+		// until it is, the host port maps its callers and answers 404.
+		var reg http.Handler
+		hs, err := hostdoor.Start(*registryHostAddr, db, reg)
+		if err != nil {
+			return err
+		}
+		defer hs.Close()
+		log.Printf("serving the registry to host clients on %s, by peer uid", hs.Addr())
 	}
 	var gatewayHandler http.Handler
 	if *gatewaySocket != "" || *gatewayTLS != "" {
