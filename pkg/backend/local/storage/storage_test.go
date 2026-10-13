@@ -137,7 +137,7 @@ func TestMeterOverQuota(t *testing.T) {
 	}
 	var child *tree.Silo
 	if err := db.Tx(ctx, func(tx store.Tx) error {
-		root, err := tree.CreateRoot(ctx, tx, "root", nil)
+		root, err := tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}

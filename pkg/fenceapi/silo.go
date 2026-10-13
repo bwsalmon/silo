@@ -32,6 +32,8 @@ type Silo struct {
 	GrantPolicy   Owned[GrantPolicy]                `json:"grant_policy"`
 	Control       Control                           `json:"control"`
 	AgentPolicy   Owned[AgentPolicy]                `json:"agent_policy"`
+	Isolation     Owned[Isolation]                  `json:"isolation"`
+	Ingress       Owned[string]                     `json:"ingress"`
 	OwnerAgent    *string                           `json:"owner_agent"`
 	State         string                            `json:"state"`
 	OverCommitted []OverCommit                      `json:"over_committed"`
@@ -193,6 +195,8 @@ func (s *Server) object(ctx context.Context, tx store.Tx, chain []*tree.Silo) (*
 	out.GrantPolicy = Owned[GrantPolicy]{Own: own.Grant, Effective: eff.Grant}
 	out.AgentPolicy = Owned[AgentPolicy]{Own: own.Agent, Effective: eff.Agent}
 	out.Control = Control{Own: own.Control, Effective: eff.Control, EffectiveFrom: eff.ControlFrom}
+	out.Isolation = Owned[Isolation]{Own: own.Isolation, Effective: eff.Isolation}
+	out.Ingress = Owned[string]{Own: own.Ingress, Effective: eff.Ingress}
 	return out, nil
 }
 

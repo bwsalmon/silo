@@ -15,6 +15,20 @@ import (
 // A GCE region name: us-central1, europe-west4, me-central2.
 var regionName = regexp.MustCompile(`^[a-z]+(-[a-z]+)+[0-9]+$`)
 
+// Local is the local backend's one region, which every silo of a local
+// tree has (local-backend.md, "Classes", call L19).
+const Local = "local"
+
+// validRegion reports whether region is one a silo of backing may
+// have: a GCE region under the subnet backing, and only Local under the
+// local one.
+func validRegion(backing, region string) bool {
+	if backing == tree.BackingLocal {
+		return region == Local
+	}
+	return regionName.MatchString(region)
+}
+
 // Regions returns a silo's allowed regions, sorted.
 func Regions(ctx context.Context, tx store.Tx, silo string) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT region FROM silo_regions WHERE silo = ? ORDER BY region`, silo)
@@ -58,7 +72,10 @@ func SetRegions(ctx context.Context, tx store.Tx, silo string, regions []string)
 	}
 	want := map[string]bool{}
 	for _, r := range regions {
-		if !regionName.MatchString(r) {
+		if !validRegion(s.Backing, r) {
+			if s.Backing == tree.BackingLocal {
+				return invalid("%q is not a region of the local backend, which has only %q", r, Local)
+			}
 			return invalid("%q is not a region name", r)
 		}
 		want[r] = true

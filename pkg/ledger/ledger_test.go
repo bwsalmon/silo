@@ -92,7 +92,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{db: newDB(t)}
 	do(t, f.db, func(tx store.Tx) error {
 		var err error
-		if f.root, err = tree.CreateRoot(ctx, tx, "root", nil); err != nil {
+		if f.root, err = tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil); err != nil {
 			return err
 		}
 		if err := ledger.SetRegions(ctx, tx, f.root.ID, []string{"us-central1", "europe-west4"}); err != nil {

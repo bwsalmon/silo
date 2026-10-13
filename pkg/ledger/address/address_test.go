@@ -87,7 +87,7 @@ func newWorld(t *testing.T) *world {
 	t.Helper()
 	w := &world{db: newDB(t)}
 	do(t, w.db, func(tx store.Tx) error {
-		r, err := tree.CreateRoot(ctx, tx, "root", nil)
+		r, err := tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}
@@ -209,7 +209,7 @@ func TestRootBlock(t *testing.T) {
 	// The defaults: 10.0.0.0/8 less the two /24s at its top.
 	db := newDB(t)
 	do(t, db, func(tx store.Tx) error {
-		r, err := tree.CreateRoot(ctx, tx, "root", nil)
+		r, err := tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}

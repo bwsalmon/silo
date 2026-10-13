@@ -85,6 +85,9 @@ func writeSilo(w *tw, s *client.Silo) {
 	w.row("Control:", fmt.Sprintf("own %s, effective %s (from %s)", s.Control.Own, s.Control.Effective, s.Control.EffectiveFrom))
 	w.row("Egress:", fmt.Sprintf("allow %s, deny %s (own: allow %s, deny %s)",
 		orNone(s.Egress.Effective.Allow), orNone(s.Egress.Effective.Deny), orNone(s.Egress.Own.Allow), orNone(s.Egress.Own.Deny)))
+	w.row("Isolation:", fmt.Sprintf("%s, default %s (own: %s, default %s)", orNone(s.Isolation.Effective.Allowed),
+		orDash(s.Isolation.Effective.Default), orNone(s.Isolation.Own.Allowed), orDash(s.Isolation.Own.Default)))
+	w.row("Ingress:", fmt.Sprintf("%s (own: %s)", s.Ingress.Effective, s.Ingress.Own))
 	w.row("Grant policy:", fmt.Sprintf("%s (own: %s)", kvs(s.GrantPolicy.Effective), kvs(s.GrantPolicy.Own)))
 	if a := s.AgentPolicy.Effective; len(a.Credentials)+len(a.Adapters)+len(a.Models) > 0 || a.MaxLease != "" {
 		w.row("Agent policy:", fmt.Sprintf("credentials %s, adapters %s, models %s, max lease %s",

@@ -222,6 +222,20 @@ func TestCreatePatchAndDescribe(t *testing.T) {
 	if ci.Control.Own != "full" {
 		t.Errorf("patch --control inherit: %+v", ci.Control)
 	}
+
+	// Isolation and ingress, on create and patch.
+	out = d.ok(d.root, "create", "/team-a/vm", "--address", "/24", "--backing", "subnet",
+		"--isolation", "vm,sandbox", "--isolation-default", "sandbox", "--ingress", "none")
+	contains(t, "create --isolation", out, "Isolation:", "vm,sandbox, default sandbox", "Ingress:", "none (own: none)")
+	var vm client.Silo
+	d.json(d.root, &vm, "patch", "/team-a/vm", "--isolation", "vm")
+	if strings.Join(vm.Isolation.Own.Allowed, ",") != "vm" || vm.Isolation.Own.Default != "vm" || vm.Ingress.Effective != "none" {
+		t.Errorf("patch --isolation vm: %+v %+v", vm.Isolation, vm.Ingress)
+	}
+	r := d.silo(d.root, "create", "/team-a/vm/x", "--address", "/26", "--isolation", "sandbox")
+	contains(t, "looser isolation", r.stderr, "LOOSER_THAN_PARENT")
+	r = d.silo(d.root, "patch", "/team-a/vm", "--backing", "local")
+	contains(t, "patch --backing", r.stderr, "--backing can't be patched")
 }
 
 func TestErrors(t *testing.T) {

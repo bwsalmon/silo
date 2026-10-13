@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/tree"
 )
 
-// Each silo has four policies of its own, stored as JSON in
+// Each silo has six policies of its own, stored as JSON in
 // silo_policies, and an effective value of each worked out down the
 // tree from the root: the silo's own narrowed by every ancestor's.
 
@@ -66,6 +67,38 @@ func (p AgentPolicy) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// Isolation is the isolation policy (local-backend.md, "In a silo's
+// policy", call L1): the classes containers in the silo may run in, and
+// the one a container that names none gets. The effective allowed is
+// the intersection down the tree.
+type Isolation struct {
+	Allowed []string `json:"allowed"`
+	Default string   `json:"default"`
+}
+
+// The isolation classes, strongest first.
+const (
+	IsolationVM      = "vm"
+	IsolationSandbox = "sandbox"
+)
+
+// IsolationClasses are every isolation class, strongest first. The
+// root's isolation allows them all unless install narrows it.
+var IsolationClasses = []string{IsolationVM, IsolationSandbox}
+
+// RootIsolation is the root's isolation unless bootstrap is given
+// another.
+func RootIsolation() Isolation {
+	return Isolation{Allowed: append([]string{}, IsolationClasses...), Default: IsolationVM}
+}
+
+// The ingress policies (local-backend.md, "Published ports"): whether a
+// published port also listens on the host's loopback.
+const (
+	IngressNone = "none"
+	IngressHost = "host"
+)
+
 // The control policies, strictest first (fence-api.md, "Control
 // policy", SV-12). control.go enforces them.
 const (
@@ -87,27 +120,30 @@ var RootGrantPolicy = GrantPolicy{"exports": "allow", "links": "deny"}
 
 // policies is one silo's own row.
 type policies struct {
-	Egress  Egress
-	Grant   GrantPolicy
-	Agent   AgentPolicy
-	Control string
+	Egress    Egress
+	Grant     GrantPolicy
+	Agent     AgentPolicy
+	Control   string
+	Isolation Isolation
+	Ingress   string
 }
 
 func readPolicies(ctx context.Context, tx store.Tx, silo string) (*policies, error) {
-	var eg, gp, ap, ctl string
-	err := tx.QueryRow(ctx, `SELECT egress, grant_policy, agent_policy, control FROM silo_policies WHERE silo = ?`, silo).
-		Scan(&eg, &gp, &ap, &ctl)
+	var eg, gp, ap, ctl, iso, ing string
+	err := tx.QueryRow(ctx, `SELECT egress, grant_policy, agent_policy, control, isolation, ingress FROM silo_policies WHERE silo = ?`, silo).
+		Scan(&eg, &gp, &ap, &ctl, &iso, &ing)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull}, nil
+		return &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull,
+			Isolation: RootIsolation(), Ingress: IngressNone}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	p := &policies{Control: ctl}
+	p := &policies{Control: ctl, Ingress: ing}
 	for _, f := range []struct {
 		s string
 		v any
-	}{{eg, &p.Egress}, {gp, &p.Grant}, {ap, &p.Agent}} {
+	}{{eg, &p.Egress}, {gp, &p.Grant}, {ap, &p.Agent}, {iso, &p.Isolation}} {
 		if err := json.Unmarshal([]byte(f.s), f.v); err != nil {
 			return nil, fmt.Errorf("silo %s policies: %w", silo, err)
 		}
@@ -116,6 +152,7 @@ func readPolicies(ctx context.Context, tx store.Tx, silo string) (*policies, err
 	if p.Grant == nil {
 		p.Grant = GrantPolicy{}
 	}
+	p.Isolation = normIsolation(p.Isolation)
 	return p, nil
 }
 
@@ -123,15 +160,17 @@ func writePolicies(ctx context.Context, tx store.Tx, silo string, p *policies) e
 	eg, _ := json.Marshal(normEgress(p.Egress))
 	gp, _ := json.Marshal(p.Grant)
 	ap, _ := json.Marshal(p.Agent)
+	iso, _ := json.Marshal(normIsolation(p.Isolation))
 	now, err := tx.Now(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO silo_policies (silo, egress, grant_policy, agent_policy, control, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+	_, err = tx.Exec(ctx, `INSERT INTO silo_policies (silo, egress, grant_policy, agent_policy, control, isolation, ingress, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (silo) DO UPDATE SET egress = excluded.egress, grant_policy = excluded.grant_policy,
-			agent_policy = excluded.agent_policy, control = excluded.control, updated_at = excluded.updated_at`,
-		silo, string(eg), string(gp), string(ap), p.Control, store.Millis(now))
+			agent_policy = excluded.agent_policy, control = excluded.control, isolation = excluded.isolation,
+			ingress = excluded.ingress, updated_at = excluded.updated_at`,
+		silo, string(eg), string(gp), string(ap), p.Control, string(iso), p.Ingress, store.Millis(now))
 	return err
 }
 
@@ -145,6 +184,49 @@ func normEgress(e Egress) Egress {
 	return e
 }
 
+// normIsolation writes allowed strongest first, and fills in a missing
+// default with the strongest class allowed.
+func normIsolation(i Isolation) Isolation {
+	out := Isolation{Allowed: []string{}, Default: i.Default}
+	for _, c := range IsolationClasses {
+		if slices.Contains(i.Allowed, c) {
+			out.Allowed = append(out.Allowed, c)
+		}
+	}
+	// A class this release doesn't know stays, for checkIsolation to
+	// refuse.
+	for _, c := range i.Allowed {
+		if !slices.Contains(IsolationClasses, c) && !slices.Contains(out.Allowed, c) {
+			out.Allowed = append(out.Allowed, c)
+		}
+	}
+	if out.Default == "" && len(out.Allowed) > 0 {
+		out.Default = out.Allowed[0]
+	}
+	return out
+}
+
+// narrowIsolation is parent's effective isolation narrowed by own:
+// the classes both allow, and own's default if that is one of them, or
+// else the strongest that is. A silo whose ancestors have since
+// narrowed past all its own classes may run nothing, and has no
+// default.
+func narrowIsolation(parent, own Isolation) Isolation {
+	out := Isolation{Allowed: []string{}}
+	for _, c := range parent.Allowed {
+		if slices.Contains(own.Allowed, c) {
+			out.Allowed = append(out.Allowed, c)
+		}
+	}
+	switch {
+	case slices.Contains(out.Allowed, own.Default):
+		out.Default = own.Default
+	case len(out.Allowed) > 0:
+		out.Default = out.Allowed[0]
+	}
+	return out
+}
+
 // effective is a silo's effective policies.
 type effective struct {
 	Egress      Egress
@@ -152,6 +234,8 @@ type effective struct {
 	Agent       AgentPolicy // lists nil where every ancestor allows everything
 	Control     string
 	ControlFrom string // the path of the silo whose setting wins
+	Isolation   Isolation
+	Ingress     string // host only where every silo up to the root has host
 }
 
 // effectiveOf works out the effective policies of chain's last silo,
@@ -174,6 +258,8 @@ func effectiveOf(ctx context.Context, tx store.Tx, chain []*tree.Silo, own *poli
 				Agent:       AgentPolicy{MaxLease: formatDuration(RootMaxLease)},
 				Control:     ControlFull,
 				ControlFrom: s.Path,
+				Isolation:   narrowIsolation(RootIsolation(), p.Isolation),
+				Ingress:     p.Ingress,
 			}
 			for k, v := range p.Grant {
 				eff.Grant[k] = v
@@ -198,6 +284,10 @@ func effectiveOf(ctx context.Context, tx store.Tx, chain []*tree.Silo, own *poli
 		eff.Agent = narrowAgent(eff.Agent, p.Agent)
 		if controlRank[p.Control] < controlRank[eff.Control] {
 			eff.Control, eff.ControlFrom = p.Control, s.Path
+		}
+		eff.Isolation = narrowIsolation(eff.Isolation, p.Isolation)
+		if p.Ingress != IngressHost {
+			eff.Ingress = IngressNone
 		}
 	}
 	return eff, nil
@@ -346,6 +436,31 @@ func checkAgent(a AgentPolicy) error {
 	return nil
 }
 
+func checkIsolation(i Isolation) error {
+	bad := func(format string, args ...any) error {
+		return errorf(InvalidArgument, "isolation: "+format, args...).with("field", "isolation")
+	}
+	if len(i.Allowed) == 0 {
+		return bad("allowed is empty: want one or more of %s", strings.Join(IsolationClasses, ", "))
+	}
+	for _, c := range i.Allowed {
+		if !slices.Contains(IsolationClasses, c) {
+			return bad("class %q: want %s", c, strings.Join(IsolationClasses, " or "))
+		}
+	}
+	if !slices.Contains(i.Allowed, i.Default) {
+		return bad("default %q is not in allowed %v", i.Default, i.Allowed)
+	}
+	return nil
+}
+
+func checkIngress(i string) error {
+	if i != IngressHost && i != IngressNone {
+		return errorf(InvalidArgument, "ingress %q: want host or none", i).with("field", "ingress")
+	}
+	return nil
+}
+
 func checkControl(c string) error {
 	if _, ok := controlRank[c]; !ok {
 		return errorf(InvalidArgument, "control %q: want full, read or none", c).with("field", "control")
@@ -394,13 +509,24 @@ func looser(parent *effective, own *policies) error {
 		return errorf(LooserThanParent, "control %s is looser than the parent's %s (from %s)", own.Control, parent.Control, parent.ControlFrom).
 			with("policy", "control").with("parent", parent.Control)
 	}
+	for _, c := range own.Isolation.Allowed {
+		if !slices.Contains(parent.Isolation.Allowed, c) {
+			return errorf(LooserThanParent, "isolation class %s is not allowed to the parent", c).
+				with("policy", "isolation").with("class", c)
+		}
+	}
+	if own.Ingress == IngressHost && parent.Ingress != IngressHost {
+		return errorf(LooserThanParent, "ingress host is not allowed to the parent").
+			with("policy", "ingress").with("parent", parent.Ingress)
+	}
 	return nil
 }
 
 // narrower checks that a silo changing its own policies from old to
 // next only narrows them: no host, grant kind, credential, adapter or
 // model it didn't allow itself, no deny entry dropped, no longer
-// max_lease. Anything wider is PERMISSION_DENIED, since only an
+// max_lease, no isolation class it didn't allow, no ingress host it
+// didn't have. Anything wider is PERMISSION_DENIED, since only an
 // ancestor may widen a silo's policies.
 func narrower(old, next *policies) error {
 	deny := func(policy, format string, args ...any) error {
@@ -442,6 +568,14 @@ func narrower(old, next *policies) error {
 		if next.Agent.MaxLease == "" || err != nil || nd > od {
 			return deny("agent_policy", "max_lease can't be longer than %s", old.Agent.MaxLease)
 		}
+	}
+	for _, c := range next.Isolation.Allowed {
+		if !slices.Contains(old.Isolation.Allowed, c) {
+			return deny("isolation", "class %s is not allowed now", c)
+		}
+	}
+	if next.Ingress == IngressHost && old.Ingress != IngressHost {
+		return deny("ingress", "host is not allowed now")
 	}
 	return nil
 }
