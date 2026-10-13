@@ -480,7 +480,7 @@ alone:
 | `silos/<silo id>/volumes/<volume id>/` | Silo id, volume id | The volume row |
 | `silos/<silo id>/logs/<container id>/` | Container id | The container row |
 | `silos/<silo id>/agents/<agent id>/` | Agent id | The agent row |
-| `cache/containerd/` namespaces `silo-<silo id>`, containers labelled `dev.silo.container=<id>` | Silo id, container id | containerd's own records, matched to rows by label |
+| `containerd/` namespaces `silo-<silo id>`, containers labelled `dev.silo.container=<id>` | Silo id, container id | containerd's own records, matched to rows by label |
 | Network namespaces, bridges, veths, rules, slices | Not on disk | Rebuilt from rows at start |
 
 A directory or containerd record with no row is an **orphan**. A row
@@ -589,14 +589,21 @@ anywhere else. Runtime state (sockets, pids, pinned namespaces) is under
     logs/<container id>/          container logs, json-file framing, rotated
     repos/<repo id>.git/          hosted git repos, bare (part 3, local-git.md)
   mirror/                         the uber-repo mirror's own repos (part 3); kept, not precious
+  containerd/                     silo-containerd's root: the content store and its metadata (bolt); part 4, call L60
   cache/                          re-creatable; never data
-    containerd/                   content store, snapshots (writable layers), metadata
+    snapshots/                    the overlayfs snapshotter's root_path: containers' writable layers
     buildkit/                     buildkitd's state for granule wraps
     images-wrapped/               wrap outputs, if outside containerd
     runtimes/                     pinned runsc, shim, granule and probe images
 ```
 
-- **`layout.json`** holds `{"layout": 1, "data_dir_id": "<random>"}`.
+- **`layout.json`** holds `{"layout": 2, "data_dir_id": "<random>"}`.
+  Layout 1 kept containerd's whole root, snapshots included, at
+  `cache/containerd/`; layout 2 is part 4's
+  ([call L60](local-registry.md#pushed-images-are-data-call-l60)), and
+  its migration moves `cache/containerd/` to `containerd/` and the
+  overlayfs snapshotter's state to `cache/snapshots/`, each with one
+  rename on one filesystem.
   silod refuses a data directory with a newer layout, and migrates an
   older one forward in place, under the store's own migration rules
   ([`state.md`](state.md)). The id also appears in the store, so that a
@@ -696,8 +703,9 @@ type Ref struct {
 | `silos/<id>/logs/` | Kept, not precious | Lost logs are lost history. A backup may skip them. |
 | `silos/<id>/repos/` | **Yes** | Hosted git repos ([part 3](local-git.md#5-storage-and-quota)). Copied with `git bundle`, not file by file |
 | `mirror/` | Kept, not precious | The submodule index's own history, and the mirror's quarantine. Rebuilt from the store if lost |
-| `cache/containerd/` content and images | **No** | Re-pulled on demand, through the silo's egress policy (call L6). *Part 4* moves containerd's root to `<data-dir>/containerd/`, because content a registry repo references is the only copy of a pushed image, and **is** data ([`local-registry.md`, call L60](local-registry.md#pushed-images-are-data-call-l60)) |
-| `cache/containerd/` snapshots: **containers' writable layers** | **No, explicitly** | A container is re-created from its row with a fresh writable layer from its image. Docker's own guidance applies: data that matters goes in a volume. `local-backend.md` §14 gets this as a limitation. |
+| `containerd/` content referenced by a registry repo, and the store's repo and tag rows | **Yes** | The only copy of a pushed image. A later backup exports it per repo as an OCI image layout through the registry, never by copying the directory ([`local-registry.md`, call L60](local-registry.md#pushed-images-are-data-call-l60)) |
+| `containerd/` content referenced only by image records or the cache | No | Re-pulled on demand, through the silo's egress policy (call L6) |
+| `cache/snapshots/`: **containers' writable layers** | **No, explicitly** | A container is re-created from its row with a fresh writable layer from its image. Docker's own guidance applies: data that matters goes in a volume. `local-backend.md` §14 gets this as a limitation. |
 | `cache/buildkit/`, wrapped images, `cache/runtimes/` | **No** | Re-wrapped and re-fetched by digest |
 
 One consequence to state plainly: **an image that has gone from its

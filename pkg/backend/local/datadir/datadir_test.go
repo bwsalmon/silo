@@ -28,22 +28,25 @@ func TestOpenMakesTheLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	var l map[string]any
-	if err := json.Unmarshal(b, &l); err != nil || l["layout"] != 1.0 || l["data_dir_id"] != d.ID {
+	if err := json.Unmarshal(b, &l); err != nil || l["layout"] != 2.0 || l["data_dir_id"] != d.ID {
 		t.Errorf("layout.json %s: %v", b, err)
 	}
-	for name, mode := range map[string]os.FileMode{"state": 0o700, "keys": 0o700, "silos": 0o755, "cache": 0o755} {
+	for name, mode := range map[string]os.FileMode{
+		"state": 0o700, "keys": 0o700, "silos": 0o755, "containerd": 0o700, "cache": 0o755, "cache/snapshots": 0o700,
+	} {
 		fi, err := os.Stat(filepath.Join(path, name))
 		if err != nil || !fi.IsDir() || fi.Mode().Perm() != mode {
 			t.Errorf("%s: %v %v", name, fi, err)
 		}
 	}
 	entries, _ := os.ReadDir(path)
-	if len(entries) != 5 {
+	if len(entries) != 6 {
 		t.Errorf("data directory holds %v", entries)
 	}
 	if d.Store() != filepath.Join(path, "state", "silo.db") || d.StoreSpec() != "sqlite:"+d.Store() ||
-		d.Keys() != filepath.Join(path, "keys") || d.Silos() != filepath.Join(path, "silos") || d.Cache() != filepath.Join(path, "cache") {
-		t.Errorf("paths: %s %s %s %s", d.Store(), d.Keys(), d.Silos(), d.Cache())
+		d.Keys() != filepath.Join(path, "keys") || d.Silos() != filepath.Join(path, "silos") || d.Cache() != filepath.Join(path, "cache") ||
+		d.Containerd() != filepath.Join(path, "containerd") || d.Snapshots() != filepath.Join(path, "cache", "snapshots") {
+		t.Errorf("paths: %s %s %s %s %s %s", d.Store(), d.Keys(), d.Silos(), d.Cache(), d.Containerd(), d.Snapshots())
 	}
 
 	// Opening it again keeps its id, and makes a missing cache again.
@@ -52,8 +55,165 @@ func TestOpenMakesTheLayout(t *testing.T) {
 	if err != nil || again.ID != d.ID {
 		t.Fatalf("reopened: %+v %v, want id %s", again, err, d.ID)
 	}
-	if _, err := os.Stat(d.Cache()); err != nil {
-		t.Errorf("cache/ not made again: %v", err)
+	if _, err := os.Stat(d.Snapshots()); err != nil {
+		t.Errorf("cache/snapshots/ not made again: %v", err)
+	}
+}
+
+// writeLayout1 makes a layout-1 data directory as a layout-1 silod
+// left it, and returns its path.
+func writeLayout1(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir()
+	os.WriteFile(filepath.Join(path, "layout.json"), []byte(`{"layout": 1, "data_dir_id": "0123456789abcdef0123456789abcdef"}`+"\n"), 0o644)
+	for _, sub := range []string{"state", "keys", "silos", "cache"} {
+		os.Mkdir(filepath.Join(path, sub), 0o755)
+	}
+	os.WriteFile(filepath.Join(path, "state", "silo.db"), []byte("db"), 0o600)
+	return path
+}
+
+// checkLayout2 checks that layout.json says layout 2 with id.
+func checkLayout2(t *testing.T, path, id string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(path, "layout.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var l map[string]any
+	if err := json.Unmarshal(b, &l); err != nil || l["layout"] != 2.0 || l["data_dir_id"] != id {
+		t.Errorf("layout.json %s: %v", b, err)
+	}
+}
+
+func TestMigrateFromLayout1(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+
+	t.Run("no containerd", func(t *testing.T) {
+		path := writeLayout1(t)
+		d, err := datadir.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.ID != id {
+			t.Errorf("id %s, want %s", d.ID, id)
+		}
+		checkLayout2(t, path, id)
+		for _, dir := range []string{d.Containerd(), d.Snapshots()} {
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Errorf("%s: %v %v", dir, entries, err)
+			}
+		}
+		if b, _ := os.ReadFile(d.Store()); string(b) != "db" {
+			t.Errorf("store %q", b)
+		}
+	})
+
+	t.Run("with cache/containerd", func(t *testing.T) {
+		path := writeLayout1(t)
+		old := filepath.Join(path, "cache", "containerd")
+		files := map[string]string{
+			"io.containerd.content.v1.content/blobs/sha256/aa":   "blob",
+			"io.containerd.metadata.v1.bolt/meta.db":             "meta",
+			datadir.SnapshotterDir + "/metadata.db":              "snap meta",
+			datadir.SnapshotterDir + "/snapshots/1/fs/upper.txt": "upper",
+		}
+		for name, content := range files {
+			os.MkdirAll(filepath.Dir(filepath.Join(old, name)), 0o700)
+			os.WriteFile(filepath.Join(old, name), []byte(content), 0o600)
+		}
+		oldMeta, err := os.Stat(filepath.Join(old, "io.containerd.metadata.v1.bolt", "meta.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d, err := datadir.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkLayout2(t, path, id)
+		if _, err := os.Lstat(old); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cache/containerd/ still there: %v", err)
+		}
+		// The content store and its metadata are containerd/'s; the
+		// snapshotter's state is cache/snapshots/, its root_path.
+		for name, content := range files {
+			p := filepath.Join(d.Containerd(), name)
+			if rest, ok := strings.CutPrefix(name, datadir.SnapshotterDir+"/"); ok {
+				p = filepath.Join(d.Snapshots(), rest)
+			}
+			if b, err := os.ReadFile(p); err != nil || string(b) != content {
+				t.Errorf("%s: %q %v, want %q", p, b, err, content)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(d.Containerd(), datadir.SnapshotterDir)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("snapshotter state left in containerd/: %v", err)
+		}
+		// Moved, not copied.
+		if fi, err := os.Stat(filepath.Join(d.Containerd(), "io.containerd.metadata.v1.bolt", "meta.db")); err != nil || !os.SameFile(fi, oldMeta) {
+			t.Errorf("meta.db was copied, not renamed: %v", err)
+		}
+
+		// Opening it again changes nothing.
+		if _, err := datadir.Open(path); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(filepath.Join(d.Containerd(), "io.containerd.metadata.v1.bolt", "meta.db")); string(b) != "meta" {
+			t.Errorf("reopened: meta.db %q", b)
+		}
+	})
+
+	t.Run("finishes a migration a crash cut short", func(t *testing.T) {
+		// containerd/ moved, layout.json not yet rewritten.
+		path := writeLayout1(t)
+		os.MkdirAll(filepath.Join(path, "containerd", datadir.SnapshotterDir), 0o700)
+		os.WriteFile(filepath.Join(path, "containerd", datadir.SnapshotterDir, "metadata.db"), []byte("snap meta"), 0o600)
+		d, err := datadir.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkLayout2(t, path, id)
+		if b, err := os.ReadFile(filepath.Join(d.Snapshots(), "metadata.db")); err != nil || string(b) != "snap meta" {
+			t.Errorf("snapshotter state: %q %v", b, err)
+		}
+	})
+
+	t.Run("refuses to merge two roots", func(t *testing.T) {
+		path := writeLayout1(t)
+		os.MkdirAll(filepath.Join(path, "cache", "containerd"), 0o700)
+		os.MkdirAll(filepath.Join(path, "containerd", "something"), 0o700)
+		if _, err := datadir.Open(path); err == nil {
+			t.Fatal("opened with both cache/containerd/ and a non-empty containerd/")
+		}
+		b, _ := os.ReadFile(filepath.Join(path, "layout.json"))
+		if !strings.Contains(string(b), `"layout": 1`) {
+			t.Errorf("layout.json rewritten after a failed migration: %s", b)
+		}
+	})
+}
+
+func TestWipingCacheKeepsContainerd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data")
+	d, err := datadir.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := filepath.Join(d.Containerd(), "io.containerd.content.v1.content", "blobs", "sha256", "aa")
+	os.MkdirAll(filepath.Dir(blob), 0o700)
+	os.WriteFile(blob, []byte("pushed"), 0o600)
+	os.MkdirAll(filepath.Join(d.Snapshots(), "snapshots", "1"), 0o700)
+
+	if err := os.RemoveAll(d.Cache()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := datadir.Open(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(blob); err != nil || string(b) != "pushed" {
+		t.Errorf("pushed blob after wiping cache/: %q %v", b, err)
+	}
+	if entries, err := os.ReadDir(d.Snapshots()); err != nil || len(entries) != 0 {
+		t.Errorf("cache/snapshots/ after wiping cache/: %v %v", entries, err)
 	}
 }
 
@@ -70,9 +230,9 @@ func TestOpenRefuses(t *testing.T) {
 
 	// A newer layout.
 	newer := t.TempDir()
-	os.WriteFile(filepath.Join(newer, "layout.json"), []byte(`{"layout": 2, "data_dir_id": "x"}`), 0o644)
+	os.WriteFile(filepath.Join(newer, "layout.json"), []byte(`{"layout": 3, "data_dir_id": "x"}`), 0o644)
 	if _, err := datadir.Open(newer); !errors.Is(err, datadir.ErrNewerLayout) {
-		t.Errorf("layout 2: %v", err)
+		t.Errorf("layout 3: %v", err)
 	}
 
 	// A layout.json with no id.
