@@ -178,6 +178,14 @@ func (s *Server) mirror(q *request, rest string) {
 		writeError(q.w, err)
 		return
 	}
+	if method != http.MethodGet {
+		body, err := readBody(q.r)
+		if err != nil {
+			writeError(q.w, err)
+			return
+		}
+		q.r = q.r.WithContext(context.WithValue(ctx, bodyKey{}, body))
+	}
 	var out *MirrorStatus
 	switch {
 	case method == http.MethodGet:

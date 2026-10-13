@@ -1056,6 +1056,34 @@ can be filed on its own, in this order.
     Tested against a local uber repo served by `git http-backend`, with
     a fault-injecting proxy in front (refusals, timeouts, a rejected
     lease, a 2 GB-style size refusal). Depends on 20.
+
+    **Built (task 3424),** in `pkg/mirror`, with migration 0026
+    (`mirror_refs`, `mirror_repos`, `mirror_diverged`) and the
+    configuration in `settings` as `mirror.*`. Where it differs from
+    §8:
+    - The probe branch is `refs/heads/<prefix>/_silo-probe`. `.silo-probe`
+      isn't a valid ref name (a component can't start with a dot), and
+      no silo or repo can be named `_silo-probe`.
+    - `quarantine.git` is in `cache/mirror/`, not `mirror/`: it keeps
+      nothing that can't be fetched again, and the data directory's
+      layout is unchanged.
+    - The dirty set is the change log: `repo` and `repo.push` changes
+      make a repo dirty, `silo` and `policy` changes make every repo
+      dirty, and `mirror_repos.mirrored_seq` is what a pass covered.
+    - An adopted external tip is archived under
+      `.../<ts>-<seq>/external/<branch>` (`external/tags/<tag>` for a
+      tag). Archives the mirror makes itself (of a deleted repo's refs)
+      have a sequence of `m<n>`.
+    - No live ref is updated or deleted unless the push keeps its old
+      tip. So after `adopt --keep-external`, a local tip that doesn't
+      fast-forward the external one is held back as diverged again.
+    - Deleting a silo with `force` hands each repo to the mirror but
+      doesn't wait for it: the silo goes, and its repos are in
+      `pending_deletes` until archived.
+    - Not done yet: install's `--mirror-*` flags; the repo object's
+      `mirror.state`, which still says only `OFF` or `UNCONFIGURED`;
+      and `repos_pending_delete` in the root's `describe` (it is in
+      `silo mirror status`).
 22. **The submodule index, and checking GitHub.**
     - `mirror/index.git`, the generated tree, `.gitmodules` and
       README;
