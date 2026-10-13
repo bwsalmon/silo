@@ -24,14 +24,14 @@ func TestTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = db.Tx(ctx, func(tx store.Tx) error {
-		root, err := tree.CreateRoot(ctx, tx, "root", nil)
+		root, err := tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}
 		if !ids.Valid(root.ID) || root.Path != "/" || root.Depth != 0 || !root.IsRoot() {
 			t.Errorf("root = %+v", root)
 		}
-		if _, err := tree.CreateRoot(ctx, tx, "again", nil); !errors.Is(err, tree.ErrExists) {
+		if _, err := tree.CreateRoot(ctx, tx, "again", tree.BackingSubnet, nil); !errors.Is(err, tree.ErrExists) {
 			t.Errorf("a second root: %v", err)
 		}
 		a, err := tree.CreateChild(ctx, tx, root.ID, "team-a", tree.BackingSubnet, map[string]string{"team": "a"})
@@ -51,6 +51,10 @@ func TestTree(t *testing.T) {
 		}
 		if _, err := tree.CreateChild(ctx, tx, root.ID, "v", "vpc", nil); !errors.Is(err, tree.ErrInvalid) {
 			t.Errorf("backing vpc: %v", err)
+		}
+		// A tree has its root's backing throughout.
+		if _, err := tree.CreateChild(ctx, tx, root.ID, "l", tree.BackingLocal, nil); !errors.Is(err, tree.ErrInvalid) {
+			t.Errorf("a local child of a subnet root: %v", err)
 		}
 
 		// Down to the depth cap, and no further.
@@ -117,7 +121,7 @@ func TestIDsStartWithALetter(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = db.Tx(ctx, func(tx store.Tx) error {
-		root, err := tree.CreateRoot(ctx, tx, "root", nil)
+		root, err := tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil)
 		if err != nil {
 			return err
 		}

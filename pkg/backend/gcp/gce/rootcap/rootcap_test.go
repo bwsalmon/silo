@@ -48,7 +48,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	fx := &fixture{db: db, fake: fake.New(fake.Options{Project: proj, OperationLatency: time.Millisecond})}
 	do(t, db, func(tx store.Tx) error {
-		if fx.root, err = tree.CreateRoot(ctx, tx, "root", nil); err != nil {
+		if fx.root, err = tree.CreateRoot(ctx, tx, "root", tree.BackingSubnet, nil); err != nil {
 			return err
 		}
 		return ledger.SetRegions(ctx, tx, fx.root.ID, []string{usc, euw})

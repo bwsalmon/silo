@@ -931,6 +931,7 @@ func TestPostgres(t *testing.T) {
 		"Audit": TestAudit, "Preview": TestPreview, "ReservedAndConventions": TestReservedAndConventions,
 		"ControlPolicy": TestControlPolicy, "ManageGrants": TestManageGrants, "Exports": TestExports, "Links": TestLinks,
 		"AgentLifecycle": TestAgentLifecycle, "AgentOwnSession": TestAgentOwnSession, "AgentSealedAndManage": TestAgentSealedAndManage,
+		"IsolationAndIngress": TestIsolationAndIngress, "LocalBacking": TestLocalBacking,
 	} {
 		t.Run(name, fn)
 	}

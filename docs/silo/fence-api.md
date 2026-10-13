@@ -4,7 +4,9 @@
 
 Normative draft, part of the Silo design ([`README.md`](README.md)),
 written in task 1930. The control policy (sealed silos) and `manage`
-grants were added in task 1947. Marks such as "call 14" refer to
+grants were added in task 1947. The `isolation` and `ingress` policies
+and the `local` backing and region were added in task 3408, for the
+[local backend](local-backend.md). Marks such as "call 14" refer to
 [Calls made in this draft](README.md#calls-made-in-this-draft).
 
 The fence API is what every backend shares. It manages the tree, the
@@ -53,13 +55,13 @@ facade ([`gcp-backend.md`](gcp-backend.md#the-computev1-facade)).
 | `INVALID_ARGUMENT` | 400 | A malformed field, an unaligned range, a bad name |
 | `PERMISSION_DENIED` | 403 | The caller may not name that silo, or may not do that to it, or a `manage` grant doesn't cover the call (`details` names the grant and what is missing) |
 | `CONTROL_DENIED` | 403 | The caller's own effective `control` policy forbids the call: any call under `none`, a mutating call under `read`. `details` gives the policy and the silo it comes from |
-| `LOOSER_THAN_PARENT` | 403 | The change would give a child more than its parent has: a region, an egress host, a grant policy or a `control` policy that the parent lacks |
+| `LOOSER_THAN_PARENT` | 403 | The change would give a child more than its parent has: a region, an egress host, a grant policy, a `control` policy, an isolation class or `ingress: host` that the parent lacks |
 | `QUOTA_EXCEEDED` | 403 | Not enough free quota in the parent (or, for a facade call, in the silo) |
 | `RESOURCE_EXHAUSTED` | 429 | No free aligned slot of that size, the block cap, the depth cap, or the fence's rule budget |
 | `NOT_FOUND` | 404 | No such silo, grant or record visible to the caller |
 | `ALREADY_EXISTS` | 409 | A sibling with that name, or a grant with that name |
 | `FAILED_PRECONDITION` | 409 | The change would strand something: lowering quota below usage, removing a region still in use, releasing a non-empty block, deleting a non-empty silo without `force` |
-| `UNIMPLEMENTED` | 501 | A backing this deployment doesn't support (`vpc` and `project` in v1) |
+| `UNIMPLEMENTED` | 501 | A backing this deployment doesn't support (`vpc` and `project` in v1, and a child's backing other than its parent's) |
 | `UNAVAILABLE` | 503 | silod is restarting, its database is unreachable, or the cloud is refusing calls |
 
 A silo that the caller may not see returns `NOT_FOUND`, never
@@ -123,6 +125,8 @@ the target is: a sealed ancestor can't change its descendants either.
   "egress": {"own": {"allow": [], "deny": []}, "effective": {"allow": ["*.debian.org"], "deny": []}},
   "grant_policy": {"own": {"exports": "allow", "links": "deny"}, "effective": {"exports": "allow", "links": "deny"}},
   "control": {"own": "full", "effective": "full", "effective_from": "/team-a/ci"},
+  "isolation": {"own": {"allowed": ["vm", "sandbox"], "default": "vm"}, "effective": {"allowed": ["vm"], "default": "vm"}},
+  "ingress": {"own": "none", "effective": "none"},
   "agent_policy": {"own": {}, "effective": {"credentials": ["anthropic-api"], "adapters": ["claude-code"],
     "models": ["claude-*"], "max_lease": "24h"}},
   "owner_agent": null,
@@ -140,11 +144,57 @@ which happens only at the root when GCE's quota drops
 
 ### Backing {#SV-5}
 
-`{"kind": "subnet"}` in v1. `{"kind": "vpc"}` and
+`{"kind": "subnet"}` (the GCP backend) or `{"kind": "local"}` (the
+[local backend](local-backend.md)) in v1. `{"kind": "vpc"}` and
 `{"kind": "project"}` are reserved, with any options they turn out to
 need, and are refused with `UNIMPLEMENTED` until a backend supports
-them. A parent chooses the backing for each child. The default is
-`subnet`.
+them.
+
+- The root's backing is set at install. A tree has the root's backing
+  throughout: a child's defaults to its parent's, and a different one
+  is refused with `UNIMPLEMENTED`. Mixed nesting, a local child of a
+  GCE silo, comes later
+  ([`local-backend.md`, open question 10](local-backend.md)).
+- A `local` tree has one region, `local`, which every silo in it has
+  ([`local-backend.md`, "Classes"](local-backend.md#classes-call-l19)).
+  A `local` silo can't have a GCE region, and a `subnet` silo can't
+  have `local`.
+
+### Isolation and ingress policies
+
+Two policies the [local backend](local-backend.md) enforces. Every
+silo has both, whatever its backing; the GCP backend ignores them.
+
+**`isolation`** is the classes the silo's containers may run in, and
+the one a container gets when it names none
+([`local-backend.md`, "In a silo's policy"](local-backend.md#in-a-silos-policy)):
+
+```json
+"isolation": {"allowed": ["vm", "sandbox"], "default": "vm"}
+```
+
+- The classes are `vm` and `sandbox`, ordered by strength: `vm` is
+  stronger. `allowed` is always written strongest first.
+- `allowed` can't be empty, and `default` must be in it. A `default`
+  left out is the strongest class allowed.
+- The **effective** `allowed` is the intersection of the silo's own
+  and every ancestor's. The effective `default` is the silo's own if
+  that is still allowed, and otherwise the strongest class that is.
+- A child's `allowed` is a subset of its parent's effective one, or
+  `LOOSER_THAN_PARENT`. A parent that allows only `vm` makes its whole
+  subtree `vm`-only: that is how a parent requires `vm`.
+- The root's is set at install: every class the host offers, unless
+  the operator narrowed it.
+
+**`ingress`** is `host` or `none`: whether the silo's published ports
+also listen on the host's loopback
+([`local-backend.md`, "Published ports"](local-backend.md#published-ports)).
+
+- The effective value is `host` only if the silo's own and every
+  ancestor's is `host`.
+- A child's can be `host` only if its parent's effective value is, or
+  `LOOSER_THAN_PARENT`.
+- The root's is `host`, set at install. A child's defaults to `none`.
 
 ## Operations
 
@@ -174,6 +224,8 @@ recurses (ancestors only).
   "grant_policy": {"exports": "allow", "links": "deny"},
   "control": "full",
   "agent_policy": {"credentials": ["anthropic-api"], "max_lease": "8h"},
+  "isolation": {"allowed": ["vm"]},
+  "ingress": "none",
   "labels": {"team": "a"}
 }
 ```
@@ -182,12 +234,15 @@ recurses (ancestors only).
   `{"range": "10.1.16.0/20"}` (the parent picks it). It is required.
 - `regions` defaults to the parent's. `quota` and `model_budget_usd`
   default to nothing. `egress` defaults to deny all. `grant_policy`,
-  `agent_policy` and `control` default to the parent's effective
-  policy (call 54 for `control`).
-- Checks: depth ≤ 16; regions ⊆ the parent's; quota fits in the
-  parent's free; the range is aligned and free in the parent; egress,
-  grant, agent and control policy are no wider than the parent's
-  effective ones; the model budget fits in the parent's free budget.
+  `agent_policy`, `control` and `isolation` default to the parent's
+  effective policy (call 54 for `control`). An `isolation` with only a
+  `default` allows the parent's effective classes. `ingress` defaults
+  to `none`. `backing` defaults to the parent's.
+- Checks: depth ≤ 16; the backing is the parent's; regions ⊆ the
+  parent's; quota fits in the parent's free; the range is aligned and
+  free in the parent; egress, grant, agent, control, isolation and
+  ingress policy are no wider than the parent's effective ones; the
+  model budget fits in the parent's free budget.
 - Effects: one transaction that records the silo and moves the quota
   and the block, then a fence update. The call returns once the fence
   rules are in place, because until then the child's addresses are
@@ -215,10 +270,13 @@ recurses (ancestors only).
 
 `PATCH /silo/v1/silos/{silo}` with any of `regions`, `quota`,
 `model_budget_usd`, `max_blocks`, `egress`, `grant_policy`,
-`agent_policy`, `control`, `labels`. Called by an ancestor, or by the
-silo itself to narrow its own `egress`, `grant_policy` and
-`agent_policy` if its control policy is `full`. `control` is set only
-by an ancestor ([Control policy](#control-policy)).
+`agent_policy`, `control`, `isolation`, `ingress`, `labels`. Called by
+an ancestor, or by the silo itself to narrow its own `egress`,
+`grant_policy`, `agent_policy`, `isolation` and `ingress` if its
+control policy is `full`. `control` is set only by an ancestor
+([Control policy](#control-policy)). The backing never changes, and
+the root's `isolation` and `ingress` are set at install, not with
+PATCH.
 
 - `quota` is replaced per region and class as given. A class not
   given is unchanged. To return a class to zero, give `0`.
@@ -228,6 +286,12 @@ by an ancestor ([Control policy](#control-policy)).
 - Narrowing `egress` or `grant_policy` applies to the subtree at once:
   the gateway closes proxied connections and denies hosts that the
   change no longer allows.
+- `isolation` replaces the fields it gives. A new `allowed` that drops
+  the `default` moves it to the strongest class kept. Like `control`,
+  an `isolation` or `ingress` the call leaves alone isn't held to the
+  parent's: an ancestor narrowing keeps its descendants' own settings,
+  narrows their effective ones, and gives them back when it widens
+  again.
 
 **Address changes** are actions:
 

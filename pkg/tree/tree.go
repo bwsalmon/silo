@@ -31,8 +31,16 @@ const (
 	StateDeleteFailed = "DELETE_FAILED"
 )
 
-// BackingSubnet is the only backing v1 implements.
-const BackingSubnet = "subnet"
+// The backings v1 implements (fence-api.md, "Backing", SV-5): a
+// subnet of the GCP backend's VPC, or a silo of the local backend
+// (local-backend.md). A tree has one backing throughout, the root's.
+const (
+	BackingSubnet = "subnet"
+	BackingLocal  = "local"
+)
+
+// ValidBacking reports whether backing is one v1 implements.
+func ValidBacking(backing string) bool { return backing == BackingSubnet || backing == BackingLocal }
 
 // Silo is one row of the tree.
 type Silo struct {
@@ -67,8 +75,9 @@ var dnsLabel = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
 // ValidName reports whether name is a DNS label, as a silo's name must be.
 func ValidName(name string) bool { return dnsLabel.MatchString(name) }
 
-// CreateRoot creates the root silo. There is one per deployment.
-func CreateRoot(ctx context.Context, tx store.Tx, name string, labels map[string]string) (*Silo, error) {
+// CreateRoot creates the root silo, with the deployment's backing.
+// There is one per deployment.
+func CreateRoot(ctx context.Context, tx store.Tx, name, backing string, labels map[string]string) (*Silo, error) {
 	var n int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM silos WHERE parent = ''`).Scan(&n); err != nil {
 		return nil, err
@@ -76,7 +85,7 @@ func CreateRoot(ctx context.Context, tx store.Tx, name string, labels map[string
 	if n > 0 {
 		return nil, fmt.Errorf("%w: the root silo", ErrExists)
 	}
-	return insert(ctx, tx, nil, name, BackingSubnet, labels)
+	return insert(ctx, tx, nil, name, backing, labels)
 }
 
 // CreateChild creates a child of parent.
@@ -88,6 +97,11 @@ func CreateChild(ctx context.Context, tx store.Tx, parent, name, backing string,
 	if p.Depth+1 > MaxDepth {
 		return nil, ErrTooDeep
 	}
+	if backing != p.Backing {
+		// Mixed nesting, a local child of a GCE silo, comes later
+		// (local-backend.md, open question 10).
+		return nil, fmt.Errorf("%w: backing %q under a %q parent", ErrInvalid, backing, p.Backing)
+	}
 	return insert(ctx, tx, p, name, backing, labels)
 }
 
@@ -95,8 +109,8 @@ func insert(ctx context.Context, tx store.Tx, parent *Silo, name, backing string
 	if !ValidName(name) {
 		return nil, fmt.Errorf("%w: name %q is not a DNS label", ErrInvalid, name)
 	}
-	if backing != BackingSubnet {
-		return nil, fmt.Errorf("%w: backing %q (v1 has only %q)", ErrInvalid, backing, BackingSubnet)
+	if !ValidBacking(backing) {
+		return nil, fmt.Errorf("%w: backing %q (v1 has %q and %q)", ErrInvalid, backing, BackingSubnet, BackingLocal)
 	}
 	if labels == nil {
 		labels = map[string]string{}

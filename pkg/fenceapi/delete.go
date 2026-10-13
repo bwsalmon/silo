@@ -374,7 +374,9 @@ func (s *Server) getOperation(q *request, id string) {
 }
 
 // BootstrapRequest creates the root silo (install.md, step 13). It is
-// accepted only while there is no root.
+// accepted only while there is no root. Backing is the tree's, subnet
+// unless given; a local tree's regions default to local, its only one.
+// Isolation defaults to every class, and ingress to host.
 type BootstrapRequest struct {
 	Name           string            `json:"name"`
 	AddressSpace   string            `json:"address_space"`
@@ -387,6 +389,9 @@ type BootstrapRequest struct {
 	Egress         *Egress           `json:"egress"`
 	GrantPolicy    GrantPolicy       `json:"grant_policy"`
 	AgentPolicy    *AgentPolicy      `json:"agent_policy"`
+	Backing        *Backing          `json:"backing"`
+	Isolation      *Isolation        `json:"isolation"`
+	Ingress        string            `json:"ingress"`
 	Admins         []string          `json:"admins"`
 	Labels         map[string]string `json:"labels"`
 }
@@ -438,14 +443,25 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		if control.ReservedName(name) {
 			return errorf(InvalidArgument, "name %q is reserved: it names a collection in fence API paths", name).with("field", "name")
 		}
-		root, err := tree.CreateRoot(ctx, tx, name, req.Labels)
+		backing := tree.BackingSubnet
+		if req.Backing != nil && req.Backing.Kind != "" {
+			if err := checkBacking(req.Backing.Kind); err != nil {
+				return err
+			}
+			backing = req.Backing.Kind
+		}
+		regions := req.Regions
+		if backing == tree.BackingLocal && regions == nil {
+			regions = []string{ledger.Local}
+		}
+		root, err := tree.CreateRoot(ctx, tx, name, backing, req.Labels)
 		if err != nil {
 			return err
 		}
 		if err := address.InitRoot(ctx, tx, root.ID, space, gw, ctl); err != nil {
 			return err
 		}
-		if err := ledger.SetRegions(ctx, tx, root.ID, req.Regions); err != nil {
+		if err := ledger.SetRegions(ctx, tx, root.ID, regions); err != nil {
 			return err
 		}
 		if req.BudgetPeriod != "" {
@@ -482,7 +498,8 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 		// The root's egress is install's --egress-allow, and empty, which
 		// allows nothing, by default (gateway.md, "Policy", SV-86).
-		p := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull}
+		p := &policies{Egress: Egress{Allow: []string{}, Deny: []string{}}, Grant: GrantPolicy{}, Control: ControlFull,
+			Isolation: RootIsolation(), Ingress: IngressHost}
 		for k, v := range RootGrantPolicy {
 			p.Grant[k] = v
 		}
@@ -494,6 +511,12 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.AgentPolicy != nil {
 			p.Agent = *req.AgentPolicy
+		}
+		if req.Isolation != nil {
+			p.Isolation = normIsolation(*req.Isolation)
+		}
+		if req.Ingress != "" {
+			p.Ingress = req.Ingress
 		}
 		if err := checkPolicies(p); err != nil {
 			return err
