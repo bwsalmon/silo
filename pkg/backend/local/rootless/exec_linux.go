@@ -1,12 +1,21 @@
 package rootless
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
@@ -79,10 +88,159 @@ func RunscMain(exe string, args []string) error {
 	if err := prepareRunscRoot(runscRoot(rargs)); err != nil {
 		return fmt.Errorf("rootless: runsc root: %w", err)
 	}
+	if err := prepareProcessFile(rargs, root); err != nil {
+		return fmt.Errorf("rootless: exec's process file: %w", err)
+	}
 	path, err := exec.LookPath(*runsc)
 	if err != nil {
 		return err
 	}
 	cmd := nsd.UserNSExec(userns, exe, append([]string{path}, rargs...)...)
+	switch runscCommand(rargs) {
+	case "create":
+		if os.Getenv(ReaperEnv) != "" {
+			return reap(cmd, bundle, rargs)
+		}
+		return startReaper()
+	case "wait":
+		return waitOrRecorded(cmd, bundle, rargs)
+	}
 	return syscall.Exec(exe, append([]string{exe}, cmd.Args[1:]...), cmd.Env)
+}
+
+// ReaperEnv marks the process `silod runsc create` starts to be its
+// sandbox's parent: the same command line, run again with it set.
+const ReaperEnv = "_SILO_RUNSC_REAPER"
+
+// ExitFile is the file in the bundle where the reaper records how the
+// sandbox ended.
+const ExitFile = "silo-exit"
+
+// startReaper runs `runsc create` under a reaper (reap) and exits with
+// create's status, leaving the reaper behind as the sandbox's parent.
+//
+// A sandbox exits with its root container's status, and only its
+// parent can collect that. runsc create forks the sandbox and exits, so
+// the shim, a subreaper, inherits it and drops its status: `runsc wait`
+// asks the sandbox instead, and a workload that exits before the wait
+// connects comes back as "exit status is unavailable", which the shim
+// reports as 128. The reaper is a subreaper between the two, so the
+// sandbox is reparented to it, and it writes the status to ExitFile
+// for waitOrRecorded.
+func startReaper() error {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("/proc/self/exe", os.Args[1:]...)
+	cmd.Args[0] = os.Args[0]
+	cmd.Env = append(os.Environ(), ReaperEnv+"=1")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.ExtraFiles = []*os.File{w}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	w.Close()
+	b, _ := io.ReadAll(r)
+	code, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		cmd.Wait()
+		return fmt.Errorf("rootless: the sandbox's reaper said %q", b)
+	}
+	os.Exit(code)
+	return nil
+}
+
+// reap is the reaper: it runs runsc create as its child, reports its
+// exit code on fd 3, lets go of the workload's stdio, and waits for the
+// sandbox, whose pid create wrote to its --pid-file, recording its
+// status in the bundle's ExitFile. It exits when it has no children
+// left: the sandbox, and the gofer and sidecars it inherits with it.
+func reap(cmd *exec.Cmd, bundle string, args []string) error {
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		return err
+	}
+	status := os.NewFile(3, "status")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			fmt.Fprintln(os.Stderr, "silod runsc:", err)
+			code = 125
+		} else {
+			code = ee.ExitCode()
+		}
+	}
+	fmt.Fprint(status, code)
+	status.Close()
+	if null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
+		for fd := 0; fd < 3; fd++ {
+			unix.Dup2(int(null.Fd()), fd)
+		}
+		null.Close()
+	}
+	if code != 0 {
+		return nil
+	}
+	pidFile := flagValue(args, "pid-file")
+	if pidFile != "" && !filepath.IsAbs(pidFile) {
+		pidFile = filepath.Join(bundle, pidFile)
+	}
+	b, _ := os.ReadFile(pidFile)
+	sandbox, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	for {
+		var ws unix.WaitStatus
+		pid, err := unix.Wait4(-1, &ws, 0, nil)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil
+		}
+		if pid == sandbox && sandbox > 0 {
+			n := ws.ExitStatus()
+			if ws.Signaled() {
+				n = 128 + int(ws.Signal())
+			}
+			tmp := filepath.Join(bundle, ExitFile+".tmp")
+			if os.WriteFile(tmp, []byte(strconv.Itoa(n)), 0o644) == nil {
+				os.Rename(tmp, filepath.Join(bundle, ExitFile))
+			}
+		}
+	}
+}
+
+// waitOrRecorded runs `runsc wait`, and when runsc has lost the
+// sandbox's status, answers with the one the reaper recorded, in runsc
+// wait's own format.
+func waitOrRecorded(cmd *exec.Cmd, bundle string, args []string) error {
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	if err == nil {
+		os.Stdout.Write(out.Bytes())
+		os.Exit(0)
+	}
+	if strings.Contains(errb.String(), "exit status is unavailable") && len(args) > 0 {
+		for i := 0; i < 200; i++ {
+			if b, err := os.ReadFile(filepath.Join(bundle, ExitFile)); err == nil {
+				n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+				json.NewEncoder(os.Stdout).Encode(struct {
+					ID         string `json:"id"`
+					ExitStatus int    `json:"exitStatus"`
+				}{args[len(args)-1], n})
+				os.Exit(0)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	os.Stderr.Write(errb.Bytes())
+	code := 1
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	}
+	os.Exit(code)
+	return nil
 }

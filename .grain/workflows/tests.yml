@@ -64,8 +64,11 @@ jobs:
   # namespaces, passed netlink sockets, runc and runsc work; then
   # pkg/backend/local/nsd's own tests, and pkg/backend/local/rootless's
   # (step 16: containerd in the holder, crun keeping the kvm group, runsc
-  # inside a container's user namespace), which skip in the `go` job (no
-  # newuidmap there) and are required here by SILO_REQUIRE_NSD, and
+  # inside a container's user namespace) and
+  # pkg/backend/local/runtime/gvisor's (step 7: the sandbox class's driver
+  # end to end, through silo-containerd and the runsc shim), which skip
+  # in the `go` job (no newuidmap there) and are required here by
+  # SILO_REQUIRE_NSD, and
   # pkg/backend/local/netfence's, which load the compiled fence with the
   # real nft.
   nsd:
@@ -106,7 +109,7 @@ jobs:
         env:
           SILO_REQUIRE_NSD: "1"
           SILO_NSD_RUNSC: /tmp/gvisor/runsc
-        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./cmd/silo/
+        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./pkg/backend/local/runtime/... ./cmd/silo/
 
   # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server

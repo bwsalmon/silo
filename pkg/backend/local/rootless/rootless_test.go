@@ -244,3 +244,23 @@ func TestProbeCgroups(t *testing.T) {
 		t.Errorf("parseSystemdVersion = %d", v)
 	}
 }
+
+func TestRunscCommandLine(t *testing.T) {
+	args := []string{"--root=/run/silo/runsc", "--log", "/b/log.json", "--platform=systrap", "create", "--bundle", "/b", "--pid-file=/b/init.pid", "c1"}
+	if c := runscCommand(args); c != "create" {
+		t.Errorf("command %q", c)
+	}
+	if v := flagValue(args, "pid-file"); v != "/b/init.pid" {
+		t.Errorf("pid-file %q", v)
+	}
+	if v := flagValue(args, "log"); v != "/b/log.json" {
+		t.Errorf("log %q", v)
+	}
+	exec := []string{"--root=/r", "exec", "--process", "/tmp/runsc-process1", "c1"}
+	if c, p := runscCommand(exec), processFile(exec); c != "exec" || p != "/tmp/runsc-process1" {
+		t.Errorf("exec: %q %q", c, p)
+	}
+	if c := runscCommand([]string{"--root=/r"}); c != "" {
+		t.Errorf("no command: %q", c)
+	}
+}
