@@ -1280,6 +1280,50 @@ The structural defence is that **the tenant fence and the host fence
 are different mechanisms**. Silos are kept apart by rules. The host is
 kept apart by having no route, which no rule can open.
 
+### As built in step 5
+
+Step 5 (task 3412) is `pkg/backend/local/netfence`. It differs from the
+text above in these places:
+
+- **The model.** The compiler emits a small typed `Ruleset`: sets with
+  their elements, and base chains whose rules are lists of matches.
+  `Render` writes it as one `nft -f` transaction, in which each table
+  is created, deleted and defined again. `Eval` interprets the same
+  model. The property test (`TestEvaluatorMatchesIntent`) checks the
+  evaluator's verdicts against what this section says, read straight
+  from `fence.Input` and the topology. Samples of its random rulesets
+  are also loaded with the real `nft` in a scratch namespace.
+- **Applying.** The applier runs `nft -f -` in `silo-net` with
+  `nsenter -U -n` into the holder. silod's user owns the holder's user
+  namespace, so no privilege is needed. It does not use the holder's
+  passed `netfilter` socket, which would need an nf_tables encoder in
+  silod. The holder's pid is read from `nsd.state` on every call.
+  `silod serve --backend=local` wires it up. It needs `--data-dir`, so
+  the store is that directory's SQLite database (call L22).
+- **Drift.** Drift is a listing of the two tables that differs from
+  the listing this silod took after its last load. A silod that has
+  loaded nothing finds none. Its first apply, which `Run` makes at
+  start, replaces whatever is there.
+- **Rules beyond the list above:**
+  - `forward` accepts `ct state established,related` first. GCE's
+    firewall is stateful, and a link that allows one direction needs
+    its replies.
+  - An export's grant, from the gateway range, has no `forward` rule.
+    The gateway's own sockets reach the target through `output`.
+  - Every `input` rule also requires the input bridge to be in
+    `external`, the set of bridges of networks that aren't `Internal`.
+- **Grant sets.** The kernel refuses an element of a concatenated
+  interval set whose ends both lie in another element. Two links over
+  the same silos (one for `all`, one for `tcp`) would hit this. So
+  grants are cut into disjoint boxes before they are rendered.
+- **Topology.** Networks and pins come from a `TopologySource`. Until
+  the Docker facade (step 6) records them, silod's is gw0's addresses
+  alone (`--local-gateway`), so no bridge is let through.
+- **`gw0`** is still the holder's bridge from step 15, not a dummy.
+- **What `local.New` builds.** It builds the `Fence`, and `Inventory`,
+  `Contents` and `Targets` over the runtime drivers (fake only, so
+  far). It builds no `Capacity`, `Classes` or `ToolVMs`.
+
 ## 10. Agents on the local backend
 
 bsalmon, on the task: **"this version should also assume that the agent

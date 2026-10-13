@@ -411,15 +411,24 @@ func (r *Reconciler) fence(ctx context.Context, rep *Report) error {
 // repaired and audits it as fence_drift under the root, in a
 // transaction guarded by the leader epoch.
 func AuditDrift(st store.Store, logf func(string, ...any)) func(context.Context, []gcefence.Step, bool) {
-	if logf == nil {
-		logf = log.Printf
-	}
+	audit := AuditDriftNames(st, logf)
 	return func(ctx context.Context, steps []gcefence.Step, repaired bool) {
 		var names []string
 		for _, s := range steps {
 			names = append(names, s.String())
 		}
-		logf("fence: the policy had drifted; %d steps to repair it (repaired: %v): %s", len(steps), repaired, strings.Join(names, "; "))
+		audit(ctx, names, repaired)
+	}
+}
+
+// AuditDriftNames is AuditDrift for a fence whose drift is described
+// by name alone, as the local backend's netfence.Applier reports it.
+func AuditDriftNames(st store.Store, logf func(string, ...any)) func(context.Context, []string, bool) {
+	if logf == nil {
+		logf = log.Printf
+	}
+	return func(ctx context.Context, names []string, repaired bool) {
+		logf("fence: the policy had drifted; %d steps to repair it (repaired: %v): %s", len(names), repaired, strings.Join(names, "; "))
 		err := st.Tx(ctx, func(tx store.Tx) error {
 			if err := leader.Guard(ctx, tx); err != nil {
 				return err
