@@ -69,6 +69,31 @@ func New(o Options) backend.Backend {
 
 var _ backend.Fence = (*netfence.Applier)(nil)
 
+// ErrMappingChanged is a holder whose user namespace maps other ids
+// than the store recorded.
+var ErrMappingChanged = errors.New("local: the namespace holder's id mapping changed")
+
+// BindMapping checks the holder's id mapping against the store's
+// (local-rootless-storage.md call L33): the first start records it, and
+// every later one, after a restart or a reboot, must find the same.
+// Volumes and snapshots on disk belong to the container ranges the
+// mapping gives, so a holder with another mapping, after an edit of
+// /etc/subuid, would hand every silo files it can't use.
+func BindMapping(ctx context.Context, st store.Store, mapping string) error {
+	return st.Tx(ctx, func(tx store.Tx) error {
+		got, ok, err := store.ReadSetting(ctx, tx, store.SettingHolderMapping)
+		switch {
+		case err != nil:
+			return err
+		case !ok:
+			return store.WriteSetting(ctx, tx, store.SettingHolderMapping, mapping)
+		case got != mapping:
+			return fmt.Errorf("%w: the store recorded %q, silo-nsd maps %q; give silod's user its old ranges in /etc/subuid and /etc/subgid again", ErrMappingChanged, got, mapping)
+		}
+		return nil
+	})
+}
+
 // Containers are the drivers' containers, as the reconcile, a silo's
 // delete and an export's target see them.
 type Containers struct {
