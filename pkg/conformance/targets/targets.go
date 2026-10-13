@@ -69,7 +69,7 @@ func (l Local) Registry(testing.TB) (conformance.Registry, error) {
 }
 
 func (l Local) Fence(testing.TB) (conformance.Fence, error) {
-	why := "silod doesn't serve the Docker facade's host sockets yet (local-backend.md §4, \"As built in step 6\": left to wiring), so no probe container can be made"
+	why := "silod serves the Docker facade's host sockets, but with no real runtime driver passed in (local-backend.md §4, \"As built in step 6\") and no CI job installing the local backend, so no probe container can be made"
 	if l.Class == "vm" {
 		why += "; the vm class also waits on step 10's runtime.Driver"
 	}

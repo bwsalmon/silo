@@ -38,10 +38,13 @@ type Driver struct {
 }
 
 type container struct {
-	spec    runtime.Spec
-	state   runtime.State
-	exit    *runtime.ExitStatus
-	done    chan struct{}
+	spec  runtime.Spec
+	state runtime.State
+	exit  *runtime.ExitStatus
+	done  chan struct{}
+	// prev is the run before a restart's exit, for a Wait woken by
+	// that run's done after the restart reset exit.
+	prev    *runtime.ExitStatus
 	files   map[string][]byte // regular files by path; dirs are "path/"
 	deleted map[string]bool   // the image's files Remove deleted
 	stdout  bytes.Buffer
@@ -137,7 +140,7 @@ func (d *Driver) Start(_ context.Context, id string) error {
 	switch c.state {
 	case runtime.Created:
 	case runtime.Stopped:
-		c.exit, c.done = nil, make(chan struct{})
+		c.prev, c.exit, c.done = c.exit, nil, make(chan struct{})
 	default:
 		return fmt.Errorf("%w: start of a %s container", runtime.ErrState, c.state)
 	}
@@ -276,6 +279,10 @@ func (d *Driver) Wait(ctx context.Context, id string) (runtime.ExitStatus, error
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if c.done != done {
+		// Restarted since this run ended.
+		return *c.prev, nil
+	}
 	return *c.exit, nil
 }
 
