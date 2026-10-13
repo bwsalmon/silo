@@ -888,8 +888,8 @@ func TestReservedAndConventions(t *testing.T) {
 	}
 	e.fail(fenceapi.InvalidArgument, e.root, "GET", "/silo/v1/self/children?page_token=junk", nil)
 	e.fail(fenceapi.InvalidArgument, e.root, "POST", "/silo/v1/self/children", "not an object")
-	if code, _ := e.do("", "GET", "/silod/health", nil); code != 200 {
-		t.Errorf("health %d", code)
+	if code, body := e.do("", "GET", "/silod/health", nil); code != 200 || body["root"] != true || body["root_id"] != e.root {
+		t.Errorf("health %d %v, want the root %s", code, body, e.root)
 	}
 }
 

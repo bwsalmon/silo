@@ -12,8 +12,11 @@
 //     and writes system units with User=silo. silod never runs as root.
 //
 // Its steps are install.Steps, so that the plan is printed, confirmed
-// and applied as the GCP install's is. Creating the root silo and
-// fetching pinned runtimes are later steps of the plan, not here.
+// and applied as the GCP install's is: the account (system install),
+// the prerequisite checks, lingering (rootless), the data directory,
+// the pinned gVisor, the units, the root silo and a docker context for
+// it. `silo uninstall --backend local` undoes them in reverse order,
+// keeping the data directory unless --delete-data.
 package local
 
 import (
@@ -21,10 +24,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -53,6 +59,16 @@ type Config struct {
 	// RegistryHostPort is the registry's port for host clients on
 	// 127.0.0.1 (--registry-host-port); 0 turns it off.
 	RegistryHostPort int
+	// AddressSpace is the root's block (--address-space); empty is
+	// silod's default, 10.0.0.0/8.
+	AddressSpace string
+	// CPUOvercommit is the root's vcpu_m overcommit (call L20); 0 is
+	// DefaultCPUOvercommit.
+	CPUOvercommit float64
+	// Uninstall is set for silo uninstall, which needs no silod binary,
+	// and DeleteData is its --delete-data.
+	Uninstall  bool
+	DeleteData bool
 }
 
 // DefaultRegistryHostPort is --registry-host-port's default: on, at
@@ -90,6 +106,27 @@ type Host struct {
 	ReadFile  func(name string) ([]byte, error)
 	WriteFile func(name string, b []byte) error
 	Stat      func(name string) (os.FileInfo, error)
+	// Open reads a file; Install writes an executable from r, atomically,
+	// renaming it into place only if reading r to its end succeeded;
+	// RemoveAll removes a tree.
+	Open      func(name string) (io.ReadCloser, error)
+	Install   func(name string, r io.Reader) error
+	RemoveAll func(name string) error
+	// OpenDataDir makes or opens the data directory, as silod does.
+	OpenDataDir func(path string) error
+	// Fetch GETs a URL.
+	Fetch func(ctx context.Context, url string) (io.ReadCloser, error)
+	// Silod is silod's API on the Unix socket at path.
+	Silod func(path string) (Silod, error)
+	// Env reads the installer's environment.
+	Env func(string) string
+	// Statfs is the filesystem a path is on.
+	Statfs func(path string) (FS, error)
+	// CPUs is the host's online CPUs, and Arch its GOARCH.
+	CPUs int
+	Arch string
+	// Self is this silo binary, which uninstall runs `silo unshare` as.
+	Self string
 	// UnitDir overrides units.Config.Dir.
 	UnitDir string
 	// Progress is where Apply says what it did.
@@ -143,9 +180,73 @@ func LocalHost() Host {
 			}
 			return os.WriteFile(name, b, 0o644)
 		},
-		Stat:     os.Stat,
+		Stat:      os.Stat,
+		Open:      func(name string) (io.ReadCloser, error) { return os.Open(name) },
+		Install:   installFile,
+		RemoveAll: os.RemoveAll,
+		OpenDataDir: func(path string) error {
+			_, err := datadir.Open(path)
+			return err
+		},
+		Fetch: func(ctx context.Context, url string) (io.ReadCloser, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			if resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
+				return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+			}
+			return resp.Body, nil
+		},
+		Silod: func(path string) (Silod, error) {
+			return install.NewSilod(&http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", path)
+			}})
+		},
+		Env:      os.Getenv,
+		Statfs:   statfs,
+		CPUs:     runtime.NumCPU(),
+		Arch:     runtime.GOARCH,
+		Self:     self(),
 		Progress: os.Stdout,
 	}
+}
+
+func self() string {
+	p, _ := os.Executable()
+	return p
+}
+
+// installFile writes r to name, mode 0755, through a temporary file in
+// the same directory that is renamed into place only once r has been
+// read to its end without error.
+func installFile(name string, r io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name)+"-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0o755); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), name)
 }
 
 func groupIDs(u *user.User) []int {
@@ -179,7 +280,7 @@ func Defaults(c Config) (Config, error) {
 		}
 		c.DataDir = d
 	}
-	if c.Silod == "" {
+	if c.Silod == "" && !c.Uninstall {
 		if self, err := os.Executable(); err == nil {
 			if p := filepath.Join(filepath.Dir(self), "silod"); fileExists(p) {
 				c.Silod = p
@@ -193,7 +294,7 @@ func Defaults(c Config) (Config, error) {
 			c.Silod = p
 		}
 	}
-	if abs, err := filepath.Abs(c.Silod); err == nil {
+	if abs, err := filepath.Abs(c.Silod); err == nil && c.Silod != "" {
 		c.Silod = abs
 	}
 	if abs, err := filepath.Abs(c.DataDir); err == nil {
@@ -209,7 +310,8 @@ func fileExists(p string) bool {
 
 // Steps are the install's steps, in order: the system account (system
 // install only), the prerequisite checks, lingering (rootless only),
-// and the units.
+// the data directory, the pinned runtimes, the units, the root silo and
+// its docker context. Uninstall undoes them in reverse order.
 func Steps(c Config, h Host) []install.Step {
 	var steps []install.Step
 	if c.Mode == units.System {
@@ -219,13 +321,17 @@ func Steps(c Config, h Host) []install.Step {
 	if c.Mode == units.Rootless {
 		steps = append(steps, &lingerStep{c: c, h: h})
 	}
-	return append(steps, &unitsStep{c: c, h: h})
+	return append(steps, &dataStep{c: c, h: h}, &runtimesStep{c: c, h: h}, &unitsStep{c: c, h: h},
+		&rootStep{c: c, h: h}, &dockerStep{c: c, h: h})
 }
 
 // unitsConfig is c's units.Config: silo-buildkitd only where buildkitd
-// is installed.
-func unitsConfig(c Config, report rootless.Report) units.Config {
+// is installed, and the pinned gVisor first on the runtimes' PATH.
+func unitsConfig(c Config, h Host, report rootless.Report) units.Config {
 	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort}
+	if _, ok := pinned(h); ok {
+		uc.RuntimePath = []string{RuntimesDir(c)}
+	}
 	if c.Mode == units.System {
 		uc.User = c.User
 	}
@@ -262,6 +368,15 @@ type prereqObserved struct {
 	// RunSilo is /run/silo's state for the rootless front door:
 	// "missing", "ok", or what is wrong with it.
 	RunSilo string `json:"run_silo"`
+	// The kernel's: its release, cgroup v2's unified hierarchy, systemd
+	// as the init system, and nftables' inet and bridge families in a
+	// scratch network namespace ("" when the probe passed).
+	Kernel  string `json:"kernel"`
+	Cgroup2 bool   `json:"cgroup2"`
+	Systemd bool   `json:"systemd"`
+	NFT     string `json:"nft"`
+	// FSType is the data directory's filesystem's magic number.
+	FSType int64 `json:"fs_type"`
 }
 
 func (s *prereqStep) Name() string                  { return "prerequisites" }
@@ -277,7 +392,80 @@ func (s *prereqStep) Observe(ctx context.Context) (install.Observed, error) {
 			o.RunSilo = fmt.Sprintf("is %v, want a directory of mode 0755", fi.Mode())
 		}
 	}
+	if b, err := s.h.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		o.Kernel = strings.TrimSpace(string(b))
+	}
+	_, err := s.h.Stat("/sys/fs/cgroup/cgroup.controllers")
+	o.Cgroup2 = err == nil
+	_, err = s.h.Stat("/run/systemd/system")
+	o.Systemd = err == nil
+	// The tables go with the namespace: the probe changes nothing.
+	if out, err := s.h.Run(ctx, "unshare", "--user", "--map-root-user", "--net", "--",
+		"env", "PATH="+units.SystemPath, "nft", "add table inet silo_probe; add table bridge silo_probe"); err != nil {
+		o.NFT = strings.TrimSpace(err.Error() + " " + string(out))
+	}
+	if fs, err := s.h.Statfs(existing(s.h, s.c.DataDir)); err == nil {
+		o.FSType = fs.Type
+	}
 	return o, nil
+}
+
+// kernelAtLeast reports whether release (as uname -r) is major.minor
+// or later.
+func kernelAtLeast(release string, major, minor int) bool {
+	var ma, mi int
+	if _, err := fmt.Sscanf(release, "%d.%d", &ma, &mi); err != nil {
+		return false
+	}
+	return ma > major || ma == major && mi >= minor
+}
+
+// Filesystem magic numbers (statfs(2)) that the reflink check names.
+const (
+	btrfsMagic = 0x9123683e
+	xfsMagic   = 0x58465342
+)
+
+// kernelChecks are the kernel rows of local-backend.md §12's table.
+func (s *prereqStep) kernelChecks(o *prereqObserved) []install.Change {
+	refuse := func(object, detail, why, fix string) install.Change {
+		return install.Change{Action: install.ActionFail, Object: object, Detail: detail, Why: why, Fix: fix}
+	}
+	var out []install.Change
+	if kernelAtLeast(o.Kernel, 5, 15) {
+		out = append(out, install.Change{Action: install.ActionOK, Object: "Linux", Detail: o.Kernel})
+	} else {
+		out = append(out, refuse("Linux", "kernel "+o.Kernel, "the holder's namespaces and the fence's nftables need Linux 5.15 or later", "upgrade the kernel"))
+	}
+	if o.Cgroup2 {
+		out = append(out, install.Change{Action: install.ActionOK, Object: "cgroup v2", Detail: "unified hierarchy"})
+	} else {
+		out = append(out, refuse("cgroup v2", "no unified hierarchy at /sys/fs/cgroup", "containers' limits and delegation",
+			"boot with systemd.unified_cgroup_hierarchy=1"))
+	}
+	if o.Systemd {
+		out = append(out, install.Change{Action: install.ActionOK, Object: "systemd", Detail: "the init system"})
+	} else {
+		out = append(out, refuse("systemd", "not the init system", "the units, and cgroup delegation", "run on a host booted with systemd"))
+	}
+	if o.NFT == "" {
+		out = append(out, install.Change{Action: install.ActionOK, Object: "nftables",
+			Detail: "inet and bridge tables load in a scratch network namespace"})
+	} else {
+		out = append(out, refuse("nftables", o.NFT, "the network fence: silo-net's inet and bridge tables",
+			"install nftables, and load nf_tables (with its inet and bridge families)"))
+	}
+	switch o.FSType {
+	case btrfsMagic:
+		out = append(out, install.Change{Action: install.ActionOK, Object: "reflinks", Detail: "btrfs"})
+	case xfsMagic:
+		out = append(out, install.Change{Action: install.ActionOK, Object: "reflinks", Detail: "xfs (made with reflink=1, the default since xfsprogs 5.1)"})
+	default:
+		out = append(out, install.Change{Action: install.ActionWarn, Object: "reflinks",
+			Detail: fmt.Sprintf("%s's filesystem (0x%x) has none", s.c.DataDir, o.FSType),
+			Why:    "cheap copies of images and volumes; without them, copies are full copies"})
+	}
+	return out
 }
 
 // classOff is what each runtime check's failure turns off; a check
@@ -302,6 +490,7 @@ func (s *prereqStep) Plan(obs install.Observed) []install.Change {
 			Detail: "not root", Why: "the system install creates the silo account and writes system units",
 			Fix: "sudo silo install --backend local --system"}}
 	}
+	out = append(out, s.kernelChecks(o)...)
 	for _, c := range o.Holder {
 		// The system install makes the account's ranges itself.
 		if s.c.Mode == units.System && strings.HasPrefix(c.Name, "range in ") {
@@ -309,18 +498,18 @@ func (s *prereqStep) Plan(obs install.Observed) []install.Change {
 		}
 		out = append(out, check(c, install.ActionFail, "the namespace holder, and every container's user namespace"))
 	}
-	off := map[string]bool{}
 	for _, c := range o.Runtime.Checks {
 		why, act := "", install.ActionFail
 		switch class, ok := classOff[c.Name]; {
+		case ok && class == "sandbox" && fetched(s.h):
+			// The runtimes step fetches the pinned gVisor, which the
+			// units put first on PATH.
+			c = nsd.Check{Name: c.Name, OK: true, Detail: "gVisor " + Gvisor.Version + ", fetched by the runtimes step"}
 		case ok:
 			why, act = "the "+class+" class; without it, "+class+" is off", install.ActionWarn
 			if s.c.Mode == units.System && c.Name == "/dev/kvm through the kvm group" && !strings.HasPrefix(c.Detail, "no /dev/kvm") {
 				// The account step puts silo in the kvm group.
 				continue
-			}
-			if !c.OK {
-				off[class] = true
 			}
 		case c.Name == "buildkitd":
 			why, act = "the vm class's image wraps; silo-buildkitd.service is not written without it", install.ActionWarn
@@ -336,12 +525,7 @@ func (s *prereqStep) Plan(obs install.Observed) []install.Change {
 		out = append(out, check(c, act, why))
 	}
 	classes := install.Change{Action: install.ActionOK, Object: "classes"}
-	var on []string
-	for _, cl := range []string{"sandbox", "vm"} {
-		if !off[cl] {
-			on = append(on, cl)
-		}
-	}
+	on := classesOn(s.c, s.h, o.Runtime)
 	if len(on) == 0 {
 		classes.Action, classes.Detail = install.ActionFail, "neither the sandbox nor the vm class can run here"
 		classes.Why, classes.Fix = "silod needs at least one class", "install runsc and its shim, or crun on a host with /dev/kvm"
@@ -366,6 +550,38 @@ func (s *prereqStep) Plan(obs install.Observed) []install.Change {
 	out = append(out, install.Change{Action: install.ActionOK, Object: "storage driver",
 		Detail: "dir: plain directories (no ZFS driver yet, so no `zfs allow` is needed)"})
 	return out
+}
+
+// fetched reports whether the runtimes step fetches a pinned gVisor
+// for this host.
+func fetched(h Host) bool {
+	_, ok := pinned(h)
+	return ok
+}
+
+// classesOn are the classes the host offers, weakest first: sandbox
+// unless runsc or its shim is missing (and not fetched), vm unless crun
+// or /dev/kvm is.
+func classesOn(c Config, h Host, report rootless.Report) []string {
+	off := map[string]bool{}
+	for _, ch := range report.Checks {
+		class, ok := classOff[ch.Name]
+		switch {
+		case !ok || ch.OK:
+		case class == "sandbox" && fetched(h):
+		case c.Mode == units.System && ch.Name == "/dev/kvm through the kvm group" && !strings.HasPrefix(ch.Detail, "no /dev/kvm"):
+			// The account step puts silo in the kvm group.
+		default:
+			off[class] = true
+		}
+	}
+	var on []string
+	for _, cl := range []string{"sandbox", "vm"} {
+		if !off[cl] {
+			on = append(on, cl)
+		}
+	}
+	return on
 }
 
 // check is c as a plan line: ok, or act with why and c's fix.
@@ -413,6 +629,14 @@ func (s *lingerStep) Plan(obs install.Observed) []install.Change {
 	}
 	return []install.Change{{Action: install.ActionEnable, Object: s.c.User,
 		Detail: "loginctl enable-linger " + s.c.User + ": start silod at boot, and keep it after logout"}}
+}
+
+func (s *lingerStep) PlanRemove(obs install.Observed) []install.Change {
+	if !obs.(*lingerObserved).Lingering {
+		return []install.Change{{Action: install.ActionOK, Object: s.c.User, Detail: "not lingering"}}
+	}
+	return []install.Change{{Action: install.ActionKeep, Object: s.c.User,
+		Detail: "lingering, which other user units may need; turn it off with: loginctl disable-linger " + s.c.User}}
 }
 
 func (s *lingerStep) Apply(ctx context.Context, changes []install.Change) error {
@@ -532,6 +756,15 @@ func (s *accountStep) Plan(obs install.Observed) []install.Change {
 	return out
 }
 
+func (s *accountStep) PlanRemove(obs install.Observed) []install.Change {
+	o := obs.(*accountObserved)
+	if !o.Exists {
+		return []install.Change{{Action: install.ActionOK, Object: "user " + s.c.User, Detail: "not there"}}
+	}
+	return []install.Change{{Action: install.ActionKeep, Object: "user " + s.c.User,
+		Detail: "with its subordinate ids, which the data directory's files are owned by; remove it with: userdel " + s.c.User}}
+}
+
 func (s *accountStep) Apply(ctx context.Context, changes []install.Change) error {
 	obs, err := s.Observe(ctx)
 	if err != nil {
@@ -588,12 +821,23 @@ func (s *unitsStep) Name() string                  { return "units" }
 func (s *unitsStep) NewObserved() install.Observed { return &unitsObserved{} }
 
 func (s *unitsStep) Observe(ctx context.Context) (install.Observed, error) {
-	_, report := s.h.Probe(s.c)
-	uc := unitsConfig(s.c, report)
-	want, err := units.Units(uc)
-	if err != nil {
-		return nil, err
+	var uc units.Config
+	var want []units.Unit
+	if s.c.Uninstall {
+		// Uninstall removes whichever of them there are.
+		uc = units.Config{Mode: s.c.Mode}
+		for _, n := range []string{units.NSD, units.Containerd, units.Buildkitd, units.Silod} {
+			want = append(want, units.Unit{Name: n})
+		}
+	} else {
+		_, report := s.h.Probe(s.c)
+		uc = unitsConfig(s.c, s.h, report)
+		var err error
+		if want, err = units.Units(uc); err != nil {
+			return nil, err
+		}
 	}
+	var err error
 	o := &unitsObserved{Dir: s.h.UnitDir, Want: want, Have: map[string]string{}, Enabled: map[string]bool{}, Active: map[string]bool{}}
 	if o.Dir == "" {
 		if o.Dir, err = uc.Dir(); err != nil {
@@ -634,6 +878,86 @@ func (s *unitsStep) Plan(obs install.Observed) []install.Change {
 	return out
 }
 
+// containersObject is the plan line for stopping every container.
+const containersObject = "containers"
+
+func (s *unitsStep) PlanRemove(obs install.Observed) []install.Change {
+	o := obs.(*unitsObserved)
+	var out []install.Change
+	if o.Active[units.Containerd] || o.Active[units.Buildkitd] {
+		out = append(out, install.Change{Action: install.ActionDelete, Object: containersObject,
+			Detail: "every container stopped, with the runtimes' shims and sandboxes; silo-net goes with the holder's namespaces"})
+	}
+	// Silod first: the order they are stopped in.
+	for i := len(o.Want) - 1; i >= 0; i-- {
+		n := o.Want[i].Name
+		_, have := o.Have[n]
+		if !have && !o.Enabled[n] && !o.Active[n] {
+			continue
+		}
+		out = append(out, install.Change{Action: install.ActionDelete, Object: n, Detail: "stopped, disabled and removed: " + filepath.Join(o.Dir, n)})
+	}
+	if len(out) == 0 {
+		return []install.Change{{Action: install.ActionOK, Object: "units", Detail: "none installed"}}
+	}
+	return out
+}
+
+// remove stops every unit, silod first, killing the runtimes' whole
+// cgroups so that the shims (KillMode=process) and every container go
+// too. With --delete-data, rootless, it removes the files container
+// ranges own while the holder, whose user namespace maps those ranges,
+// still runs. Then it disables and removes the units.
+func (s *unitsStep) remove(ctx context.Context, o *unitsObserved, del map[string]bool) error {
+	stop := func(n string) {
+		if o.Active[n] {
+			systemctl(ctx, s.c, s.h, "stop", n)
+			fmt.Fprintf(s.h.Progress, "  stopped %s\n", n)
+		}
+	}
+	stop(units.Silod)
+	for _, n := range []string{units.Buildkitd, units.Containerd} {
+		if o.Active[n] {
+			if _, err := systemctl(ctx, s.c, s.h, "kill", "--signal=SIGKILL", n); err != nil {
+				return err
+			}
+		}
+		stop(n)
+	}
+	if s.c.DeleteData && s.c.Mode == units.Rootless && o.Active[units.NSD] {
+		args := []string{"unshare", "--", "rm", "-rf"}
+		for _, d := range []string{"silos", "containerd", "cache"} {
+			args = append(args, filepath.Join(s.c.DataDir, d))
+		}
+		if _, err := s.h.Run(ctx, s.h.Self, args...); err != nil {
+			return fmt.Errorf("removing the containers' files inside the holder: %w", err)
+		}
+		fmt.Fprintf(s.h.Progress, "  removed the containers' files, inside the holder\n")
+	}
+	stop(units.NSD)
+	var names []string
+	for _, u := range o.Want {
+		if del[u.Name] {
+			names = append(names, u.Name)
+		}
+	}
+	if len(names) > 0 {
+		if _, err := systemctl(ctx, s.c, s.h, append([]string{"disable"}, names...)...); err != nil {
+			return err
+		}
+	}
+	for _, n := range names {
+		if _, have := o.Have[n]; have {
+			if err := s.h.RemoveAll(filepath.Join(o.Dir, n)); err != nil {
+				return err
+			}
+			fmt.Fprintf(s.h.Progress, "  removed %s\n", filepath.Join(o.Dir, n))
+		}
+	}
+	_, err := systemctl(ctx, s.c, s.h, "daemon-reload")
+	return err
+}
+
 func (s *unitsStep) Apply(ctx context.Context, changes []install.Change) error {
 	obs, err := s.Observe(ctx)
 	if err != nil {
@@ -641,8 +965,15 @@ func (s *unitsStep) Apply(ctx context.Context, changes []install.Change) error {
 	}
 	o := obs.(*unitsObserved)
 	act := map[string]install.Action{}
+	del := map[string]bool{}
 	for _, ch := range changes {
 		act[ch.Object] = ch.Action
+		del[ch.Object] = ch.Action == install.ActionDelete
+	}
+	for _, d := range del {
+		if d {
+			return s.remove(ctx, o, del)
+		}
 	}
 	for _, u := range o.Want {
 		if a := act[u.Name]; a == install.ActionCreate || a == install.ActionUpdate {

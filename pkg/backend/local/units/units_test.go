@@ -75,6 +75,24 @@ func TestRegistryHostPort(t *testing.T) {
 	}
 }
 
+// RuntimePath puts install's pinned runtimes ahead of the system's on
+// the runtimes' and silod's PATH, and leaves the holder's alone.
+func TestRuntimePath(t *testing.T) {
+	m := unitMap(t, Config{Mode: Rootless, Silod: "/s", DataDir: "/d", RuntimePath: []string{"/d/cache/runtimes/runsc-1"}})
+	want := "Environment=PATH=/d/cache/runtimes/runsc-1:" + SystemPath
+	for _, name := range []string{Containerd, Silod} {
+		if !slices.Contains(lines(m[name]), want) {
+			t.Errorf("%s has no line %q:\n%s", name, want, m[name])
+		}
+	}
+	if strings.Contains(m[NSD], "Environment=PATH") {
+		t.Errorf("silo-nsd.service sets PATH:\n%s", m[NSD])
+	}
+	if strings.Contains(unitMap(t, Config{Mode: Rootless, Silod: "/s", DataDir: "/d"})[Silod], "Environment=PATH") {
+		t.Error("PATH set with no RuntimePath")
+	}
+}
+
 func TestSystem(t *testing.T) {
 	c := Config{Mode: System, Silod: "/usr/bin/silod", DataDir: "/var/lib/silo"}
 	m := unitMap(t, c)
@@ -132,6 +150,7 @@ func TestValidate(t *testing.T) {
 		{Mode: Rootless, Silod: "/s", DataDir: "/my data"},
 		{Mode: System, Silod: "/s", DataDir: "/d", User: "a%b"},
 		{Mode: Rootless, Silod: "/s", DataDir: "/d", RegistryHostPort: 65536},
+		{Mode: Rootless, Silod: "/s", DataDir: "/d", RuntimePath: []string{"rel"}},
 	} {
 		if _, err := Units(c); err == nil {
 			t.Errorf("Units(%+v) succeeded", c)

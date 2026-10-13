@@ -132,8 +132,12 @@ commands:
   install --project p --regions r,... --admin user:...
                                     set Silo up in a project (docs/silo/install.md)
   install --backend local [--system] set the local backend up on this machine: user
-                                    units as you, or system units under a silo account
+                                    units as you, or system units under a silo account,
+                                    the pinned gVisor, the root silo and a docker context
   uninstall --project p             remove what install set up
+  uninstall --backend local [--system] [--delete-data]
+                                    stop every container and remove the local backend,
+                                    keeping its data directory unless --delete-data
   proxy [--listen localhost:8642]   serve the facade and fence API on localhost,
                                     through the front door, for gcloud and terraform
   unshare [--probe] [-- cmd...]     run cmd as root in the local backend's namespace

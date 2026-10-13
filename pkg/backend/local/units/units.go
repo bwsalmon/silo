@@ -65,7 +65,15 @@ type Config struct {
 	// on 127.0.0.1 (local-registry.md §5), which silod serves with
 	// --registry-host-listen; 0 serves none.
 	RegistryHostPort int
+	// RuntimePath are directories put ahead of the system's on the
+	// runtimes' and silod's PATH: install's pinned runsc and its shim,
+	// which `silod containerd` and containerd find there.
+	RuntimePath []string
 }
+
+// SystemPath is the PATH a unit with RuntimePath gets after those
+// directories.
+const SystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // Unit is one unit file.
 type Unit struct {
@@ -129,7 +137,12 @@ func (c Config) Validate() error {
 	if c.RegistryHostPort < 0 || c.RegistryHostPort > 65535 {
 		errs = append(errs, fmt.Errorf("units: registry host port %d: want 1 to 65535, or 0 for none", c.RegistryHostPort))
 	}
-	for _, s := range []string{c.Silod, c.DataDir, c.User} {
+	for _, d := range c.RuntimePath {
+		if !filepath.IsAbs(d) {
+			errs = append(errs, fmt.Errorf("units: runtime path %q is not an absolute path", d))
+		}
+	}
+	for _, s := range append([]string{c.Silod, c.DataDir, c.User}, c.RuntimePath...) {
 		if strings.ContainsAny(s, " \t\n\"'\\%$") {
 			errs = append(errs, fmt.Errorf("units: %q has characters a unit file would need quoted", s))
 		}
@@ -174,6 +187,10 @@ func Units(c Config) ([]Unit, error) {
 		target = "multi-user.target"
 	}
 	data := c.DataDir
+	var path []string
+	if len(c.RuntimePath) > 0 {
+		path = []string{"Environment=PATH=" + strings.Join(append(append([]string{}, c.RuntimePath...), SystemPath), ":")}
+	}
 	var out []Unit
 	add := func(name, desc string, unit []string, svc []string) {
 		var b strings.Builder
@@ -205,7 +222,7 @@ func Units(c Config) ([]Unit, error) {
 		deps := append([]string{NSD}, after...)
 		add(name, desc,
 			[]string{"Wants=" + strings.Join(deps, " "), "After=" + strings.Join(deps, " ")},
-			append(system(),
+			append(append(system(), path...),
 				fmt.Sprintf("ExecStart=%s %s --data-dir %s --runtime-dir %s", c.Silod, cmd, data, rt),
 				"Delegate=yes", "KillMode=process"))
 	}
@@ -224,6 +241,6 @@ func Units(c Config) ([]Unit, error) {
 	}
 	add(Silod, "Silo's control plane (silod), local backend",
 		[]string{"Wants=" + deps, "After=" + deps},
-		append(system("RuntimeDirectory=silo", "RuntimeDirectoryMode=0755", "Delegate=yes"), serve))
+		append(append(system("RuntimeDirectory=silo", "RuntimeDirectoryMode=0755", "Delegate=yes"), path...), serve))
 	return out, nil
 }
