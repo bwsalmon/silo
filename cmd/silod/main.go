@@ -91,6 +91,9 @@ commands:
             a sandbox-class container's log copier
   runtime-remap
             remap a container's snapshot to its user namespace, in the holder
+  containerd
+            silo-containerd: containerd inside silo-nsd's namespaces
+  buildkitd silo-buildkitd: buildkitd inside silo-nsd's namespaces
   harness-init
             a session container's entrypoint: forward the session
             socket to the loopback, and run the harness
@@ -134,6 +137,17 @@ func main() {
 	case gvisor.RemapArg:
 		// Remapping a container's snapshot, run inside the holder.
 		err = gvisor.RemapMain(os.Args[2:])
+	case "containerd", "buildkitd":
+		// silo-containerd and silo-buildkitd, which replace this
+		// process with the runtime inside the holder's namespaces.
+		var exe string
+		if exe, err = os.Executable(); err == nil {
+			if os.Args[1] == "containerd" {
+				err = rootless.ContainerdMain(ctx, exe, os.Args[2:])
+			} else {
+				err = rootless.BuildkitdMain(ctx, exe, os.Args[2:])
+			}
+		}
 	case gitserve.HookArg:
 		// The git service's pre-receive hook, which receive-pack runs.
 		os.Exit(gitserve.HookMain(os.Args[2:], os.Stdin, os.Stderr))
@@ -577,6 +591,9 @@ func serve(ctx context.Context, args []string) error {
 		if be, err = localBackend(db, *nsdState, *nftPath, *localGateway, leaderLed); err != nil {
 			return err
 		}
+		if err := bindHolder(ctx, db, *nsdState); err != nil {
+			return err
+		}
 	} else {
 		be = gcp.New(bo)
 	}
@@ -890,6 +907,23 @@ func localBackend(db store.Store, state, nft, gateway string, leaderLed bool) (b
 		o.OnDrift = reconcile.AuditDriftNames(db, nil)
 	}
 	return local.New(o), nil
+}
+
+// bindHolder waits for silo-nsd, which writes its state once its
+// namespaces are ready (fresh ones after a reboot, adopted ones after
+// its own restart), and checks that they map what the store recorded
+// (local-rootless-storage.md call L33). What isn't on disk is rebuilt
+// from the store after it: the fence's applier loads the whole ruleset
+// into silo-net, which after a reboot is empty.
+func bindHolder(ctx context.Context, db store.Store, state string) error {
+	if state == "" {
+		state = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "silo", "nsd.state")
+	}
+	mapping, err := local.HolderMapping(ctx, state, time.Minute)
+	if err != nil {
+		return fmt.Errorf("--backend=local: %w", err)
+	}
+	return local.BindMapping(ctx, db, mapping)
 }
 
 func heartbeat(ctx context.Context, db store.Store, r store.Replica, sessions *atomic.Int64, runner *harness.Runner) {

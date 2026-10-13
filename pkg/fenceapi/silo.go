@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -353,11 +354,24 @@ type QuotaMap map[string]map[string]json.Number
 
 // amounts reads a QuotaMap against the class table. A class name with
 // "@" or "/" is reserved for custom classes; one the table doesn't
-// have is INVALID_ARGUMENT.
-func amounts(ctx context.Context, tx store.Tx, m QuotaMap) ([]ledger.Amount, error) {
+// have is INVALID_ARGUMENT. A name two backends' kinds share
+// (memory_mb) is the tree's backend's: backing is the tree's, or "" to
+// read it from the root.
+func amounts(ctx context.Context, tx store.Tx, m QuotaMap, backing string) ([]ledger.Amount, error) {
 	classes, err := ledger.Classes(ctx, tx)
 	if err != nil {
 		return nil, err
+	}
+	if backing == "" && len(m) > 0 {
+		root, err := tree.Root(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		backing = root.Backing
+	}
+	other := "local" // the kind of the backend the tree doesn't have
+	if backing == tree.BackingLocal {
+		other = "gce"
 	}
 	byName := map[string][]ledger.Class{}
 	for _, c := range classes {
@@ -365,6 +379,11 @@ func amounts(ctx context.Context, tx store.Tx, m QuotaMap) ([]ledger.Amount, err
 			continue // the model budget is model_budget_usd
 		}
 		byName[c.Name] = append(byName[c.Name], c)
+	}
+	for name, cs := range byName {
+		if len(cs) > 1 {
+			byName[name] = slices.DeleteFunc(cs, func(c ledger.Class) bool { return c.Kind == other })
+		}
 	}
 	var regions []string
 	for r := range m {

@@ -2,6 +2,7 @@ package rootless
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -243,4 +244,69 @@ func waitOrRecorded(cmd *exec.Cmd, bundle string, args []string) error {
 	}
 	os.Exit(code)
 	return nil
+}
+
+// ContainerdMain is `silod containerd`, run by silo-containerd.service:
+// it waits for the holder, writes containerd's configuration and the
+// runsc shim's options, and replaces itself with containerd inside the
+// holder's namespaces, so that containerd is the unit's main process.
+// containerd and its shims outlive a restart of silo-nsd, whose next
+// holder adopts the namespaces they keep (call L33).
+func ContainerdMain(ctx context.Context, exe string, args []string) error {
+	p, bin, err := unitFlags("containerd", "containerd", args)
+	if err != nil {
+		return err
+	}
+	st, err := nsd.WaitState(ctx, filepath.Join(p.RuntimeDir, "nsd.state"), 60*time.Second)
+	if err != nil {
+		return err
+	}
+	if runsc, err := exec.LookPath("runsc"); err == nil {
+		if err := WriteRunsc(p, exe, runsc); err != nil {
+			return err
+		}
+	}
+	cmd, err := StartContainerd(p, st.Pid, exe, bin)
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(cmd.Path, cmd.Args, cmd.Env)
+}
+
+// BuildkitdMain is `silod buildkitd`, run by silo-buildkitd.service,
+// like ContainerdMain.
+func BuildkitdMain(ctx context.Context, exe string, args []string) error {
+	p, bin, err := unitFlags("buildkitd", "buildkitd", args)
+	if err != nil {
+		return err
+	}
+	st, err := nsd.WaitState(ctx, filepath.Join(p.RuntimeDir, "nsd.state"), 60*time.Second)
+	if err != nil {
+		return err
+	}
+	cmd, err := StartBuildkitd(p, st.Pid, exe, bin)
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(cmd.Path, cmd.Args, cmd.Env)
+}
+
+// unitFlags parses --data-dir, --runtime-dir and the binary's flag.
+func unitFlags(name, bin string, args []string) (Paths, string, error) {
+	rt, _ := nsd.RuntimeDir()
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	dataDir := fs.String("data-dir", "", "the data directory (required)")
+	runtimeDir := fs.String("runtime-dir", rt, "the holder's runtime directory, where nsd.state and the sockets are")
+	path := fs.String(name, bin, "the "+name+" binary")
+	if err := fs.Parse(args); err != nil {
+		return Paths{}, "", err
+	}
+	if *dataDir == "" || *runtimeDir == "" {
+		return Paths{}, "", fmt.Errorf("%s: give --data-dir, and --runtime-dir unless XDG_RUNTIME_DIR is set", name)
+	}
+	p, err := exec.LookPath(*path)
+	if err != nil {
+		return Paths{}, "", err
+	}
+	return Paths{DataDir: *dataDir, RuntimeDir: *runtimeDir}, p, nil
 }

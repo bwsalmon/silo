@@ -9,8 +9,10 @@ import (
 	"io"
 	"strings"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/units"
 	"github.com/bwsalmon/silo/pkg/install"
 	installgcp "github.com/bwsalmon/silo/pkg/install/gcp"
+	localinstall "github.com/bwsalmon/silo/pkg/install/local"
 )
 
 // version is this CLI's release, the default of silo install --version.
@@ -44,6 +46,13 @@ func (c *cli) installFlags(fs *flag.FlagSet, args []string) error {
 // install is silo install (docs/silo/install.md): it plans every step,
 // prints the plan, asks for confirmation unless --yes, and applies it.
 func (c *cli) install(ctx context.Context, args []string) error {
+	if backend, rest := backendFlag(args); backend == "local" {
+		return c.installLocal(ctx, rest)
+	} else if backend != "" && backend != "gcp" {
+		return usagef("--backend %q: want gcp or local", backend)
+	} else {
+		args = rest
+	}
 	cfg := install.Defaults()
 	fs := flag.NewFlagSet("silo install", flag.ContinueOnError)
 	cfg.Flags(fs, version)
@@ -80,6 +89,76 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	plans := install.PlanAll(ctx, steps)
 	header := fmt.Sprintf("silo install: project %s, home region %s", cfg.Project, cfg.HomeRegion())
 	return c.plan(header, plans, cfg.DryRun, cfg.Yes, "Apply this plan?", func() error {
+		return install.Apply(ctx, steps, c.stdout)
+	})
+}
+
+// backendFlag takes --backend out of args: install's backends have
+// flag sets of their own.
+func backendFlag(args []string) (backend string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return backend, append(rest, args[i:]...)
+		case a == "--backend" || a == "-backend":
+			if i+1 < len(args) {
+				backend = args[i+1]
+				i++
+				continue
+			}
+		case strings.HasPrefix(a, "--backend=") || strings.HasPrefix(a, "-backend="):
+			_, backend, _ = strings.Cut(a, "=")
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return backend, rest
+}
+
+// newLocalHost is the machine silo install --backend local changes.
+// Tests replace it.
+var newLocalHost = localinstall.LocalHost
+
+// installLocal is silo install --backend local: the local backend's
+// units, rootless as the current user, or with --system under a silo
+// account (docs/silo/local-rootless-storage.md, calls L33 and L34).
+func (c *cli) installLocal(ctx context.Context, args []string) error {
+	var cfg localinstall.Config
+	var system, dryRun, yes bool
+	var output string
+	fs := flag.NewFlagSet("silo install --backend local", flag.ContinueOnError)
+	fs.BoolVar(&system, "system", false, "the system install: run as root, create the silo account, and write system units with User=silo")
+	fs.StringVar(&cfg.DataDir, "data-dir", "", "the data directory (default ~/.local/share/silo, or /var/lib/silo with --system)")
+	fs.StringVar(&cfg.Silod, "silod", "", "the silod binary the units run (default the one beside silo, else on PATH)")
+	fs.BoolVar(&dryRun, "dry-run", false, "print the plan and change nothing")
+	fs.BoolVar(&yes, "yes", false, "don't ask for confirmation")
+	fs.StringVar(&output, "output", "table", "the plan's format: table or json")
+	fs.StringVar(&output, "o", "table", "short for --output")
+	if err := c.installFlags(fs, args); err != nil {
+		return err
+	}
+	c.output = output
+	if output != "table" && output != "json" {
+		return usagef("--output %q: want table or json", output)
+	}
+	if output == "json" && !dryRun {
+		return usagef("--output json is for --dry-run: an install prints its plan as a table")
+	}
+	cfg.Mode = units.Rootless
+	if system {
+		cfg.Mode = units.System
+	}
+	cfg, err := localinstall.Defaults(cfg)
+	if err != nil {
+		return err
+	}
+	h := newLocalHost()
+	h.Progress = c.stdout
+	steps := localinstall.Steps(cfg, h)
+	plans := install.PlanAll(ctx, steps)
+	header := fmt.Sprintf("silo install: local backend, %s, silod as %s, data directory %s", cfg.Mode, cfg.User, cfg.DataDir)
+	return c.plan(header, plans, dryRun, yes, "Apply this plan?", func() error {
 		return install.Apply(ctx, steps, c.stdout)
 	})
 }

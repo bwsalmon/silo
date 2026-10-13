@@ -97,11 +97,20 @@ const Repos = "repos"
 // serves it; the fence API and the registry ask for it.
 const Registry = "registry"
 
+// DockerResources are the Docker facade's resource types
+// (local-backend.md, "Address, and how a request names its silo"): a
+// call is charged to the type its path starts with, and exec and the
+// system endpoints to containers.
+var DockerResources = []string{"containers", "images", "networks", "volumes"}
+
 // Resources are the resource types a scope may name: the facade types
 // gcp-backend.md "Covered" lists, as pkg/control's table has them,
-// repos and registry.
+// the Docker facade's, repos and registry.
 func Resources() []string {
 	seen := map[string]bool{Repos: true, Registry: true}
+	for _, r := range DockerResources {
+		seen[r] = true
+	}
 	for m := range control.FacadeMethods() {
 		seen[strings.SplitN(m, ".", 2)[0]] = true
 	}

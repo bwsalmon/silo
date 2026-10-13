@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -130,5 +131,23 @@ func TestUninstallDeleteDataNamesTheInstance(t *testing.T) {
 	code, out, errOut = runCLI(t, "", "uninstall", "--project", "silo-test-project", "--delete-data", "--force", "--yes")
 	if code != 0 || len(f.SQLInstances) != 0 || f.FinalBackups[name] != 30 || len(f.Silos) != 0 {
 		t.Fatalf("--force --delete-data: exit %d, instances %+v\n%s%s", code, f.SQLInstances, out, errOut)
+	}
+}
+
+func TestBackendFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args    []string
+		backend string
+		rest    []string
+	}{
+		{[]string{"--project", "p"}, "", []string{"--project", "p"}},
+		{[]string{"--backend", "local", "--system"}, "local", []string{"--system"}},
+		{[]string{"--dry-run", "--backend=local"}, "local", []string{"--dry-run"}},
+		{[]string{"-backend=gcp", "--project", "p"}, "gcp", []string{"--project", "p"}},
+	} {
+		b, rest := backendFlag(tc.args)
+		if b != tc.backend || !slices.Equal(rest, tc.rest) {
+			t.Errorf("backendFlag(%q) = %q, %q; want %q, %q", tc.args, b, rest, tc.backend, tc.rest)
+		}
 	}
 }

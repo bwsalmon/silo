@@ -121,6 +121,13 @@ const (
 	// driver the data directory's silos are kept with ("dir"). It is
 	// written once and never changes (call L37).
 	SettingStorageDriver = "storage_driver"
+	// SettingHolderMapping is, on the local backend, the uid and gid
+	// mapping of silo-nsd's user namespace (nsd.Mapping's String). It
+	// is written at the first start, and every later one, a reboot's
+	// fresh namespaces included, must find the same, or every
+	// container range on disk would belong to other ids
+	// (local-rootless-storage.md calls L29 and L33).
+	SettingHolderMapping = "holder_mapping"
 )
 
 // SetSetting writes a setting.
