@@ -93,6 +93,8 @@ type envOptions struct {
 	// repos and git are silod's repos and git service, if any.
 	repos fenceapi.RepoHost
 	git   *gitserve.Service
+	// registry is silod's registry service, if any.
+	registry http.Handler
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
@@ -139,7 +141,7 @@ func newEnv(t *testing.T, o envOptions) *env {
 	if o.git != nil {
 		git = o.git
 	}
-	ssrv := &http.Server{Handler: Silod(db, SilodOptions{API: mux, Publisher: pub, Tools: e.tools, Git: git})}
+	ssrv := &http.Server{Handler: Silod(db, SilodOptions{API: mux, Publisher: pub, Tools: e.tools, Git: git, Registry: o.registry})}
 	go ssrv.Serve(l)
 
 	e.resolver = &fakeResolver{names: map[string][]netip.Addr{}}
