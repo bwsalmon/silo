@@ -26,18 +26,18 @@ import (
 type Op string
 
 const (
-	OpInfo       Op = "info"        // the holder's pid, mapping and storage driver
-	OpNetlink    Op = "netlink"     // a netlink socket in silo-net: Proto "route" or "netfilter"
-	OpListen     Op = "listen"      // a listening socket in silo-net: Network, Addr
-	OpDialPool   Op = "dial_pool"   // Count unconnected TCP sockets in silo-net
-	OpContainer  Op = "container"   // create and pin a container's user namespace and netns
-	OpDelete     Op = "delete"      // unpin a container's namespaces and delete its veth
-	OpBridge     Op = "bridge"      // create a bridge in silo-net with Addrs
-	OpVeth       Op = "veth"        // a veth from a bridge into a container's netns
-	OpDelLink    Op = "del_link"    // delete a link in silo-net
-	OpVolCreate  Op = "vol_create"  // storage.Driver.Create
-	OpVolDelete  Op = "vol_delete"  // storage.Driver.Delete
-	OpVolUsage   Op = "vol_usage"   // storage.Driver.Usage
+	OpInfo       Op = "info"       // the holder's pid, mapping and storage driver
+	OpNetlink    Op = "netlink"    // a netlink socket in silo-net: Proto "route" or "netfilter"
+	OpListen     Op = "listen"     // a listening socket in silo-net: Network, Addr
+	OpDialPool   Op = "dial_pool"  // Count unconnected TCP sockets in silo-net
+	OpContainer  Op = "container"  // create and pin a container's user namespace and netns
+	OpDelete     Op = "delete"     // unpin a container's namespaces and delete its veth
+	OpBridge     Op = "bridge"     // create a bridge in silo-net with Addrs
+	OpVeth       Op = "veth"       // a veth from a bridge into a container's netns
+	OpDelLink    Op = "del_link"   // delete a link in silo-net
+	OpVolCreate  Op = "vol_create" // storage.Driver.Create
+	OpVolDelete  Op = "vol_delete" // storage.Driver.Delete
+	OpVolUsage   Op = "vol_usage"  // storage.Driver.Usage
 	maxDialBatch    = 64
 )
 
@@ -55,13 +55,13 @@ type Request struct {
 	// namespace maps.
 	Range uint32 `json:"range,omitempty"`
 
-	Name    string           `json:"name,omitempty"`    // bridge, del_link, veth (host side)
-	Bridge  string           `json:"bridge,omitempty"`  // veth
-	Addrs   []netip.Prefix   `json:"addrs,omitempty"`   // bridge; veth (container side)
-	MAC     string           `json:"mac,omitempty"`     // veth (container side)
-	Gateway netip.Addr       `json:"gateway,omitzero"`  // veth: default route in the container
-	Volume  *storage.Ref     `json:"volume,omitempty"`  // vol_*
-	Size    int64            `json:"size,omitempty"`    // vol_create
+	Name    string         `json:"name,omitempty"`   // bridge, del_link, veth (host side)
+	Bridge  string         `json:"bridge,omitempty"` // veth
+	Addrs   []netip.Prefix `json:"addrs,omitempty"`  // bridge; veth (container side)
+	MAC     string         `json:"mac,omitempty"`    // veth (container side)
+	Gateway netip.Addr     `json:"gateway,omitzero"` // veth: default route in the container
+	Volume  *storage.Ref   `json:"volume,omitempty"` // vol_*
+	Size    int64          `json:"size,omitempty"`   // vol_create
 }
 
 // Response is a call's answer. Descriptors travel beside it with

@@ -112,7 +112,7 @@ func (f fakeInfo) Mode() fs.FileMode { return f.mode }
 
 func TestProbeHost(t *testing.T) {
 	files := map[string]string{
-		"/proc/sys/kernel/unprivileged_userns_clone":           "1\n",
+		"/proc/sys/kernel/unprivileged_userns_clone":             "1\n",
 		"/proc/sys/kernel/apparmor_restrict_unprivileged_userns": "1\n",
 		"/etc/subuid": "silo:100000:65536\n",
 		"/etc/subgid": "silo:1000:65536\n",
