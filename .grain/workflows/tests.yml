@@ -63,7 +63,9 @@ jobs:
   # first the spike, which proves with stock tools that the design's
   # namespaces, passed netlink sockets, runc and runsc work; then
   # pkg/backend/local/nsd's own tests, which skip in the `go` job (no
-  # newuidmap there) and are required here by SILO_REQUIRE_NSD.
+  # newuidmap there) and are required here by SILO_REQUIRE_NSD, and
+  # pkg/backend/local/netfence's, which load the compiled fence with the
+  # real nft.
   nsd:
     name: nsd
     paths-ignore: *not-read-by-the-go-program
@@ -95,7 +97,7 @@ jobs:
         env:
           SILO_REQUIRE_NSD: "1"
           SILO_NSD_RUNSC: /tmp/gvisor/runsc
-        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./cmd/silo/
+        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./cmd/silo/
 
   # ./pkg/store/... is silod's store: the conformance suite, and the
   # Postgres-only lease and change-log cases, against a throwaway server
