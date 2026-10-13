@@ -981,9 +981,14 @@ Three things in gVisor's shim had to be worked around:
   only its parent can read that. A workload that exits before
   `runsc wait` connects comes back as "exit status is unavailable",
   which the shim reports as 128. So `silod runsc create` leaves a small
-  subreaper behind as the sandbox's parent, which writes the status to
-  `silo-exit` in the bundle. `silod runsc wait` answers from that file
-  when runsc can't.
+  subreaper behind as the sandbox's parent, which records the status in
+  `/run/silo/exits/<id>`, in the holder's private `/run`.
+  `silod runsc wait` answers from that record when runsc can't. The
+  record is not kept in the bundle: the reaper runs as the holder's root
+  (silod's uid), and the bundle belongs to the container's root, who
+  could plant a symlink there. `/run/silo/exits` is mode `0700`, the
+  holder's root's own. For the same reason, exec's process file is
+  handed over with `lchown`.
 
 ### granule driver
 

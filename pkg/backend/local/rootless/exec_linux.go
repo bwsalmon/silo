@@ -104,7 +104,14 @@ func RunscMain(exe string, args []string) error {
 		}
 		return startReaper()
 	case "wait":
-		return waitOrRecorded(cmd, bundle, rargs)
+		return waitOrRecorded(cmd, rargs)
+	case "delete":
+		// The container is gone; so is its record.
+		if len(rargs) > 0 {
+			if p := exitPath(rargs[len(rargs)-1]); p != "" {
+				os.Remove(p)
+			}
+		}
 	}
 	return syscall.Exec(exe, append([]string{exe}, cmd.Args[1:]...), cmd.Env)
 }
@@ -113,9 +120,50 @@ func RunscMain(exe string, args []string) error {
 // sandbox's parent: the same command line, run again with it set.
 const ReaperEnv = "_SILO_RUNSC_REAPER"
 
-// ExitFile is the file in the bundle where the reaper records how the
-// sandbox ended.
-const ExitFile = "silo-exit"
+// ExitDir is where the reaper records how each sandbox ended, one file
+// per container id, in the holder's private /run. Not in the bundle:
+// silod runsc gives the bundle to the container's root, and the reaper
+// runs as the holder's root, silod's uid on the host, so a file it
+// wrote there could be a symlink the container's root planted. ExitDir
+// is the holder's root's own, mode 0700, which no container's root can
+// enter.
+const ExitDir = "/run/silo/exits"
+
+// exitPath is container id's record in ExitDir, or "" for an id that
+// isn't one path element.
+func exitPath(id string) string {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\x00") {
+		return ""
+	}
+	return filepath.Join(ExitDir, id)
+}
+
+// recordExit writes n as container id's record, atomically.
+func recordExit(id string, n int) error {
+	p := exitPath(id)
+	if p == "" {
+		return fmt.Errorf("rootless: container id %q", id)
+	}
+	if err := os.MkdirAll(ExitDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(ExitDir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(ExitDir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(strconv.Itoa(n)); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), p)
+}
 
 // startReaper runs `runsc create` under a reaper (reap) and exits with
 // create's status, leaving the reaper behind as the sandbox's parent.
@@ -126,8 +174,8 @@ const ExitFile = "silo-exit"
 // asks the sandbox instead, and a workload that exits before the wait
 // connects comes back as "exit status is unavailable", which the shim
 // reports as 128. The reaper is a subreaper between the two, so the
-// sandbox is reparented to it, and it writes the status to ExitFile
-// for waitOrRecorded.
+// sandbox is reparented to it, and it writes the status to its record
+// in ExitDir for waitOrRecorded.
 func startReaper() error {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -155,7 +203,9 @@ func startReaper() error {
 // reap is the reaper: it runs runsc create as its child, reports its
 // exit code on fd 3, lets go of the workload's stdio, and waits for the
 // sandbox, whose pid create wrote to its --pid-file, recording its
-// status in the bundle's ExitFile. It exits when it has no children
+// status in ExitDir. The pid file is in the bundle, which the
+// container's root can write, so it is only trusted to name one of the
+// reaper's own children. It exits when it has no children
 // left: the sandbox, and the gofer and sidecars it inherits with it.
 func reap(cmd *exec.Cmd, bundle string, args []string) error {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
@@ -204,9 +254,8 @@ func reap(cmd *exec.Cmd, bundle string, args []string) error {
 			if ws.Signaled() {
 				n = 128 + int(ws.Signal())
 			}
-			tmp := filepath.Join(bundle, ExitFile+".tmp")
-			if os.WriteFile(tmp, []byte(strconv.Itoa(n)), 0o644) == nil {
-				os.Rename(tmp, filepath.Join(bundle, ExitFile))
+			if len(args) > 0 {
+				recordExit(args[len(args)-1], n)
 			}
 		}
 	}
@@ -215,7 +264,7 @@ func reap(cmd *exec.Cmd, bundle string, args []string) error {
 // waitOrRecorded runs `runsc wait`, and when runsc has lost the
 // sandbox's status, answers with the one the reaper recorded, in runsc
 // wait's own format.
-func waitOrRecorded(cmd *exec.Cmd, bundle string, args []string) error {
+func waitOrRecorded(cmd *exec.Cmd, args []string) error {
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -225,7 +274,11 @@ func waitOrRecorded(cmd *exec.Cmd, bundle string, args []string) error {
 	}
 	if strings.Contains(errb.String(), "exit status is unavailable") && len(args) > 0 {
 		for i := 0; i < 200; i++ {
-			if b, err := os.ReadFile(filepath.Join(bundle, ExitFile)); err == nil {
+			p := exitPath(args[len(args)-1])
+			if p == "" {
+				break
+			}
+			if b, err := os.ReadFile(p); err == nil {
 				n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
 				json.NewEncoder(os.Stdout).Encode(struct {
 					ID         string `json:"id"`

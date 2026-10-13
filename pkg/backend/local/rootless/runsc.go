@@ -164,7 +164,9 @@ func prepareProcessFile(args []string, root int) error {
 	if f == "" {
 		return nil
 	}
-	return os.Chown(f, root, root)
+	// Lchown: a symlink is never followed into a file the holder's
+	// root owns.
+	return os.Lchown(f, root, root)
 }
 
 // valueFlags are runsc's global flags the shim may pass with their
