@@ -43,15 +43,18 @@ func main() {
 	user := flag.String("user", "agent", "the user commands run as, when silo-tools runs as root")
 	proxy := flag.String("proxy", "http://silo.internal:3128", "the egress proxy, set as HTTPS_PROXY and HTTP_PROXY for commands")
 	noProxy := flag.String("no-proxy", "localhost,127.0.0.1,::1,silo.internal,registry.silo.internal,metadata.google.internal,169.254.169.254", "NO_PROXY for commands")
-	prefix := flag.String("name-prefix", "", "SILO_NAME_PREFIX for commands; the instance metadata's silo-name-prefix if empty")
+	prefix := flag.String("name-prefix", "", "SILO_NAME_PREFIX for commands; the instance metadata's silo-name-prefix if empty, and none if - (a local backend's tool container, whose silo's names carry no prefix)")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *version {
 		fmt.Println(tools.Version)
 		return
 	}
-	if *prefix == "" {
+	switch *prefix {
+	case "":
 		*prefix = metadataNamePrefix()
+	case "-":
+		*prefix = ""
 	}
 	srv, err := tools.New(tools.Options{User: *user, Proxy: *proxy, NoProxy: *noProxy, NamePrefix: *prefix})
 	if err != nil {

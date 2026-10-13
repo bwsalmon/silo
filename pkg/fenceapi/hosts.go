@@ -27,6 +27,12 @@ import (
 // silod restarted, or moved off a control VM that is gone.
 const KindAgentSessionRestart = "agent.session_restart"
 
+// KindAgentHarnessVersion is the audit kind of a session whose harness
+// CLI is another version than the agent recorded: on the local backend,
+// where the CLI is whatever the host has installed (local-backend.md
+// §10, call L17).
+const KindAgentHarnessVersion = "agent.harness_version"
+
 // MaxStartFailures is how many times in a row a harness may fail to
 // start before its agent is FAILED.
 const MaxStartFailures = 3
@@ -251,6 +257,33 @@ func (s *Server) SessionStarted(ctx context.Context, agent string) error {
 		_, err := tx.Exec(ctx, `UPDATE agents SET start_failures = 0,
 			status_message = CASE WHEN status_message = ? THEN '' ELSE status_message END WHERE id = ?`, WaitingForSlot, agent)
 		return err
+	})
+}
+
+// SessionVersion records the version of the harness CLI agent's session
+// runs: its harness.version, audited agent.harness_version when it
+// changes. On the GCP backend the version is the adapter's, pinned in
+// the harness image; on the local backend it is the host's CLI, which
+// silod doesn't install or update, so the agent shows what it ran.
+func (s *Server) SessionVersion(ctx context.Context, agent, version string) error {
+	c, err := s.internalCaller(ctx)
+	if err != nil {
+		return err
+	}
+	return s.tx(ctx, func(tx store.Tx) error {
+		a, err := readAgent(ctx, tx, `id = ?`, agent)
+		if err != nil || a == nil || a.Harness.Version == version {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE agents SET version = ? WHERE id = ?`, version, agent); err != nil {
+			return err
+		}
+		t, err := tree.Get(ctx, tx, a.Silo)
+		if err != nil {
+			return err
+		}
+		return Audit(ctx, tx, t, c, KindAgentHarnessVersion, "", "OK", agentFields(a, map[string]any{
+			"adapter": a.Harness.Adapter, "version": version, "previous_version": a.Harness.Version}))
 	})
 }
 

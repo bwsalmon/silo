@@ -37,6 +37,18 @@ type Silo struct {
 	CreateTime    time.Time                         `json:"create_time"`
 	Labels        map[string]string                 `json:"labels"`
 	Children      []*Silo                           `json:"children,omitempty"`
+	Usage         *ResourceUsage                    `json:"usage,omitempty"`
+}
+
+// ResourceUsage is a silo's or an agent's host resource use, on the
+// local backend: the last reading of its cgroups.
+type ResourceUsage struct {
+	SampleTime      time.Time `json:"sample_time"`
+	CPUUsec         uint64    `json:"cpu_usec"`
+	MemoryBytes     uint64    `json:"memory_bytes"`
+	MemoryPeakBytes uint64    `json:"memory_peak_bytes,omitempty"`
+	ReadBytes       uint64    `json:"read_bytes"`
+	WriteBytes      uint64    `json:"write_bytes"`
 }
 
 // Backing is how a silo is isolated (SV-5).

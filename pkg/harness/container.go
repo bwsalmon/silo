@@ -118,6 +118,9 @@ const LoginPath = "/run/silo/login"
 const (
 	NetworkNone   = "none"
 	NetworkEgress = "egress"
+	// NetworkAmbient is an ambient session's, on the local backend's
+	// host: the agent user's own network. sessiond refuses it.
+	NetworkAmbient = "ambient"
 )
 
 // Layout is where a control VM keeps sessions' sockets, private

@@ -107,7 +107,20 @@ type Spec struct {
 	Root       IDRange
 	Labels     map[string]string
 	StopSignal syscall.Signal
+	// SiloTools mounts silod's own static silo-tools read-only at
+	// ToolsPath: an agent's tool container in the sandbox class
+	// (local-backend.md §10). The binary is the driver's to know; a
+	// spec never names a host path.
+	SiloTools bool
 }
+
+// ToolsPath is where silo-tools is in an agent's tool container: the
+// mount SiloTools asks for, or the vm class's tool image's own.
+const ToolsPath = "/.silo/silo-tools"
+
+// LabelAgent is the label on an agent's tool container, with the
+// agent's id.
+const LabelAgent = "dev.silo.agent"
 
 // Validate refuses a Spec that names anything silod didn't make.
 // volumes is the storage driver's root: a volume mount must be inside
