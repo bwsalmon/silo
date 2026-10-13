@@ -118,3 +118,25 @@ func TestRegistryCommands(t *testing.T) {
 	res = d.silo(x.ID, "registry", "get", "app")
 	contains(t, "deleted", res.stderr, "NOT_FOUND")
 }
+
+// silo registry cache status and set: install's upstreams until set,
+// a set changes only what its flags name, and only the root may.
+func TestRegistryCacheCommands(t *testing.T) {
+	d := startSilod(t)
+	contains(t, "cache status", d.ok(d.root, "registry", "cache", "status"), "docker.io at https://registry-1.docker.io",
+		"index.docker.io", "ghcr.io", "Stale tags:", "24h")
+	out := d.ok(d.root, "registry", "cache", "set", "--upstream", "docker.io=https://mirror.example.com,index.docker.io",
+		"--upstream", "ghcr.io=https://ghcr.io", "--stale-tag-max", "2h")
+	contains(t, "cache set", out, "docker.io at https://mirror.example.com (also index.docker.io)", "ghcr.io at https://ghcr.io", "2h")
+	var st client.CacheSettings
+	d.json(d.root, &st, "registry", "cache", "status")
+	if len(st.Upstreams) != 2 || st.StaleTagMax != "2h" || st.AuthTTL != "300s" {
+		t.Errorf("after set: %+v", st)
+	}
+	res := d.silo(d.root, "registry", "cache", "set", "--upstream", "nodot=https://x.io")
+	contains(t, "a bad upstream", res.stderr, "INVALID_ARGUMENT")
+	var a client.Silo
+	d.json(d.root, &a, "create", "/team-a", "--address", "/16")
+	res = d.silo(a.ID, "registry", "cache", "status")
+	contains(t, "a child's status", res.stderr, "PERMISSION_DENIED")
+}

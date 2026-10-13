@@ -80,6 +80,10 @@ type Options struct {
 	Store   store.Store
 	API     API
 	Content Content
+	// Egress carries the pull-through cache's upstream fetches through
+	// the gateway's egress proxy as the calling silo. Nil serves cache
+	// hits only.
+	Egress Egress
 	// Now is the clock; time.Now if nil.
 	Now func() time.Time
 	// The limits; the defaults above if zero.
@@ -99,6 +103,8 @@ type Service struct {
 	// grace is each repo's completed uploads no manifest need yet
 	// reference, by repo id and digest (local-registry.md, "Uploads").
 	grace map[string]map[string]graceBlob
+	// flights are the cache's upstream fetches in progress, by object.
+	flights map[string]*flight
 }
 
 type graceBlob struct {
@@ -126,7 +132,8 @@ func New(opts Options) *Service {
 	if opts.Idle == 0 {
 		opts.Idle = DefaultIdle
 	}
-	return &Service{opts: opts, uploads: map[string]*upload{}, grace: map[string]map[string]graceBlob{}}
+	return &Service{opts: opts, uploads: map[string]*upload{}, grace: map[string]map[string]graceBlob{},
+		flights: map[string]*flight{}}
 }
 
 // SetAPI sets Options.API, for a service made before the fence API.
@@ -241,7 +248,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"silo: the cache is read-only; push to %s/<silo path>/<repo>", imagerepos.Host))
 			return
 		}
-		writeErr(w, r, rerr(http.StatusNotFound, codeNameUnknown, "silo: this host's pull-through cache is not served yet"))
+		s.serveCache(q, m[2])
 		return
 	}
 	rest := m[2]

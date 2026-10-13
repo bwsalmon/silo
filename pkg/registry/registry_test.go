@@ -40,6 +40,12 @@ type env struct {
 
 func newEnv(t *testing.T, capacity obj) *env {
 	t.Helper()
+	return newEnvWith(t, capacity, nil)
+}
+
+// newEnvWith is newEnv with extra fields in the bootstrap call.
+func newEnvWith(t *testing.T, capacity, bootstrap obj) *env {
+	t.Helper()
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "silo.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -63,8 +69,12 @@ func newEnv(t *testing.T, capacity obj) *env {
 	if capacity == nil {
 		capacity = obj{"global": obj{"disk_gb": 100, "image_repos": 100}}
 	}
-	code, root := e.call("", "POST", "/silod/bootstrap", obj{"regions": []string{"us-central1"}, "capacity": capacity,
-		"grant_policy": obj{"exports": "allow"}, "admins": []string{"user:admin@example.com"}})
+	body := obj{"regions": []string{"us-central1"}, "capacity": capacity,
+		"grant_policy": obj{"exports": "allow"}, "admins": []string{"user:admin@example.com"}}
+	for k, v := range bootstrap {
+		body[k] = v
+	}
+	code, root := e.call("", "POST", "/silod/bootstrap", body)
 	if code != 200 {
 		t.Fatalf("bootstrap: %d %v", code, root)
 	}

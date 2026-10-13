@@ -25,7 +25,7 @@ silo install: project silo-test-project
   image             ok      silo silod@sha256:7dd5524d6d0b
   db                ok      database silo, IAM user silod@silo-test-project.iam
   db-endpoint       update  silo-db visible to silo, t3st.us-central1.sql.goog. A 10.255.254.2
-  migrate           ok      schema 26
+  migrate           ok      schema 27
   control           ok      silo-control us-central1-a, silod@sha256:7dd5524d6d0b
   root              ok      / exists (changed through the fence API, not by install)
   admin             create  user:admin@example.com roles/iap.tunnelResourceAccessor on silo-control

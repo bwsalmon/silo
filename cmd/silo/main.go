@@ -102,6 +102,10 @@ commands:
                                     delete an image repo, a tag, or a manifest
   registry prune [silo/]<name> --untagged
                                     delete the manifests no tag points at
+  registry cache status             the pull-through cache's upstreams (root)
+  registry cache set [--upstream name=endpoint[,alias...]]... [--stale-tag-max d]
+                                    change them; each silo's egress still
+                                    decides what it may get from the cache
   audit [silo] [--since --kind --subtree]
   agent create <silo>/agents/<name> --credential --model --budget --tool-zone --tool-subnet
                                     make an agent and its tool VM
@@ -233,6 +237,9 @@ var commands = map[string]command{
 	"registry": group("registry", map[string]command{
 		"list": (*cli).registryList, "get": (*cli).registryGet, "tags": (*cli).registryTags, "url": (*cli).registryURL,
 		"delete": (*cli).registryDelete, "prune": (*cli).registryPrune,
+		"cache": group("registry cache", map[string]command{
+			"status": (*cli).registryCacheStatus, "set": (*cli).registryCacheSet,
+		}),
 	}),
 	"audit": (*cli).audit,
 	"agent": group("agent", map[string]command{
