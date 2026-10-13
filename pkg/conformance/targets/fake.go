@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/fake"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
@@ -52,6 +53,11 @@ type fakeRegistry struct {
 	dockSrv *httptest.Server
 	root    string
 
+	// With a fence (newFake's withFence): the applier and the ruleset
+	// it last loaded.
+	applier *netfence.Applier
+	nft     *netfence.Fake
+
 	mu sync.Mutex
 	// skew is how far Advance has moved the clock on from time.Now.
 	skew time.Duration
@@ -63,6 +69,17 @@ var (
 )
 
 func (Fake) Registry(t testing.TB) (conformance.Registry, error) {
+	f, err := newFake(t, false)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// newFake starts the in-process silod. withFence also gives it an
+// address space and the local fence's applier, over netfence.Fake, so
+// that probes' checks can be judged by the ruleset it loads.
+func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := sqlite.Open(filepath.Join(dir, "silo.db"))
@@ -84,28 +101,49 @@ func (Fake) Registry(t testing.TB) (conformance.Registry, error) {
 			return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: via}, nil
 		}
 	}
-	f.api = fenceapi.New(db, fenceapi.Options{Caller: byHeader(fenceapi.ViaOrigin)})
+	opts := fenceapi.Options{Caller: byHeader(fenceapi.ViaOrigin)}
+	if withFence {
+		f.nft = &netfence.Fake{}
+		f.applier = &netfence.Applier{Store: db, NFT: f.nft, Topology: docker.Topology(gatewayAPI, gatewayDocker)}
+		opts.Fence, opts.Budget = f.applier, f.applier
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); f.applier.Run(runCtx, 10*time.Millisecond) }()
+		t.Cleanup(func() { cancel(); <-done })
+	}
+	f.api = fenceapi.New(db, opts)
 	f.content.Now = f.now
 	f.reg = registry.New(registry.Options{Store: db, API: f.api, Content: f.content, Egress: f, Now: f.now})
 	f.api.SetRegistry(f.reg)
 	vols := t.TempDir()
 	vm, sbx := fake.New(runtime.VM), fake.New(runtime.Sandbox)
 	vm.Volumes, sbx.Volumes = vols, vols
-	facade := docker.New(db, docker.Options{Drivers: []runtime.Driver{vm, sbx}, Storage: &storage.Dir{Root: vols},
-		Fetcher: f.reg, Content: f.content, Registry: f.reg, Login: f.login, Caller: byHeader(fenceapi.ViaInternal), Version: "conformance"})
+	dopts := docker.Options{Drivers: []runtime.Driver{vm, sbx}, Storage: &storage.Dir{Root: vols},
+		Fetcher: f.reg, Content: f.content, Registry: f.reg, Login: f.login, Caller: byHeader(fenceapi.ViaInternal), Version: "conformance"}
+	if withFence {
+		// Probes' images come from probeImages, not through the cache,
+		// so that a probe's silo needs no egress to be made.
+		dopts.Fetcher, dopts.Images = nil, probeImages{}
+	}
+	facade := docker.New(db, dopts)
 	f.apiSrv = httptest.NewServer(f.api)
 	f.regSrv = httptest.NewServer(f.asCaller(f.reg))
 	f.dockSrv = httptest.NewServer(facade)
 	t.Cleanup(func() { f.dockSrv.Close(); f.regSrv.Close(); f.apiSrv.Close(); facade.Close(); f.api.Close() })
 
-	code, root := f.API("", "POST", "/silod/bootstrap", map[string]any{
+	boot := map[string]any{
 		"backing": map[string]any{"kind": "local"},
 		"capacity": map[string]any{"global": map[string]any{"vcpu_m": 32000, "memory_mb": 32768, "disk_gb": 1000,
 			"containers": 50, "networks": 20, "volumes": 20, "image_repos": 100}},
 		"grant_policy": map[string]any{"exports": "allow"},
 		"egress":       map[string]any{"allow": []string{"*"}},
 		"admins":       []string{"user:admin@example.com"},
-	})
+	}
+	if withFence {
+		boot["grant_policy"] = map[string]any{"exports": "allow", "links": "allow"}
+		boot["address_space"], boot["gateway_range"], boot["control_range"] = "10.0.0.0/16", "10.0.255.0/24", "10.0.254.0/24"
+	}
+	code, root := f.API("", "POST", "/silod/bootstrap", boot)
 	if code != 200 {
 		return nil, fmt.Errorf("bootstrap: %d %v", code, root)
 	}
