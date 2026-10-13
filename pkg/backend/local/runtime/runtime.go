@@ -79,6 +79,12 @@ type Mount struct {
 	SizeMB   int64 // tmpfs
 }
 
+// IDRange is a container's ids, 0 to Size-1, as ids Outside to
+// Outside+Size-1 in the holder's namespace (nsd.Range).
+type IDRange struct {
+	Outside, Size uint32
+}
+
 // Spec is everything a driver needs to create a container.
 type Spec struct {
 	ID   string
@@ -92,8 +98,12 @@ type Spec struct {
 	// wired before Create; UserNS its user namespace, where the class
 	// needs one.
 	NetNS, UserNS string
-	Labels        map[string]string
-	StopSignal    syscall.Signal
+	// Root is where UserNS maps the container's ids in the holder's
+	// namespace: its root is Root.Outside. The sandbox class remaps the
+	// container's snapshot to it and runs runsc as it.
+	Root       IDRange
+	Labels     map[string]string
+	StopSignal syscall.Signal
 }
 
 // Validate refuses a Spec that names anything silod didn't make.

@@ -1,15 +1,22 @@
 package rootless
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
@@ -82,12 +89,214 @@ func RunscMain(exe string, args []string) error {
 	if err := prepareRunscRoot(runscRoot(rargs)); err != nil {
 		return fmt.Errorf("rootless: runsc root: %w", err)
 	}
+	if err := prepareProcessFile(rargs, root); err != nil {
+		return fmt.Errorf("rootless: exec's process file: %w", err)
+	}
 	path, err := exec.LookPath(*runsc)
 	if err != nil {
 		return err
 	}
 	cmd := nsd.UserNSExec(userns, exe, append([]string{path}, rargs...)...)
+	switch runscCommand(rargs) {
+	case "create":
+		if os.Getenv(ReaperEnv) != "" {
+			return reap(cmd, bundle, rargs)
+		}
+		return startReaper()
+	case "wait":
+		return waitOrRecorded(cmd, rargs)
+	case "delete":
+		// The container is gone; so is its record.
+		if len(rargs) > 0 {
+			if p := exitPath(rargs[len(rargs)-1]); p != "" {
+				os.Remove(p)
+			}
+		}
+	}
 	return syscall.Exec(exe, append([]string{exe}, cmd.Args[1:]...), cmd.Env)
+}
+
+// ReaperEnv marks the process `silod runsc create` starts to be its
+// sandbox's parent: the same command line, run again with it set.
+const ReaperEnv = "_SILO_RUNSC_REAPER"
+
+// ExitDir is where the reaper records how each sandbox ended, one file
+// per container id, in the holder's private /run. Not in the bundle:
+// silod runsc gives the bundle to the container's root, and the reaper
+// runs as the holder's root, silod's uid on the host, so a file it
+// wrote there could be a symlink the container's root planted. ExitDir
+// is the holder's root's own, mode 0700, which no container's root can
+// enter.
+const ExitDir = "/run/silo/exits"
+
+// exitPath is container id's record in ExitDir, or "" for an id that
+// isn't one path element.
+func exitPath(id string) string {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\x00") {
+		return ""
+	}
+	return filepath.Join(ExitDir, id)
+}
+
+// recordExit writes n as container id's record, atomically.
+func recordExit(id string, n int) error {
+	p := exitPath(id)
+	if p == "" {
+		return fmt.Errorf("rootless: container id %q", id)
+	}
+	if err := os.MkdirAll(ExitDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(ExitDir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(ExitDir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(strconv.Itoa(n)); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), p)
+}
+
+// startReaper runs `runsc create` under a reaper (reap) and exits with
+// create's status, leaving the reaper behind as the sandbox's parent.
+//
+// A sandbox exits with its root container's status, and only its
+// parent can collect that. runsc create forks the sandbox and exits, so
+// the shim, a subreaper, inherits it and drops its status: `runsc wait`
+// asks the sandbox instead, and a workload that exits before the wait
+// connects comes back as "exit status is unavailable", which the shim
+// reports as 128. The reaper is a subreaper between the two, so the
+// sandbox is reparented to it, and it writes the status to its record
+// in ExitDir for waitOrRecorded.
+func startReaper() error {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("/proc/self/exe", os.Args[1:]...)
+	cmd.Args[0] = os.Args[0]
+	cmd.Env = append(os.Environ(), ReaperEnv+"=1")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.ExtraFiles = []*os.File{w}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	w.Close()
+	b, _ := io.ReadAll(r)
+	code, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		cmd.Wait()
+		return fmt.Errorf("rootless: the sandbox's reaper said %q", b)
+	}
+	os.Exit(code)
+	return nil
+}
+
+// reap is the reaper: it runs runsc create as its child, reports its
+// exit code on fd 3, lets go of the workload's stdio, and waits for the
+// sandbox, whose pid create wrote to its --pid-file, recording its
+// status in ExitDir. The pid file is in the bundle, which the
+// container's root can write, so it is only trusted to name one of the
+// reaper's own children. It exits when it has no children
+// left: the sandbox, and the gofer and sidecars it inherits with it.
+func reap(cmd *exec.Cmd, bundle string, args []string) error {
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		return err
+	}
+	status := os.NewFile(3, "status")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			fmt.Fprintln(os.Stderr, "silod runsc:", err)
+			code = 125
+		} else {
+			code = ee.ExitCode()
+		}
+	}
+	fmt.Fprint(status, code)
+	status.Close()
+	if null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
+		for fd := 0; fd < 3; fd++ {
+			unix.Dup2(int(null.Fd()), fd)
+		}
+		null.Close()
+	}
+	if code != 0 {
+		return nil
+	}
+	pidFile := flagValue(args, "pid-file")
+	if pidFile != "" && !filepath.IsAbs(pidFile) {
+		pidFile = filepath.Join(bundle, pidFile)
+	}
+	b, _ := os.ReadFile(pidFile)
+	sandbox, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	for {
+		var ws unix.WaitStatus
+		pid, err := unix.Wait4(-1, &ws, 0, nil)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil
+		}
+		if pid == sandbox && sandbox > 0 {
+			n := ws.ExitStatus()
+			if ws.Signaled() {
+				n = 128 + int(ws.Signal())
+			}
+			if len(args) > 0 {
+				recordExit(args[len(args)-1], n)
+			}
+		}
+	}
+}
+
+// waitOrRecorded runs `runsc wait`, and when runsc has lost the
+// sandbox's status, answers with the one the reaper recorded, in runsc
+// wait's own format.
+func waitOrRecorded(cmd *exec.Cmd, args []string) error {
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	if err == nil {
+		os.Stdout.Write(out.Bytes())
+		os.Exit(0)
+	}
+	if strings.Contains(errb.String(), "exit status is unavailable") && len(args) > 0 {
+		for i := 0; i < 200; i++ {
+			p := exitPath(args[len(args)-1])
+			if p == "" {
+				break
+			}
+			if b, err := os.ReadFile(p); err == nil {
+				n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+				json.NewEncoder(os.Stdout).Encode(struct {
+					ID         string `json:"id"`
+					ExitStatus int    `json:"exitStatus"`
+				}{args[len(args)-1], n})
+				os.Exit(0)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	os.Stderr.Write(errb.Bytes())
+	code := 1
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	}
+	os.Exit(code)
+	return nil
 }
 
 // ContainerdMain is `silod containerd`, run by silo-containerd.service:

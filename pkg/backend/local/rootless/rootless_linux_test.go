@@ -334,3 +334,14 @@ func firstLine(s string) string {
 	l, _, _ := strings.Cut(s, "\n")
 	return l
 }
+
+func TestExitPath(t *testing.T) {
+	if p := exitPath("c1"); p != ExitDir+"/c1" {
+		t.Errorf("c1: %q", p)
+	}
+	for _, id := range []string{"", ".", "..", "../x", "a/b", "a\x00b"} {
+		if p := exitPath(id); p != "" {
+			t.Errorf("%q: %q, want refused", id, p)
+		}
+	}
+}

@@ -375,7 +375,10 @@ Limits that follow:
     happens without `silod runsc`, with the shim calling runsc as the
     holder's root. So it is the shim's stdio under `ctr` in this setup,
     not the namespace. The driver (item 7) uses containerd's client,
-    with its own I/O, and has to check this first.
+    with its own I/O, and has to check this first. *Step 7 found the
+    cause:* without `io.kubernetes.cri.container-type: sandbox` the
+    shim gives runsc create no stdio. See
+    [local-backend.md, "As built in step 7"](local-backend.md#as-built-in-step-7).
   - `--overlay2=root:self` puts its filestore in the rootfs mount. On a
     snapshot still owned by the holder's root, the container's root
     can't create it. The driver remaps each container's snapshot to its

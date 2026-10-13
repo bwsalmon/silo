@@ -55,6 +55,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
+	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
@@ -87,6 +88,10 @@ commands:
   sessiond  launch agents' harness session containers for silod
   nsd       silo-nsd, the local backend's rootless namespace holder
   runsc     runsc inside a container's user namespace, for the sandbox class's shim
+  runtime-log
+            a sandbox-class container's log copier
+  runtime-remap
+            remap a container's snapshot to its user namespace, in the holder
   containerd
             silo-containerd: containerd inside silo-nsd's namespaces
   buildkitd silo-buildkitd: buildkitd inside silo-nsd's namespaces
@@ -127,6 +132,12 @@ func main() {
 		if exe, err = os.Executable(); err == nil {
 			err = rootless.RunscMain(exe, os.Args[2:])
 		}
+	case gvisor.LogArg:
+		// A sandbox-class container's log copier, which outlives silod.
+		err = gvisor.LogMain(os.Args[2:])
+	case gvisor.RemapArg:
+		// Remapping a container's snapshot, run inside the holder.
+		err = gvisor.RemapMain(os.Args[2:])
 	case "containerd", "buildkitd":
 		// silo-containerd and silo-buildkitd, which replace this
 		// process with the runtime inside the holder's namespaces.

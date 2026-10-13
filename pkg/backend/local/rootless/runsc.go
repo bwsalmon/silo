@@ -139,3 +139,67 @@ func prepareRunscRoot(root string) error {
 	}
 	return os.Chmod(root, 0o777|os.ModeSticky)
 }
+
+// processFile is the --process in a `runsc exec` command line, if any:
+// the exec'd process's spec, which the shim writes to its own temporary
+// directory, mode 0600, as the holder's root.
+func processFile(args []string) string {
+	for i, a := range args {
+		if (a == "--process" || a == "-process") && i+1 < len(args) {
+			return args[i+1]
+		}
+		for _, f := range []string{"--process=", "-process="} {
+			if v, ok := strings.CutPrefix(a, f); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// prepareProcessFile gives an exec's process file to the container's
+// root, which runsc runs as and which couldn't read it otherwise.
+func prepareProcessFile(args []string, root int) error {
+	f := processFile(args)
+	if f == "" {
+		return nil
+	}
+	// Lchown: a symlink is never followed into a file the holder's
+	// root owns.
+	return os.Lchown(f, root, root)
+}
+
+// valueFlags are runsc's global flags the shim may pass with their
+// value as the next argument.
+var valueFlags = map[string]bool{"root": true, "log": true, "log-format": true, "debug-log": true, "bundle": true, "b": true, "pid-file": true}
+
+// runscCommand is a runsc command line's subcommand: create, start,
+// wait and so on.
+func runscCommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+		if !strings.Contains(a, "=") && valueFlags[strings.TrimLeft(a, "-")] {
+			i++
+		}
+	}
+	return ""
+}
+
+// flagValue is the value of flag name (-name or --name, with = or as
+// the next argument) in a runsc command line.
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		for _, f := range []string{"--" + name, "-" + name} {
+			if a == f && i+1 < len(args) {
+				return args[i+1]
+			}
+			if v, ok := strings.CutPrefix(a, f+"="); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
