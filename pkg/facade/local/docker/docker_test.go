@@ -94,8 +94,8 @@ type env struct {
 	content *registry.Memory
 	reg     *registry.Service
 	facade  *Server
-	srv    *httptest.Server
-	vols   string
+	srv     *httptest.Server
+	vols    string
 
 	root, a, ci, b, ro, sandboxOnly string
 }
@@ -129,7 +129,7 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { e.srv.Close(); e.facade.Close(); api.Close() })
 
 	code, root := e.do("", "POST", "/silod/bootstrap", obj{
-		"backing":  obj{"kind": "local"},
+		"backing":      obj{"kind": "local"},
 		"capacity":     obj{"global": obj{"vcpu_m": 32000, "memory_mb": 32768, "disk_gb": 1000, "containers": 50, "networks": 20, "volumes": 20, "image_repos": 100}},
 		"grant_policy": obj{"exports": "allow"},
 		"admins":       []string{"user:admin@example.com"},
