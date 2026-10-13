@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -126,12 +127,13 @@ func get(t *testing.T, c *http.Client, method, path string) (int, string) {
 func TestSockets(t *testing.T) {
 	e := newEnv(t)
 	dir := filepath.Join(t.TempDir(), "docker")
-	var uid uint32 = 4242
+	var uid atomic.Uint32
+	uid.Store(4242)
 	s := &Sockets{Dir: dir, Store: e.db, Handler: e.facade, PeerUID: func(c net.Conn) (uint32, error) {
 		if _, err := PeerCred(c); err != nil {
 			return 0, err
 		}
-		return uid, nil
+		return uid.Load(), nil
 	}}
 	if err := s.Sync(ctx); err != nil {
 		t.Fatal(err)
@@ -152,7 +154,7 @@ func TestSockets(t *testing.T) {
 	}
 	// A member of the root reaches the child's socket, whose target is
 	// the child.
-	e.member(uid, e.root)
+	e.member(uid.Load(), e.root)
 	req, _ := http.NewRequest("POST", "http://docker/v1.47/networks/create", strings.NewReader(`{"Name":"back"}`))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := a.Do(req)
@@ -172,8 +174,8 @@ func TestSockets(t *testing.T) {
 	}
 	// A member of the child can't reach the root's socket. The peer's
 	// uid is its connection's, so it connects anew.
-	uid = 4343
-	e.member(uid, e.a)
+	uid.Store(4343)
+	e.member(uid.Load(), e.a)
 	if code, _ := get(t, unixClient(s.Path(e.root)), "GET", "/v1.47/networks"); code != 404 {
 		t.Errorf("the root's socket from the child's member: %d", code)
 	}
