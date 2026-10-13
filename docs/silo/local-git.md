@@ -1202,6 +1202,34 @@ can be filed on its own, in this order.
 
     Depends on 12, 21 and 22.
 
+    **Built (task 3427),** in `pkg/conformance/local/git_test.go`,
+    against a new `conformance.Git` that a target's `Fence` offers.
+    Where it differs from the list above:
+    - Only `local/fake` runs them. The installed `local/sandbox` and
+      `local/vm` targets still report themselves not runnable, as for
+      every other local case.
+    - In `local/fake`, git runs for real: silod's git service,
+      `gitstore` and the mirror, with the gateway in front, following
+      silod's tables over a Unix socket. The clients are real `git`
+      processes, which the gateway sees as coming from a probe's
+      address. The uber repo is `git http-backend` behind a switch that
+      refuses every request while it is down.
+    - A restore in `local/fake` is silod (store, repos, git service,
+      mirror, fence API and gateway) started again on a `VACUUM INTO`
+      copy of its store and a copy of its data directory, in report-only
+      mode. The fake's facade, registry and fence stay as they were.
+    - The restore case pushes a commit after the restore that the uber
+      repo never had. A repo that nothing pushes to has no mirror pass,
+      so it would show nothing. That push becomes `DIVERGED` (expected
+      the backup's tip, actual the newer one), and the uber repo keeps
+      the newer tip.
+    - Revoking the manage grant cuts off a fetch that is still sending
+      its request, as in `TestGitManageGrant`. The fetch after the
+      revoke is `not found`.
+    - The force-push case checks that the uber repo's archive is the
+      repo's own archive ref, mapped under `a/foo.git/`, at the same
+      commit.
+
 ## Calls made on this page
 
 L41. **Repos are silo objects in the fence API,** named per silo,

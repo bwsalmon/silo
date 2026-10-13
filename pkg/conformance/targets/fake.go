@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +59,12 @@ type fakeRegistry struct {
 	applier *netfence.Applier
 	nft     *netfence.Fake
 
+	// With a fence: silod's repos, git service and mirror, and the
+	// gateway in front (fakegit.go), which a restore replaces; apiH
+	// serves the fence API of the silod there is now.
+	silod atomic.Pointer[fakeSilod]
+	apiH  handlerSwap
+
 	mu sync.Mutex
 	// skew is how far Advance has moved the clock on from time.Now.
 	skew time.Duration
@@ -96,11 +103,6 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 	u, _ := url.Parse(upSrv.URL)
 	f.upAddr = u.Host
 
-	byHeader := func(via string) func(*http.Request) (fenceapi.Caller, error) {
-		return func(r *http.Request) (fenceapi.Caller, error) {
-			return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: via}, nil
-		}
-	}
 	opts := fenceapi.Options{Caller: byHeader(fenceapi.ViaOrigin)}
 	if withFence {
 		f.nft = &netfence.Fake{}
@@ -111,7 +113,18 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 		go func() { defer close(done); f.applier.Run(runCtx, 10*time.Millisecond) }()
 		t.Cleanup(func() { cancel(); <-done })
 	}
-	f.api = fenceapi.New(db, opts)
+	if withFence {
+		s, err := f.startSilod(t, db, dir, opts)
+		if err != nil {
+			return nil, err
+		}
+		f.silod.Store(s)
+		f.api = s.api
+	} else {
+		f.api = fenceapi.New(db, opts)
+		t.Cleanup(func() { f.api.Close() })
+	}
+	f.apiH.set(f.api)
 	f.content.Now = f.now
 	f.reg = registry.New(registry.Options{Store: db, API: f.api, Content: f.content, Egress: f, Now: f.now})
 	f.api.SetRegistry(f.reg)
@@ -126,10 +139,10 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 		dopts.Fetcher, dopts.Images = nil, probeImages{}
 	}
 	facade := docker.New(db, dopts)
-	f.apiSrv = httptest.NewServer(f.api)
+	f.apiSrv = httptest.NewServer(&f.apiH)
 	f.regSrv = httptest.NewServer(f.asCaller(f.reg))
 	f.dockSrv = httptest.NewServer(facade)
-	t.Cleanup(func() { f.dockSrv.Close(); f.regSrv.Close(); f.apiSrv.Close(); facade.Close(); f.api.Close() })
+	t.Cleanup(func() { f.dockSrv.Close(); f.regSrv.Close(); f.apiSrv.Close(); facade.Close() })
 
 	boot := map[string]any{
 		"backing": map[string]any{"kind": "local"},
@@ -141,6 +154,7 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 	}
 	if withFence {
 		boot["grant_policy"] = map[string]any{"exports": "allow", "links": "allow"}
+		boot["capacity"].(map[string]any)["global"].(map[string]any)["repos"] = 50
 		boot["address_space"], boot["gateway_range"], boot["control_range"] = "10.0.0.0/16", "10.0.255.0/24", "10.0.254.0/24"
 	}
 	code, root := f.API("", "POST", "/silod/bootstrap", boot)
@@ -154,6 +168,14 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 		return nil, fmt.Errorf("configuring the cache: %d %v", code, out)
 	}
 	return f, nil
+}
+
+// byHeader is a caller named by the Silo-Caller header, as the gateway
+// names it by origin, via via.
+func byHeader(via string) func(*http.Request) (fenceapi.Caller, error) {
+	return func(r *http.Request) (fenceapi.Caller, error) {
+		return fenceapi.Caller{Silo: r.Header.Get("Silo-Caller"), Via: via}, nil
+	}
 }
 
 // asCaller serves h with the Silo-Caller header's silo as the caller.

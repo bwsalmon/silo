@@ -77,6 +77,36 @@ type Unpinned interface {
 	FromUnpinnedPort(p Probe, checks []Check) map[string]ProbeResult
 }
 
+// Git is what a local target's Fence offers beyond it for the repo and
+// mirror cases (local-git.md §11 item 24): the git service on port 80,
+// as a probe reaches it, an uber repo for the mirror, and a restore of
+// silod.
+type Git interface {
+	// GitURL is http://silo.internal/git/ as p reaches it: a base URL
+	// git clients on this host can use, whose connections the gateway
+	// sees as coming from p.
+	GitURL(t testing.TB, p Probe) string
+	// Uber starts an uber repo for the install's mirror to push to, and
+	// stops it when t ends.
+	Uber(t testing.TB) Uber
+	// Backup backs up silod's store and data directory, and returns what
+	// restores them: silod started again from the backup, in report-only
+	// mode, as it starts after a restore. Calls made after the restore
+	// reach the restored silod.
+	Backup(t testing.TB) (restore func())
+}
+
+// Uber is an uber repo a Git target's mirror pushes to.
+type Uber interface {
+	// URL and Credential are what PUT /silo/v1/mirror is given.
+	URL() string
+	Credential() string
+	// Refs is every ref in the uber repo, with its commit.
+	Refs() map[string]string
+	// SetDown makes the uber repo refuse every request, or serve again.
+	SetDown(down bool)
+}
+
 // FenceOf is target's install for t, or t skipped, as RegistryOf.
 func FenceOf(t *testing.T, target Target) Fence {
 	t.Helper()
