@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,6 +26,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
+	"github.com/bwsalmon/silo/pkg/facade/local/docker"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
@@ -212,6 +215,9 @@ func setup(t *testing.T) *env {
 		Logger:    []string{os.Args[0], gvisor.LogArg},
 		LoggerEnv: []string{"_SILO_GVISOR_TEST_SUB=1"},
 		InHolder:  gvisor.InHolder(pid, os.Args[0], "_SILO_GVISOR_TEST_SUB=1"),
+		HolderCmd: gvisor.HolderCommand(pid, os.Args[0], "_SILO_GVISOR_TEST_RUNSC=1"),
+		Runsc:     []string{"--runsc", runsc},
+		RunscRoot: p.RunscRoot(),
 		Toolbox:   busybox,
 	}
 	for i := 0; ; i++ {
@@ -509,6 +515,108 @@ func TestSandboxDriver(t *testing.T) {
 		}
 	})
 
+	// What docker commit reads (local-registry.md §7, "commit"): the
+	// container creates files, changes one from the image, removes two
+	// and remakes a directory, and RootfsUpper is read paused, as the
+	// facade reads it. runsc writes the removals as overlayfs whiteouts,
+	// a 0/0 character device and hard links to it, and the remade
+	// directory with trusted.overlay.opaque; WhiteoutLayer turns them
+	// into OCI's .wh. entries.
+	t.Run("rootfs upper", func(t *testing.T) {
+		if code, _, er := run(t, d, "c1", runtime.Process{Args: []string{"sh", "-c",
+			"echo new > /created && echo temp > /tmp/temp && echo changed >> /etc/passwd && rm /bin/head /bin/grep && rm -rf /root && mkdir /root && echo in > /root/again"}}, nil); code != 0 {
+			t.Fatalf("changing the root: %d %s", code, er)
+		}
+		if err := d.Pause(ctx, "c1"); err != nil {
+			t.Fatal(err)
+		}
+		r, err := d.RootfsUpper(ctx, "c1")
+		if err != nil {
+			d.Resume(ctx, "c1")
+			t.Fatalf("rootfs upper: %v", err)
+		}
+		raw, err := io.ReadAll(r)
+		r.Close()
+		if err := d.Resume(ctx, "c1"); err != nil {
+			t.Fatal(err)
+		}
+		if err != nil {
+			t.Fatalf("reading rootfs upper: %v", err)
+		}
+		type entry struct {
+			h    *tar.Header
+			body string
+		}
+		entries := map[string]entry{}
+		tr := tar.NewReader(bytes.NewReader(raw))
+		for {
+			h, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("runsc's tar: %v", err)
+			}
+			b, _ := io.ReadAll(tr)
+			t.Logf("runsc: %c %q dev %d:%d link %q pax %v", h.Typeflag, h.Name, h.Devmajor, h.Devminor, h.Linkname, h.PAXRecords)
+			entries[h.Name] = entry{h, string(b)}
+		}
+		if e := entries["./created"]; e.h == nil || e.h.Typeflag != tar.TypeReg || e.body != "new\n" {
+			t.Errorf("the created file: %+v", e)
+		}
+		// runsc mounts a tmpfs of its own over an image's empty /tmp,
+		// which isn't the root's upper layer.
+		if e := entries["./tmp/temp"]; e.h != nil {
+			t.Errorf("a file in /tmp is in the upper layer: %+v", e.h)
+		}
+		if e := entries["./etc/passwd"]; e.h == nil || e.h.Typeflag != tar.TypeReg || e.body != "root:x:0:0:root:/root:/bin/sh\nchanged\n" {
+			t.Errorf("the changed file: %+v", e)
+		}
+		chars := 0
+		for _, n := range []string{"./bin/head", "./bin/grep"} {
+			h := entries[n].h
+			if h != nil && h.Typeflag == tar.TypeLink {
+				h = entries[h.Linkname].h
+			}
+			if h == nil || h.Typeflag != tar.TypeChar || h.Devmajor != 0 || h.Devminor != 0 {
+				t.Errorf("%s is not a 0/0 character device or a hard link to one: %+v", n, entries[n].h)
+			}
+			if entries[n].h != nil && entries[n].h.Typeflag == tar.TypeChar {
+				chars++
+			}
+		}
+		if chars == 0 {
+			t.Errorf("neither removal is a character device")
+		}
+		if e := entries["./root/"]; e.h == nil || e.h.PAXRecords["SCHILY.xattr.trusted.overlay.opaque"] != "y" {
+			t.Errorf("the remade directory is not opaque: %+v", e.h)
+		}
+
+		var out bytes.Buffer
+		if err := docker.WhiteoutLayer(&out, bytes.NewReader(raw)); err != nil {
+			t.Fatalf("WhiteoutLayer: %v", err)
+		}
+		var names []string
+		tr = tar.NewReader(&out)
+		for {
+			h, err := tr.Next()
+			if err != nil {
+				break
+			}
+			names = append(names, h.Name)
+		}
+		for _, want := range []string{"created", "etc/passwd", "bin/.wh.head", "bin/.wh.grep", "root/", "root/.wh..wh..opq", "root/again"} {
+			if !slices.Contains(names, want) {
+				t.Errorf("the OCI layer has no %s: %v", want, names)
+			}
+		}
+
+		// A container whose sandbox has gone has no upper layer.
+		if _, err := d.RootfsUpper(ctx, "nope"); err == nil {
+			t.Errorf("the upper layer of a container that doesn't exist")
+		}
+	})
+
 	t.Run("adoption after silod restarts", func(t *testing.T) {
 		o, _ := streams(t, d, "c1")
 		d.Close()
@@ -580,6 +688,9 @@ func TestSandboxDriver(t *testing.T) {
 		}
 		if o, _ := streams(t, d, "c2"); o != "bye\n" {
 			t.Errorf("output: %q", o)
+		}
+		if _, err := d.RootfsUpper(ctx, "c2"); !errors.Is(err, runtime.ErrState) {
+			t.Errorf("the upper layer of a stopped container: %v", err)
 		}
 		cs, _ := d.List(ctx)
 		if len(cs) != 1 || cs[0].State != runtime.Stopped || cs[0].Exit == nil || cs[0].Exit.Code != 7 {
