@@ -41,7 +41,7 @@ func parsePrefixLength(s string) (int, error) {
 var globalClasses = map[string]bool{
 	"subnetworks": true, "firewall_rules": true, "images": true, "snapshots": true,
 	"image_storage_gb": true, "snapshot_storage_gb": true, "instance_templates": true,
-	"gpus_all_regions": true, "agent_sessions": true, "repos": true,
+	"gpus_all_regions": true, "agent_sessions": true, "repos": true, "image_repos": true,
 }
 
 // classAliases are short names the CLI takes for classes in the class

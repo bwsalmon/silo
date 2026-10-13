@@ -465,13 +465,25 @@ var handlers = map[string]func(s *Server, q *request, c control.FenceCall){
 	control.OpReposRestoreRef: func(s *Server, q *request, c control.FenceCall) {
 		s.mutating(q, func(q *request) (any, error) { return s.restoreRef(q, c.Ref, c.ID) }, true)
 	},
-	control.OpReposGit: func(s *Server, q *request, c control.FenceCall) { s.gitConnect(q, c.Ref, c.ID) },
+	control.OpReposGit:       func(s *Server, q *request, c control.FenceCall) { s.gitConnect(q, c.Ref, c.ID) },
+	control.OpImageReposList: func(s *Server, q *request, c control.FenceCall) { s.listImageRepos(q, c.Ref) },
+	control.OpImageReposGet:  func(s *Server, q *request, c control.FenceCall) { s.getImageRepo(q, c.Ref, c.ID) },
+	control.OpImageReposTags: func(s *Server, q *request, c control.FenceCall) { s.imageRepoTags(q, c.Ref, c.ID) },
+	control.OpImageReposUntag: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.untagImage(q, c.Ref, c.ID, c.Item) }, true)
+	},
+	control.OpImageReposDeleteManifest: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.deleteImageManifest(q, c.Ref, c.ID, c.Item) }, true)
+	},
+	control.OpImageReposDelete: func(s *Server, q *request, c control.FenceCall) {
+		s.mutating(q, func(q *request) (any, error) { return s.deleteImageRepo(q, c.Ref, c.ID) }, true)
+	},
 }
 
 // builtCollections are the sub-resources served so far; the rest of
 // control.Collections are UNIMPLEMENTED.
 var builtCollections = map[string]bool{"children": true, "members": true, "audit": true, "manageGrants": true,
-	"exports": true, "imports": true, "offers": true, "links": true, "agents": true, "repos": true}
+	"exports": true, "imports": true, "offers": true, "links": true, "agents": true, "repos": true, "imageRepos": true}
 
 // route dispatches c, the parsed call to rest, the path after
 // /silo/v1/.

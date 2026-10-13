@@ -87,6 +87,15 @@ commands:
                                     a deletion would have orphaned
   repo restore-ref [silo/]<name> <archive> <branch>
                                     make a branch from an archive ref
+  registry list [--recursive] [silo]
+                                    list a silo's image repos
+  registry get|tags [silo/]<name>   read an image repo, or its tags and manifests
+  registry url [silo/]<name> [--by-id]
+                                    the name the caller pushes to and pulls from
+  registry delete [silo/]<name>[:tag|@digest]
+                                    delete an image repo, a tag, or a manifest
+  registry prune [silo/]<name> --untagged
+                                    delete the manifests no tag points at
   audit [silo] [--since --kind --subtree]
   agent create <silo>/agents/<name> --credential --model --budget --tool-zone --tool-subnet
                                     make an agent and its tool VM
@@ -119,8 +128,8 @@ its id. Every command but install and uninstall takes --endpoint
 --output table|json and --timeout, and goes through the front door
 outside the cloud: --front-door, --project (default $SILO_PROJECT),
 --zone and --instance.
-A repo is named [silo/]name, its silo a path relative to the caller's own
-unless it starts with /.
+A repo or image repo is named [silo/]name, its silo a path relative to the
+caller's own unless it starts with /.
 Every change takes --request-id and --validate-only. The export,
 import and link commands take --silo, to act for a descendant (or a silo a
 manage grant with the grants scope covers).
@@ -206,7 +215,11 @@ var commands = map[string]command{
 		"clone": (*cli).repoClone, "archives": (*cli).repoArchives, "restore-ref": (*cli).repoRestoreRef,
 	}),
 	RemoteHelper: (*cli).gitRemote,
-	"audit":      (*cli).audit,
+	"registry": group("registry", map[string]command{
+		"list": (*cli).registryList, "get": (*cli).registryGet, "tags": (*cli).registryTags, "url": (*cli).registryURL,
+		"delete": (*cli).registryDelete, "prune": (*cli).registryPrune,
+	}),
+	"audit": (*cli).audit,
 	"agent": group("agent", map[string]command{
 		"create": (*cli).agentCreate, "list": (*cli).agentList, "get": (*cli).agentGet, "patch": (*cli).agentPatch,
 		"delete": (*cli).agentDelete, "stop": agentAction("stop"), "resume": agentAction("resume"), "renew": (*cli).agentRenew,

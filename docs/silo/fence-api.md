@@ -7,7 +7,9 @@ written in task 1930. The control policy (sealed silos) and `manage`
 grants were added in task 1947. The `isolation` and `ingress` policies
 and the `local` backing and region were added in task 3408, for the
 [local backend](local-backend.md), and [repos](#repos) and the `repos`
-policy in task 3422 ([`local-git.md`](local-git.md)). Marks such as "call 14" refer to
+policy in task 3422 ([`local-git.md`](local-git.md)), and
+[image repos](#image-repos) in task 3450
+([`local-registry.md`](local-registry.md)). Marks such as "call 14" refer to
 [Calls made in this draft](README.md#calls-made-in-this-draft).
 
 The fence API is what every backend shares. It manages the tree, the
@@ -611,8 +613,8 @@ nothing, since its VMs can't reach the API port.
 ```
 
 - `facade.resources` names facade resource types from
-  [`gcp-backend.md`, Covered](gcp-backend.md#covered), and `repos`
-  ([below](#repos)). `["*"]` means every type, including types added
+  [`gcp-backend.md`, Covered](gcp-backend.md#covered), `repos`
+  ([below](#repos)) and `registry` ([below](#image-repos)). `["*"]` means every type, including types added
   later. A call is
   charged to the resource in its path: a boot disk that
   `instances.insert` creates is covered by `instances`. `access` is
@@ -799,6 +801,66 @@ backend keeps repos so far: elsewhere creating one is
 - Creates, `PATCH`es and deletes are audited under the silo as
   `repo.create`, `repo.patch` and `repo.delete`. Deleting a silo with
   `force` deletes its repos.
+
+## Image repos
+
+An image repo is a repository of the host-local OCI registry at
+`registry.silo.internal`: a silo object, named per silo, and created by
+its first push rather than by a call. The design is in
+[`local-registry.md`](local-registry.md); this section is its fence API.
+The registry service that pushes and pulls is a later step, so for now
+nothing outside silod makes one.
+
+```json
+{
+  "name": "app",
+  "id": "ir-3fq8zk",
+  "silo": "/team-a/x",
+  "state": "READY",
+  "ref": "registry.silo.internal/team-a/x/app",
+  "ref_by_id": "registry.silo.internal/id_k7f3qa/app",
+  "tags": 4,
+  "manifests": 6,
+  "charged_bytes": 412090368,
+  "create_time": "2026-10-13T09:12:00Z",
+  "last_push_time": "2026-10-13T10:40:51Z"
+}
+```
+
+- A `name` is one component of 1 to 63 characters matching
+  `[a-z0-9]+((_|__|-+)[a-z0-9]+)*`, not starting with `id_`: the OCI
+  name grammar without its `.`, so that no repo name looks like an
+  upstream registry.
+- `charged_bytes` is the stored size of every distinct blob and
+  manifest the repo's manifests reference, each once
+  ([`local-registry.md`, Charging](local-registry.md#charging-call-l61)).
+
+| Call | Does |
+| --- | --- |
+| `GET /silo/v1/silos/{silo}/imageRepos` | List. `?recursive=true` lists the descendants' too, each with its silo's path |
+| `GET .../imageRepos/{repo}` | Get one |
+| `GET .../imageRepos/{repo}/tags` | `tags`, each with the digest it points at, and `manifests`, every manifest the repo holds, untagged ones included, each with its `charged_bytes`, its `tags` and `referenced` (another manifest of the repo, an index, references it) |
+| `DELETE .../imageRepos/{repo}/tags/{tag}` | Untag. The manifest stays, untagged and charged. Returns the repo |
+| `DELETE .../imageRepos/{repo}/manifests/{digest}` | Delete a manifest and every tag on it, and an index's children that nothing else in the repo tags or references. Returns the repo |
+| `DELETE .../imageRepos/{repo}` | Delete the repo and everything in it. An operation of kind `registry.delete` |
+
+- **Who may call them** ([`local-registry.md` §5](local-registry.md#who-may-do-what-call-l63)):
+  the silo itself and its ancestors, any of them; the holder of an
+  active `manage` grant on the silo or an ancestor whose
+  `facade.resources` covers `registry`, list, get and tags at `read`
+  and all of them at `write`; anyone else, `NOT_FOUND`, whether the
+  repo exists or not. The caller's own control policy then applies:
+  under `read`, list, get and tags only.
+- **Quota.** Each image repo holds one of its silo's `image_repos` (a
+  global count class), so a first push past it is refused. The root's
+  is unlimited unless install names one.
+- **Creating** one by a push is a control-plane call: a caller whose
+  own control policy isn't `full` can't, though it keeps pushing to
+  the repos it has.
+- Untags, manifest deletes and repo deletes are audited under the silo
+  as `registry.delete`, with `refunded_bytes`. Deleting a silo without
+  `force` is `FAILED_PRECONDITION` while it has image repos; with
+  `force` it deletes them.
 
 ## Members {#SV-25}
 

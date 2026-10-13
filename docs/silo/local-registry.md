@@ -2,9 +2,13 @@
 
 ## Status
 
-Design draft, docs only, written in task 3449 (filed from task 3024).
-No implementation code. Like the rest of the local backend, the steps in
-the [staged plan](#13-staged-implementation-plan) are filed one by one.
+Design draft, written in task 3449 (filed from task 3024). Like the
+rest of the local backend, the steps in the
+[staged plan](#13-staged-implementation-plan) are filed one by one.
+Task 3450 landed the first part of step 25: image repos in the store
+and the fence API, the `image_repos` class, the `registry` scope type
+and `silo registry` ([§13](#13-staged-implementation-plan) says what of
+step 25 is left).
 
 This page is the fourth part of the local backend, after
 [`local-backend.md`](local-backend.md) (task 3350),
@@ -285,7 +289,7 @@ nothing to seed: it is empty until something is pushed.
 | --- | --- |
 | `GET /silo/v1/silos/{silo}/imageRepos` | List. `?recursive=true` also lists descendants' repos, each with its silo path |
 | `GET .../imageRepos/{repo}` | Get one |
-| `GET .../imageRepos/{repo}/tags` | Tags and the digests they point at, with each manifest's charged size |
+| `GET .../imageRepos/{repo}/tags` | Tags and the digests they point at, and every manifest the repo holds, untagged ones included, with its charged size, its tags, and whether another manifest of the repo (an index) references it, which `prune` needs |
 | `DELETE .../imageRepos/{repo}/tags/{tag}` | Untag ([§10](#10-garbage-collection-and-deletion)) |
 | `DELETE .../imageRepos/{repo}/manifests/{digest}` | Delete a manifest and every tag on it |
 | `DELETE .../imageRepos/{repo}` | Delete the repo and everything in it |
@@ -1339,6 +1343,16 @@ earlier depends on them. Each can be filed on its own, in this order.
     - the `images.sharing` policy, never-looser.
 
     Uses the fake backend. Depends on 4.
+
+    *Landed in task 3450:* the object and its calls, the tables,
+    `silo registry` (all but `cache`, which is step 31's), the
+    `image_repos` class, the `registry` scope type, and
+    `fenceapi.CreateImageRepo`, the first push's half that step 27
+    calls. Each manifest row carries the digests and sizes it
+    references, from which `charged_bytes` is worked out; the
+    `disk_gb` charge itself is made by step 27's push path, which has
+    the bytes. *Left:* registry exports and their imports, and the
+    `images.sharing` policy, filed as step 25b.
 26. **containerd's root out of `cache/`** (call L60): layout 2,
     `containerd/` and `cache/snapshots/`, the migration from layout 1,
     and the data table. Depends on 14. Best landed before 7, so that

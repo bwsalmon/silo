@@ -164,6 +164,15 @@ const (
 	OpReposArchives   = "silos.repos.archives"
 	OpReposRestoreRef = "silos.repos.restoreRef"
 	OpReposGit        = "silos.repos.git"
+	// Image repos (local-registry.md, §3 "Operations", call L58), under
+	// silos/{silo}/imageRepos. There is no create: a first push makes
+	// one.
+	OpImageReposList           = "silos.imageRepos.list"
+	OpImageReposGet            = "silos.imageRepos.get"
+	OpImageReposDelete         = "silos.imageRepos.delete"
+	OpImageReposTags           = "silos.imageRepos.tags"
+	OpImageReposUntag          = "silos.imageRepos.untag"
+	OpImageReposDeleteManifest = "silos.imageRepos.deleteManifest"
 )
 
 // fenceOps classifies every fence operation.
@@ -235,9 +244,15 @@ var fenceOps = map[string]Class{
 	OpReposPatch:  Mutation,
 	OpReposDelete: Mutation,
 
-	OpReposArchives:   Reading,
-	OpReposRestoreRef: Mutation,
-	OpReposGit:        Reading,
+	OpReposArchives:            Reading,
+	OpReposRestoreRef:          Mutation,
+	OpReposGit:                 Reading,
+	OpImageReposList:           Reading,
+	OpImageReposGet:            Reading,
+	OpImageReposDelete:         Mutation,
+	OpImageReposTags:           Reading,
+	OpImageReposUntag:          Mutation,
+	OpImageReposDeleteManifest: Mutation,
 }
 
 // FenceOps returns every fence operation the table knows, with its
@@ -276,7 +291,7 @@ func FenceClass(op string) Class { return fenceOps[op] }
 var Collections = map[string]bool{
 	"children": true, "members": true, "audit": true,
 	"exports": true, "imports": true, "offers": true, "links": true, "manageGrants": true, "agents": true,
-	"repos": true,
+	"repos": true, "imageRepos": true,
 }
 
 // AllocatorCollections are the custom-allocator collections v1
@@ -510,6 +525,22 @@ func ParseFence(method, rest string) FenceCall {
 		c.Extra = false
 		if method == http.MethodGet {
 			c.Op = OpReposArchives
+		}
+	case c.Collection == "imageRepos" && len(segs) == 1:
+		if method == http.MethodGet {
+			c.Op = OpImageReposList
+		}
+	case c.Collection == "imageRepos" && len(segs) == 2:
+		c.Op = map[string]string{http.MethodGet: OpImageReposGet, http.MethodDelete: OpImageReposDelete}[method]
+	case c.Collection == "imageRepos" && len(segs) == 3 && segs[2] == "tags":
+		c.Extra = false
+		if method == http.MethodGet {
+			c.Op = OpImageReposTags
+		}
+	case c.Collection == "imageRepos" && len(segs) == 4 && (segs[2] == "tags" || segs[2] == "manifests"):
+		c.Extra, c.Item = false, segs[3]
+		if method == http.MethodDelete {
+			c.Op = map[string]string{"tags": OpImageReposUntag, "manifests": OpImageReposDeleteManifest}[segs[2]]
 		}
 	}
 	return c
