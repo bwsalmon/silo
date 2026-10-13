@@ -21,6 +21,8 @@ func TestBackendLocalFlags(t *testing.T) {
 		{[]string{"--backend=local", "--store=sqlite:" + filepath.Join(t.TempDir(), "x.db")}, "--data-dir"},
 		{[]string{"--backend=local", "--data-dir=" + data, "--fence-project=p"}, "GCP backend's"},
 		{[]string{"--backend=nope", "--store=sqlite:" + filepath.Join(t.TempDir(), "x.db")}, "want gcp or local"},
+		{[]string{"--ambient-agents", "--store=sqlite:" + filepath.Join(t.TempDir(), "x.db")}, "local backend's"},
+		{[]string{"--backend=local", "--data-dir=" + data, "--ambient-agents", "--fake-agents"}, "not with --sessiond-socket or --fake-agents"},
 	} {
 		err := serve(ctx, append(c.args, "--listen=127.0.0.1:0"))
 		if err == nil || !strings.Contains(err.Error(), c.want) {

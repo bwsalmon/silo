@@ -1515,6 +1515,76 @@ What follows from that (call L17):
 
   The tool server dials the gateway, as today.
 
+### As built in step 11
+
+Task 3418 built this section's agents, and the resource metering in
+[§11](#metering):
+
+- **Ambient credentials** (`agents.CredentialAmbient`). With fenceapi's
+  `Options.Ambient` every provider has one, `ambient-<provider>`. It
+  holds no secret, can't be added or removed, and is refused by the
+  model proxy. Each turn is charged by the usage the harness reports
+  (`agents.MeteredByReport`, shared with subscriptions). A root's
+  agent policy has to allow the name, as for any credential.
+- **Harnesses in scopes** (`harness.Scopes`). Each turn runs the host's
+  CLI with `systemd-run --user --scope --unit=silo-agent-<id>.scope`,
+  with the session's memory, task and CPU limits, in silod's own user
+  manager. silod runs as the agent user, so this runs the harness as
+  that user. Its working directory is `<data dir>/cache/sessions/<id>`.
+  The CLI's session file stays in the agent user's home, so a resume
+  needs nothing from the database. A system install, whose silod user
+  is not the agent user, is not handled yet.
+- **MCP over stdio.** An ambient CLI's one MCP server is
+  `silod mcp-stdio --socket <session socket>`, the CLI's own child. The
+  container's loopback forwarder would let any host process in, so it
+  isn't used here. That also means no model proxy reaches an ambient
+  harness: on a host Runner an API-key or subscription credential is
+  refused, and the operator's explicit API keys need a way in that
+  passes the peer check first.
+- **The CLI version.** Before a session's first turn the Runner runs
+  `claude --version` or `codex --version`. It refuses a CLI older than
+  the adapter's `MinVersion` (2.1.4 and 0.46.0), and records the
+  version as the agent's `harness.version`, audited
+  `agent.harness_version`.
+- **Peer checks** (call L18, `session.ScopePeer`). The peer is held by a
+  pidfd: `SO_PEERPIDFD` on 6.5 and later, otherwise `SO_PEERCRED` and
+  `pidfd_open`. Its cgroup's last element must be the session's scope,
+  under silod's own `user@<uid>.service`, and the pidfd must still be
+  alive after the cgroup is read. A process of the agent user that
+  means harm can move itself into the scope; the check keeps sessions
+  off each other's sockets, which is what call L18 asks.
+- **Tool containers** (`docker.ToolContainers`). They are made through
+  the Docker facade in-process, as the caller, so its checks, charges
+  and audit apply, and marked as the agent's call. They are named like
+  tool VMs. `tool_vm.isolation` picks the class (the silo's default if
+  empty), and `tool_vm.image` the image. A tool container takes no
+  zone, subnet, machine type, disk or metadata
+  (`fenceapi.ToolSpecChecker`). In the sandbox class the driver mounts
+  silod's static silo-tools read-only at `/.silo/silo-tools`
+  (`runtime.Spec.SiloTools`, gVisor's `Config.SiloTools`). In the vm
+  class the image carries silo-tools there itself: the facade's
+  `VMToolImage`, which install is to build, or the agent's own. Any
+  write to a tool container except the agent's is a 403 naming the
+  agent, and prune passes it by. silo-tools runs as the container's
+  root with no name prefix (`--name-prefix=-`).
+- **Resource metering** (`pkg/backend/local/usage`). Every minute silod
+  reads each silo's slice and each agent's harness scope: `cpu.stat`
+  `usage_usec`, `memory.current`, `memory.peak` and `io.stat`. The
+  silo's last reading is its `usage` on describe; the agent's is its
+  `usage` on get, from its last turn.
+- **`silod serve --backend=local --ambient-agents`** wires the
+  harnesses, the peer check and the ambient credentials. The meter runs
+  on every local backend.
+
+Left for later steps:
+
+- serving the Docker facade, the gVisor driver (with `SiloTools`) and
+  `ToolContainers` from silod;
+- `--ambient-agents` in install's units;
+- the vm tool image built at install;
+- putting the silos' containers in their slices (`CgroupsPath`), until
+  which most silos have no reading.
+
 ## 11. Resources and quota
 
 ### Classes (call L19)
