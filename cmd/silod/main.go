@@ -54,6 +54,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
+	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
@@ -84,6 +85,7 @@ commands:
   pause     hold a network namespace until stopped
   sessiond  launch agents' harness session containers for silod
   nsd       silo-nsd, the local backend's rootless namespace holder
+  runsc     runsc inside a container's user namespace, for the sandbox class's shim
   harness-init
             a session container's entrypoint: forward the session
             socket to the loopback, and run the harness
@@ -113,6 +115,13 @@ func main() {
 		var exe string
 		if exe, err = os.Executable(); err == nil {
 			err = nsd.Main(ctx, exe, os.Args[2:])
+		}
+	case "runsc":
+		// The sandbox class's runsc, as its containerd shim calls it:
+		// runsc started inside the container's user namespace.
+		var exe string
+		if exe, err = os.Executable(); err == nil {
+			err = rootless.RunscMain(exe, os.Args[2:])
 		}
 	case gitserve.HookArg:
 		// The git service's pre-receive hook, which receive-pack runs.

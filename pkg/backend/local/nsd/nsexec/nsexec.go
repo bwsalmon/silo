@@ -20,9 +20,17 @@
 //   - join: enter the user, mount and network namespaces of the process
 //     in _SILO_NSEXEC_PID, as root of its user namespace: silo unshare,
 //     and anything else run "inside the holder".
+//   - userns: enter the user namespace pinned at _SILO_NSEXEC_USERNS, as
+//     its root, and nothing else: runsc is started this way inside a
+//     container's user namespace, because its gofer can't join one by
+//     path (call L30).
 //   - pause: block forever. The holder starts one per container in a
 //     fresh nested user namespace and netns, pins both by bind mounts,
 //     and kills it.
+//
+// With _SILO_NSEXEC_EXEC set, join and userns then execvp argv[1:]
+// instead of returning to Go: containerd, buildkitd and runsc are
+// started in the holder that way, and no Go code runs inside.
 package nsexec
 
 /*
@@ -30,7 +38,6 @@ package nsexec
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <grp.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,9 +50,12 @@ static void silo_die(const char *what) {
 	_exit(125);
 }
 
+// silo_become_root keeps the caller's supplementary groups: the vm
+// class reaches /dev/kvm through the kvm group, which crun's
+// keep_original_groups carries into the container (call L31). They
+// stay kernel credentials whether or not the namespace maps them.
 static void silo_become_root(void) {
 	if (setresgid(0, 0, 0) < 0) silo_die("setresgid");
-	if (setgroups(0, NULL) < 0 && errno != EPERM) silo_die("setgroups");
 	if (setresuid(0, 0, 0) < 0) silo_die("setresuid");
 }
 
@@ -84,16 +94,36 @@ static void silo_join(void) {
 	if (cwd[0] == 0 || chdir(cwd) < 0) (void)chdir("/");
 }
 
-__attribute__((constructor)) static void silo_nsexec(void) {
+static void silo_userns(void) {
+	const char *path = getenv("_SILO_NSEXEC_USERNS");
+	if (path == NULL) { errno = EINVAL; silo_die("_SILO_NSEXEC_USERNS"); }
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) silo_die(path);
+	if (setns(fd, CLONE_NEWUSER) < 0) silo_die("setns user");
+	close(fd);
+	silo_become_root();
+}
+
+// glibc passes argc, argv and envp to constructors.
+__attribute__((constructor)) static void silo_nsexec(int argc, char **argv, char **envp) {
 	const char *stage = getenv("_SILO_NSEXEC");
 	if (stage == NULL) return;
 	if (strcmp(stage, "create") == 0) silo_create();
 	else if (strcmp(stage, "join") == 0) silo_join();
+	else if (strcmp(stage, "userns") == 0) silo_userns();
 	else if (strcmp(stage, "pause") == 0) for (;;) pause();
 	else { errno = EINVAL; silo_die(stage); }
+	int exec = getenv("_SILO_NSEXEC_EXEC") != NULL;
 	unsetenv("_SILO_NSEXEC");
 	unsetenv("_SILO_NSEXEC_SYNC");
 	unsetenv("_SILO_NSEXEC_PID");
+	unsetenv("_SILO_NSEXEC_USERNS");
+	unsetenv("_SILO_NSEXEC_EXEC");
+	if (exec) {
+		if (argc < 2) { errno = EINVAL; silo_die("nothing to exec"); }
+		execvp(argv[1], argv + 1);
+		silo_die(argv[1]);
+	}
 }
 */
 import "C"
