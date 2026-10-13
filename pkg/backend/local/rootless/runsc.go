@@ -169,6 +169,26 @@ func prepareProcessFile(args []string, root int) error {
 	return os.Lchown(f, root, root)
 }
 
+// prepareTarFile gives the descriptor a `runsc tar` command line's
+// --file names, /proc/self/fd/N, to the container's root, as
+// prepareProcessFile gives an exec's process file: runsc reopens the
+// path as that root, and the descriptor is the caller's pipe, the
+// holder's root's. A --file that names a path is left alone.
+func prepareTarFile(args []string, root int) error {
+	if runscCommand(args) != "tar" {
+		return nil
+	}
+	n, ok := strings.CutPrefix(flagValue(args, "file"), "/proc/self/fd/")
+	if !ok {
+		return nil
+	}
+	fd, err := strconv.Atoi(n)
+	if err != nil || fd < 0 {
+		return fmt.Errorf("--file /proc/self/fd/%s is not a descriptor", n)
+	}
+	return syscall.Fchown(fd, root, root)
+}
+
 // valueFlags are runsc's global flags the shim may pass with their
 // value as the next argument.
 var valueFlags = map[string]bool{"root": true, "log": true, "log-format": true, "debug-log": true, "bundle": true, "b": true, "pid-file": true}

@@ -66,10 +66,13 @@ func holderExec(holderPid int, exe string, argv []string) (*exec.Cmd, error) {
 // as the shim does. It finds the container's bundle, reads the user
 // namespace the bundle names, and replaces itself with runsc started
 // inside that namespace as its root, through exe's nsexec constructor.
-// A bundle that names none is refused (ErrNoUserNS).
+// A bundle that names none is refused (ErrNoUserNS). --bundle names the
+// bundle for a runsc command line that names none and isn't run from
+// it, as `runsc tar rootfs-upper` from silod (Paths.TaskBundle).
 func RunscMain(exe string, args []string) error {
 	fs := flag.NewFlagSet("runsc", flag.ContinueOnError)
 	runsc := fs.String("runsc", "runsc", "the runsc binary")
+	bundleFlag := fs.String("bundle", "", "the container's bundle, when it isn't the runsc command line's or the working directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -78,7 +81,10 @@ func RunscMain(exe string, args []string) error {
 	if err != nil {
 		return err
 	}
-	bundle := RunscBundle(rargs, cwd)
+	bundle := *bundleFlag
+	if bundle == "" {
+		bundle = RunscBundle(rargs, cwd)
+	}
 	userns, root, err := RunscUserNS(bundle)
 	if err != nil {
 		return err
@@ -91,6 +97,9 @@ func RunscMain(exe string, args []string) error {
 	}
 	if err := prepareProcessFile(rargs, root); err != nil {
 		return fmt.Errorf("rootless: exec's process file: %w", err)
+	}
+	if err := prepareTarFile(rargs, root); err != nil {
+		return fmt.Errorf("rootless: tar's output: %w", err)
 	}
 	path, err := exec.LookPath(*runsc)
 	if err != nil {

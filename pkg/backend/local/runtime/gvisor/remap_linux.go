@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"os/exec"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
@@ -67,9 +68,9 @@ func RemapMain(args []string) error {
 // holder whose pid is holderPid through exe's nsexec constructor, with
 // env added to its environment.
 func InHolder(holderPid int, exe string, env ...string) func(ctx context.Context, args ...string) ([]byte, error) {
+	command := HolderCommand(holderPid, exe, env...)
 	return func(ctx context.Context, args ...string) ([]byte, error) {
-		cmd := nsd.JoinExec(holderPid, exe, append([]string{exe}, args...)...)
-		cmd.Env = append(cmd.Env, env...)
+		cmd := command(args...)
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
 		if err := cmd.Start(); err != nil {
@@ -79,5 +80,15 @@ func InHolder(holderPid int, exe string, env ...string) func(ctx context.Context
 		defer stop()
 		err := cmd.Wait()
 		return out.Bytes(), err
+	}
+}
+
+// HolderCommand is Config.HolderCmd for silod: InHolder's command, not
+// yet started, for a caller that streams its output.
+func HolderCommand(holderPid int, exe string, env ...string) func(args ...string) *exec.Cmd {
+	return func(args ...string) *exec.Cmd {
+		cmd := nsd.JoinExec(holderPid, exe, append([]string{exe}, args...)...)
+		cmd.Env = append(cmd.Env, env...)
+		return cmd
 	}
 }

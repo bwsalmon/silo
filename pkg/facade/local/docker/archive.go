@@ -556,7 +556,7 @@ func (s *Server) imageLoad(q *request) error {
 	return nil
 }
 
-// whiteoutLayer copies a writable layer from runsc tar rootfs-upper
+// WhiteoutLayer copies a writable layer from runsc tar rootfs-upper
 // into w as an OCI layer, checking every entry: a path outside the
 // root is refused, an overlayfs whiteout (a 0/0 character device)
 // becomes OCI's .wh.<name>, a directory overlayfs made opaque gains
@@ -565,7 +565,7 @@ func (s *Server) imageLoad(q *request) error {
 // hard link to the first, since they share one inode
 // (local-registry.md §7, "commit"), so a hard link to a whiteout is a
 // whiteout too.
-func whiteoutLayer(w io.Writer, r io.Reader) error {
+func WhiteoutLayer(w io.Writer, r io.Reader) error {
 	tr := tar.NewReader(r)
 	tw := tar.NewWriter(w)
 	whiteouts := map[string]bool{}
@@ -894,7 +894,7 @@ func (s *Server) commit(q *request) error {
 			return "", 0, err
 		}
 		cw := &cappedWriter{w: in, max: free}
-		if err := whiteoutLayer(cw, rc); err != nil {
+		if err := WhiteoutLayer(cw, rc); err != nil {
 			_ = s.opts.Content.Abort(ctx, lease+"-layer")
 			if errors.Is(err, errTooBig) {
 				return "", 0, forbidden("silo: commit: the layer is over the silo's free disk_gb (%d bytes)", free)

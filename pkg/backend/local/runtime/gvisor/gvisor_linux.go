@@ -1,6 +1,7 @@
 package gvisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,6 +82,17 @@ type Config struct {
 	// InHolder runs silod with args inside the holder and returns its
 	// combined output: RemapMain runs through it.
 	InHolder func(ctx context.Context, args ...string) ([]byte, error)
+	// HolderCmd is InHolder's command, not yet started, for output that
+	// is streamed rather than collected (HolderCommand).
+	HolderCmd func(args ...string) *exec.Cmd
+	// Runsc is `silod runsc` up to its runsc command line, after silod,
+	// as rootless.RunscWrapperScript runs it: "runsc", "--runsc" and the
+	// pinned runsc. RunscRoot is the shim's options' root
+	// (rootless.Paths.RunscRoot), under which the shim gives runsc the
+	// namespace's directory as its --root. RootfsUpper runs runsc with
+	// them through HolderCmd; without all three, it refuses.
+	Runsc     []string
+	RunscRoot string
 	// Toolbox is a static busybox on the host, mounted read-only at
 	// ToolboxPath in every container for CopyIn and CopyOut. Without
 	// it, they need tar in the image.
@@ -961,6 +973,90 @@ func (d *Driver) CopyOut(ctx context.Context, id, p string) (io.ReadCloser, erro
 		pw.CloseWithError(err)
 	}()
 	return pr, nil
+}
+
+var _ runtime.Committer = (*Driver)(nil)
+
+// RootfsUpper implements runtime.Committer: `runsc tar rootfs-upper`,
+// which with --overlay2=root:self is the only reader of the container's
+// writes, in the sandbox's memory. `silod runsc` runs it inside the
+// holder, in the container's user namespace as its root, as the shim
+// runs runsc, given the task's bundle since runsc tar names none. The
+// tar is streamed through a pipe runsc's --file names. runsc
+// release-20261005 writes deletions as overlayfs whiteouts
+// (local-registry.md §7, "commit"). A container whose sandbox has
+// exited has no upper layer left, and is ErrState.
+func (d *Driver) RootfsUpper(ctx context.Context, id string) (io.ReadCloser, error) {
+	if d.cfg.HolderCmd == nil || len(d.cfg.Runsc) == 0 || d.cfg.RunscRoot == "" {
+		return nil, errors.New("gvisor: reading a writable layer needs `silod runsc` and runsc's root, and this driver was given neither")
+	}
+	nctx := d.ns(ctx)
+	t, err := d.task(nctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s, err := t.Status(nctx); err != nil {
+		return nil, err
+	} else if s.Status != containerd.Running && s.Status != containerd.Paused {
+		return nil, fmt.Errorf("%w: %s is %s, and its writable layer went with its sandbox", runtime.ErrState, id, s.Status)
+	}
+	// runsc prints a line on stdout before the tar, so the tar has a
+	// pipe of its own, which runsc reopens by its path.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	args := append(append([]string(nil), d.cfg.Runsc...), "--bundle", rootless.Paths{}.TaskBundle(d.cfg.Namespace, id), "--",
+		"--root", filepath.Join(d.cfg.RunscRoot, d.cfg.Namespace), "tar", "rootfs-upper", "--file", "/proc/self/fd/3", id)
+	cmd := d.cfg.HolderCmd(args...)
+	cmd.ExtraFiles = []*os.File{pw}
+	r := &cmdReader{cmd: cmd, r: pr}
+	cmd.Stdout, cmd.Stderr = &r.msgs, &r.msgs
+	err = cmd.Start()
+	pw.Close()
+	if err != nil {
+		pr.Close()
+		return nil, fmt.Errorf("gvisor: runsc tar rootfs-upper: %w", err)
+	}
+	r.stop = context.AfterFunc(ctx, func() { cmd.Process.Kill() })
+	return r, nil
+}
+
+// cmdReader is a command's output pipe, which fails with the command's
+// messages if the command does; Close kills it if it is still running.
+type cmdReader struct {
+	cmd  *exec.Cmd
+	r    io.ReadCloser
+	msgs bytes.Buffer
+	stop func() bool
+	once sync.Once
+	err  error
+}
+
+func (c *cmdReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	if err == io.EOF {
+		if werr := c.wait(); werr != nil {
+			return n, werr
+		}
+	}
+	return n, err
+}
+
+func (c *cmdReader) wait() error {
+	c.once.Do(func() {
+		c.stop()
+		if err := c.cmd.Wait(); err != nil {
+			c.err = fmt.Errorf("gvisor: runsc tar rootfs-upper: %v: %s", err, strings.TrimSpace(c.msgs.String()))
+		}
+	})
+	return c.err
+}
+
+func (c *cmdReader) Close() error {
+	c.cmd.Process.Kill()
+	c.wait()
+	return c.r.Close()
 }
 
 // List implements runtime.Driver: every sandbox-class container in
