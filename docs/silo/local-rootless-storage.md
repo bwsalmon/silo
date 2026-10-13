@@ -952,6 +952,53 @@ older volumes) back into the data directory and starting silod.
   destroys anything the restore didn't, and an operator who restored the
   wrong copy can restore again.
 
+*What step 18 built* (task 3419):
+
+- **The sequence** is the store setting `object_seq`, in package
+  `pkg/backend/local/objseq`. The Docker facade takes a number in the
+  transaction that writes a container's, network's or volume's row, and
+  keeps it in the row as `Seq`. Containers carry it as `dev.silo.seq`.
+  Networks keep it in the row only: a bridge isn't on disk, and is
+  rebuilt from the rows at start.
+- **A volume's label is beside it, not in it:**
+  `silos/<id>/volumes/.<volume>.silo-seq`, and `silos/<id>/.silo-seq`
+  for the subtree. A file inside the volume would be the tenant's to
+  change, and raising it would put silod in report-only mode at every
+  start. `storage.Driver` grew `Label` and `List`, served by the
+  holder as `vol_label` and `vol_list`. A subtree keeps its first
+  label.
+- **Detection** is `local.DetectRestore`, which silod runs at start on
+  the local backend, before the reconcile. It compares the highest
+  label on the drivers' containers and in `silos/` with the high-water
+  mark. When the disk is ahead, or `silod serve --after-restore` is
+  given, it sets the reconcile to report-only, records the restore in
+  the setting `restore_detected`, and audits `restore_detected` with
+  both numbers. It also raises the high-water mark to the disk's, so
+  that new objects are numbered above every old one, and the next start
+  doesn't find the same restore again. `describe` on the root shows
+  `restore_detected` until `silo reconcile --apply` clears it.
+- **Orphans** come from the local inventory, which now lists volumes
+  and subtrees beside containers. A container or a volume of a live
+  silo with no row (`docker.Records`) is `backend.Object.Unrecorded`,
+  and the reconcile treats it as an orphan.
+- **Rows without records** are `docker.Server.Recover`. It audits
+  `volume_missing` for a volume row with no directory, and
+  `container.recreated` for a container made again from its row. A
+  container that mounts a missing volume is not made again, so that
+  the volume isn't made again empty. It is audited `FAILED`, with the
+  reason in its row's `Error`.
+- **The test** is `TestCopyAndRestore` in the facade's package. It runs
+  `VACUUM INTO` while two silos create containers, and restores the
+  copy over the running store. It then checks that everything made
+  after the copy is an orphan, that report-only deletes nothing even
+  past the grace period, and that no port of a later container is
+  pinned.
+
+*Not built yet:* silod doesn't serve the Docker facade or run drivers
+yet, so it reads only `silos/` for the disk's labels, and doesn't call
+`Recover`. Whatever wires the facade into silod also has to call
+`Recover` at start, after `DetectRestore`.
+
 ## Calls made on this page
 
 L26. **silod runs fully rootless by default:** no root after the

@@ -12,6 +12,9 @@
 //     and deletes it, as orphan.deleted, once it has been seen for the
 //     grace period of database time (call 27), unless reconcile is
 //     report-only (state.md "Backups and recovery", call 36);
+//   - audits the same way an object of a live silo that the store has
+//     no row for (backend.Object.Unrecorded): on the local backend, one
+//     made after the point a restored store was copied at;
 //   - reports a foreign object, one in the VPC with neither label nor
 //     prefix and not install's own, as foreign.found, and leaves it
 //     alone;
@@ -222,6 +225,8 @@ func (r *Reconciler) objects(ctx context.Context, root *tree.Silo, regions []str
 			kind := ""
 			switch {
 			case o.Install:
+			case o.Unrecorded:
+				kind = seenOrphan
 			case o.Silo != "" && !live[o.Silo]:
 				orphan := o.Labelled
 				if !orphan {

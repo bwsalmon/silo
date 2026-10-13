@@ -44,6 +44,11 @@ type Object struct {
 	InVPC bool
 	// Install is whether it is install's own.
 	Install bool
+	// Unrecorded is whether the store has no row for it although its
+	// silo exists: on the local backend, a container or a volume made
+	// after the point a restored store was copied at. It is an orphan
+	// (local-rootless-storage.md call L40).
+	Unrecorded bool
 	// Ledger is the ledger object it is charged as, or "" for one the
 	// ledger doesn't know.
 	Ledger string

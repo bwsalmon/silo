@@ -132,7 +132,25 @@ const (
 	// container range on disk would belong to other ids
 	// (local-rootless-storage.md calls L29 and L33).
 	SettingHolderMapping = "holder_mapping"
+	// SettingObjectSeq is, on the local backend, the object sequence's
+	// high-water mark: the last number given to a container, network,
+	// volume or subtree, which labels it on disk
+	// (local-rootless-storage.md call L40). A label above it is an
+	// object made after this store was copied.
+	SettingObjectSeq = "object_seq"
+	// SettingRestoreDetected is, on the local backend, the restore
+	// silod found at its last start, as fenceapi.RestoreDetected's
+	// JSON. describe shows it on the root until silo reconcile --apply
+	// clears it.
+	SettingRestoreDetected = "restore_detected"
 )
+
+// DeleteSetting removes a setting, in tx. One that isn't set is not an
+// error.
+func DeleteSetting(ctx context.Context, tx Tx, name string) error {
+	_, err := tx.Exec(ctx, `DELETE FROM settings WHERE name = ?`, name)
+	return err
+}
 
 // SetSetting writes a setting.
 func SetSetting(ctx context.Context, s Store, name, value string) error {

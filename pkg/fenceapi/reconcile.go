@@ -1,7 +1,11 @@
 package fenceapi
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/bwsalmon/silo/pkg/store"
 	"github.com/bwsalmon/silo/pkg/tree"
@@ -60,6 +64,9 @@ func (s *Server) reconcile(q *request, rest string) {
 			if err := store.WriteSetting(ctx, tx, store.SettingReconcile, store.ReconcileApply); err != nil {
 				return err
 			}
+			if err := store.DeleteSetting(ctx, tx, store.SettingRestoreDetected); err != nil {
+				return err
+			}
 			if err := Audit(ctx, tx, root, q.caller, KindReconcileApply, "", "OK",
 				map[string]any{"was": modeName(reportOnly)}); err != nil {
 				return err
@@ -74,6 +81,47 @@ func (s *Server) reconcile(q *request, rest string) {
 		return
 	}
 	writeJSON(q.w, http.StatusOK, out)
+}
+
+// KindRestoreDetected is the audit kind of a restore silod found at
+// its start, or was told of with --after-restore
+// (local-rootless-storage.md call L40).
+const KindRestoreDetected = "restore_detected"
+
+// RestoreDetected is a restore silod found at its start: a store whose
+// object sequence is below a label on disk. Its reconcile is
+// report-only until silo reconcile --apply.
+type RestoreDetected struct {
+	// StoreSeq is the store's high-water mark as it was found, and
+	// DiskSeq the highest label on disk.
+	StoreSeq uint64 `json:"store_seq"`
+	DiskSeq  uint64 `json:"disk_seq"`
+	// Forced is set when silod --after-restore said so, whatever the
+	// numbers.
+	Forced bool      `json:"forced,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// ReadRestoreDetected is the restore recorded in the store, or nil.
+func ReadRestoreDetected(ctx context.Context, tx store.Tx) (*RestoreDetected, error) {
+	v, ok, err := store.ReadSetting(ctx, tx, store.SettingRestoreDetected)
+	if err != nil || !ok {
+		return nil, err
+	}
+	var r RestoreDetected
+	if err := json.Unmarshal([]byte(v), &r); err != nil {
+		return nil, fmt.Errorf("setting %s: %w", store.SettingRestoreDetected, err)
+	}
+	return &r, nil
+}
+
+// WriteRestoreDetected records r, which describe shows on the root.
+func WriteRestoreDetected(ctx context.Context, tx store.Tx, r RestoreDetected) error {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	return store.WriteSetting(ctx, tx, store.SettingRestoreDetected, string(b))
 }
 
 func modeName(reportOnly bool) string {

@@ -38,6 +38,8 @@ const (
 	OpVolCreate  Op = "vol_create" // storage.Driver.Create
 	OpVolDelete  Op = "vol_delete" // storage.Driver.Delete
 	OpVolUsage   Op = "vol_usage"  // storage.Driver.Usage
+	OpVolLabel   Op = "vol_label"  // storage.Driver.Label
+	OpVolList    Op = "vol_list"   // storage.Driver.List
 	maxDialBatch    = 64
 )
 
@@ -62,6 +64,7 @@ type Request struct {
 	Gateway netip.Addr     `json:"gateway,omitzero"` // veth: default route in the container
 	Volume  *storage.Ref   `json:"volume,omitempty"` // vol_*
 	Size    int64          `json:"size,omitempty"`   // vol_create
+	Seq     uint64         `json:"seq,omitempty"`    // vol_label
 }
 
 // Response is a call's answer. Descriptors travel beside it with
@@ -73,6 +76,8 @@ type Response struct {
 	NS    *ContainerNS   `json:"ns,omitempty"`
 	Path  string         `json:"path,omitempty"`  // vol_create
 	Usage *storage.Usage `json:"usage,omitempty"` // vol_usage
+	// Entries are vol_list's answer.
+	Entries []storage.Entry `json:"entries,omitempty"`
 }
 
 // Info describes the holder.

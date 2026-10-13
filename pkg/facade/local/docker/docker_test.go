@@ -96,13 +96,16 @@ type env struct {
 	facade  *Server
 	srv     *httptest.Server
 	vols    string
+	// path is the store's file.
+	path string
 
 	root, a, ci, b, ro, sandboxOnly string
 }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "silo.db"))
+	path := filepath.Join(t.TempDir(), "silo.db")
+	db, err := sqlite.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +118,7 @@ func newEnv(t *testing.T) *env {
 	}
 	content := registry.NewMemory()
 	e := &env{t: t, db: db, vm: fake.New(runtime.VM), sbx: fake.New(runtime.Sandbox), images: &images{content: content},
-		content: content, vols: t.TempDir()}
+		content: content, vols: t.TempDir(), path: path}
 	e.vm.Volumes, e.sbx.Volumes = e.vols, e.vols
 	api := fenceapi.New(db, fenceapi.Options{Caller: caller})
 	e.reg = registry.New(registry.Options{Store: db, API: api, Content: content})
