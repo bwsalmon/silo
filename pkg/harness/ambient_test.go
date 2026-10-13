@@ -132,7 +132,7 @@ func (v *versionControl) SessionVersion(_ context.Context, agent, version string
 // ambientLogins: ambient-anthropic is ambient, anything else an API key.
 type ambientLogins struct{ logins }
 
-func (ambientLogins) SessionCredential(_ context.Context, name string) (agents.Credential, error) {
+func (*ambientLogins) SessionCredential(_ context.Context, name string) (agents.Credential, error) {
 	if name == "ambient-anthropic" {
 		return agents.Credential{Name: name, Provider: "anthropic", Kind: agents.CredentialAmbient}, nil
 	}
