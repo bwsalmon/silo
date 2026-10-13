@@ -1979,7 +1979,8 @@ before item 7.
     - the one-time root steps table as install's checks;
     - the system install under a `silo` user.
 
-    Depends on 15 and 16.
+    Depends on 15 and 16. Built in task 3415. What it built, and what
+    it left to the drivers, is under call L33 and call L34 in part 2.
 18. **Safe copies and restore detection**
     ([calls L39 and L40](local-rootless-storage.md#copying-the-state-safely-call-l39)):
     - the object sequence and its labels (`dev.silo.seq`, `.silo-seq`);

@@ -513,7 +513,7 @@ and stays after logout:
 | Unit | Runs |
 | --- | --- |
 | `silo-nsd.service` | The holder: user namespace, mount namespace, `silo-net`, `gw0`, the base nftables tables |
-| `silo-containerd.service` | containerd, joined to the holder's namespaces (`BindsTo=silo-nsd.service`) |
+| `silo-containerd.service` | containerd, joined to the holder's namespaces (`Wants=` and `After=silo-nsd.service`; not `BindsTo=`, which would stop it with every holder restart) |
 | `silo-buildkitd.service` | buildkitd for granule wraps, likewise |
 | `silod.service` | silod, in the host's namespaces (`After=` the others) |
 
@@ -563,6 +563,40 @@ alone:
 A directory or containerd record with no row is an **orphan**. A row
 with no record is **recreated** ([Restoring](#restoring-call-l40)).
 
+*What step 17 built* (task 3415):
+
+- **Units** are `pkg/backend/local/units`. `silo-nsd.service` runs
+  `silod nsd`; `silo-containerd.service` and `silo-buildkitd.service`
+  run `silod containerd` and `silod buildkitd`, which wait for the
+  holder's `nsd.state` and then replace themselves with the runtime
+  inside its namespaces, so the runtime is the unit's main process.
+  The runtimes have `Delegate=yes` and `KillMode=process`, as
+  containerd's own unit does, so that the shims outlive containerd.
+  They `Want` the holder rather than `BindsTo` it: `BindsTo` would stop
+  containerd with every holder restart and leave nothing to adopt.
+  `silo-buildkitd.service` is written only where `buildkitd` is
+  installed. `silod.service` runs `silod serve --backend=local
+  --migrate`, with the front door at `%t/silo/silo.sock`.
+- **Adoption** is `nsd.Adopt`. `nsd.state` records the holder's pid and
+  its user, mount and network namespaces. A new `silod nsd` that finds
+  the file looks for any process still in all three. It holds each
+  candidate by a pidfd while it reads the namespaces, and checks after
+  that the process is still alive. It joins the namespaces through the
+  process it finds, as their root. The new holder then takes over the
+  private `/run`, the pin tmpfs and its pins, `silo-net` and `gw0` as
+  they are. It refuses while the old holder still answers on
+  `nsd.sock`. It also refuses when the surviving namespaces map other
+  ranges than `/etc/subuid` now gives. With nothing left, it makes fresh
+  namespaces.
+- **After a reboot**, `silod serve --backend=local` waits up to a
+  minute for the holder. It then checks the holder's mapping against
+  the `holder_mapping` setting. The first start records that setting,
+  and a different mapping refuses the start. The fence's applier
+  rebuilds the ruleset from the store, as on any start. *Not built
+  yet:* restarting containers by `RestartPolicy`, and recreating
+  bridges, veths and slices. Each comes with the drivers and the
+  facade's networks (steps 6, 7 and 10), which are what create them.
+
 ### The one-time root steps
 
 "No root after the packages are installed" means these happen with
@@ -581,6 +615,24 @@ command for any that is missing:
 | `zfs allow` on a dataset | The ZFS storage driver | Plain directories |
 
 None of these grants silod a capability in the host's namespaces.
+
+*As built in step 17*, these are the prerequisite step of `silo
+install --backend local` (`pkg/install/local`), printed in its plan
+with each fix:
+
+- **Refuse:** a missing package that the holder or both classes need
+  (`uidmap`, `containerd`), no subuid or subgid range, user namespaces
+  not allowed, and no class left.
+- **Turn a class off, with a warning:** a missing `runsc` or shim
+  turns `sandbox` off. A missing `crun` or no `kvm` group membership
+  turns `vm` off.
+- **Warn:** no `buildkitd`, partial cgroup delegation, and no
+  `/run/silo`.
+
+Lingering is a step of its own. Install runs `loginctl enable-linger`
+itself, and where polkit refuses that, it warns with the `sudo`
+command. The ZFS row is reported as not needed, because only the `dir`
+driver exists. `passt` isn't checked, because nothing uses it yet.
 
 ### Security statement
 
@@ -635,6 +687,29 @@ changes is only who sets it up, and how:
 | Agents | Ambient as the operator | Ambient as `silo`: the CLIs' logins must be made as `silo` (`sudo -u silo claude login`) |
 | Capabilities | None | **None needed.** `AmbientCapabilities=CAP_NET_BIND_SERVICE` only if `ingress: host` should bind ports under 1024 |
 | Root after install | Never | Never. `silo install` and `silo uninstall` run as root, silod never does. |
+
+*As built in step 17*, `sudo silo install --backend local --system`
+does the following:
+
+- It creates `silo` (`useradd --system --user-group`, with no login
+  shell) and adds it to `kvm`.
+- It gives `silo` subordinate uids and gids for 256 container ranges.
+  These start at the first 65536-aligned id past every range in
+  `/etc/subuid` and `/etc/subgid`, and no lower than 1048576.
+- It makes the data directory, owned by `silo` and mode 0700.
+- It writes the same four units to `/etc/systemd/system` with
+  `User=silo`, and grants no capability.
+
+One difference from the table above: the holder's runtime directory
+is `/run/silo-nsd` (`RuntimeDirectory=silo-nsd`, preserved across
+restarts), not `/run/silo`. The holder gives itself a private `/run`
+in which `silo` is its own directory (for pins and runsc's root), so a
+socket it made under `/run/silo` would be invisible to silod. The
+front door stays at `/run/silo/silo.sock`.
+
+*Not built yet:* silod's cgroup slices still go through the user
+manager (`systemctl --user`). Under the system install, they should be
+sub-cgroups of `silod.service`'s delegated cgroup instead.
 
 Whether to drop `CAP_NET_ADMIN` from the operator's sketch is
 [open question 13](#open-questions). This page assumes it is dropped,
