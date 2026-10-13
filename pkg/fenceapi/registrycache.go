@@ -209,6 +209,29 @@ func EffectiveEgress(ctx context.Context, tx store.Tx, silo string) ([]egress.Po
 	return levels, paths, nil
 }
 
+// SharingDomain is silo's images sharing domain (local-registry.md,
+// "The timing channel, and images.sharing", call L73): the ID and path
+// of the nearest silo, silo or an ancestor, that sets isolated itself.
+// The whole host is ID "" and path "/", which is also the domain when
+// only the root isolates, since every silo is in it. The cache's index
+// is per domain.
+func SharingDomain(ctx context.Context, tx store.Tx, silo string) (id, path string, err error) {
+	chain, err := tree.Ancestry(ctx, tx, silo)
+	if err != nil {
+		return "", "", err
+	}
+	eff, err := effectiveOf(ctx, tx, chain, nil)
+	if err != nil {
+		return "", "", err
+	}
+	for _, s := range chain[1:] {
+		if s.Path == eff.ImagesFrom {
+			return s.ID, s.Path, nil
+		}
+	}
+	return "", "/", nil
+}
+
 // cachePath reports whether rest is the cache's configuration: GET
 // registry/cache is silo registry cache status, PUT sets it.
 func cachePath(rest string) bool { return rest == "registry/cache" }

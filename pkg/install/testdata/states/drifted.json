@@ -152,7 +152,7 @@
         "labels": {
           "silo-install": "i7a71c41be6",
           "silo-role": "db",
-          "silo-schema": "28"
+          "silo-schema": "29"
         },
         "edition": "ENTERPRISE",
         "tier": "db-f1-micro",
@@ -398,7 +398,7 @@
     "migrate": {
       "instance": "silo-db-t3st",
       "state": "RUNNABLE",
-      "schema": 28
+      "schema": 29
     },
     "nat": {
       "computeEnabled": true,
@@ -569,7 +569,7 @@
           "labels": {
             "silo-install": "i7a71c41be6",
             "silo-role": "db",
-            "silo-schema": "28"
+            "silo-schema": "29"
           },
           "edition": "ENTERPRISE",
           "tier": "db-f1-micro",

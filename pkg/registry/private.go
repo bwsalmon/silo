@@ -104,13 +104,15 @@ func needsCredentials(err error) bool {
 	return errors.As(err, &ue) && (ue.status == http.StatusUnauthorized || ue.status == http.StatusForbidden)
 }
 
-// setClass records o's class, as of now.
+// setClass records o's class, as of now, in the caller's domain's
+// index.
 func (s *Service) setClass(ctx context.Context, cr *cacheReq, o *cacheObject, private bool) error {
 	o.private, o.classifiedAt = private, s.opts.Now()
+	x := indexOf(cr.domain)
 	return s.opts.Store.Tx(ctx, func(tx store.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE registry_cache_objects SET private = ?, classified_at = ?
-			WHERE upstream = ? AND repo = ? AND digest = ?`,
-			boolInt(private), store.Millis(o.classifiedAt), cr.name.Upstream, cr.name.UpstreamRepo, o.digest)
+		_, err := tx.Exec(ctx, `UPDATE `+x.objects+` SET private = ?, classified_at = ?
+			WHERE `+x.where+`upstream = ? AND repo = ? AND digest = ?`,
+			append([]any{boolInt(private), store.Millis(o.classifiedAt)}, x.args(cr.name.Upstream, cr.name.UpstreamRepo, o.digest)...)...)
 		return err
 	})
 }

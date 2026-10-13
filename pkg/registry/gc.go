@@ -38,8 +38,17 @@ const (
 // however far the object sequence has gone on since.
 const OrphanLabel = "dev.silo.orphan"
 
-// cacheEntry is a cache entry's record name in silo-cache.
-func cacheEntry(upstream, repo, digest string) string { return upstream + "/" + repo + "@" + digest }
+// cacheEntry is a cache entry's record name in silo-cache: the whole
+// host's <upstream>/<repo>@<digest>, and an isolated domain's the same
+// under domain-<id>/, so that each domain's entry keeps its blob alive
+// for as long as that entry is there (call L73).
+func cacheEntry(domain, upstream, repo, digest string) string {
+	name := upstream + "/" + repo + "@" + digest
+	if domain != "" {
+		name = "domain-" + domain + "/" + name
+	}
+	return name
+}
 
 // Reckon brings repo's disk_gb charge to what it holds now, in tx: the
 // fence API's manifest delete calls it, so that a delete refunds at
@@ -74,6 +83,7 @@ func (s *Service) collect(ctx context.Context) {
 
 // cacheRow is one cache entry, as eviction sees it.
 type cacheRow struct {
+	domain                 string // "" for the whole host's index
 	upstream, repo, digest string
 	size                   int64
 	accessed               int64
@@ -95,15 +105,16 @@ func (s *Service) cacheUse(ctx context.Context) (*cacheUse, error) {
 	u := &cacheUse{only: map[string]int64{}, entries: map[string]int{}}
 	err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
 		u.rows = nil
-		rows, err := tx.Query(ctx, `SELECT upstream, repo, digest, size, accessed_at FROM registry_cache_objects
-			ORDER BY accessed_at, upstream, repo, digest`)
+		rows, err := tx.Query(ctx, `SELECT '' AS domain, upstream, repo, digest, size, accessed_at FROM registry_cache_objects
+			UNION ALL SELECT domain, upstream, repo, digest, size, accessed_at FROM registry_cache_domain_objects
+			ORDER BY accessed_at, upstream, repo, digest, domain`)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var r cacheRow
-			if err := rows.Scan(&r.upstream, &r.repo, &r.digest, &r.size, &r.accessed); err != nil {
+			if err := rows.Scan(&r.domain, &r.upstream, &r.repo, &r.digest, &r.size, &r.accessed); err != nil {
 				return err
 			}
 			u.rows = append(u.rows, r)
@@ -149,15 +160,16 @@ func (s *Service) cacheUse(ctx context.Context) (*cacheUse, error) {
 // returns the cache-only bytes that removing it freed: its size, if it
 // was the last entry of a cache-only digest.
 func (s *Service) drop1(ctx context.Context, u *cacheUse, r cacheRow) (int64, error) {
+	x := indexOf(r.domain)
 	err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM registry_cache_objects WHERE upstream = ? AND repo = ? AND digest = ?`,
-			r.upstream, r.repo, r.digest)
+		_, err := tx.Exec(ctx, `DELETE FROM `+x.objects+` WHERE `+x.where+`upstream = ? AND repo = ? AND digest = ?`,
+			x.args(r.upstream, r.repo, r.digest)...)
 		return err
 	})
 	if err != nil {
 		return 0, err
 	}
-	if err := s.opts.Content.DeleteImage(ctx, CacheNamespace, cacheEntry(r.upstream, r.repo, r.digest)); err != nil {
+	if err := s.opts.Content.DeleteImage(ctx, CacheNamespace, cacheEntry(r.domain, r.upstream, r.repo, r.digest)); err != nil {
 		return 0, err
 	}
 	u.entries[r.digest]--
@@ -261,9 +273,10 @@ func (s *Service) EvictCache(ctx context.Context, upstream, repo, digest string)
 // and, after a miss brought new bytes in, keeps the cache in budget.
 func (s *Service) touch(ctx context.Context, cr *cacheReq, digest string) {
 	ctx = context.WithoutCancel(ctx)
+	x := indexOf(cr.domain)
 	err := s.opts.Store.Tx(ctx, func(tx store.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE registry_cache_objects SET accessed_at = ? WHERE upstream = ? AND repo = ? AND digest = ?`,
-			store.Millis(s.opts.Now()), cr.name.Upstream, cr.name.UpstreamRepo, digest)
+		_, err := tx.Exec(ctx, `UPDATE `+x.objects+` SET accessed_at = ? WHERE `+x.where+`upstream = ? AND repo = ? AND digest = ?`,
+			append([]any{store.Millis(s.opts.Now())}, x.args(cr.name.Upstream, cr.name.UpstreamRepo, digest)...)...)
 		return err
 	})
 	if err != nil {

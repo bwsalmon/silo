@@ -13,6 +13,7 @@ fake content store; containerd's half is step 27b. Task 3483 landed
 step 30's facade endpoints over the same fake. Task 3484 landed step
 31's pull-through cache for public content, over the same fake and a
 test upstream ([§13](#13-staged-implementation-plan) says what is left).
+Task 3486 landed step 33's cache index per sharing domain.
 Task 3488 ran step 35's builders in `sandbox` and wrote what they
 showed into [§9](#9-building-images); the `vm` half is step 35b.
 
@@ -1653,8 +1654,8 @@ earlier depends on them. Each can be filed on its own, in this order.
     way for silod to say which silo a request is for (on its silod
     socket, as `Silo-Origin` is), and silod's wiring of the cache with
     step 27b's. The cache's `silo-cache` image records and GC labels
-    are step 34's, with eviction; the cache index per sharing domain is
-    step 33's.
+    are step 34's, with eviction; the cache index per sharing domain
+    landed in step 33.
 32. **Private upstream content:**
     - anonymous classification and `public_ttl`;
     - revalidation by digest with the caller's credentials;
@@ -1668,7 +1669,7 @@ earlier depends on them. Each can be filed on its own, in this order.
 
     *Landed in task 3485:* `pkg/registry/private.go`, with each cache
     object's class in `registry_cache_objects.private` and
-    `classified_at` (migration 0028). A miss is fetched anonymously
+    `classified_at` of both indexes (migration 0029). A miss is fetched anonymously
     first, shared in flight as before; an upstream answer of 401 or 403
     makes it private, and the caller's credentials then fetch it alone.
     A miss uses an anonymous `GET` rather than a `HEAD`: a refused `GET`
@@ -1720,6 +1721,28 @@ earlier depends on them. Each can be filed on its own, in this order.
 33. **Sharing domains:** the cache index per domain, full fetches for
     misses in an isolated domain, and facade pulls on the same rule.
     Depends on 25 and 31.
+
+    *Landed in task 3486, over `registry.Memory`:* every cache request
+    resolves the caller's domain with `fenceapi.SharingDomain`, the
+    nearest silo below the root that sets `isolated` itself, or the
+    whole host (which is also the domain when only the root isolates,
+    since every silo is in it). The whole host's entries stay in
+    `registry_cache_objects` and `registry_cache_tags`; an isolated
+    domain's are in `registry_cache_domain_objects` and
+    `registry_cache_domain_tags`, keyed by the domain silo's ID, so the
+    migration only adds. Hits, tag revalidation and stale tags read the
+    caller's domain's rows only; a miss is the caller's full upstream
+    fetch, verified, and the content store's commit drops the
+    duplicate for the copy on disk. In-flight fetches are shared only
+    within a domain. `registry.cache` records carry `domain`, the
+    domain's path. Facade pulls go through the same requests, so they
+    follow the rule unchanged. With step 34 merged, an isolated
+    domain's `silo-cache` records are `domain-<id>/<upstream>/<repo>@<digest>`,
+    so each domain's entry holds its blob, and eviction, `cache evict`
+    and access times cover both indexes. *Left:* an isolated domain's
+    entries outlive the silo's deletion or its turning `shared` again
+    until eviction or `cache evict` drops them; silo deletion's
+    registry step doesn't drop them yet.
 34. **Cache budget, eviction, GC and deletion:**
     - the budget in root capacity, `--image-cache-size`;
     - LRU eviction of cache-only entries, `cache evict`;
@@ -1736,7 +1759,7 @@ earlier depends on them. Each can be filed on its own, in this order.
     `Memory` does as a mark and sweep over every namespace's records
     and the unexpired leases blobs were committed under. Each cache
     fetch records its object as a `silo-cache` entry,
-    `<upstream>/<repo>@<digest>` (step 33 adds the domain), before its
+    `<upstream>/<repo>@<digest>` (step 33 prefixes an isolated domain's), before its
     fetch lease ends, and every hit or miss records its access time.
     After a miss, `Service.Evict` counts the cache-only bytes (cache
     entries' blobs that no record outside `silo-cache` references) and,

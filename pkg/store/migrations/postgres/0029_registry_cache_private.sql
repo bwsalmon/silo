@@ -9,7 +9,10 @@
 -- revalidate it (a manifest) or through an authorisation for a manifest
 -- that references it (a blob); authorisations are held in silod's
 -- memory and never here, and no credential or token is ever stored.
--- Rows from before this step are public, classified at 0, so they are
--- asked again on their next request.
+-- Both indexes have them: the whole host's and the isolated sharing
+-- domains' (0028). Rows from before this step are public, classified
+-- at 0, so they are asked again on their next request.
 ALTER TABLE registry_cache_objects ADD COLUMN private INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE registry_cache_objects ADD COLUMN classified_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE registry_cache_domain_objects ADD COLUMN private INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE registry_cache_domain_objects ADD COLUMN classified_at BIGINT NOT NULL DEFAULT 0;
