@@ -32,6 +32,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
+	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/granule"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
@@ -428,6 +430,7 @@ func serve(ctx context.Context, args []string) error {
 	localGateway := fs.String("local-gateway", "10.255.255.1,10.255.255.2", "with --backend=local: silo.internal's and docker.silo.internal's addresses on gw0, comma-separated")
 	nsdSocket := fs.String("nsd-socket", "", "with --backend=local: the namespace holder's RPC socket, which opens silod's sockets in silo-net and wires containers (default nsd.sock beside --nsd-state)")
 	dockerSockets := fs.String("docker-socket-dir", dockerSocketDir(), "with --backend=local: serve the Docker facade on <dir>/<silo id>.sock, one socket per silo, each caller its peer uid's member silo; \"\" serves none")
+	toolbox := fs.String("toolbox", "", "with --backend=local: a static busybox, mounted read-only in every sandbox-class container for docker cp; \"\" makes docker cp need tar in the image")
 	fakeRuntime := fs.Bool("fake-runtime", false, "with --backend=local: run the Docker facade's containers on the fake runtime drivers, which start nothing (development and tests only)")
 	fs.Parse(args)
 	if *socket == "" && *listen == "" && *gatewaySocket == "" && *frontDoorAddr == "" && *gatewayTLS == "" {
@@ -701,7 +704,31 @@ func serve(ctx context.Context, args []string) error {
 			defer cs.Close()
 			reg = registry.New(registry.Options{Store: db, Content: cs})
 			log.Printf("serving the registry over silo-containerd's content store at %s", csock)
-			dk = newLocalDocker(db, sd, names, sn, *fakeRuntime, dd.Silos(), release, reg, cs)
+			var drivers []runtime.Driver
+			if !*fakeRuntime {
+				// The sandbox class, over silo-containerd and the runsc
+				// shim (step 7). The vm class waits on step 10's driver.
+				exe, err := os.Executable()
+				if err != nil {
+					return err
+				}
+				runsc, _ := exec.LookPath("runsc")
+				sbx, err := sandboxDriver(sandboxConfig{Exe: exe, State: holderState(*nsdState), Containerd: csock,
+					Dir: filepath.Join(dd.Cache(), "containers"), Volumes: dd.Silos(), Runsc: runsc, Toolbox: *toolbox,
+					SiloPaths: localusage.StoreSilos(db)})
+				if err != nil {
+					log.Printf("no sandbox class: %v", err)
+				} else {
+					if c, ok := sbx.(io.Closer); ok {
+						defer c.Close()
+					}
+					if pr := sbx.Probe(ctx); !pr.OK {
+						log.Printf("the sandbox class isn't available yet: %s", pr.Why)
+					}
+					drivers = append(drivers, sbx)
+				}
+			}
+			dk = newLocalDocker(db, sd, names, sn, *fakeRuntime, drivers, dd.Silos(), release, reg, cs)
 			defer dk.f.Close()
 			objects = dk.f.DeleteSilo
 		}

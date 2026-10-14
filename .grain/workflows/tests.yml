@@ -72,7 +72,10 @@ jobs:
   # pkg/backend/local/netfence's, which load the compiled fence with the
   # real nft, and pkg/registry/containerdstore's (local-registry.md step
   # 27b: the registry's content store over silo-containerd, rootless in
-  # a holder, held to the contract the `go` job holds its fake to).
+  # a holder, held to the contract the `go` job holds its fake to), and
+  # cmd/silod's (a sandbox container made through the Docker facade as
+  # silod serve --backend=local builds it, over `silod nsd` and `silod
+  # containerd`).
   nsd:
     name: nsd
     paths-ignore: *not-read-by-the-go-program
@@ -111,7 +114,7 @@ jobs:
         env:
           SILO_REQUIRE_NSD: "1"
           SILO_NSD_RUNSC: /tmp/gvisor/runsc
-        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./pkg/backend/local/runtime/... ./pkg/registry/containerdstore/ ./cmd/silo/
+        run: go test -count=1 -timeout 15m ./pkg/backend/local/nsd/... ./pkg/backend/local/netfence/ ./pkg/backend/local/rootless/... ./pkg/backend/local/runtime/... ./pkg/registry/containerdstore/ ./cmd/silo/ ./cmd/silod/
 
   # The registry for local image repos (docs/silo/local-registry.md §13,
   # step 27) against real clients: the OCI distribution-spec
@@ -164,9 +167,10 @@ jobs:
   # "local/fake" runs them in process, judging probes' packets with the
   # nftables evaluator; "gcp" reports them not offered or not runnable
   # here (its own forms run nightly in silo-conformance); "local/sandbox"
-  # and "local/vm" report themselves not runnable until silod serves the
-  # registry and the Docker facade's host sockets, which this job needs
-  # to install the local backend and make probe containers. The summary
+  # and "local/vm" report themselves not runnable until this job installs
+  # the local backend and makes probe containers through the Docker
+  # facade's host sockets, which silod now serves, with sandbox
+  # containers (the vm class waits on step 10's driver). The summary
   # at the end of Test names every target that wasn't tested, and
   # whether /dev/kvm works here for the vm class. The `go` job runs the
   # same packages, without the distribution-spec suite, which this job
