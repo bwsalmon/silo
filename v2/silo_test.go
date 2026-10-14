@@ -280,7 +280,7 @@ func TestExtendDeadline(t *testing.T) {
 	if d := time.Since(start); d < 3*time.Second {
 		t.Errorf("ended after %s: the deadline was not extended", d)
 	}
-	if s.Inject("more") != silo.ErrNotYet {
-		t.Error("Inject is stage 6b's")
+	if _, err := s.Inject("more"); err == nil {
+		t.Error("a session that has ended took an injected message")
 	}
 }

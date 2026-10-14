@@ -82,6 +82,7 @@ type parser struct {
 	last     string
 	final    string
 	finished bool
+	turns    int
 	failure  string
 	failed   bool
 	// errorText is the last error event's message: codex reports its
@@ -105,7 +106,12 @@ func (p *parser) Line(line []byte) []events.Event {
 		if ev.Item != nil {
 			out = append(out, p.item(ev.Item, ev.Type == "item.completed")...)
 		}
+	case "turn.started":
+		// A resumed session's next turn (an injected message) is judged
+		// on its own.
+		p.finished = false
 	case "turn.completed":
+		p.turns++
 		p.finished, p.failed, p.failure, p.errorText = true, false, "", ""
 		p.final = p.last
 		if u := ev.Usage; u != nil {
@@ -115,6 +121,7 @@ func (p *parser) Line(line []byte) []events.Event {
 			}})
 		}
 	case "turn.failed":
+		p.turns++
 		p.finished, p.failed = true, true
 		p.failure = failureText(&ev)
 		out = append(out, events.Event{Type: events.TypeTranscript, Transcript: &events.Item{Kind: events.ItemError, Text: p.failure}})
@@ -190,7 +197,7 @@ func (p *parser) item(it *rawItem, completed bool) []events.Event {
 }
 
 func (p *parser) Outcome() agentcli.Outcome {
-	o := agentcli.Outcome{CLISession: p.thread, Finished: p.finished}
+	o := agentcli.Outcome{CLISession: p.thread, Finished: p.finished, Turns: p.turns}
 	switch {
 	case p.failed:
 		o.Failure = classify(p.failure)

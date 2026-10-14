@@ -67,8 +67,9 @@ As built in stage 1c: `--setting-sources user` and
 for `all`. Headless `none` adds no permission flag (nothing is left to
 approve but `mcp__silo`). `agent.system_prompt` is staged as a file and
 passed with `--append-system-prompt-file`. The headless prompt is one
-stream-json user message on stdin, which is then closed (injection is
-stage 6a), never argv. The interactive prompt follows `--`. A Claude
+stream-json user message on stdin, never argv. Since stage 6b, stdin
+stays open until the turn's `result` so that a message can be injected
+(§3.2); before that it was closed after the prompt. The interactive prompt follows `--`. A Claude
 version with no roster table is checked against the newest table, with a
 warning. `--bare` is not used (design open question 4).
 
@@ -175,6 +176,16 @@ On `ssh`, headless runs use `ssh -T` with the same argv.
 As built in stage 1c, `silo run` without `--json` passes the CLI's
 stdout through to its own; parsing it into events is stage 6a.
 
+Injection is as built in stage 6b. Claude's stdin stays open until the
+turn's `result`, and each injected message is written as one stream-json
+user line. A message that arrives later resumes the session as
+`claude -p ... --resume <id>`, with the message on stdin. Codex's
+messages always wait for the turn to end, then go through
+`codex exec resume --json --skip-git-repo-check [-c ...] [-m m] <thread> -`,
+with the messages on stdin. That argv carries the same flags as the
+first turn (A: that `exec resume` takes `-c`). `codex queue` is not
+used.
+
 ### 3.3 `attached` (reserved)
 
 | CLI | Flag or command | Source |
@@ -206,4 +217,5 @@ front, V), `codex exec resume <id>` (V, G), `agy --conversation <id>`
    review. Until reviewed, `none` is refused on it.
 6. agy's JSON field names for an HTTP MCP server with a header.
 7. The behaviour of every `attached` command.
-8. `codex queue` as a mid-run injection path.
+8. `codex queue` as a mid-run injection path. Still unchecked: stage 6b
+   queues codex messages for `codex exec resume` instead.

@@ -10,9 +10,10 @@
 // re-published, which the gateway announces to the CLI with
 // notifications/tools/list_changed.
 //
-// A Spec is plain data plus an optional Dial, so a server given in code
-// rather than read from a Silofile (grain.md §2.2's caller-provided
-// servers, stage 6b) is fronted the same way.
+// A Spec is plain data plus an optional Dial or HTTP client, so a server
+// given in code rather than read from a Silofile (grain.md §2.2's
+// caller-provided servers, session.CallerMCP) is fronted the same way,
+// on a Unix socket too, with its blocking tools free of the timeout.
 package proxy
 
 import (
@@ -20,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -61,6 +63,9 @@ type Spec struct {
 	// URL is a running server to connect to, sending Headers.
 	URL     string
 	Headers map[string]string
+	// HTTP is the client a URL server is reached through;
+	// http.DefaultClient when nil, mcp.UnixClient's for a Unix socket.
+	HTTP *http.Client
 
 	// Dial connects to a server given in code.
 	Dial func(ctx context.Context) (mcp.Conn, error)
@@ -73,6 +78,9 @@ type Spec struct {
 	// Restart restarts a launched server that dies (restart:
 	// on-failure).
 	Restart bool
+	// Blocking names tools (the server's own names) that the gateway
+	// lets run without a timeout (grain.md §2.2).
+	Blocking []string
 }
 
 func (s Spec) launched() bool { return len(s.Command) > 0 }
@@ -287,7 +295,7 @@ func (s *server) connect(ctx context.Context) (mcp.Conn, *process, error) {
 		}
 		return c, nil, nil
 	case s.spec.URL != "":
-		c, err := mcp.DialHTTP(ctx, s.spec.URL, s.spec.Headers)
+		c, err := mcp.DialHTTPClient(ctx, s.spec.URL, s.spec.Headers, s.spec.HTTP)
 		return c, nil, err
 	case s.spec.launched():
 		proc, conn, err := s.launch()
@@ -397,6 +405,15 @@ func (s *server) filter(listed []mcp.ToolInfo, strict bool) ([]gateway.Tool, err
 	return tools, nil
 }
 
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func orNone(names []string) string {
 	if len(names) == 0 {
 		return "none"
@@ -416,6 +433,7 @@ func (s *server) tool(t mcp.ToolInfo) gateway.Tool {
 		Description: t.Description,
 		InputSchema: schema,
 		Timeout:     s.p.opts.CallTimeout,
+		Blocking:    contains(s.spec.Blocking, orig),
 		Handler: func(ctx context.Context, args map[string]any) (mcp.Result, error) {
 			conn, err := s.live()
 			if err != nil {

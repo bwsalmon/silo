@@ -73,6 +73,7 @@ type parser struct {
 	session  string
 	model    string
 	finished bool
+	turns    int
 	isError  bool
 	subtype  string
 	result   string
@@ -138,6 +139,7 @@ func (p *parser) Line(line []byte) []events.Event {
 	case "result":
 		out = append(out, p.flush()...)
 		// The last result is what the run ended as.
+		p.turns++
 		p.finished, p.isError, p.subtype, p.result = true, ev.IsError, ev.Subtype, ev.Result
 		if !ev.IsError {
 			p.final = ev.Result
@@ -189,7 +191,7 @@ func BareToolName(name string) string {
 }
 
 func (p *parser) Outcome() agentcli.Outcome {
-	o := agentcli.Outcome{FinalText: p.final, CLISession: p.session, Finished: p.finished}
+	o := agentcli.Outcome{FinalText: p.final, CLISession: p.session, Finished: p.finished, Turns: p.turns}
 	o.Failure = p.classify()
 	if o.Failure != nil {
 		o.FinalText = ""

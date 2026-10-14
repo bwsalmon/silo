@@ -45,6 +45,19 @@ type Request struct {
 	Env map[string]string
 	// Deadline is agent.limits.deadline, 0 for none.
 	Deadline time.Duration
+	// Blocking reports that a gateway tool is blocking (a caller's
+	// wait_for_checks or ask_question, grain.md §2.2), so the CLI's own
+	// MCP call timeout is raised to BlockingToolTimeout.
+	Blocking bool
+}
+
+// ToolTimeout is how long the CLI should wait on one gateway call:
+// ToolTimeout, or BlockingToolTimeout when a tool is blocking.
+func (r Request) ToolTimeout() time.Duration {
+	if r.Blocking {
+		return BlockingToolTimeout
+	}
+	return ToolTimeout
 }
 
 // Plan is a CLI's staged files, and how to build its command once they
@@ -56,6 +69,29 @@ type Plan struct {
 	Command func(dir string) location.Command
 	// Notes are things the user should be told at start.
 	Notes []string
+	// Resume, for a CLI that implements Injector, returns the headless
+	// command that continues the CLI's session id with one more turn,
+	// read from its stdin like the first (claude --resume, codex exec
+	// resume), given the directory the files were staged in.
+	Resume func(dir, id string) location.Command
+}
+
+// Injection is how a headless CLI takes a user message mid-run
+// (grain.md §2.1).
+type Injection struct {
+	// Live reports that the CLI reads further user messages on its
+	// stdin while it runs (claude's stream-json input): silo keeps
+	// stdin open until the CLI's turn ends and writes each message to
+	// it. A message that arrives later, or for a CLI that is not live,
+	// waits for the turn to end and is delivered by Plan.Resume.
+	Live bool
+	// Message is one or more messages as the CLI reads them on stdin.
+	Message func(texts ...string) []byte
+}
+
+// Injector is a Mapping whose CLI takes injected messages.
+type Injector interface {
+	Injection() Injection
 }
 
 // Mapping is one CLI.
@@ -174,6 +210,12 @@ func Getenv(env []string, key string) string {
 // minute cap, design §4.4) plus slack, so the gateway's clock ends a
 // call rather than the CLI abandoning it.
 const ToolTimeout = 32 * time.Minute
+
+// BlockingToolTimeout is the CLI's MCP call timeout in a session with a
+// blocking tool, which the gateway runs without a timeout of its own
+// (design §6.2): long enough that the session's own deadline, not the
+// CLI, ends a call that waits on a person.
+const BlockingToolTimeout = 7 * 24 * time.Hour
 
 // ServerName is the MCP server name every CLI's config gives the
 // gateway.

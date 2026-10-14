@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -228,14 +229,23 @@ func NewStdioConn(r io.Reader, w io.WriteCloser) Conn {
 // initialize (the backwards-compatibility rule of the MCP spec), and
 // performs the initialize handshake.
 func DialHTTP(ctx context.Context, rawURL string, headers map[string]string) (Conn, error) {
-	c := &Client{URL: rawURL, Headers: headers}
-	hc := &httpConn{c: c, changed: make(chan struct{}, 1), done: make(chan struct{})}
+	return DialHTTPClient(ctx, rawURL, headers, nil)
+}
+
+// DialHTTPClient is DialHTTP through hc, http.DefaultClient when nil:
+// UnixClient's, for a server on a Unix socket.
+func DialHTTPClient(ctx context.Context, rawURL string, headers map[string]string, hc *http.Client) (Conn, error) {
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	c := &Client{URL: rawURL, Headers: headers, HTTP: hc}
+	conn := &httpConn{c: c, changed: make(chan struct{}, 1), done: make(chan struct{})}
 	if _, err := c.Initialize(ctx); err == nil {
-		hc.watch(ctx)
-		return hc, nil
+		conn.watch(ctx)
+		return conn, nil
 	} else if !isHTTP4xx(err) {
 		return nil, err
-	} else if sc, serr := dialSSE(ctx, rawURL, headers); serr == nil {
+	} else if sc, serr := dialSSE(ctx, rawURL, headers, hc); serr == nil {
 		return sc, nil
 	} else {
 		return nil, fmt.Errorf("%w (and as HTTP+SSE: %v)", err, serr)
@@ -306,7 +316,7 @@ func (h *httpConn) Close() error {
 // dialSSE connects over HTTP+SSE (MCP 2024-11-05): a GET opens the
 // stream, whose first event names the endpoint to POST messages to, and
 // responses arrive on the stream.
-func dialSSE(ctx context.Context, rawURL string, headers map[string]string) (Conn, error) {
+func dialSSE(ctx context.Context, rawURL string, headers map[string]string, hc *http.Client) (Conn, error) {
 	base, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
@@ -321,7 +331,7 @@ func dialSSE(ctx context.Context, rawURL string, headers map[string]string) (Con
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("mcp: %w", err)
@@ -346,7 +356,7 @@ func dialSSE(ctx context.Context, rawURL string, headers map[string]string) (Con
 			req.Header.Set(k, v)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
 			return err
 		}
@@ -393,4 +403,19 @@ func dialSSE(ctx context.Context, rawURL string, headers map[string]string) (Con
 		return nil, err
 	}
 	return m, nil
+}
+
+// UnixURL is the URL a server on a Unix socket is reached at through
+// UnixClient: its Streamable HTTP endpoint is /mcp on the socket.
+const UnixURL = "http://unix/mcp"
+
+// UnixClient is an HTTP client whose every connection is to the Unix
+// socket at path, whatever the URL's host.
+func UnixClient(path string) *http.Client {
+	var d net.Dialer
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, "unix", path)
+		},
+	}}
 }

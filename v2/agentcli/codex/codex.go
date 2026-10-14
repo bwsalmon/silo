@@ -92,7 +92,7 @@ func Config(req agentcli.Request) []byte {
 	fmt.Fprintf(&b, "[mcp_servers.%s]\n", agentcli.ServerName)
 	fmt.Fprintf(&b, "url = %s\nhttp_headers = { Authorization = %s }\nrequired = true\n",
 		tomlString(req.GatewayURL), tomlString("Bearer "+req.GatewayToken))
-	fmt.Fprintf(&b, "tool_timeout_sec = %d\n", int(agentcli.ToolTimeout.Seconds()))
+	fmt.Fprintf(&b, "tool_timeout_sec = %d\n", int(req.ToolTimeout().Seconds()))
 	// Only the gateway's own tools are enabled and preapproved.
 	tools, _ := json.Marshal(append([]string{}, req.GatewayTools...))
 	fmt.Fprintf(&b, "enabled_tools = %s\n", tools)
@@ -146,7 +146,7 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		plan.Files = append(plan.Files, location.StagedFile{Name: filepath.Join(Home, authFile), Link: auth})
 	}
 
-	plan.Command = func(dir string) location.Command {
+	command := func(dir, resume string) location.Command {
 		env := map[string]string{"CODEX_HOME": filepath.Join(dir, Home)}
 		if perm == silofile.PermNone {
 			env["CODEX_EXEC_SERVER_URL"] = "none"
@@ -157,7 +157,12 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		argv := []string{req.Host.Binary}
 		cmd := location.Command{Env: agentcli.MergeEnv(req.Host.Env, env)}
 		if req.Mode == agentcli.Headless {
-			argv = append(argv, "exec", "--json", "--skip-git-repo-check")
+			argv = append(argv, "exec")
+			if resume != "" {
+				// The subcommand follows exec; it takes exec's flags.
+				argv = append(argv, "resume")
+			}
+			argv = append(argv, "--json", "--skip-git-repo-check")
 			if perm == silofile.PermAll {
 				// A run must never block on an approval nobody can give.
 				argv = append(argv, "-c", `approval_policy="never"`)
@@ -169,7 +174,10 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		switch {
 		case req.Mode == agentcli.Headless:
 			// "-" reads the prompt from stdin, never argv, where ps
-			// would show it.
+			// would show it. On a resume it follows the thread id.
+			if resume != "" {
+				argv = append(argv, resume)
+			}
 			argv = append(argv, "-")
 			cmd.Stdin = []byte(req.Prompt)
 		case req.Prompt != "":
@@ -179,5 +187,23 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		cmd.TTY = req.Mode == agentcli.Interactive
 		return cmd
 	}
+	plan.Command = func(dir string) location.Command { return command(dir, "") }
+	if req.Mode == agentcli.Headless {
+		plan.Resume = func(dir, id string) location.Command {
+			cmd := command(dir, id)
+			cmd.Stdin = nil
+			return cmd
+		}
+	}
 	return plan, nil
+}
+
+// Injection: codex exec takes no input once started, so a message waits
+// for the turn to end and is the next turn, through codex exec resume
+// (cli-mapping.md §3.2; whether codex queue could deliver one mid-run
+// is unchecked, cli-mapping.md §4).
+func (Mapping) Injection() agentcli.Injection {
+	return agentcli.Injection{Message: func(texts ...string) []byte {
+		return []byte(strings.Join(texts, "\n\n"))
+	}}
 }

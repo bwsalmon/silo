@@ -473,6 +473,10 @@ func (l *Location) Start(ctx context.Context, c location.Command, sio location.I
 	} else {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin = bytes.NewReader(c.Stdin)
+		if c.Input != nil {
+			// ssh -T carries it to the CLI's stdin as it is written.
+			cmd.Stdin = c.Input
+		}
 	}
 	procgroup.DieWithParent(cmd)
 	if err := cmd.Start(); err != nil {

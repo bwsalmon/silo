@@ -74,6 +74,21 @@ agy today, and by MCP tool-result piggyback for others). Codex takes one
 between turns. `Inject` picks the CLI's mechanism and says in its return
 value whether the message was delivered now or queued for the next turn.
 
+As built in stage 6b, the socket's methods and the library's `Session`
+methods share one implementation ([`events.md`](events.md), "The control
+socket"). `Session.Approve(id, allow)` was added to the library, so that
+a library caller can answer `approval_request` as `silo approve` does.
+`Inject` returns `(Delivery, error)`.
+- **claude**: the message is written to stdin until the turn's
+  `result`. After that it is queued, and silo resumes the session with
+  `claude -p --resume <id>`. The design names only stdin for claude; the
+  resume fallback keeps a message that arrives just after the result
+  from being refused.
+- **codex**: the message is always queued for `codex exec resume <id>
+  -`. `codex queue` is not used, because its semantics are still
+  unchecked (cli-mapping.md §4, item 8).
+- **agy**: not driven by `silo run` yet.
+
 ### 2.2 Caller-provided MCP servers
 
 Grain serves its tools today with `grain mcpserver`, a child process the
@@ -91,13 +106,30 @@ session; and the caller may mark tools as **blocking** (grain's
 `wait_for_checks`, `ask_question`), so the gateway does not apply its
 default timeout to them. Allowlisting and audit apply as for any server.
 
+As built in stage 6b ([`events.md`](events.md), "Caller-provided MCP
+servers"), this is `silo.Options.CallerMCP` and `silo run --caller-mcp`:
+- **Socket form.** A Unix socket is `unix:/path`, or a bare absolute
+  path, serving Streamable HTTP at `/mcp`.
+- **Token.** The token is sent as a bearer token and redacted like a
+  credential. On the command line it comes from
+  `$SILO_CALLER_MCP_TOKEN_<NAME>`, never argv.
+- **Required.** Every caller server is required. A wrong token fails
+  setup.
+- **Blocking tools.** They run with no gateway timeout. Their presence
+  raises the CLI's own MCP timeout to 7 days.
+- **Reconnecting.** A caller server that restarts is not reconnected to;
+  that is stage 9.
+
 The split of grain's tools: the **sandbox tools** (`run_command`,
 `read_file`, `write_file`, `edit_file`) become silo's own `sandbox_*`
 tools. Grain's **task tools** stay grain's and come through the caller
 server. Grain's tool names (which its prompts, its transcript parser
 and its memory notes use) can be kept by a per-session rename map in
 the gateway, so a migrated run looks the same to the model (open
-question 19 in the design).
+question 19 in the design). As built in stage 6b, the map is
+`silo.Options.Rename`, keyed by silo's name and valued by the name the
+model sees. The audit log records both names. Silo ships no map: the
+names are grain's to choose, when it migrates.
 
 ### 2.3 Sandboxes good enough for grain
 

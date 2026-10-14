@@ -79,6 +79,11 @@ type Command struct {
 	// Stdin, for headless mode, is written to the CLI's stdin, which is
 	// then closed.
 	Stdin []byte
+	// Input, when set, replaces Stdin: the CLI's stdin is read from it
+	// until it ends, so that silo can write to the CLI while it runs
+	// (an injected message, grain.md §2.1). Silo passes the read end of
+	// an os.Pipe and closes it once Start returns.
+	Input io.Reader
 }
 
 // IO is where the CLI's streams go: silo's terminal in interactive mode,
