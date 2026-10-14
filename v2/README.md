@@ -51,6 +51,9 @@ builds, vets or tests the other's packages.
 
 ```sh
 go run ./cmd/silo run [--dry-run] [--json] [--prompt text] [--caller-mcp name=url ...] <Silofile|dir>   # design §3
+go run ./cmd/silo run --detach [--label k=v ...] <Silofile|dir>   # grain.md §2.7: prints the session id
+go run ./cmd/silo attach [--from seq] [--json] <session>          # replay and follow its events
+go run ./cmd/silo ls [--label k=v ...] [--json]                   # the running sessions
 go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
 go run ./cmd/silo gc [--host <host>]        # what crashed sessions left (there)
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4

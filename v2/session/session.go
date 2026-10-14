@@ -95,6 +95,12 @@ type Options struct {
 	// the name the agent sees (grain.md §2.2, design open question 19).
 	// Silo chooses no names of its own.
 	Rename map[string]string
+	// Labels are the caller's, kept in session.json so that it can find
+	// its sessions again with silo ls (grain.md §2.7): grain's run ids.
+	Labels map[string]string
+	// Detached records in session.json that the session runs under its
+	// own supervisor, silo run --detach.
+	Detached bool
 	// Started, when set, is called with the session once it has an id
 	// and a directory, before setup: the library's handle on it.
 	Started func(*Session)
@@ -278,6 +284,7 @@ func Execute(ctx context.Context, opts Options) (events.Result, error) {
 		}
 	}()
 	code, err := s.start(ctx)
+	defer s.em.closeLog()
 	if s.result == nil {
 		// It ended before there was a session to tear down.
 		r := events.Result{Exit: events.Exit{Code: code, Reason: events.ReasonSetupFailed}}
@@ -366,6 +373,10 @@ func (s *Session) start(ctx context.Context) (int, error) {
 		os.RemoveAll(s.Dir)
 		return ExitPrerequisite, err
 	}
+	if err := s.em.openLog(filepath.Join(s.StateDir, EventsFile)); err != nil {
+		os.RemoveAll(s.Dir)
+		return ExitPrerequisite, err
+	}
 	kind := f.Location.Kind
 	if kind == "" {
 		kind = "local"
@@ -373,7 +384,8 @@ func (s *Session) start(ctx context.Context) (int, error) {
 	s.rec = &recorder{path: filepath.Join(s.Dir, RecordFile), rec: Record{
 		ID: s.ID, PID: os.Getpid(), Started: time.Now().UTC(), Silofile: f.File, Name: f.Name,
 		CLI: f.Agent.CLI, Location: kind, Mode: s.Mode, Permissions: permString(f.RemotePermissions),
-		StateDir: s.StateDir, Resources: []Resource{},
+		StateDir: s.StateDir, Events: filepath.Join(s.StateDir, EventsFile), Labels: opts.Labels, Detached: opts.Detached,
+		Resources: []Resource{},
 	}}
 	if err := s.rec.update(func(*Record) {}); err != nil {
 		os.RemoveAll(s.Dir)

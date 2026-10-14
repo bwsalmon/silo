@@ -1,5 +1,5 @@
 // Command silo is Silo v2's command line (design §3, §16). So far it has
-// run, approve, gc, validate and schema.
+// run, attach, ls, approve, gc, validate and schema.
 package main
 
 import (
@@ -25,9 +25,15 @@ const (
 const usage = `usage: silo <command> [arguments]
 
 commands:
-  run [--dry-run] [--json] [--prompt text] <Silofile|dir>
+  run [--dry-run] [--json | --detach] [--label k=v] [--prompt text] <Silofile|dir>
                             run one session (design §3), or with --dry-run
                             check what it needs and change nothing
+                            with --detach, start it under a supervisor of its
+                            own and print its id
+  attach [--from seq] [--json] <session>
+                            replay a session's events after seq and follow them
+  ls [--label key=value] [--json]
+                            list the running sessions
   gc [--host <host>]        remove what crashed sessions left behind, and with
                             --host their remote session directories there
   approve <session> [--deny] [<call-id>]
@@ -48,6 +54,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "run":
 		return runSession(args[1:], os.Stdin, stdout, stderr, session.Options{})
+	case superviseCmd:
+		return supervise(args[1:])
+	case "attach":
+		return attach(args[1:], os.Getenv, stdout, stderr)
+	case "ls":
+		return ls(args[1:], os.Getenv, stdout, stderr)
 	case "gc":
 		return gc(args[1:], stdout, stderr)
 	case "approve":

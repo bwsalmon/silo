@@ -80,6 +80,13 @@ type Record struct {
 	Permissions string `json:"remote_permissions"`
 	// StateDir holds the audit log, which outlives the session.
 	StateDir string `json:"state_dir"`
+	// Events is the session's events.jsonl, in StateDir.
+	Events string `json:"events,omitempty"`
+	// Labels are the caller's (silo run --label), for silo ls.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Detached: the session runs under its own supervisor, whose PID is
+	// PID (silo run --detach).
+	Detached bool `json:"detached,omitempty"`
 	// Resources is everything set up outside the session directory, in
 	// the order it was set up.
 	Resources []Resource `json:"resources"`

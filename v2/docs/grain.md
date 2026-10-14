@@ -117,8 +117,10 @@ servers"), this is `silo.Options.CallerMCP` and `silo run --caller-mcp`:
   setup.
 - **Blocking tools.** They run with no gateway timeout. Their presence
   raises the CLI's own MCP timeout to 7 days.
-- **Reconnecting.** A caller server that restarts is not reconnected to;
-  that is stage 9.
+- **Reconnecting.** As built in stage 9 (§2.7), a caller server that goes
+  away is dialled again on the next call, so a caller that comes back on
+  the same address is used again. Calls made while it is gone fail with
+  a retryable error.
 
 The split of grain's tools: the **sandbox tools** (`run_command`,
 `read_file`, `write_file`, `edit_file`) become silo's own `sandbox_*`
@@ -240,6 +242,58 @@ silo v2 does the same per session (stage 9):
   caller comes back on the same socket path. Calls made while it was
   gone fail with a retryable error, which grain's tools already have to
   tolerate across a restart.
+
+As built in stage 9 ([`events.md`](events.md), "Detach and re-attach"):
+
+- **Supervisor.** `silo run --detach [--label k=v ...] <Silofile|dir>`
+  re-executes silo as `silo __supervise <same arguments>`, in a session
+  of its own (`setsid`), with stdin, stdout and stderr on `/dev/null`. It
+  waits on a pipe until the session has an id and a directory, prints
+  the id and exits; the supervisor is then no child of the caller. A
+  failure before that is reported and exits as `silo run` would. A
+  failure later in setup is the session's `setup_failed` result, which
+  `attach` shows. `--detach` needs `agent.mode: headless` and is refused
+  with `--json`. The supervisor's own log is `supervisor.log` beside
+  the audit log. `session.json` records `detached: true`, and its `pid`
+  is the supervisor's, so `silo gc` treats a killed supervisor as any
+  crashed `silo run`: it kills the CLI's process group and removes what
+  the session recorded.
+- **Events.** Every session writes `events.jsonl`, not only a detached
+  one, and the library's too. It is in the **state directory**
+  (`$XDG_STATE_HOME/silo/sessions/<id>/events.jsonl`, beside
+  `audit.jsonl`), not the session directory. The session directory is
+  removed at teardown, before the result event is written, and a caller
+  that comes back after the session ended needs that result. Each line
+  is one event of the stream, with its `seq`.
+- **The cursor** is the seq of the last event the caller has handled:
+  `silo attach <id> --from <seq>` and `silo.Attach(ctx, id, seq, opts)`
+  deliver the events after it, then follow until the result. `--from 0`
+  replays everything. Grain's run host keeps a byte offset; a seq is the
+  same idea in the stream's own terms. Attaching to an ended session
+  replays it to its result. A session whose process died without one
+  ends `attach` with an error (`silo.ErrNoResult`), and exit 1 for the
+  command.
+- **Labels.** `silo run --label k=v` and `silo.Options.Labels` are kept in
+  `session.json`. `silo ls [--label k=v ...] [--json]` and
+  `silo.List(labels, opts)` list the live sessions carrying them, so
+  grain's adoption pass is: list by its run-id label, then attach from
+  the cursor it stored. The library's `Attached` handle sends `Inject`,
+  `Cancel`, `ExtendDeadline` and `Approve` to the control socket.
+- **Caller servers.** Every caller server is marked to reconnect. A call
+  whose request never reached the server (a refused dial, or HTTP 404
+  for a session the restarted server does not know) is made once more
+  on a fresh connection, so the first call after the caller is back
+  succeeds. A call that fails otherwise returns a tool error saying it
+  is retryable (`proxy.UnavailableError`), and the next call dials
+  again.
+- **Not built.** A detached session is started from the command line;
+  the library has no detached `Start`, because the supervisor reads a
+  Silofile from disk. A library caller writes one and runs
+  `silo run --detach`. CLI-level resume (`claude --resume`, `codex exec
+  resume`, cli-mapping.md §3.4) is not used to restart a CLI: the
+  supervisor keeps it alive. The detach covers silo's caller, not an
+  ssh session's link to its agent host (design §5.3). Persistent
+  sandboxes, and who collects them (open question 4), are untouched.
 
 ### 2.8 Sandbox-only sessions (CI)
 

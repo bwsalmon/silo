@@ -19,7 +19,10 @@ func init() { RegisterToolProvider("caller", provideCaller) }
 // session (grain.md §2.2): grain's task tools. The gateway connects to
 // it as a client and fronts its tools as <Name>__<tool>, allowlisted
 // and audited like a Silofile's mcp[] server. Silo neither starts nor
-// stops it.
+// stops it. When it goes away, as while the caller restarts, calls fail
+// with a retryable *proxy.UnavailableError, and the gateway dials it
+// again on the next call, so a caller back on the same address is used
+// again (grain.md §2.7).
 type CallerMCP struct {
 	// Name prefixes the server's tools. It follows mcp[]'s naming rule
 	// and must not be the name of a Silofile mcp[] entry.
@@ -78,7 +81,7 @@ func (c CallerMCP) spec() (proxy.Spec, error) {
 			return proxy.Spec{}, fmt.Errorf("caller MCP server %s: blocking tool %s is not in its allowlist", c.Name, b)
 		}
 	}
-	sp := proxy.Spec{Name: c.Name, URL: c.URL, Allow: c.Tools, Required: true, Blocking: c.Blocking}
+	sp := proxy.Spec{Name: c.Name, URL: c.URL, Allow: c.Tools, Required: true, Blocking: c.Blocking, Reconnect: true}
 	if c.Tools != nil && len(c.Tools) == 0 {
 		sp.Allow = []string{}
 	}
