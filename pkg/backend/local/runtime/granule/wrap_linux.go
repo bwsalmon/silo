@@ -7,13 +7,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/opencontainers/image-spec/identity"
@@ -30,17 +30,17 @@ const WrapArg = "runtime-wrap"
 // its root. The guest half is written beside its final name and renamed
 // into place, so a wrap that is there is whole (Wrapped).
 func WrapMain(args []string) error {
-	fs := flag.NewFlagSet(WrapArg, flag.ContinueOnError)
-	address := fs.String("address", "", "silo-containerd's socket")
-	ns := fs.String("namespace", "", "the containerd namespace")
-	snapshotter := fs.String("snapshotter", "overlayfs", "the snapshotter")
-	image := fs.String("image", "", "the image to wrap, by its name in containerd")
-	digest := fs.String("digest", "", "the image's digest, which names its wrap")
-	guest := fs.String("guest-image", "", "granule's guest rootfs image, by its name in containerd")
-	runtimeImage := fs.String("granule-image", "", "the granule image, by its name in containerd")
-	granule := fs.String("granule", "", "the granule binary")
-	wraps := fs.String("wraps", "", "the wraps directory")
-	if err := fs.Parse(args); err != nil {
+	flags := flag.NewFlagSet(WrapArg, flag.ContinueOnError)
+	address := flags.String("address", "", "silo-containerd's socket")
+	ns := flags.String("namespace", "", "the containerd namespace")
+	snapshotter := flags.String("snapshotter", "overlayfs", "the snapshotter")
+	image := flags.String("image", "", "the image to wrap, by its name in containerd")
+	digest := flags.String("digest", "", "the image's digest, which names its wrap")
+	guest := flags.String("guest-image", "", "granule's guest rootfs image, by its name in containerd")
+	runtimeImage := flags.String("granule-image", "", "the granule image, by its name in containerd")
+	granule := flags.String("granule", "", "the granule binary")
+	wraps := flags.String("wraps", "", "the wraps directory")
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *address == "" || *ns == "" || *image == "" || *digest == "" || *guest == "" || *runtimeImage == "" || *granule == "" || *wraps == "" {
@@ -55,7 +55,7 @@ func WrapMain(args []string) error {
 	}
 	defer c.Close()
 	ctx := namespaces.WithNamespace(context.Background(), *ns)
-	ctx, done, err := c.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(0))
+	ctx, done, err := c.WithLease(ctx)
 	if err != nil {
 		return err
 	}
@@ -138,6 +138,25 @@ func WrapMain(args []string) error {
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("granule wrap: %w", err)
+	}
+	// The VM containers that mount it run as their silos' subuids, so
+	// the guest half is readable by every user; the wraps directory,
+	// 0700, keeps the host's other users out.
+	if err := filepath.WalkDir(o.Out, func(p string, e fs.DirEntry, err error) error {
+		if err != nil || e.Type()&os.ModeSymlink != 0 {
+			return err
+		}
+		fi, err := e.Info()
+		if err != nil {
+			return err
+		}
+		m := fi.Mode().Perm() | 0o044
+		if e.IsDir() || fi.Mode()&0o100 != 0 {
+			m |= 0o011
+		}
+		return os.Chmod(p, m)
+	}); err != nil {
+		return err
 	}
 	if err := os.Rename(o.Out, WrapDir(*wraps, *digest)); err != nil && !errors.Is(err, os.ErrExist) {
 		return err

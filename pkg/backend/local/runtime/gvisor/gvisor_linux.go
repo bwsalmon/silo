@@ -880,17 +880,24 @@ func (d *Driver) Stats(ctx context.Context, id string) (runtime.Stats, error) {
 	if err != nil {
 		return runtime.Stats{}, err
 	}
+	return TaskStats(ctx, t)
+}
+
+// TaskStats is a task's use, from its shim's cgroup metrics: zero once
+// it has stopped. The vm class's driver reads its VM containers' the
+// same way.
+func TaskStats(ctx context.Context, t containerd.Task) (runtime.Stats, error) {
 	st := runtime.Stats{SampledAt: time.Now()}
 	if s, err := t.Status(ctx); err != nil || (s.Status != containerd.Running && s.Status != containerd.Paused) {
 		return st, err
 	}
 	m, err := t.Metrics(ctx)
 	if err != nil {
-		return st, fmt.Errorf("gvisor: metrics: %w", err)
+		return st, fmt.Errorf("metrics: %w", err)
 	}
 	v, err := typeurl.UnmarshalAny(m.Data)
 	if err != nil {
-		return st, fmt.Errorf("gvisor: metrics: %w", err)
+		return st, fmt.Errorf("metrics: %w", err)
 	}
 	switch m := v.(type) {
 	case *stats.Metrics:

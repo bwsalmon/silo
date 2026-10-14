@@ -53,8 +53,17 @@ func WrapArgs(o WrapOptions) []string {
 		"-out", o.Out,
 		"-work-dir", o.Work,
 		o.Image,
+		// granule wraps nothing that has no process, and an image need
+		// not name one; every container gives its own as the override
+		// (CHV_CONTAINER_OVERRIDE), so the wrap's is never what runs.
+		WrapCommand,
 	}
 }
+
+// WrapCommand is the process a wrap records: a placeholder, since the
+// one wrap of an image serves every container of it, each with its own
+// process.
+const WrapCommand = "/.silo/no-command"
 
 // WrapDir is image's wrap in the wraps directory dir: the guest half
 // its VM containers mount at GuestDir, shared by all of them.
