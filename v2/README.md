@@ -223,8 +223,8 @@ runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
 answers `--version`, reads the staged MCP config, calls the gateway and
 exits as told. The library's tests (`internal/fakecli`) add a claude that
 answers stream-json messages on stdin, and a fake `codex` whose turn
-can be resumed, for injection. No real `claude` or `codex` is needed (stage 1d checks
-those). The same binary is also the MCP server those tests launch: with
+can be resumed, for injection. No real `claude` or `codex` is needed (the live tests
+below use them). The same binary is also the MCP server those tests launch: with
 `SILO_MCPTEST=stdio` it serves `internal/mcptest` over stdio.
 
 `location/k8s`'s tests run against a kind (Kubernetes in Docker)
@@ -257,6 +257,30 @@ and the server stopped (and reaped after the grace when it ignores the
 closed channel), and a killed master turning calls into tool errors
 and the session into exit 75. They skip
 without Docker unless `SILO_V2_REQUIRE_DOCKER` is set.
+
+The live tests run the real `claude` and `codex` against a model,
+through `silo run`, to check `docs/cli-mapping.md`'s assumptions (its
+§4). They spend tokens, so they are not part of CI and skip unless
+`SILO_V2_LIVE_CLI=1` is set (and without the CLI on `PATH`, or its key):
+
+```sh
+cd v2
+npm i -g @anthropic-ai/claude-code@2.1.197 @openai/codex@0.162.1
+SILO_V2_LIVE_CLI=1 ANTHROPIC_API_KEY=... OPENAI_API_KEY=... \
+  go test ./cmd/silo ./agentcli/codex -run Live -v -count=1
+```
+
+silo hands each CLI its key through `agent.auth: {credential: ...}`.
+`ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`, when set, are delivered to
+the CLI as well, for a key that belongs to a proxy (grain's
+`claude-proxy` and `openai-proxy` capabilities).
+`SILO_V2_CLAUDE_MODEL` and `SILO_V2_CODEX_MODEL` choose the models.
+`agentcli/codex`'s `TestLiveCodexNoneIsolation` uses no model and no
+key: it runs the codex binary (`SILO_V2_CODEX`, or `codex` on `PATH`)
+with silo's `remote_permissions: none` configuration against a stub
+Responses API, logs the tools codex advertises and checks that every
+native tool call is refused. It is the probe for reviewing a new Codex
+version.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip

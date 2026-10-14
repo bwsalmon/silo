@@ -863,8 +863,9 @@ Two things follow and are said here, not left for a user to discover:
   no-environment configuration against `codex-cli 0.153.0` and refuses
   other versions. silo keeps the same rule: a table of reviewed Codex
   versions for `none`, a refusal for any other, and a reviewed-version
-  bump as a deliberate change. The Codex installed while writing this
-  was 0.162.1, which would need that review first.
+  bump as a deliberate change. 0.162.1, current while writing this,
+  was added in stage 1d on a behavioural probe ([`cli-mapping.md`](cli-mapping.md)
+  §2.2).
 
 Every mapping also takes the CLI's *other* ways of reaching the host off
 the table for `none` and subsets: MCP servers from the user's own config
