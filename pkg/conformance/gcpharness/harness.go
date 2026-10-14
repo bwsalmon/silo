@@ -1,14 +1,21 @@
 //go:build silo_conformance
 
-package conformance
-
-// The real-GCP harness (docs/silo/testing.md, "Where and how it runs",
-// SV-121): silo install into a fresh --address-space, the cases, then
-// silo uninstall --force --delete-data --yes and a check that no
-// labelled object is left. TestMain uninstalls whatever happened in
+// Package gcpharness is the real-GCP conformance harness
+// (docs/silo/testing.md, "Where and how it runs", SV-121): silo install
+// into a fresh --address-space, the cases, then silo uninstall --force
+// --delete-data --yes and a check that no labelled object is left. Main
+// is a test binary's TestMain, and uninstalls whatever happened in
 // between; the workflow's step runs uninstall again from a shell trap,
-// for the run that dies too hard for TestMain to get there (a panic, the
-// go test timeout).
+// for the run that dies too hard for Main to get there (a panic, the go
+// test timeout).
+//
+// It is shared by pkg/conformance's own GCP cases and by the "gcp"
+// conformance.Target of pkg/conformance/targets (local-backend.md §13,
+// call L24), so the backend-neutral cases run against the same install.
+// Only one install can be in the project at a time, so one test binary
+// installs and hands the install on (-silo.handoff) and the next attaches
+// to it (-silo.attach) and uninstalls it at its end.
+package gcpharness
 
 import (
 	"bytes"
@@ -29,20 +36,23 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/client"
+	"github.com/bwsalmon/silo/pkg/conformance"
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/option"
 	sqladmin "google.golang.org/api/sqladmin/v1"
 )
 
 var (
-	flagProject = flag.String("silo.project", envOr("SILO_CONFORMANCE_PROJECT", DefaultProject), "the host project")
+	flagProject = flag.String("silo.project", envOr("SILO_CONFORMANCE_PROJECT", conformance.DefaultProject), "the host project")
 	flagRegion  = flag.String("silo.region", envOr("SILO_CONFORMANCE_REGION", "us-central1"), "the home region")
 	flagKey     = flag.String("silo.key", envOr("SILO_CONFORMANCE_KEY", "/home/debian/.gcp-service-account.json"), "the gcp-key capability's key")
 	flagImage   = flag.String("silo.image", os.Getenv("SILO_CONFORMANCE_IMAGE"), "silod's image, by digest (install --image)")
 	flagKeep    = flag.Bool("silo.keep", false, "don't uninstall at the end (debugging only)")
 
 	flagHarnessImage = flag.String("silo.harness-image", os.Getenv("SILO_CONFORMANCE_HARNESS_IMAGE"), "the harness image, by digest (install --harness-image), needed with -silo.image")
-	flagModelKey     = flag.String("silo.model-key", os.Getenv("SILO_CONFORMANCE_MODEL_KEY"), "a file holding an Anthropic API key for the agent cases' model calls; without it they are skipped")
+
+	flagHandoff = flag.Bool("silo.handoff", false, "at the end, delete every silo under the root and leave the install for a later -silo.attach, instead of uninstalling")
+	flagAttach  = flag.Bool("silo.attach", false, "use the install a -silo.handoff run left in the project instead of installing, and uninstall it at the end")
 )
 
 // The agent cases' install settings: harness sessions on the control
@@ -63,37 +73,56 @@ func envOr(k, def string) string {
 	return def
 }
 
-// run is the whole run's state, which the cases read.
-var run struct {
-	project, region, zone string
-	key                   string
-	silo                  string // the silo CLI built from this tree
-	space                 netip.Prefix
-	gateway, control      netip.Prefix
-	admin                 string
-	installOut            string
-	installErr            error
-	migrateSeen           bool
+// State is the whole run's state, which the cases read.
+type State struct {
+	Project, Region, Zone string
+	Key                   string
+	Silo                  string // the silo CLI built from this tree
+	Space                 netip.Prefix
+	Gateway, Control      netip.Prefix
+	Admin                 string
+	InstallOut            string
+	InstallErr            error
+	MigrateSeen           bool
+	// Attached is whether this binary attached to a handed-on install
+	// rather than installing: install's own checks then have nothing to
+	// look at.
+	Attached bool
 
-	proxyAddr string
-	api       *client.Client
-	compute   *compute.Service
-	sql       *sqladmin.Service
+	ProxyAddr string
+	API       *client.Client
+	Compute   *compute.Service
+	SQL       *sqladmin.Service
 
-	vms chan struct{} // the cap on probe VMs at once
+	VMs chan struct{} // the cap on probe VMs at once
 }
 
-// installed says whether the cases have a silo to test, and skips the
+// Run is this binary's run. Started is false until Main has set it up,
+// so a package whose TestMain isn't Main has none.
+var (
+	Run     = &State{}
+	Started bool
+)
+
+var run = Run
+
+// Installed says whether the cases have a silo to test, and skips the
 // case with install's failure if not: a case can't pass, or fail, on a
 // tree that never came up. TestInstall reports install's own failure.
-func installed(t *testing.T) {
+func Installed(t testing.TB) {
 	t.Helper()
-	if run.installErr != nil {
-		t.Skipf("silo install failed, so there is no tree to test: %v", run.installErr)
+	if !Started {
+		t.Skip("the GCP harness isn't running in this test binary (its TestMain isn't gcpharness.Main)")
+	}
+	if run.InstallErr != nil {
+		t.Skipf("silo install failed, so there is no tree to test: %v", run.InstallErr)
 	}
 }
 
-func TestMain(m *testing.M) {
+// Main is a test binary's TestMain: set up, install (or attach), run the
+// tests, then uninstall and check that nothing is left (or hand the
+// install on).
+func Main(m *testing.M) {
 	flag.Parse()
 	code := func() int {
 		ctx := context.Background()
@@ -101,10 +130,27 @@ func TestMain(m *testing.M) {
 			fmt.Fprintf(os.Stderr, "conformance: %v\n", err)
 			return 2
 		}
-		run.installErr = install(ctx)
+		Started = true
+		if *flagAttach {
+			run.Attached = true
+			run.InstallErr = startProxy(ctx)
+			if run.InstallErr != nil {
+				run.InstallErr = fmt.Errorf("attaching to the handed-on install: %v", run.InstallErr)
+			}
+		} else {
+			run.InstallErr = install(ctx)
+		}
 		code := m.Run()
-		if *flagKeep {
+		switch {
+		case *flagKeep:
 			fmt.Fprintln(os.Stderr, "conformance: -silo.keep: leaving the install in place")
+			return code
+		case *flagHandoff && run.InstallErr == nil:
+			if err := handoff(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "--- FAIL: TestHandoff\n    %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(os.Stderr, "conformance: -silo.handoff: leaving the install for -silo.attach")
 			return code
 		}
 		if err := uninstallAndCheck(ctx); err != nil {
@@ -118,42 +164,86 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// handoff deletes every silo under the root, so that the binary that
+// attaches next starts from an empty tree, as a fresh install would.
+func handoff(ctx context.Context) error {
+	root, err := run.API.Describe(ctx, "/", false)
+	if err != nil {
+		return err
+	}
+	kids, err := run.API.Children(ctx, root.Path)
+	if err != nil {
+		return err
+	}
+	for _, k := range kids {
+		if err := DeleteSilo(ctx, k.Path); err != nil {
+			return fmt.Errorf("deleting %s: %v", k.Path, err)
+		}
+	}
+	return nil
+}
+
+// DeleteSilo deletes path and its subtree, and waits for it to go.
+func DeleteSilo(ctx context.Context, path string) error {
+	op, err := run.API.Delete(ctx, path, true, client.Mutation{})
+	if err != nil {
+		return err
+	}
+	if op.ID == "" || op.Done {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	done, err := run.API.WaitOperation(ctx, op.ID, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	if done.Error != nil {
+		return done.Error
+	}
+	return nil
+}
+
 // setup checks the key, points gcloud and the SDKs at it, builds the CLI
 // and picks a fresh address space.
 func setup(ctx context.Context) error {
 	if _, err := os.Stat(*flagKey); err != nil {
 		return fmt.Errorf("no GCP key at %s: this suite needs the gcp-key capability (%v)", *flagKey, err)
 	}
-	run.project, run.region, run.zone, run.key = *flagProject, *flagRegion, *flagRegion+"-a", *flagKey
-	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", run.key)
-	os.Setenv("GOOGLE_CLOUD_PROJECT", run.project)
-	os.Setenv("CLOUDSDK_CORE_PROJECT", run.project)
-	if out, err := exec.Command("gcloud", "auth", "activate-service-account", "--key-file="+run.key).CombinedOutput(); err != nil {
+	run.Project, run.Region, run.Zone, run.Key = *flagProject, *flagRegion, *flagRegion+"-a", *flagKey
+	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", run.Key)
+	os.Setenv("GOOGLE_CLOUD_PROJECT", run.Project)
+	os.Setenv("CLOUDSDK_CORE_PROJECT", run.Project)
+	if out, err := exec.Command("gcloud", "auth", "activate-service-account", "--key-file="+run.Key).CombinedOutput(); err != nil {
 		return fmt.Errorf("gcloud auth: %v: %s", err, out)
 	}
 	var k struct {
 		ClientEmail string `json:"client_email"`
 	}
-	if b, err := os.ReadFile(run.key); err == nil && json.Unmarshal(b, &k) == nil {
-		run.admin = "serviceAccount:" + k.ClientEmail
+	if b, err := os.ReadFile(run.Key); err == nil && json.Unmarshal(b, &k) == nil {
+		run.Admin = "serviceAccount:" + k.ClientEmail
 	}
 	var err error
-	if run.compute, err = compute.NewService(ctx, option.WithCredentialsFile(run.key)); err != nil {
+	if run.Compute, err = compute.NewService(ctx, option.WithCredentialsFile(run.Key)); err != nil {
 		return err
 	}
-	if run.sql, err = sqladmin.NewService(ctx, option.WithCredentialsFile(run.key)); err != nil {
+	if run.SQL, err = sqladmin.NewService(ctx, option.WithCredentialsFile(run.Key)); err != nil {
 		return err
 	}
 	dir, err := os.MkdirTemp("", "silo-conformance")
 	if err != nil {
 		return err
 	}
-	run.silo = filepath.Join(dir, "silo")
-	if out, err := exec.Command("go", "build", "-o", run.silo, "github.com/bwsalmon/silo/cmd/silo").CombinedOutput(); err != nil {
+	run.Silo = filepath.Join(dir, "silo")
+	if out, err := exec.Command("go", "build", "-o", run.Silo, "github.com/bwsalmon/silo/cmd/silo").CombinedOutput(); err != nil {
 		return fmt.Errorf("building silo: %v: %s", err, out)
 	}
+	run.VMs = make(chan struct{}, conformance.MaxVMs)
+	if *flagAttach {
+		return nil
+	}
 	var used []netip.Prefix
-	err = run.compute.Subnetworks.AggregatedList(run.project).Pages(ctx, func(l *compute.SubnetworkAggregatedList) error {
+	err = run.Compute.Subnetworks.AggregatedList(run.Project).Pages(ctx, func(l *compute.SubnetworkAggregatedList) error {
 		for _, sc := range l.Items {
 			for _, s := range sc.Subnetworks {
 				if p, err := netip.ParsePrefix(s.IpCidrRange); err == nil {
@@ -171,17 +261,16 @@ func setup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listing the project's subnets: %v", err)
 	}
-	if run.space, err = PickAddressSpace(used); err != nil {
+	if run.Space, err = conformance.PickAddressSpace(used); err != nil {
 		return err
 	}
-	run.gateway, run.control = Ranges(run.space)
-	run.vms = make(chan struct{}, MaxVMs)
+	run.Gateway, run.Control = conformance.Ranges(run.Space)
 	return nil
 }
 
 // silo runs the CLI.
 func silo(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, run.silo, args...)
+	cmd := exec.CommandContext(ctx, run.Silo, args...)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = io.MultiWriter(&out, os.Stderr), io.MultiWriter(&out, os.Stderr)
 	err := cmd.Run()
@@ -194,10 +283,10 @@ func silo(ctx context.Context, args ...string) (string, error) {
 func install(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Minute)
 	defer cancel()
-	args := []string{"install", "--project", run.project, "--regions", run.region,
-		"--admin", run.admin, "--credentials", run.key,
-		"--address-space", run.space.String(), "--gateway-range", run.gateway.String(),
-		"--control-range", run.control.String(),
+	args := []string{"install", "--project", run.Project, "--regions", run.Region,
+		"--admin", run.Admin, "--credentials", run.Key,
+		"--address-space", run.Space.String(), "--gateway-range", run.Gateway.String(),
+		"--control-range", run.Control.String(),
 		"--db-tier", "db-f1-micro", "--control-replicas", "2",
 		"--agent-sessions", agentSessions, "--control-machine-type", controlMachineType,
 		"--root-model-budget", rootModelBudget, "--yes"}
@@ -210,7 +299,7 @@ func install(ctx context.Context) error {
 	stop := watchMigrateVM(ctx)
 	out, err := silo(ctx, args...)
 	stop()
-	run.installOut = out
+	run.InstallOut = out
 	if err != nil {
 		return fmt.Errorf("silo install: %v", err)
 	}
@@ -226,11 +315,11 @@ func watchMigrateVM(ctx context.Context) func() {
 	go func() {
 		defer wg.Done()
 		for {
-			l, err := run.compute.Instances.AggregatedList(run.project).Filter(`name = "silo-migrate"`).Context(ctx).Do()
+			l, err := run.Compute.Instances.AggregatedList(run.Project).Filter(`name = "silo-migrate"`).Context(ctx).Do()
 			if err == nil {
 				for _, sc := range l.Items {
 					if len(sc.Instances) > 0 {
-						run.migrateSeen = true
+						run.MigrateSeen = true
 					}
 				}
 			}
@@ -253,19 +342,19 @@ func startProxy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	run.proxyAddr = l.Addr().String()
+	run.ProxyAddr = l.Addr().String()
 	l.Close()
-	proxyCmd = exec.Command(run.silo, "proxy", "--project", run.project, "--listen", run.proxyAddr)
+	proxyCmd = exec.Command(run.Silo, "proxy", "--project", run.Project, "--listen", run.ProxyAddr)
 	proxyCmd.Stdout, proxyCmd.Stderr = os.Stderr, os.Stderr
 	if err := proxyCmd.Start(); err != nil {
 		return err
 	}
-	if run.api, err = client.New(client.Options{Endpoint: "http://" + run.proxyAddr + "/silo/v1/", Timeout: 2 * time.Minute}); err != nil {
+	if run.API, err = client.New(client.Options{Endpoint: "http://" + run.ProxyAddr + "/silo/v1/", Timeout: 2 * time.Minute}); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		_, err := run.api.Describe(ctx, "/", false)
+		_, err := run.API.Describe(ctx, "/", false)
 		if err == nil {
 			return nil
 		}
@@ -289,7 +378,7 @@ func uninstallAndCheck(ctx context.Context) error {
 	stopProxy()
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 	defer cancel()
-	_, uerr := silo(ctx, "uninstall", "--project", run.project, "--credentials", run.key, "--force", "--delete-data", "--yes")
+	_, uerr := silo(ctx, "uninstall", "--project", run.Project, "--credentials", run.Key, "--force", "--delete-data", "--yes")
 	left, lerr := labelledObjects(ctx)
 	switch {
 	case lerr != nil:
@@ -304,13 +393,13 @@ func uninstallAndCheck(ctx context.Context) error {
 
 // labelledObjects is every object in the project that Leftovers counts:
 // install's and the tenants'.
-func labelledObjects(ctx context.Context) ([]Object, error) {
-	var objs []Object
-	p := run.project
+func labelledObjects(ctx context.Context) ([]conformance.Object, error) {
+	var objs []conformance.Object
+	p := run.Project
 	add := func(kind, name string, labels map[string]string, desc string) {
-		objs = append(objs, Object{Kind: kind, Name: name, Labels: labels, Description: desc})
+		objs = append(objs, conformance.Object{Kind: kind, Name: name, Labels: labels, Description: desc})
 	}
-	if err := run.compute.Instances.AggregatedList(p).Pages(ctx, func(l *compute.InstanceAggregatedList) error {
+	if err := run.Compute.Instances.AggregatedList(p).Pages(ctx, func(l *compute.InstanceAggregatedList) error {
 		for _, sc := range l.Items {
 			for _, o := range sc.Instances {
 				add("instance", o.Name, o.Labels, o.Description)
@@ -320,7 +409,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.Disks.AggregatedList(p).Pages(ctx, func(l *compute.DiskAggregatedList) error {
+	if err := run.Compute.Disks.AggregatedList(p).Pages(ctx, func(l *compute.DiskAggregatedList) error {
 		for _, sc := range l.Items {
 			for _, o := range sc.Disks {
 				add("disk", o.Name, o.Labels, o.Description)
@@ -330,7 +419,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.Subnetworks.AggregatedList(p).Pages(ctx, func(l *compute.SubnetworkAggregatedList) error {
+	if err := run.Compute.Subnetworks.AggregatedList(p).Pages(ctx, func(l *compute.SubnetworkAggregatedList) error {
 		for _, sc := range l.Items {
 			for _, o := range sc.Subnetworks {
 				add("subnetwork", o.Name, nil, o.Description)
@@ -340,7 +429,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.Addresses.AggregatedList(p).Pages(ctx, func(l *compute.AddressAggregatedList) error {
+	if err := run.Compute.Addresses.AggregatedList(p).Pages(ctx, func(l *compute.AddressAggregatedList) error {
 		for _, sc := range l.Items {
 			for _, o := range sc.Addresses {
 				add("address", o.Name, o.Labels, o.Description)
@@ -350,7 +439,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.ForwardingRules.AggregatedList(p).Pages(ctx, func(l *compute.ForwardingRuleAggregatedList) error {
+	if err := run.Compute.ForwardingRules.AggregatedList(p).Pages(ctx, func(l *compute.ForwardingRuleAggregatedList) error {
 		for _, sc := range l.Items {
 			for _, o := range sc.ForwardingRules {
 				add("forwardingRule", o.Name, o.Labels, o.Description)
@@ -360,7 +449,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.InstanceTemplates.List(p).Pages(ctx, func(l *compute.InstanceTemplateList) error {
+	if err := run.Compute.InstanceTemplates.List(p).Pages(ctx, func(l *compute.InstanceTemplateList) error {
 		for _, o := range l.Items {
 			var labels map[string]string
 			if o.Properties != nil {
@@ -372,7 +461,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.Images.List(p).Pages(ctx, func(l *compute.ImageList) error {
+	if err := run.Compute.Images.List(p).Pages(ctx, func(l *compute.ImageList) error {
 		for _, o := range l.Items {
 			add("image", o.Name, o.Labels, o.Description)
 		}
@@ -380,7 +469,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.Snapshots.List(p).Pages(ctx, func(l *compute.SnapshotList) error {
+	if err := run.Compute.Snapshots.List(p).Pages(ctx, func(l *compute.SnapshotList) error {
 		for _, o := range l.Items {
 			add("snapshot", o.Name, o.Labels, o.Description)
 		}
@@ -388,7 +477,7 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := run.compute.Firewalls.List(p).Pages(ctx, func(l *compute.FirewallList) error {
+	if err := run.Compute.Firewalls.List(p).Pages(ctx, func(l *compute.FirewallList) error {
 		for _, o := range l.Items {
 			add("firewall", o.Name, nil, o.Description)
 		}
@@ -396,21 +485,21 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if l, err := run.compute.NetworkFirewallPolicies.List(p).Context(ctx).Do(); err != nil {
+	if l, err := run.Compute.NetworkFirewallPolicies.List(p).Context(ctx).Do(); err != nil {
 		return nil, err
 	} else {
 		for _, o := range l.Items {
 			add("firewallPolicy", o.Name, nil, o.Description)
 		}
 	}
-	if l, err := run.compute.Networks.List(p).Context(ctx).Do(); err != nil {
+	if l, err := run.Compute.Networks.List(p).Context(ctx).Do(); err != nil {
 		return nil, err
 	} else {
 		for _, o := range l.Items {
 			add("network", o.Name, nil, o.Description)
 		}
 	}
-	if l, err := run.sql.Instances.List(p).Context(ctx).Do(); err != nil {
+	if l, err := run.SQL.Instances.List(p).Context(ctx).Do(); err != nil {
 		return nil, fmt.Errorf("Cloud SQL: %v", err)
 	} else {
 		for _, o := range l.Items {
@@ -421,100 +510,27 @@ func labelledObjects(ctx context.Context) ([]Object, error) {
 			add("sqlInstance", o.Name, labels, "")
 		}
 	}
-	return Leftovers(objs), nil
+	return conformance.Leftovers(objs), nil
 }
 
-// TestInstall reports the install itself (SV-97): that it finished, used
-// Cloud SQL with a PSC endpoint and IAM login as in production, and that
-// the silo-migrate VM came and went.
-func TestInstall(t *testing.T) {
-	t.Run("Finished", func(t *testing.T) {
-		if run.installErr != nil {
-			t.Fatalf("%v\n%s", run.installErr, tail(run.installOut, 6000))
-		}
-	})
-	t.Run("CloudSQLWithPSCAndIAMLogin", func(t *testing.T) {
-		installed(t)
-		ctx := context.Background()
-		l, err := run.sql.Instances.List(run.project).Context(ctx).Do()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var db *sqladmin.DatabaseInstance
-		for _, o := range l.Items {
-			if o.Settings != nil && o.Settings.UserLabels["silo-install"] != "" {
-				db = o
-			}
-		}
-		if db == nil {
-			t.Fatal("no Cloud SQL instance labelled silo-install")
-		}
-		ip := db.Settings.IpConfiguration
-		if ip == nil || ip.PscConfig == nil || !ip.PscConfig.PscEnabled {
-			t.Errorf("%s: PSC isn't on", db.Name)
-		}
-		if ip != nil && ip.Ipv4Enabled {
-			t.Errorf("%s has a public IP", db.Name)
-		}
-		iam := false
-		for _, f := range db.Settings.DatabaseFlags {
-			if f.Name == "cloudsql.iam_authentication" && f.Value == "on" {
-				iam = true
-			}
-		}
-		if !iam {
-			t.Errorf("%s: cloudsql.iam_authentication isn't on", db.Name)
-		}
-		if db.Settings.Tier != "db-f1-micro" {
-			t.Errorf("%s: tier %s, want db-f1-micro", db.Name, db.Settings.Tier)
-		}
-		users, err := run.sql.Users.List(run.project, db.Name).Context(ctx).Do()
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, u := range users.Items {
-			if u.Type == "CLOUD_IAM_SERVICE_ACCOUNT" && strings.HasPrefix(u.Name, "silod@") {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("%s: no IAM user for silod", db.Name)
-		}
-		if _, err := run.compute.ForwardingRules.Get(run.project, run.region, "silo-db-psc").Context(ctx).Do(); err != nil {
-			t.Errorf("the PSC endpoint silo-db-psc: %v", err)
-		}
-	})
-	t.Run("MigrateVMCameAndWent", func(t *testing.T) {
-		installed(t)
-		if !run.migrateSeen {
-			t.Error("silo-migrate never appeared while install ran")
-		}
-		_, err := run.compute.Instances.Get(run.project, run.zone, "silo-migrate").Do()
-		if err == nil {
-			t.Error("silo-migrate is still there after install")
-		}
-	})
-}
-
-func tail(s string, n int) string {
+func Tail(s string, n int) string {
 	if len(s) > n {
 		return "..." + s[len(s)-n:]
 	}
 	return s
 }
 
-// facade calls the compute/v1 facade through the front door, as a root
+// Facade calls the compute/v1 facade through the front door, as a root
 // member: the caller may read and write every silo's facade project.
 // It returns the HTTP status and the decoded body.
-func facade(t *testing.T, method, path string, body any) (int, map[string]any) {
+func Facade(t testing.TB, method, path string, body any) (int, map[string]any) {
 	t.Helper()
 	var r io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		r = bytes.NewReader(b)
 	}
-	req, _ := http.NewRequest(method, "http://"+run.proxyAddr+"/compute/v1/"+strings.TrimPrefix(path, "/"), r)
+	req, _ := http.NewRequest(method, "http://"+run.ProxyAddr+"/compute/v1/"+strings.TrimPrefix(path, "/"), r)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 2 * time.Minute}).Do(req)
 	if err != nil {
@@ -530,8 +546,8 @@ func facade(t *testing.T, method, path string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-// waitOp waits for a facade operation to finish.
-func waitOp(t *testing.T, project string, op map[string]any) map[string]any {
+// WaitOp waits for a facade operation to finish.
+func WaitOp(t testing.TB, project string, op map[string]any) map[string]any {
 	t.Helper()
 	name, _ := op["name"].(string)
 	if name == "" {
@@ -539,12 +555,12 @@ func waitOp(t *testing.T, project string, op map[string]any) map[string]any {
 	}
 	scope := "global"
 	if z, _ := op["zone"].(string); z != "" {
-		scope = "zones/" + lastSegment(z)
+		scope = "zones/" + LastSegment(z)
 	} else if rg, _ := op["region"].(string); rg != "" {
-		scope = "regions/" + lastSegment(rg)
+		scope = "regions/" + LastSegment(rg)
 	}
 	for i := 0; i < 60; i++ {
-		_, o := facade(t, "POST", "projects/"+project+"/"+scope+"/operations/"+name+"/wait", nil)
+		_, o := Facade(t, "POST", "projects/"+project+"/"+scope+"/operations/"+name+"/wait", nil)
 		if o["status"] == "DONE" {
 			return o
 		}
@@ -553,4 +569,24 @@ func waitOp(t *testing.T, project string, op map[string]any) map[string]any {
 	return nil
 }
 
-func lastSegment(s string) string { return s[strings.LastIndex(s, "/")+1:] }
+func LastSegment(s string) string { return s[strings.LastIndex(s, "/")+1:] }
+
+// ProbeImage is every probe VM's boot image.
+const ProbeImage = "projects/debian-cloud/global/images/family/debian-12"
+
+// InstanceBody is a probe-sized instance in the "<siloID>-net" subnet,
+// Spot.
+func InstanceBody(name, siloID string, mutate func(map[string]any)) map[string]any {
+	body := map[string]any{
+		"name":        name,
+		"machineType": "zones/" + run.Zone + "/machineTypes/" + conformance.ProbeMachineType,
+		"scheduling":  map[string]any{"provisioningModel": "SPOT", "instanceTerminationAction": "DELETE"},
+		"disks": []any{map[string]any{"boot": true, "autoDelete": true,
+			"initializeParams": map[string]any{"sourceImage": ProbeImage, "diskSizeGb": "10", "diskType": "zones/" + run.Zone + "/diskTypes/pd-standard"}}},
+		"networkInterfaces": []any{map[string]any{"subnetwork": "regions/" + run.Region + "/subnetworks/" + siloID + "-net"}},
+	}
+	if mutate != nil {
+		mutate(body)
+	}
+	return body
+}
