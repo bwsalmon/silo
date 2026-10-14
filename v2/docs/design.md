@@ -603,9 +603,13 @@ ssh -S $SESSION/ssh.ctl -O forward -R 127.0.0.1:0:127.0.0.1:<gateway-port> <host
 ```
 
 With port 0, OpenSSH has the server allocate a free port and prints it
-on stdout. The forward binds the remote host's **loopback** only (and
-`GatewayPorts` on the server cannot widen an explicit `127.0.0.1` bind
-address). No port is opened to the network on either side. Other users
+on stdout. The forward binds the remote host's **loopback** only. A
+server with `GatewayPorts yes` overrides the client's bind address and
+binds the wildcard instead (measured against OpenSSH 9.2's sshd; `no`,
+the default, and `clientspecified` keep `127.0.0.1`), so silo checks
+the listening address after asking for the forward and refuses the
+session, with the `sshd_config` fix, if it is not loopback. No port is
+opened to the network on either side. Other users
 on the remote host can connect to the loopback port. The bearer token
 (§4.3) is what turns them away.
 
@@ -654,6 +658,42 @@ SIGHUP finds every gateway call failing and has nothing left to do. silo
 cannot do better than that without an agent on the remote host, and v2.0
 deliberately has none. There is no reconnect in v2.0: a reconnecting
 session is the detach/re-attach work of [`grain.md`](grain.md) §2.7.
+
+**As built in stage 4b** (`location/ssh`):
+
+- The master is started without `-f`: silo keeps it as its own child,
+  under `Pdeathsig`, and waits for `ssh -O check` to succeed. With `-f`
+  the backgrounded master would outlive a killed silo, and its exit
+  would not be an event silo can watch. A passphrase prompt still
+  reaches the user through `/dev/tty`. Every later step is
+  `ssh -S <ctl> -o ControlMaster=no -o BatchMode=yes ...`, and the
+  control socket moves to a short temporary directory when
+  `$SESSION/ssh.ctl` would not fit in a socket address.
+- The remote session directory holds `session`
+  (`id=<session> origin=<hostname>:<uid>`), the staged files under
+  `agent/`, the private workdir `work/`, the env file while it lives,
+  and `pid`. `silo gc --host` (and `silo run` to the host, at startup)
+  removes only directories whose origin is this machine and user and
+  whose session is not live here, so it never removes a live session
+  that another machine is running against the same remote account.
+- The command is `exec /bin/sh -c '<preamble>; exec <argv>'`, so the
+  CLI keeps the pid of the session `sshd` made, which leads its process
+  group. **Headless signals** are sent as real signals to that group
+  over the master (`kill -s INT -- -<pid>`). Closing stdin is not
+  enough, because stdin is already closed once the prompt is written.
+  Tearing down a channel without a pty does not make `sshd` send SIGHUP.
+  A kill also ends the local `ssh`, which closes the channel, and so
+  does any signal once the master is gone.
+- The gateway also answers to the forward's own `Host`
+  (`127.0.0.1:<remote port>`), still loopback, so its DNS-rebinding
+  check stands.
+- `--dry-run` adds four checks for `kind: ssh`: reachable
+  (`ssh -o BatchMode=yes <host> true`), host key accepted, the CLI
+  binary and its version, and the CLI's login when `auth` is ambient.
+  The login checks are `claude auth status`, `codex login status`, and
+  for agy the presence of `~/.gemini/oauth_creds.json`.
+- `gateway_transport: unix` is refused, by `silo validate` and again by
+  the location.
 
 ## 6. Remote permissions and CLI modes
 
@@ -1868,7 +1908,7 @@ change argued below.
 | 1 | **Core** | `silofile` (types, strict decoding, folder, validation, schema), `silo validate`, `silo schema`, `session` (setup/teardown, signals, session dir, exit codes), `gateway` (registry, refusal, audit), `location/local`, `agentcli/claude` and `agentcli/codex` for `interactive`/`headless` with `none`/`all`/subset, `sandbox/container` (+gvisor), `credentials` (env, file, ambient). A silo with a container sandbox runs end to end. | — |
 | 2 | **Journey 2** | `gcp`: account spec and naming, setup checks, create/verify/reuse, propagation wait, token minting and refresh, delivery, metadata emulator, `silo gc` for accounts. | 1 |
 | 3 | **Journey 1** | `create`: the built-in Silofile, `sandbox/folder`, the `silo_*` tools, embedded docs and examples, `silo run --dry-run`, `silo edit`, the first-run summary. | 1, 2 (for `silo_check`'s IAM checks) |
-| 4 | **Journey 3** | `location/ssh`, `localexec`, approvals, `silo gc --host`. | 1 |
+| 4 | **Journey 3** | `location/ssh`, `localexec`, approvals, `silo gc --host`. Built as 4a (`localexec`, approvals) and 4b (`location/ssh`, `silo gc --host`). | 1 |
 | 5 | **Journey 4** | `mcp/sources`, launched and URL servers, local and remote, allowlists, lifecycle. | 1, 4 (remote servers) |
 | 6 | **Programmatic interface** | `--json` events, control socket, the Go library API, caller-provided MCP servers. | 1 |
 | 7 | **Git proxy** | `gitproxy` copied and adapted from grain, `git:` and `sandboxes[].repos`. | 1 |
