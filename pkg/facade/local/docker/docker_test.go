@@ -479,10 +479,12 @@ func TestRefusals(t *testing.T) {
 		e.fail(c.code, c.want, e.a, "POST", path, c.body)
 	}
 	// Defaults are not refused: what the docker CLI sends for a plain
-	// run, MemorySwappiness -1 (unset) included, as 29.x sends it.
+	// run, as 29.x sends it: MemorySwappiness -1 (unset), and the
+	// endpoint named for the mode, "default".
 	e.ok(e.a, "POST", path, obj{"Image": "alpine", "MacAddress": "", "HostConfig": obj{"Privileged": false, "NetworkMode": "default",
 		"Binds": []string{"cache:/cache:ro"}, "LogConfig": obj{"Type": "json-file", "Config": obj{}}, "Runtime": "runc",
-		"SecurityOpt": []string{"no-new-privileges"}, "MemorySwappiness": -1}})
+		"SecurityOpt": []string{"no-new-privileges"}, "MemorySwappiness": -1},
+		"NetworkingConfig": obj{"EndpointsConfig": obj{"default": obj{"IPAMConfig": nil, "Aliases": nil, "MacAddress": "", "DNSNames": nil}}}})
 	// The named volume was made, and charged.
 	if got := e.used(e.a, ClassVolumes); got != 2 {
 		t.Errorf("volumes: %d, want cache and the anonymous /data", got)
