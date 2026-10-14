@@ -6,6 +6,8 @@ facade), fenced so that everything it makes stays inside its silo. The
 control plane, `silod`, keeps the tree, the allocators, the grants and
 the audit log in a database (SQLite or PostgreSQL).
 
+Silo v2, a fresh and smaller design under construction, lives in [`v2/`](v2/README.md).
+
 The specification is [`docs/silo/`](docs/silo/README.md); its README is
 the overview and wins on any conflict. Requirement headings there carry
 stable ids, `{#SV-n}`, which code and commits cite.

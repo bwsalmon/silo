@@ -18,8 +18,10 @@ test:
 vet:
 	go vet ./...
 
+# gofmt walks directories without regard to modules, so v2/ (its own
+# module, with its own CI in .grain/workflows/v2.yml) is pruned here.
 fmt:
-	@unformatted="$$(gofmt -l .)"; \
+	@unformatted="$$(find . -path ./v2 -prune -o -name '*.go' -print | xargs gofmt -l)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; \
 		exit 1; \

@@ -21,11 +21,14 @@ env:
 jobs:
   go:
     name: go
-    # Everything but the documentation: no test opens anything under
-    # docs/ or a top-level Markdown file.
+    # Everything but the documentation and v2: no test opens anything
+    # under docs/ or a top-level Markdown file, and v2/ is a module of its
+    # own that this one's ./... never reaches (.grain/workflows/v2.yml
+    # tests it).
     paths-ignore: &not-read-by-the-go-program
       - docs/**
       - "*.md"
+      - v2/**
     sandbox:
       cpus: 8
       memory-mb: 16384
