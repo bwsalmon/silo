@@ -369,7 +369,11 @@ in the session's raw transcript rather than written to stdout. A control socket 
 designed in [`grain.md`](grain.md) §2.1; journeys 1–4 do not need them
 (apart from answering a script's `approve: true` under `--json`, §12.3).
 `--caller-mcp <name>=<url>` adds a caller-provided MCP server
-([`grain.md`](grain.md) §2.2).
+([`grain.md`](grain.md) §2.2). `--detach` runs the session under a
+supervisor of its own and prints its id; `silo attach <id> --from <seq>`
+replays and follows its numbered `events.jsonl`, and `silo ls` lists the
+running sessions by label ([`grain.md`](grain.md) §2.7, as built in
+stage 9).
 
 As built in stage 6b, the socket's methods (`inject`, `cancel`,
 `extend_deadline`, `approve`) and their params are documented in
@@ -404,7 +408,8 @@ CLI obeyed still exits 130, since silo sent the signal. The session
 directory holds `session.json` and the staged CLI files (`agent/`) and
 the private workdir (`work/`); the audit log is written straight to
 `$XDG_STATE_HOME/silo/sessions/<id>/audit.jsonl`, so a crash keeps it,
-and the final `session.json` is copied beside it. Where
+and the final `session.json` is copied beside it. As built in stage 9,
+the event stream is kept there too, as `events.jsonl`. Where
 `XDG_RUNTIME_DIR` is unset, session directories go in
 `$TMPDIR/silo-<uid>/`. Containers also carry `silo.uid=<uid>`, so
 `silo gc` on a shared Docker daemon removes only the invoking user's.
@@ -671,8 +676,10 @@ session, and the CLI loses its gateway at the same moment because the
 reverse forward lived on the master connection. A CLI that survives
 SIGHUP finds every gateway call failing and has nothing left to do. silo
 cannot do better than that without an agent on the remote host, and v2.0
-deliberately has none. There is no reconnect in v2.0: a reconnecting
-session is the detach/re-attach work of [`grain.md`](grain.md) §2.7.
+deliberately has none. There is no reconnect in v2.0. The detach and
+re-attach of [`grain.md`](grain.md) §2.7 (stage 9) covers silo's
+caller, not this link: a detached session whose ssh connection drops
+still ends with exit 75.
 
 **As built in stage 4b** (`location/ssh`):
 

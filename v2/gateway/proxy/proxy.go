@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -81,9 +82,31 @@ type Spec struct {
 	// Blocking names tools (the server's own names) that the gateway
 	// lets run without a timeout (grain.md §2.2).
 	Blocking []string
+	// Reconnect has a URL server that goes away dialled again on the
+	// next call: a caller's server, which comes back on the same
+	// address after the caller restarts (grain.md §2.7). Calls made
+	// while it cannot be reached fail with an *UnavailableError.
+	Reconnect bool
 }
 
 func (s Spec) launched() bool { return len(s.Command) > 0 }
+
+// UnavailableError is a call to a Reconnect server that cannot be
+// reached right now, as while its caller restarts. It is retryable:
+// the same call may succeed once the server is back.
+type UnavailableError struct {
+	Server string
+	Err    error
+}
+
+func (e *UnavailableError) Error() string {
+	return fmt.Sprintf("MCP server %s cannot be reached right now, as while its caller restarts; the call is retryable, so try it again shortly (%v)", e.Server, e.Err)
+}
+
+func (e *UnavailableError) Unwrap() error { return e.Err }
+
+// Retryable reports that the call may be made again.
+func (e *UnavailableError) Retryable() bool { return true }
 
 // Options configure a Proxy; zero values take the defaults.
 type Options struct {
@@ -221,6 +244,9 @@ type server struct {
 	spec Spec
 	stop chan struct{}
 
+	// rmu serialises reconnects, so that calls failing together dial
+	// once.
+	rmu       sync.Mutex
 	mu        sync.Mutex
 	conn      mcp.Conn
 	proc      *process
@@ -436,10 +462,21 @@ func (s *server) tool(t mcp.ToolInfo) gateway.Tool {
 		Blocking:    contains(s.spec.Blocking, orig),
 		Handler: func(ctx context.Context, args map[string]any) (mcp.Result, error) {
 			conn, err := s.live()
+			if err != nil && s.spec.Reconnect {
+				conn, err = s.reconnect(ctx, nil)
+			}
 			if err != nil {
 				return mcp.Result{}, err
 			}
 			r, err := conn.CallTool(ctx, orig, args)
+			if err != nil && s.spec.Reconnect && ctx.Err() == nil && notSent(err) {
+				// The server went away and may be back: a call that never
+				// reached it is made again on a fresh connection.
+				if conn, err = s.reconnect(ctx, conn); err != nil {
+					return mcp.Result{}, err
+				}
+				r, err = conn.CallTool(ctx, orig, args)
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return mcp.Result{}, ctx.Err()
@@ -447,6 +484,10 @@ func (s *server) tool(t mcp.ToolInfo) gateway.Tool {
 				var rpcErr *mcp.Error
 				if errors.As(err, &rpcErr) {
 					return mcp.Result{}, fmt.Errorf("MCP server %s refused %s: %s", s.name(), orig, rpcErr.Message)
+				}
+				if s.spec.Reconnect {
+					s.drop(conn)
+					return mcp.Result{}, &UnavailableError{Server: s.name(), Err: err}
 				}
 				return mcp.Result{}, fmt.Errorf("MCP server %s: %v", s.name(), err)
 			}
@@ -467,6 +508,84 @@ func (s *server) live() (mcp.Conn, error) {
 		return nil, fmt.Errorf("MCP server %s is not running", s.name())
 	}
 	return s.conn, nil
+}
+
+// notSent reports whether a failed call certainly never reached the
+// server: its address could not be dialled, or it no longer knows the
+// MCP session (HTTP 404, a restarted server).
+func notSent(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	return strings.Contains(err.Error(), "HTTP 404")
+}
+
+// reconnect dials a Reconnect server afresh, replacing old, and returns
+// the new connection; when another call has already replaced old it
+// returns that one. Failing, it returns an *UnavailableError.
+func (s *server) reconnect(ctx context.Context, old mcp.Conn) (mcp.Conn, error) {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	s.mu.Lock()
+	cur, closed := s.conn, s.closed
+	s.mu.Unlock()
+	if closed {
+		return nil, errors.New("the session is ending")
+	}
+	if cur != nil && cur != old {
+		return cur, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.p.opts.StartTimeout)
+	defer cancel()
+	conn, _, err := s.connect(ctx)
+	var tools []gateway.Tool
+	if err == nil {
+		var listed []mcp.ToolInfo
+		if listed, err = conn.ListTools(ctx); err == nil {
+			tools, _ = s.filter(listed, false)
+		}
+	}
+	if err != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		s.drop(old)
+		return nil, &UnavailableError{Server: s.name(), Err: err}
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = conn.Close()
+		return nil, errors.New("the session is ending")
+	}
+	prev := s.conn
+	s.conn, s.dead, s.tools = conn, nil, tools
+	s.mu.Unlock()
+	if prev != nil {
+		_ = prev.Close()
+	}
+	go s.watch(conn, nil)
+	s.publish()
+	s.p.opts.Warn("MCP server %s: reconnected", s.name())
+	return conn, nil
+}
+
+// drop forgets conn, when it is still the server's, so that the next
+// call dials again.
+func (s *server) drop(conn mcp.Conn) {
+	if conn == nil {
+		return
+	}
+	s.mu.Lock()
+	mine := s.conn == conn
+	if mine {
+		s.conn = nil
+	}
+	s.mu.Unlock()
+	if mine {
+		_ = conn.Close()
+	}
 }
 
 // watch follows one connection until it ends.
@@ -572,6 +691,12 @@ func (s *server) died(conn mcp.Conn, proc *process, cause error) {
 	s.mu.Lock()
 	if s.closed || s.conn != conn {
 		s.mu.Unlock()
+		return
+	}
+	if s.spec.Reconnect {
+		s.conn, s.proc = nil, nil
+		s.mu.Unlock()
+		s.p.opts.Warn("MCP server %s: its connection ended (%s); it is dialled again on the next call", s.name(), why)
 		return
 	}
 	restart := s.spec.Restart && s.spec.launched()

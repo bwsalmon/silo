@@ -20,6 +20,10 @@ const (
 	// RawTranscriptFile is the CLI's headless output as it wrote it,
 	// credentials redacted.
 	RawTranscriptFile = "transcript.raw.jsonl"
+	// EventsFile is every event of the session, numbered, one JSON line
+	// each, appended as it is emitted: what silo attach replays and
+	// follows (grain.md §2.7).
+	EventsFile = "events.jsonl"
 	// TranscriptFile is the normalised transcript: one transcript event
 	// per line.
 	TranscriptFile = "transcript.jsonl"
@@ -78,6 +82,10 @@ type emitter struct {
 	phase   string
 	seq     int64
 	secrets []string // longest first
+	// log is events.jsonl once the state directory exists; pending holds
+	// what was emitted before, so that the file has every event.
+	log     *os.File
+	pending []events.Event
 	// usage sums usage events per model, for the result.
 	usage map[string]*events.Usage
 	order []string
@@ -144,7 +152,49 @@ func (m *emitter) emit(e events.Event) events.Event {
 		t.Add(*u)
 	}
 	m.sink.Event(e)
+	m.appendLocked(e)
 	return e
+}
+
+func (m *emitter) appendLocked(e events.Event) {
+	if m.log == nil {
+		m.pending = append(m.pending, e)
+		return
+	}
+	if b, err := events.Marshal(e); err == nil {
+		// One write per line on an O_APPEND file: a reader sees whole
+		// lines, or a last line still without its newline.
+		_, _ = m.log.Write(b)
+	}
+}
+
+// openLog creates the events file and writes what was emitted so far.
+func (m *emitter) openLog(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.log = f
+	pending := m.pending
+	m.pending = nil
+	for _, e := range pending {
+		e.Session = m.session
+		m.appendLocked(e)
+	}
+	return nil
+}
+
+// closeLog closes the events file; later events are not kept.
+func (m *emitter) closeLog() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.log != nil {
+		m.log.Close()
+		m.log = nil
+	}
+	m.pending = nil
 }
 
 func (m *emitter) totals() []events.Usage {

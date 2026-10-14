@@ -20,17 +20,26 @@ import (
 // runSession is silo run (design §3). stdin is the terminal in
 // interactive mode.
 func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts session.Options) int {
+	return runSessionWith(args, stdin, stdout, stderr, opts, nil)
+}
+
+// runSessionWith is silo run, or with sup the detached session's
+// supervisor running it.
+func runSessionWith(args []string, stdin io.Reader, stdout, stderr io.Writer, opts session.Options, sup *supervisor) int {
 	fs := flag.NewFlagSet("silo run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	prompt := fs.String("prompt", "", "the prompt, replacing agent.prompt")
 	dryRun := fs.Bool("dry-run", false, "check what the session needs, changing nothing, and print a checklist")
 	jsonOut := fs.Bool("json", false, "write the session's events as JSON lines on stdout (docs/events.md); mode headless only")
+	detach := fs.Bool("detach", false, "run the session under a supervisor of its own, print its id and exit; follow it with silo attach (mode headless only)")
+	labels := labelFlags{}
+	fs.Func("label", "a label kept in session.json, `key=value`, which silo ls --label finds the session by (repeatable)", labels.set)
 	callers := &callerFlags{getenv: func(k string) string { return agentcliGetenv(opts.Environ, k) }}
 	fs.Func("caller-mcp", "a caller-provided MCP server, `name=url`: an http(s) URL, or unix:<path> for a Unix socket; its token is read from $"+callerTokenPrefix+"<NAME> (repeatable)", callers.server)
 	fs.Func("caller-mcp-tools", "the allowlist of caller server name's tools, `name=tool,...` (default: every tool it lists)", callers.tools)
 	fs.Func("caller-mcp-blocking", "caller server name's tools that may block with no gateway timeout, `name=tool,...`", callers.blocking)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: silo run [--dry-run] [--json] [--prompt text] [--caller-mcp name=url ...] <Silofile|dir>")
+		fmt.Fprintln(stderr, "usage: silo run [--dry-run] [--json | --detach] [--label key=value ...] [--prompt text] [--caller-mcp name=url ...] <Silofile|dir>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
@@ -82,8 +91,26 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 	if *dryRun {
 		return dryRunChecks(f, stdout, opts.Environ)
 	}
+	if *detach && sup == nil {
+		switch {
+		case *jsonOut:
+			return fail(exitUsage, "silo run: --detach prints the session's id; follow its events with silo attach --json")
+		case f.Agent.Mode != "headless":
+			return fail(exitUsage, "silo run: --detach needs agent.mode: headless; an interactive CLI needs the caller's terminal")
+		}
+		return startDetached(args, opts.Environ, stdout, stderr)
+	}
 	opts.File, opts.Prompt, opts.CallerMCP = f, *prompt, callerMCP
 	opts.Stdin, opts.Stdout, opts.Stderr = stdin, stdout, stderr
+	if len(labels) > 0 {
+		opts.Labels = labels
+	}
+	if sup != nil {
+		// The supervisor's events go to events.jsonl alone; its own
+		// lines to supervisor.log.
+		opts.Detached, opts.Started = true, sup.started
+		opts.Stdin, opts.Stdout, opts.Sink = strings.NewReader(""), io.Discard, session.TextSink{W: stderr}
+	}
 	if *jsonOut {
 		if f.Agent.Mode != "headless" {
 			return fail(exitUsage, "silo run: --json needs agent.mode: headless; the events and an interactive CLI cannot share stdout")

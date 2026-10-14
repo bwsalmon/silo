@@ -48,6 +48,9 @@ type Options struct {
 	// name (sandbox_exec, <server>__<tool>, ...), valued by the name the
 	// agent sees. The audit log records both. Silo chooses no names.
 	Rename map[string]string
+	// Labels are kept in session.json, for List and silo ls to find the
+	// session by (grain.md §2.7).
+	Labels map[string]string
 }
 
 // CallerMCP is a caller-provided MCP server: a URL or a Unix socket, a
@@ -135,7 +138,7 @@ func Start(ctx context.Context, f silofile.Silofile, opts Options) (*Session, er
 		Signals: make(chan os.Signal),
 		Cancel:  s.cancel, ExtendDeadline: s.extend,
 		NoGC:      !opts.GC,
-		CallerMCP: opts.CallerMCP, Rename: opts.Rename,
+		CallerMCP: opts.CallerMCP, Rename: opts.Rename, Labels: opts.Labels,
 		Started: func(ss *session.Session) {
 			s.sess = ss
 			close(s.started)

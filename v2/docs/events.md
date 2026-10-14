@@ -11,6 +11,10 @@ A silo session reports what it does as one stream of typed events
   (`v2/silo.go`), delivers the same values on `Session.Events()` and to
   `Options.Sink`.
 
+- Every session also writes the stream to `events.jsonl` in its state
+  directory, which `silo attach` and `silo.Attach` replay and follow
+  from a cursor ([detach and re-attach](#detach-and-re-attach)).
+
 A running session is acted on through its [control socket](#the-control-socket)
 or, in the library, through the `Session` methods that share its
 implementation.
@@ -227,6 +231,54 @@ with the methods the socket has. Bad params get -32602: the wrong type,
 an unknown field, a missing `message` or `deadline`, or a request the
 method refuses. `silo approve` is a client of this socket.
 
+## Detach and re-attach
+
+A session can outlive the process that started it
+([`grain.md`](grain.md) §2.7):
+
+```sh
+id=$(silo run --detach --label grain.run=r-42 --prompt "..." ./silo)
+silo ls --label grain.run=r-42 --json      # live sessions, one session.json a line
+silo attach "$id" --from 17 --json         # events after seq 17, then follows to the result
+```
+
+```go
+live, _ := silo.List(map[string]string{"grain.run": "r-42"}, silo.AttachOptions{})
+a, _ := silo.Attach(ctx, live[0].ID, cursor, silo.AttachOptions{})
+for e := range a.Events() { cursor = e.Seq; ... }   // ends with result
+res, err := a.Wait()                               // err is silo.ErrNoResult if the supervisor was killed
+a.Inject(msg); a.Cancel("superseded")              // over the control socket
+```
+
+- **`--detach`** starts a supervisor (`silo __supervise`, in its own
+  session, with no terminal and no pipes to the caller) that owns the
+  CLI, the gateway and teardown, prints the session id once the session
+  exists, and exits. It needs `agent.mode: headless`, and is refused
+  with `--json`. The supervisor logs to `supervisor.log` in the state
+  directory.
+- **`events.jsonl`** is in the state directory,
+  `$XDG_STATE_HOME/silo/sessions/<id>/events.jsonl`, so it outlives the
+  session as the audit log does. Every session writes it, detached or
+  not. It holds every event, numbered by `seq` from 1 with no gaps, one
+  JSON line each, appended as it is emitted. Events emitted before the
+  session had an id (the start-up `silo gc`) are written with it once it
+  has one.
+- **The cursor** is the `seq` of the last event the caller has handled.
+  Attaching from it delivers the events after it, so a caller that
+  stores it as it goes sees each event once across its restarts.
+  `--from 0` replays everything. An ended session is replayed to its
+  result. Attaching ends at the result. When the session's process is
+  gone and there is none, `silo attach` exits 1 and `silo.Attach`'s
+  `Wait` returns `silo.ErrNoResult`; `silo gc` removes what it left.
+  Otherwise `silo attach` exits with the session's exit code.
+  Interrupting `silo attach`, or `Attached.Detach`, leaves the session
+  running.
+- **Labels** (`--label k=v`, `Options.Labels`) are kept in
+  `session.json`. `silo ls` and `silo.List` show the sessions whose
+  process is running and that carry every label asked for.
+- **Caller MCP servers** are dialled again when they come back on the
+  same address ([below](#caller-provided-mcp-servers)).
+
 ## Caller-provided MCP servers
 
 A caller can pass the session MCP servers of its own, such as grain's
@@ -251,6 +303,15 @@ Silo neither starts nor stops these servers.
   days: `MCP_TOOL_TIMEOUT` for claude, `tool_timeout_sec` for codex. The
   session's deadline, `cancel` or the server itself ends such a call, not
   the CLI.
+- **Reconnecting** (stage 9). A caller server that goes away, as while
+  its caller restarts, is dialled again on the next call. A call whose
+  request never reached it (a refused dial, or HTTP 404 for an MCP
+  session a restarted server does not know) is made once more on the
+  fresh connection. A call that still fails returns a tool error saying
+  that the server cannot be reached and the call is retryable, and is
+  audited as an error. Once the caller serves the same address again,
+  calls succeed. The token is not re-read: the caller comes back with
+  the session's token.
 - **Names.** A caller server's name follows `mcp[]`'s rule, may not
   contain `__`, and may not be the name of a Silofile `mcp[]` entry.
 - **On the command line.** `silo run --caller-mcp <name>=<url>` gives
