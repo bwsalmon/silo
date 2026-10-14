@@ -134,6 +134,13 @@ projects:
 		{name: "empty destination", yaml: "credentials:\n  - {name: c, from: {env: A}, to: [{env: X}]}\n", wantErr: "name a destination"},
 		{name: "credential file outside", yaml: "credentials:\n  - {name: c, from: {file: ~/.config/token}, to: [{proxy: git}]}\n"},
 
+		// location.k8s (design §5.4).
+		{name: "k8s", yaml: "location: {kind: k8s, k8s: {context: kind-a, namespace: silo, image: x, resources: {cpu: 500m, memory: 1Gi}}}\n"},
+		{name: "k8s missing", yaml: "location: {kind: k8s}\n", wantErr: "kind k8s needs k8s"},
+		{name: "k8s bad namespace", yaml: "location: {kind: k8s, k8s: {image: x, namespace: Silo_1}}\n", wantErr: "is not a namespace name"},
+		{name: "k8s bad cpu", yaml: "location: {kind: k8s, k8s: {image: x, resources: {cpu: two}}}\n", wantErr: "is not a CPU quantity"},
+		{name: "k8s on local", yaml: "location: {k8s: {image: x}}\n", wantErr: "k8s is only for kind: k8s"},
+
 		// Projects.
 		{name: "basic role", yaml: "projects:\n  - {project: p, roles: [roles/viewer]}\n", wantErr: "roles/viewer is a basic role"},
 		{name: "basic role allowed", yaml: "projects:\n  - {project: p, roles: [roles/viewer], allow_basic_roles: true}\n"},
@@ -146,12 +153,12 @@ projects:
 		// Later values decode, and are refused naming what adds them.
 		{name: "granule", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x}\n", later: "stage 8"},
 		{name: "location vm", yaml: "location: {kind: vm}\n", later: "stage 10"},
-		{name: "location k8s", yaml: "location: {kind: k8s}\n", later: "stage 11"},
+		{name: "k8s identity", yaml: "location: {kind: k8s, k8s: {image: x, identity: {gcp_account_for: p}}}\n", later: "design §5.4"},
 		{name: "location ax", yaml: "location: {kind: ax}\n", later: "stage 12"},
 		{name: "attached", yaml: "  mode: attached\n", later: "design §6.2"},
 		{name: "unix transport", yaml: "location: {kind: ssh, ssh: {host: h, gateway_transport: unix}}\n", later: "design §5.3"},
 		{name: "network allow", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, network: {allow: [a.example]}}\n", later: "grain.md §2.3"},
-		{name: "k8s backend", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, backend: {k8s: {context: c}}}\n", later: "stage 11"},
+		{name: "k8s backend", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, backend: {k8s: {context: c}}}\n", later: "stage 11b"},
 		{name: "persistent", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, lifetime: persistent}\n", later: "grain.md §2.3"},
 		{name: "model proxy", yaml: "credentials:\n  - {name: c, from: {env: A}, to: [{proxy: model}]}\n", later: "grain.md §2.5"},
 		{name: "account", yaml: "projects:\n  - {project: p, account: a@p.iam.gserviceaccount.com}\n", later: "grain.md §2.6"},

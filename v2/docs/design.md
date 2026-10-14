@@ -185,13 +185,20 @@ agent:
     permissions: {none: [...], all: []}
 
 location:
-  kind: local                 # local | ssh | vm (later) | k8s (later) | ax (later) | capsule (later)
+  kind: local                 # local | ssh | k8s | vm (later) | ax (later) | capsule (later)
   ssh:                        # only for kind: ssh
     host: devbox              # a Host alias in ~/.ssh/config, or a hostname
     user: alice               # optional; ~/.ssh/config otherwise
     port: 22                  # optional
     identity: ~/.ssh/id_ed25519   # optional
     gateway_transport: tcp    # tcp (default) | unix (later); see §5.3
+  k8s:                        # only for kind: k8s; see §5.4
+    context: kind-dev         # optional; kubectl's current context otherwise
+    namespace: silo           # optional; the context's namespace otherwise
+    image: ghcr.io/acme/agent:claude-2.1   # needs /bin/sh and the CLI
+    tunnel_image: ...         # optional; silo's published sidecar otherwise
+    resources: {cpu: "2", memory: 4Gi}
+    identity: {gcp_account_for: acme-staging}   # later
 
 remote_permissions: none      # none (default) | all | [Read, Grep, Glob, Edit]
 
@@ -555,11 +562,11 @@ whose CLI cannot be given a TTY refuses `interactive` in `Prepare`.
 | `local` | yes | look up binary | loopback URL | `exec` with the terminal or pipes |
 | `ssh` | yes | ssh master; remote checks | `ssh -R` | `ssh -t` (interactive) or `ssh -T` |
 | `vm` | later (journey 5) | create or reuse VM, then as `ssh` (or IAP) | as `ssh` | as `ssh` |
-| `k8s` | later (journey 8) | create the pod, wait ready | port-forward or sidecar | `exec`/attach into the pod |
+| `k8s` | yes (stage 11a, journey 8) | create the pod and Secret, wait ready, probe | tunnel sidecar, reached by `kubectl port-forward` | `kubectl exec -i -t` (interactive) or `kubectl exec -i` |
 | `ax`, `capsule` | later (journey 6) | submit or attach a hosted session | outbound tunnel from the runtime | runtime-started; handle only |
 
 Sandboxes are not part of the location in v2.0: they run on the
-invoking machine for both `local` and `ssh` (§7.3).
+invoking machine for `local`, `ssh` and `k8s` (§7.3).
 
 ### 5.2 `local`
 
@@ -716,6 +723,108 @@ still ends with exit 75.
   for agy the presence of `~/.gemini/oauth_creds.json`.
 - `gateway_transport: unix` is refused, by `silo validate` and again by
   the location.
+
+### 5.4 `k8s`
+
+Journey 8. As for `ssh`, silo, the gateway, credentials, sandboxes and
+the local executor stay on the invoking machine; only the CLI runs in
+the cluster, in one pod per session made from `location.k8s.image`.
+
+**Configuration.** silo drives the cluster with the system `kubectl`
+(`--context` and `--namespace` from the Silofile, both optional), for
+the reason it uses OpenSSH **(call 7)**: the user's kubeconfig, exec
+credential plugins such as `gke-gcloud-auth-plugin`, and proxies behave
+exactly as at their own prompt, and silo takes on no client library.
+The image needs `/bin/sh` and the CLI on its `PATH` (or at
+`agent.binary`); silo never installs a CLI.
+
+**The pod** is `silo-<session id>`, labelled
+`app.kubernetes.io/managed-by: silo` and `silo.dev/session: <id>`, and
+annotated `silo.dev/origin: <hostname>:<uid>` (an annotation, because a
+label value cannot hold the colon). It has `restartPolicy: Never`, no
+service account token (`automountServiceAccountToken: false`, so the
+agent has no credentials for the cluster), a 5 s termination grace, an
+`emptyDir` at `/silo` (staged files under `agent/`, the private workdir
+`work/`, the env file while it lives, and `pid`), and two containers:
+
+- `agent`, the image, whose command holds
+  (`while :; do sleep 3600 & wait; done`, ending at once on SIGTERM)
+  until silo execs the CLI into it, with `resources` as both requests
+  and limits;
+- `tunnel`, the gateway sidecar (below), non-root, with a read-only
+  root filesystem and no capabilities.
+
+`Prepare` removes this origin's stale pods in the namespace (as
+`silo gc --k8s` does), creates the pod, then the Secret, waits for the
+pod to be ready (failing at once on `ErrImagePull`,
+`ImagePullBackOff` and the like, naming the image), and runs §5.3's
+probe in it with `kubectl exec -i ... sh -s`. `Teardown` deletes the
+pod and Secret by label, so that a pod whose create call failed half
+way goes too, without waiting for the pod to finish terminating.
+`session.json` records the context and namespace before the pod is
+made, so `silo gc` deletes the pod of a session that crashed.
+
+**The CLI is started with `kubectl exec` in both modes**: `-i -t` for
+interactive (kubectl puts the terminal in raw mode and carries window
+size changes) and `-i` for headless, with the same
+`cd; . env; rm env; echo $$ > pid; exec <argv>` preamble as `ssh`. This
+differs from journey 8's sketch, which ran a headless CLI as the
+container's command and read its logs: the pod has to exist for
+`Prepare` to probe the CLI and for `Stage` to write its files, before
+the command is known, and `exec` gives headless mode the same stdin
+(the prompt, injected messages), exit code and signals as `ssh`, with
+no second code path. kubectl passes the CLI's exit code on; a failure
+with the pod no longer running is exit 75. Signals go as real signals
+to the pid file's process group with another `exec`; a kill also ends
+the local `kubectl`.
+
+**The gateway** is a tunnel, because Kubernetes has no reverse
+port-forward. The sidecar (`cmd/silo-tunnel`) listens twice on the
+pod's loopback: on `127.0.0.1:7811`, the URL the CLI's MCP config names
+(`http://127.0.0.1:7811/mcp`), and on `127.0.0.1:7812` for silo, which
+reaches it with `kubectl port-forward pod/<pod> :7812`. Silo's
+connection opens with a hello line and then carries a stream mux
+(`internal/tunnel/mux`, copied from grain's `pkg/tunnel/mux`); each
+connection the CLI makes to 7811 becomes a stream, which silo splices
+to the gateway on the invoking machine. If the port-forward or the
+connection drops, silo opens them again, and a newer connection
+replaces the old one at the sidecar. Nothing in the cluster can reach
+either port, since both are bound to the pod's loopback, and the
+gateway's bearer token still guards every call.
+
+**The sidecar's image** is built from `cmd/silo-tunnel/Dockerfile`
+(from `v2/`) and published as `ghcr.io/bwsalmon/silo-tunnel:v2` by a
+maintainer with `docker buildx build --push`, as the v2 README says;
+`location.k8s.tunnel_image` names another (a mirror, or a private
+registry the cluster can pull from), and `--dry-run` checks that it can
+be pulled.
+
+**Credentials.** Every variable of the CLI's environment that carries
+a credential (`agent.auth: {credential: ...}`, and credentials
+delivered `to: {agent: ...}`) goes into a Secret, `silo-<session id>`,
+labelled as the pod is and owned by it (so the cluster deletes it with
+the pod even when silo cannot). It is mounted read-only into the
+`agent` container only, at `/run/silo/secret`, one file per variable,
+and the preamble reads each into the CLI's environment, so no value is
+in the pod's spec or any argv. The other variables go in the env file,
+written over `exec`'s stdin with `umask 077`. **Workload identity**
+(`identity: {gcp_account_for: ...}`, the pod's Kubernetes service
+account bound to journey 2's per-user GCP account) is later:
+`silo validate` refuses `identity:` naming this section.
+
+**`--dry-run`** adds, for `kind: k8s`: the context is reachable
+(`kubectl version`), the namespace exists, silo may create and delete
+pods and Secrets and use `pods/exec` and `pods/portforward` there
+(`kubectl auth can-i`), and both images can be pulled and the CLI is in
+the agent's. Only the cluster's nodes can say whether they can pull an
+image, so this last check runs a short-lived pod (labelled
+`silo.dev/check`, deleted at once, and removed by `silo gc --k8s` if it
+is left behind) in which the agent image runs the probe and the tunnel
+image its `-check`. It is the one thing `--dry-run` makes.
+
+**`silo gc --k8s [--context c] [--namespace ns]`** deletes the pods
+and Secrets in the namespace whose origin is this machine and user and
+whose session is not live here, and check pods older than ten minutes.
 
 ## 6. Remote permissions and CLI modes
 
@@ -1805,10 +1914,13 @@ git:
     silo opens (a port-forward run in reverse is not offered by the
     Kubernetes API, so the sidecar dials out or silo uses
     `kubectl port-forward` to the sidecar, which then relays). Grain's
-    `pkg/tunnel` is the model.
+    `pkg/tunnel` is the model. Stage 11a built this with
+    `kubectl port-forward` (§5.4), and starts the CLI with `exec` in
+    headless mode too, not as the container's command (§5.4 says why).
   - **Credentials:** delivered as a Secret mounted into the pod (deleted
     at teardown), or as workload identity: the pod's Kubernetes service
-    account bound to journey 2's per-user GCP account.
+    account bound to journey 2's per-user GCP account. Stage 11a
+    delivers the Secret; workload identity is later.
 
 ```yaml
 location:
@@ -1949,7 +2061,7 @@ v2/
 │   ├── local/
 │   ├── ssh/               # master connection, probe, forwards, staging
 │   ├── vm/                # later
-│   ├── k8s/               # later
+│   ├── k8s/               # pod, Secret, tunnel, exec, gc (stage 11a)
 │   └── hosted/            # later: ax, capsule
 ├── agentcli/              # per-CLI mapping: modes, remote_permissions,
 │   ├── claude/            #   MCP config format, auth, version checks,
@@ -1994,7 +2106,7 @@ change argued below.
 | 8 | **Granule** | `sandbox/granule`, Granulefiles (journeys 7, 10). | 1, 7 |
 | 9 | **Detach and re-attach** | per-session supervisor, resumable event stream. | 6 |
 | 10 | **`vm`** (journey 5) | | 2, 4 |
-| 11 | **`k8s`** (journeys 8, 9) | | 6, 8 |
+| 11 | **`k8s`** (journeys 8, 9) | 11a: `location/k8s`, the tunnel sidecar, Secrets, `silo gc --k8s` (journey 8). 11b: granule sandboxes on Kubernetes (journey 9). | 6, 8 (11a also waits on 9) |
 | 12 | **`ax`/`capsule`** (journey 6) | | 6, open questions 13–17 |
 
 **One change to the suggested order:** stages 6 and 7 could come before

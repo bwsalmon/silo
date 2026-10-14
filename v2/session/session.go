@@ -351,6 +351,8 @@ func (s *Session) start(ctx context.Context) (int, error) {
 			s.Location = local.New()
 		case "ssh":
 			s.Location = SSHLocation(f.Location.SSH, getenv, opts.Stderr)
+		case "k8s":
+			s.Location = K8sLocation(f.Location.K8s, getenv, opts.Stderr)
 		default:
 			return ExitRefused, fmt.Errorf("location kind %s is not supported by silo run yet", f.Location.Kind)
 		}

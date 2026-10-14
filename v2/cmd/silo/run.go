@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwsalmon/silo/v2/agentcli"
 	"github.com/bwsalmon/silo/v2/events"
+	k8sloc "github.com/bwsalmon/silo/v2/location/k8s"
 	sshloc "github.com/bwsalmon/silo/v2/location/ssh"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
@@ -148,7 +149,12 @@ func gc(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("silo gc", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	host := fs.String("host", "", "also remove stale remote session directories on this ssh host")
-	fs.Usage = func() { fmt.Fprintln(stderr, "usage: silo gc [--host <host>]") }
+	kube := fs.Bool("k8s", false, "also remove this machine's stale silo pods and Secrets in a Kubernetes namespace")
+	kubeContext := fs.String("context", "", "with --k8s, the kubeconfig context (kubectl's current one by default)")
+	namespace := fs.String("namespace", "", "with --k8s, the namespace (the context's by default)")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: silo gc [--host <host>] [--k8s [--context <context>] [--namespace <namespace>]]")
+	}
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		if err == nil {
 			fs.Usage()
@@ -172,6 +178,21 @@ func gc(args []string, stdout, stderr io.Writer) int {
 		}
 		if err != nil {
 			fmt.Fprintf(stderr, "silo gc --host %s: %v\n", *host, err)
+			code = 1
+		}
+	}
+	if !*kube && (*kubeContext != "" || *namespace != "") {
+		fmt.Fprintln(stderr, "silo gc: --context and --namespace go with --k8s")
+		return exitUsage
+	}
+	if *kube {
+		k := &k8sloc.Kubectl{Context: *kubeContext, Namespace: *namespace}
+		removed, err := k8sloc.GC(context.Background(), k, k8sloc.GCOptions{Live: session.Live(os.Getenv)})
+		for _, r := range removed {
+			fmt.Fprintf(stdout, "removed stale %s (%s)\n", r, k.Where())
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "silo gc --k8s: %v\n", err)
 			code = 1
 		}
 	}
