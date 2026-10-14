@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -132,7 +131,7 @@ func newFake(t testing.TB, withFence bool) (*fakeRegistry, error) {
 	vm, sbx := fake.New(runtime.VM), fake.New(runtime.Sandbox)
 	vm.Volumes, sbx.Volumes = vols, vols
 	dopts := docker.Options{Drivers: []runtime.Driver{vm, sbx}, Storage: &storage.Dir{Root: vols},
-		Fetcher: f.reg, Content: f.content, Registry: f.reg, Login: f.login, Caller: byHeader(fenceapi.ViaInternal), Version: "conformance"}
+		Fetcher: f.reg, Content: f.content, Registry: f.reg, Login: f.reg.Login, Caller: byHeader(fenceapi.ViaInternal), Version: "conformance"}
 	if withFence {
 		// Probes' images come from probeImages, not through the cache,
 		// so that a probe's silo needs no egress to be made.
@@ -316,23 +315,6 @@ func (f *fakeRegistry) allowed(ctx context.Context, silo, host string) error {
 	}
 	if ok, _, _ := egress.Allowed(levels, host, 80, egress.DefaultHTTPPort); !ok {
 		return &registry.EgressRefusal{Host: host, Reason: "denied by the egress proxy"}
-	}
-	return nil
-}
-
-// login is docker login's check (docker.Options.Login): a token
-// request with the credentials, through the egress proxy as silo, that
-// keeps nothing.
-func (f *fakeRegistry) login(ctx context.Context, silo, server, user, pass string) error {
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://auth.test/token?service=registry.test&scope=repository:private/app:pull", nil)
-	req.SetBasicAuth(user, pass)
-	res, err := f.Transport(silo).RoundTrip(req)
-	if err != nil {
-		return err
-	}
-	res.Body.Close()
-	if res.StatusCode != 200 {
-		return errors.New("unauthorized: incorrect username or password")
 	}
 	return nil
 }

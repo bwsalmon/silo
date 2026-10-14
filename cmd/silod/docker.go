@@ -16,6 +16,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/facade/local/docker"
 	"github.com/bwsalmon/silo/pkg/facade/local/dockergw"
 	"github.com/bwsalmon/silo/pkg/gateway"
+	"github.com/bwsalmon/silo/pkg/registry"
 	"github.com/bwsalmon/silo/pkg/store"
 )
 
@@ -63,10 +64,17 @@ type localDocker struct {
 // until the real drivers are wired (local-backend.md §15 steps 7 and
 // 10), so that networks, volumes and images are served and a container
 // create is refused. net, if set, wires containers' links and serves
-// published ports in silo-net.
-func newLocalDocker(db store.Store, sd storage.Driver, names docker.Names, sn siloNet, fakeRuntime bool, volumes, version string) *localDocker {
+// published ports in silo-net. reg and content, if set, are the
+// registry and silo-containerd's content store: push, pulls through
+// registry.silo.internal and the cache, save, load, commit and docker
+// login's check (local-registry.md §7).
+func newLocalDocker(db store.Store, sd storage.Driver, names docker.Names, sn siloNet, fakeRuntime bool, volumes, version string,
+	reg *registry.Service, content registry.Content) *localDocker {
 	d := &localDocker{db: db, names: names, net: sn, pub: gateway.NewPublisher(db)}
-	o := docker.Options{Storage: sd, Version: version, Ready: func() string { return "" }}
+	o := docker.Options{Storage: sd, Content: content, Version: version, Ready: func() string { return "" }}
+	if reg != nil {
+		o.Registry, o.Fetcher, o.Login = reg, reg, reg.Login
+	}
 	if fakeRuntime {
 		vm, sbx := fake.New(runtime.VM), fake.New(runtime.Sandbox)
 		vm.Volumes, sbx.Volumes = volumes, volumes
