@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "docs": {
+      "command": "docs-search-mcp",
+      "args": ["--index", "/idx"],
+      "env": {"LOG_LEVEL": "info"}
+    }
+  }
+}

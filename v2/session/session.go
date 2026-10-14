@@ -152,6 +152,9 @@ type Session struct {
 	opts Options
 	rec  *recorder
 	sink Sink
+
+	hookMu       sync.Mutex
+	gatewayHooks []func(*gateway.Gateway)
 }
 
 func (s *Session) getenv(k string) string { return agentcli.Getenv(s.opts.Environ, k) }
