@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/bwsalmon/silo/v2/agentcli"
 	"github.com/bwsalmon/silo/v2/control"
+	"github.com/bwsalmon/silo/v2/events"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/localexec"
 )
@@ -76,9 +76,17 @@ func (s *Session) approver() localexec.Approver {
 	q := &localexec.Queue{Notify: func(r localexec.Request) {
 		cmd := fmt.Sprintf("silo approve %s %s", s.ID, r.ID)
 		msg := fmt.Sprintf("call %s waits for your approval: %s %s (run %q, or add --deny)", r.ID, r.Tool, r.Summary(), cmd)
-		if _, text := s.sink.(textSink); !text || s.Mode != agentcli.Interactive {
+		if _, text := s.em.sink.(TextSink); !text || s.Mode != agentcli.Interactive {
 			// In interactive mode the terminal is the CLI's.
-			s.sink.Event(Event{Time: time.Now(), Type: "approval_request", Message: msg})
+			args := make([]any, len(r.Args))
+			for i, a := range r.Args {
+				args[i] = a
+			}
+			deadline := r.Deadline.UTC()
+			s.RequestApproval(events.ApprovalRequest{
+				ID: r.ID, Tool: r.Tool, Message: msg, Deadline: &deadline,
+				Args: map[string]any{"script": r.Script, "args": args, "stdin_bytes": float64(r.Stdin)},
+			})
 		}
 		if s.Mode == agentcli.Interactive {
 			go localexec.Notify(context.Background(), s.getenv("PATH"),

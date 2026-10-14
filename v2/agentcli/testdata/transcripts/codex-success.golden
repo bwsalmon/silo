@@ -1,0 +1,14 @@
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"resumable","resumable":{"cli":"codex","cli_session":"01a066db-4912-79b0-8254-ff2d2927a870"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"thinking","text":"reading the repo"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"tool_call","id":"item_1","tool":"sandbox_exec","args":{"command":"go test ./...","sandbox":"work"}}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"tool_result","text":"ok  example.com/x","id":"item_1"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"tool_call","id":"item_2","tool":"shell","args":{"command":"bash -lc ls"}}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"tool_result","text":"go.mod\nmain.go\n","id":"item_2"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"text","text":"the tests pass"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"usage","usage":{"source":"agent","model":"gpt-5-codex","input_tokens":24763,"output_tokens":122,"cache_read_tokens":24448}}
+outcome: {
+  "FinalText": "the tests pass",
+  "CLISession": "01a066db-4912-79b0-8254-ff2d2927a870",
+  "Finished": true,
+  "Failure": null
+}

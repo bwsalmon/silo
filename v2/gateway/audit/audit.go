@@ -68,6 +68,7 @@ type Log struct {
 	f       *os.File
 	secrets []secret // longest first
 	nextID  atomic.Int64
+	observe func(Record)
 }
 
 type secret struct{ name, value string }
@@ -86,6 +87,16 @@ func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.f.Close()
+}
+
+// Observe has fn called with every record once it is written,
+// credentials already redacted: the session's tool_call events. fn is
+// called with the log's lock held, in the order the lines were written,
+// and must not call back into the log.
+func (l *Log) Observe(fn func(Record)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.observe = fn
 }
 
 // Register records a credential value, so that every later line has
@@ -155,6 +166,9 @@ func (l *Log) write(r Record) error {
 	}
 	if _, err := l.f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("audit: %w", err)
+	}
+	if l.observe != nil {
+		l.observe(r)
 	}
 	return nil
 }

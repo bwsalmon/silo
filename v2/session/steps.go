@@ -20,6 +20,7 @@ import (
 	"github.com/bwsalmon/silo/v2/gateway/audit"
 	"github.com/bwsalmon/silo/v2/location"
 	"github.com/bwsalmon/silo/v2/mcp"
+	"github.com/bwsalmon/silo/v2/silofile"
 )
 
 // Undo reverses one setup step. It must work against a step that only
@@ -89,11 +90,28 @@ func stepCredentials(ctx context.Context, s *Session) (Undo, error) {
 	if r == nil {
 		r = &credentials.Resolver{Folder: s.File.Folder, Getenv: s.getenv}
 	}
-	vals, err := r.ResolveAll(ctx, s.File.Credentials, nil)
+	var resolve []silofile.Credential
+	for _, c := range s.File.Credentials {
+		if _, ok := s.opts.Credentials[c.Name]; !ok {
+			resolve = append(resolve, c)
+		}
+	}
+	vals, err := r.ResolveAll(ctx, resolve, nil)
 	if err != nil {
 		return nil, &location.PrerequisiteError{What: err.Error()}
 	}
+	if vals == nil {
+		vals = map[string]credentials.Value{}
+	}
+	for name, v := range s.opts.Credentials {
+		vals[name] = credentials.Value{Name: name, Secret: v, Source: "the caller"}
+	}
 	s.Credentials = vals
+	named := map[string]string{}
+	for _, v := range vals {
+		named[v.Name] = v.Secret
+	}
+	s.em.setSecrets(named)
 	for _, c := range s.File.Credentials {
 		v := vals[c.Name]
 		for _, d := range c.To {
@@ -199,6 +217,7 @@ func stepGateway(ctx context.Context, s *Session) (Undo, error) {
 	for _, v := range s.Credentials {
 		log.Register(v.Name, v.Secret)
 	}
+	log.Observe(func(r audit.Record) { s.em.emit(toolCallEvent(r)) })
 	g := gateway.New(log)
 	g.Register(s.Tools...)
 	srv, err := g.Serve(context.WithoutCancel(ctx))
@@ -259,6 +278,9 @@ func stepStage(ctx context.Context, s *Session) (Undo, error) {
 	plan, err := s.Mapping.Build(req)
 	if err != nil {
 		return nil, err
+	}
+	if s.Mode == agentcli.Headless {
+		s.parser = agentcli.NewParser(s.Mapping, req)
 	}
 	for _, n := range plan.Notes {
 		s.warnf("%s", n)

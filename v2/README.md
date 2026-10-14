@@ -42,7 +42,7 @@ builds, vets or tests the other's packages.
 ## Commands
 
 ```sh
-go run ./cmd/silo run [--dry-run] [--prompt text] <Silofile|dir>   # design §3
+go run ./cmd/silo run [--dry-run] [--json] [--prompt text] <Silofile|dir>   # design §3
 go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
 go run ./cmd/silo gc                        # what crashed sessions left
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4

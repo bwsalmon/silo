@@ -360,7 +360,11 @@ one-shot: there is no daemon in v2.0.
 
 `silo run --json` writes a JSON-lines event stream on stdout (transcript
 items, tool calls, usage, status changes, the exit reason) and a final
-`result` event. A control socket in the session directory accepts
+`result` event. The schema, versioned, is [`events.md`](events.md). It is
+shared with the Go library (`silo.Start`, `v2/silo.go`), whose
+`Session.Events()` delivers the same values. As built in stage 6a,
+`--json` needs `agent.mode: headless`, and the CLI's own output is kept
+in the session's raw transcript rather than written to stdout. A control socket in the session directory accepts
 `inject`, `cancel` and `extend_deadline`. Both exist for grain and are
 designed in [`grain.md`](grain.md) §2.1; journeys 1–4 do not need them
 (apart from answering a script's `approve: true` under `--json`, §12.3).
@@ -1814,6 +1818,8 @@ v2/
 │                          #   validation, JSON Schema generation
 ├── session/               # one session: setup order, teardown, session.json,
 │                          #   signals, exit codes, event stream, control socket
+├── events/                # the event schema shared by --json and the
+│                          #   library (events.md)
 ├── gateway/               # the MCP server: tool registry, routing, refusal,
 │                          #   audit, redaction
 │   └── audit/

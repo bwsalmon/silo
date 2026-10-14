@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"abc","model":"claude-opus-5-5"}
+{"type":"result","subtype":"success","is_error":false,"result":"You've hit your session limit","session_id":"abc","num_turns":1}

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 503 Service Unavailable)"}
+{"type":"turn.failed","error":{"message":"The server is overloaded or not ready yet."}}

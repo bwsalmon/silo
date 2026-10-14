@@ -21,6 +21,7 @@ import (
 	"github.com/bwsalmon/silo/v2/agentcli"
 	"github.com/bwsalmon/silo/v2/control"
 	"github.com/bwsalmon/silo/v2/credentials"
+	"github.com/bwsalmon/silo/v2/events"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/gateway/audit"
 	"github.com/bwsalmon/silo/v2/location"
@@ -69,42 +70,23 @@ type Options struct {
 	Backend sandbox.Backend
 	// Resolver resolves credentials; one reading Environ when nil.
 	Resolver *credentials.Resolver
+	// Credentials are values the caller already holds, by credential
+	// name: a credential named here takes this value, and its from: is
+	// not read (the library's way to pass credentials, grain.md §2.1).
+	Credentials map[string]string
 	// Signals delivers SIGINT and SIGTERM; signal.Notify's when nil.
 	Signals <-chan os.Signal
 	// Grace replaces DefaultGrace.
 	Grace time.Duration
-	// Sink receives the session's events; progress lines on Stderr when
-	// nil. Stage 6a's --json attaches its event stream here.
+	// Sink receives the session's events (docs/events.md); TextSink on
+	// Stderr when nil.
 	Sink Sink
+	// Cancel ends the session, as cancelled, with the reason sent.
+	Cancel <-chan string
+	// ExtendDeadline moves the session's deadline to the time sent.
+	ExtendDeadline <-chan time.Time
 	// NoGC skips the local silo gc at start.
 	NoGC bool
-}
-
-// Event is one thing that happened in a session.
-type Event struct {
-	Time time.Time
-	// Type is status, warning, step, approval_request or exit.
-	Type    string
-	Message string
-	// Code is the exit code, for exit.
-	Code int
-}
-
-// Sink receives events.
-type Sink interface{ Event(Event) }
-
-type textSink struct{ w io.Writer }
-
-func (t textSink) Event(e Event) {
-	switch e.Type {
-	case "warning":
-		fmt.Fprintf(t.w, "silo: warning: %s\n", e.Message)
-	case "step":
-	case "approval_request":
-		fmt.Fprintf(t.w, "\nsilo: %s\n", e.Message)
-	default:
-		fmt.Fprintf(t.w, "silo: %s\n", e.Message)
-	}
 }
 
 type syncWriter struct {
@@ -156,7 +138,12 @@ type Session struct {
 
 	opts Options
 	rec  *recorder
-	sink Sink
+	em   *emitter
+	// parser reads the CLI's headless output; transcript is the tee
+	// that feeds it.
+	parser     agentcli.Parser
+	transcript *transcript
+	result     *events.Result
 
 	hookMu       sync.Mutex
 	gatewayHooks []func(*gateway.Gateway)
@@ -165,11 +152,22 @@ type Session struct {
 func (s *Session) getenv(k string) string { return agentcli.Getenv(s.opts.Environ, k) }
 
 func (s *Session) status(format string, args ...any) {
-	s.sink.Event(Event{Time: time.Now(), Type: "status", Message: fmt.Sprintf(format, args...)})
+	s.emitStatus("", events.StateInfo, fmt.Sprintf(format, args...))
 }
 
 func (s *Session) warnf(format string, args ...any) {
-	s.sink.Event(Event{Time: time.Now(), Type: "warning", Message: fmt.Sprintf(format, args...)})
+	s.emitStatus("", events.StateWarning, fmt.Sprintf(format, args...))
+}
+
+func (s *Session) emitStatus(step, state, msg string) {
+	s.em.emit(events.Event{Type: events.TypeStatus, Status: &events.Status{Step: step, State: state, Message: msg}})
+}
+
+// RequestApproval emits an approval_request event: a gateway call with
+// approve: true waiting for its answer, which arrives over the control
+// socket's approve method (design §12.3).
+func (s *Session) RequestApproval(r events.ApprovalRequest) {
+	s.em.emit(events.Event{Type: events.TypeApprovalRequest, ApprovalRequest: &r})
 }
 
 // AddResource records something set up outside the session directory
@@ -211,9 +209,13 @@ func exitCode(err error) int {
 // Run runs one session and returns silo run's exit code, and the error
 // that ended it, if one did.
 func Run(ctx context.Context, opts Options) (int, error) {
-	if opts.File == nil {
-		return ExitUsage, errors.New("session: no Silofile")
-	}
+	res, err := Execute(ctx, opts)
+	return res.Exit.Code, err
+}
+
+// Execute runs one session and returns its result, which it has also
+// emitted as the session's last event.
+func Execute(ctx context.Context, opts Options) (events.Result, error) {
 	if opts.Environ == nil {
 		opts.Environ = os.Environ()
 	}
@@ -236,9 +238,28 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	if _, ok := opts.Stdout.(*os.File); !ok {
 		opts.Stdout = &syncWriter{w: opts.Stdout}
 	}
-	s := &Session{File: opts.File, opts: opts, sink: opts.Sink, AgentEnv: map[string]string{}}
-	if s.sink == nil {
-		s.sink = textSink{opts.Stderr}
+	sink := opts.Sink
+	if sink == nil {
+		sink = TextSink{opts.Stderr}
+	}
+	s := &Session{File: opts.File, opts: opts, em: &emitter{sink: sink, phase: events.PhaseSetup}, AgentEnv: map[string]string{}}
+	code, err := s.start(ctx)
+	if s.result == nil {
+		// It ended before there was a session to tear down.
+		r := events.Result{Exit: events.Exit{Code: code, Reason: events.ReasonSetupFailed}}
+		if err != nil {
+			r.Exit.Detail = err.Error()
+		}
+		s.em.emit(events.Event{Type: events.TypeResult, Result: &r})
+		s.result = &r
+	}
+	return *s.result, err
+}
+
+func (s *Session) start(ctx context.Context) (int, error) {
+	opts := s.opts
+	if opts.File == nil {
+		return ExitUsage, errors.New("session: no Silofile")
 	}
 	getenv := s.getenv
 
@@ -292,6 +313,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 
 	s.ID = NewID()
+	s.em.mu.Lock()
+	s.em.session = s.ID
+	s.em.mu.Unlock()
 	root := RuntimeRoot(getenv)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return ExitPrerequisite, err
@@ -339,9 +363,30 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 	}
 
 	var undos []namedUndo
-	reason := ""
+	// reason is the human account session.json keeps; why is the
+	// result's exit reason, decided here for every end but the CLI's
+	// own, which the deferred function reads from its output.
+	reason, why := "", ""
+	cliExited := false
 	defer func() {
+		s.em.setPhase(events.PhaseTeardown)
 		errs := s.teardown(undos)
+		s.transcript.close()
+		out := s.transcript.outcome()
+		var cliErr *events.CLIError
+		if cliExited {
+			why = events.ReasonCompleted
+			switch {
+			case out.Failure != nil:
+				why, cliErr = events.ReasonCLIError, out.Failure
+			case code != 0:
+				why = events.ReasonCLIError
+				cliErr = &events.CLIError{Kind: events.CLIErrorOther, Message: fmt.Sprintf("the agent CLI exited %d", code)}
+				if code == ExitConnLost {
+					why, cliErr = events.ReasonConnectionLost, nil
+				}
+			}
+		}
 		res := &Result{Ended: time.Now().UTC(), ExitCode: code, Reason: reason}
 		if runErr != nil {
 			res.Errors = append(res.Errors, runErr.Error())
@@ -357,24 +402,54 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 		if err := os.RemoveAll(s.Dir); err != nil {
 			s.warnf("teardown: %v", err)
 		}
-		s.sink.Event(Event{Time: time.Now(), Type: "exit", Code: code, Message: fmt.Sprintf("session %s ended: %s (exit %d)", s.ID, reason, code)})
+		r := &events.Result{
+			Exit:        events.Exit{Code: code, Reason: why, Detail: reason, CLI: cliErr},
+			FinalText:   out.FinalText,
+			CLISession:  out.CLISession,
+			UsageTotals: s.em.totals(),
+			AuditPath:   filepath.Join(s.StateDir, audit.FileName),
+			Errors:      res.Errors,
+		}
+		if s.transcript != nil {
+			r.TranscriptPath = filepath.Join(s.StateDir, RawTranscriptFile)
+			if s.parser != nil {
+				r.NormalizedTranscriptPath = filepath.Join(s.StateDir, TranscriptFile)
+			}
+		}
+		e := s.em.emit(events.Event{Type: events.TypeResult, Result: r})
+		s.result = e.Result
 	}()
 
-	// Setup, ended early by SIGINT or SIGTERM.
+	// Setup, ended early by SIGINT, SIGTERM or Cancel.
 	setupCtx, cancelSetup := context.WithCancel(ctx)
 	defer cancelSetup()
-	interrupted := make(chan os.Signal, 1)
+	interrupted := make(chan string, 1)
 	stopWatch := make(chan struct{})
 	go func() {
 		select {
 		case sig := <-sigs:
-			interrupted <- sig
+			interrupted <- sig.String()
+			cancelSetup()
+		case r := <-s.opts.Cancel:
+			interrupted <- "cancelled: " + r
 			cancelSetup()
 		case <-stopWatch:
 		}
 	}()
+	setupEnd := func() (int, string, bool) {
+		select {
+		case what := <-interrupted:
+			c := ExitInterrupted
+			if strings.HasPrefix(what, "cancelled") || what == syscall.SIGTERM.String() {
+				c = ExitTerminated
+			}
+			return c, what, true
+		default:
+		}
+		return 0, "", false
+	}
 	for _, st := range Steps() {
-		s.sink.Event(Event{Time: time.Now(), Type: "step", Message: st.Name})
+		s.emitStatus(st.Name, events.StateStarted, "")
 		undo, err := st.Run(setupCtx, s)
 		if undo != nil {
 			undos = append(undos, namedUndo{st.Name, undo})
@@ -383,40 +458,50 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			err = setupCtx.Err()
 		}
 		if err != nil {
+			s.emitStatus(st.Name, events.StateFailed, err.Error())
 			close(stopWatch)
-			select {
-			case sig := <-interrupted:
-				reason = "interrupted during setup"
-				return signalCode(sig), fmt.Errorf("%s: %w", st.Name, err)
-			default:
+			if c, what, ok := setupEnd(); ok {
+				reason, why = "interrupted during setup ("+what+")", events.ReasonCancelled
+				return c, fmt.Errorf("%s: %w", st.Name, err)
 			}
-			reason = "setup failed: " + st.Name
+			reason, why = "setup failed: "+st.Name, events.ReasonSetupFailed
 			return exitCode(err), fmt.Errorf("%s: %w", st.Name, err)
 		}
+		s.emitStatus(st.Name, events.StateDone, "")
 	}
 	close(stopWatch)
-	select {
-	case sig := <-interrupted:
-		reason = "interrupted during setup"
-		return signalCode(sig), errors.New("interrupted during setup")
-	default:
+	if c, what, ok := setupEnd(); ok {
+		reason, why = "interrupted during setup ("+what+")", events.ReasonCancelled
+		return c, errors.New("interrupted during setup")
 	}
 
-	// Step 7: start the CLI.
-	io := location.IO{Stdin: s.opts.Stdin, Stdout: s.opts.Stdout, Stderr: s.opts.Stderr}
+	// Step 7: start the CLI. In headless mode its output is also kept
+	// and parsed into transcript events.
+	stdout := s.opts.Stdout
+	if s.Mode == agentcli.Headless {
+		t, err := newTranscript(s.em, s.parser, filepath.Join(s.StateDir, RawTranscriptFile), filepath.Join(s.StateDir, TranscriptFile))
+		if err != nil {
+			reason, why = "the transcript could not be written", events.ReasonSetupFailed
+			return ExitPrerequisite, err
+		}
+		s.transcript = t
+		stdout = io.MultiWriter(stdout, t)
+	}
+	io := location.IO{Stdin: s.opts.Stdin, Stdout: stdout, Stderr: s.opts.Stderr}
 	agent, err := s.Location.Start(ctx, s.Command, io)
 	if err != nil {
-		reason = "the agent CLI did not start"
+		reason, why = "the agent CLI did not start", events.ReasonSetupFailed
 		return ExitPrerequisite, err
 	}
 	if lp, ok := agent.(interface{ PGID() int }); ok && lp.PGID() > 0 {
 		_ = s.AddResource(Resource{Kind: KindProcessGroup, PGID: lp.PGID()})
 	}
 	undos = append(undos, namedUndo{"agent", func(context.Context) error { return s.stop(agent) }})
-	s.status("started %s in %s mode", s.File.Agent.CLI, s.Mode)
+	s.em.setPhase(events.PhaseRunning)
+	s.emitStatus("agent", events.StateStarted, fmt.Sprintf("started %s in %s mode", s.File.Agent.CLI, s.Mode))
 
 	// Step 8: serve until the CLI exits, the deadline passes, or a
-	// signal ends the session.
+	// signal or Cancel ends the session.
 	type exit struct {
 		st  location.ExitStatus
 		err error
@@ -427,11 +512,16 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 		exited <- exit{st, err}
 	}()
 	var deadline <-chan time.Time
+	var timer *time.Timer
 	if s.Deadline > 0 {
-		t := time.NewTimer(s.Deadline)
-		defer t.Stop()
-		deadline = t.C
+		timer = time.NewTimer(s.Deadline)
+		deadline = timer.C
 	}
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	var grace <-chan time.Time
 	silo := 0 // silo's own code once silo has ended the session
 	interrupts := 0
@@ -441,15 +531,29 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			if silo != 0 {
 				return silo, nil
 			}
+			cliExited = true
 			reason = "the agent CLI exited"
 			if e.st.Signaled != "" {
 				reason += " on " + e.st.Signaled
 			}
 			return e.st.Code, e.err
 		case <-deadline:
-			s.warnf("the session deadline (%s) passed; stopping the agent", s.Deadline)
-			reason = "deadline"
+			s.warnf("the session deadline passed; stopping the agent")
+			reason, why = "deadline", events.ReasonDeadline
 			return ExitDeadline, nil
+		case t := <-s.opts.ExtendDeadline:
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.NewTimer(time.Until(t))
+			deadline = timer.C
+			s.status("deadline moved to %s", t.UTC().Format(time.RFC3339))
+		case r := <-s.opts.Cancel:
+			reason, why = "cancelled: "+r, events.ReasonCancelled
+			return ExitTerminated, nil
+		case <-ctx.Done():
+			reason, why = "cancelled: "+ctx.Err().Error(), events.ReasonCancelled
+			return ExitTerminated, nil
 		case <-grace:
 			s.warnf("the agent did not stop within %s of the interrupt; stopping it", s.opts.Grace)
 			return ExitInterrupted, nil
@@ -457,10 +561,10 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			interrupts++
 			switch {
 			case sig == syscall.SIGTERM:
-				reason = "terminated"
+				reason, why = "terminated", events.ReasonCancelled
 				return ExitTerminated, nil
 			case interrupts > 1:
-				reason = "interrupted twice"
+				reason, why = "interrupted twice", events.ReasonCancelled
 				return ExitInterrupted, nil
 			case s.Command.TTY:
 				// The CLI shares the terminal, which has delivered the
@@ -474,7 +578,7 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			default:
 				_ = agent.Signal(location.Interrupt)
 				s.status("interrupted; giving the agent %s to stop (Ctrl-C again to end now)", s.opts.Grace)
-				reason = "interrupted"
+				reason, why = "interrupted", events.ReasonCancelled
 				silo = ExitInterrupted
 				t := time.NewTimer(s.opts.Grace)
 				defer t.Stop()
@@ -550,6 +654,9 @@ func (s *Session) teardown(undos []namedUndo) []error {
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", undos[i].name, err))
+			s.emitStatus(undos[i].name, events.StateFailed, err.Error())
+		} else {
+			s.emitStatus(undos[i].name, events.StateDone, "")
 		}
 	}
 	return errs
