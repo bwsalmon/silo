@@ -6,7 +6,9 @@
 # sandboxes and gitproxy's against real git clients (SILO_V2_REQUIRE_DOCKER,
 # SILO_V2_REQUIRE_RUNSC and SILO_V2_REQUIRE_GIT make a missing Docker, runsc
 # or git a failure here rather than a skip; location/ssh's tests run a
-# real sshd in Docker, so SILO_V2_REQUIRE_DOCKER covers them too).
+# real sshd in Docker, and location/k8s's a kind cluster in Docker, so
+# SILO_V2_REQUIRE_DOCKER covers them too, and makes a missing kind or
+# kubectl a failure).
 name: v2
 
 on:
@@ -33,8 +35,9 @@ jobs:
       - "*.md"
     sandbox:
       cpus: 2
-      memory-mb: 4096
-    timeout-minutes: 25
+      # location/k8s's tests run a kind cluster beside everything else.
+      memory-mb: 8192
+    timeout-minutes: 30
     steps:
       # A pinned gVisor release, checked against its published sha512 (the
       # same one tests.yml's nsd job installs), registered with Docker as
@@ -56,6 +59,15 @@ jobs:
           for i in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
           docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' | grep -w runsc
 
+      # location/k8s's tests make a kind cluster; the sandbox image
+      # carries kind and kubectl, and this says so before the tests do.
+      - name: Check kind
+        infrastructure: true
+        run: |
+          set -e
+          kind version
+          kubectl version --client
+
       - name: Format
         run: |
           cd v2
@@ -76,4 +88,4 @@ jobs:
           SILO_V2_REQUIRE_DOCKER: "1"
           SILO_V2_REQUIRE_RUNSC: "1"
           SILO_V2_REQUIRE_GIT: "1"
-        run: cd v2 && go test -race -timeout 15m ./...
+        run: cd v2 && go test -race -timeout 20m ./...

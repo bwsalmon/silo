@@ -137,7 +137,18 @@ func stepLocation(ctx context.Context, s *Session) (Undo, error) {
 	ls := &location.Session{
 		ID: s.ID, Dir: s.Dir, CLI: s.File.Agent.CLI, Binary: s.File.Agent.Binary,
 		VersionArgs: s.Mapping.VersionArgs(), AmbientAuth: s.File.Agent.Auth.Ambient(),
-		Mode: s.Mode, Environ: s.opts.Environ,
+		Mode: s.Mode, Environ: s.opts.Environ, Secrets: map[string]string{},
+	}
+	for k, v := range s.AgentEnv {
+		ls.Secrets[k] = v
+	}
+	if kt, ok := s.Location.(interface{ KubeTarget() (string, string) }); ok {
+		// Recorded first, so that silo gc deletes the pod of a session
+		// that crashed in the middle of making it.
+		c, ns := kt.KubeTarget()
+		if err := s.AddResource(Resource{Kind: KindPod, Context: c, Namespace: ns}); err != nil {
+			return nil, err
+		}
 	}
 	undo := func(ctx context.Context) error { return s.Location.Teardown(ctx) }
 	host, err := s.Location.Prepare(ctx, ls)
@@ -153,7 +164,10 @@ func stepLocation(ctx context.Context, s *Session) (Undo, error) {
 	s.Host = host
 	if r, ok := s.Location.(interface{ RemoteGC() []string }); ok {
 		for _, d := range r.RemoteGC() {
-			s.status("gc: removed stale remote session directory %s", d)
+			if strings.HasPrefix(d, "/") {
+				d = "remote session directory " + d
+			}
+			s.status("gc: removed stale %s", d)
 		}
 	}
 	s.status("agent CLI: %s %s (%s)", s.File.Agent.CLI, host.Version, host.Binary)

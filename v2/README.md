@@ -17,7 +17,12 @@ to the remote loopback; `silo gc --host <host>` removes the remote
 session directories crashed sessions left there. Stage 5b adds remote
 MCP servers (`where: remote`, journey 4 in full): servers on the ssh
 agent host, started or reached over the master connection and proxied
-into the gateway, so the remote CLI still sees the gateway only.
+into the gateway, so the remote CLI still sees the gateway only. Stage 11a
+adds the `k8s` location (journey 8): the CLI runs in a pod made from a
+container image, one per session, with its credentials in a Secret, and
+reaches the gateway through a sidecar that silo connects to with
+`kubectl port-forward`; `silo gc --k8s` removes pods crashed sessions
+left behind.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -157,6 +162,9 @@ changing a type, run `go generate ./silofile` and
 | `location` | The `Location` and `Agent` interfaces (design §5.1). |
 | `location/local` | The CLI as a child process with a scrubbed environment (design §5.2). |
 | `location/ssh` | The CLI on a remote host (design §5.3): the system `ssh` behind a small `Transport` (so stage 10's IAP can replace it), the master connection, the probe, the loopback-only reverse forward to the gateway, staging with `umask 077` and `cat >`, the env file, exit 75 on a dropped connection, the remote half of `silo gc`, and the `--dry-run` checks. `Run` and `ForwardLocal` share the master, and `mcp.go` is what remote MCP servers need of it: `Host` (the remote login environment, files and `PATH` lookups, over the master or, for `--dry-run`, on a connection of its own), `LaunchMCP` (the env file, the preamble, and the reap of the server's process group) and `ForwardMCP` (the `-L` forward and an HTTP client that dials it). |
+| `location/k8s` | The CLI in a pod (design §5.4, journey 8), driven with the system `kubectl`: one pod per session labelled with its id, the Secret holding the CLI's credentials (mounted into the agent container, owned by the pod), the probe, staging and the CLI with `kubectl exec` (`-t` for interactive), the gateway through the tunnel sidecar over `kubectl port-forward` (reconnected if it drops), `silo gc --k8s`, and the `--dry-run` checks (context, namespace, permissions, and a short-lived pod that pulls both images). |
+| `internal/tunnel` | The gateway tunnel (design §5.4): the sidecar's two loopback listeners, silo's control connection with its hello, and the splice of each CLI connection to the gateway as a stream. `internal/tunnel/mux` is grain's `pkg/tunnel/mux`, copied. |
+| `cmd/silo-tunnel` | The tunnel sidecar's binary, and the `Dockerfile` its image is built from. |
 | `agentcli` | Per-CLI mappings onto argv, env and staged files: `claude`, `codex` (with the reviewed-version gate for `none`), `custom`. Golden files in `agentcli/testdata`. |
 | `mcp` | MCP plumbing: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and client connections over Streamable HTTP, HTTP+SSE and stdio (`Conn`). |
 | `mcp/sources` | Reads `from: <source>:<name>` server definitions from `~/.claude.json`, `.mcp.json` files, codex's `config.toml` and agy's `mcp_config.json`, and the inline-secret test of call 25. |
@@ -174,6 +182,26 @@ changing a type, run `go generate ./silofile` and
 | `internal/lockfile` | `.silo/lock.json`: one key per part of silo (`images`, `mcp`), each written without disturbing the others. |
 | `internal/mcptest` | A test MCP server over stdio or HTTP whose tool list can change, used by the proxy and session tests. |
 | `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
+
+## The tunnel sidecar image
+
+The `k8s` location (design §5.4) runs `cmd/silo-tunnel` beside the CLI
+in each session's pod. Its image is built from this module:
+
+```sh
+cd v2
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f cmd/silo-tunnel/Dockerfile -t ghcr.io/bwsalmon/silo-tunnel:v2 --push .
+```
+
+A maintainer publishes it to `ghcr.io/bwsalmon/silo-tunnel:v2` (the
+default `location.k8s.tunnel_image`) with that command, by hand, when
+`cmd/silo-tunnel` or `internal/tunnel` changes; the control
+connection's hello line carries a version, so an old sidecar refuses a
+silo that speaks a newer protocol rather than misbehaving. Anyone can
+build the same image and push it where their cluster pulls from, and
+name it with `location.k8s.tunnel_image`. `silo run --dry-run` checks
+that the cluster can pull it.
 
 ## Building and testing
 
@@ -198,6 +226,19 @@ answers stream-json messages on stdin, and a fake `codex` whose turn
 can be resumed, for injection. No real `claude` or `codex` is needed (stage 1d checks
 those). The same binary is also the MCP server those tests launch: with
 `SILO_MCPTEST=stdio` it serves `internal/mcptest` over stdio.
+
+`location/k8s`'s tests run against a kind (Kubernetes in Docker)
+cluster, created for the run (or the one `SILO_V2_KIND_CLUSTER` names),
+into which they load two images: busybox with
+`location/k8s/testdata/fakecli` as its `claude`, and `cmd/silo-tunnel`
+on `scratch`. They run headless and interactive (on a pty) sessions in
+which the fake CLI reaches the gateway through the tunnel and calls
+`sandbox_exec` on a container sandbox on the invoking machine, and
+check that its credentials arrive through the Secret and not the pod's
+spec, that teardown deletes the pod and the Secret, that `silo gc`'s
+k8s part removes a leaked pod and keeps a live one, and the `--dry-run`
+checks. They need Docker, `kind` and `kubectl`, which the sandbox image
+carries; `SILO_V2_REQUIRE_DOCKER=1` makes their absence a failure.
 
 `location/ssh`'s tests run against a real `sshd` in a Docker container
 (Debian's `openssh-server`, built on first use as `silo-v2-sshd-test`)

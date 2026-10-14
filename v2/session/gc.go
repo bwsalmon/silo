@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	k8sloc "github.com/bwsalmon/silo/v2/location/k8s"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -120,6 +121,8 @@ func undoResource(ctx context.Context, b sandbox.Backend, id string, r Resource)
 		}
 	case KindDir:
 		return os.RemoveAll(r.Path)
+	case KindPod:
+		return k8sloc.DeleteSession(ctx, &k8sloc.Kubectl{Context: r.Context, Namespace: r.Namespace}, id)
 	}
 	return nil
 }

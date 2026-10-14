@@ -2,7 +2,8 @@
 
 // Package location is where one session's agent CLI runs (design §5):
 // the Location interface every kind implements, and the Agent handle on
-// a running CLI. Kinds live in subpackages (local; ssh in stage 4b).
+// a running CLI. Kinds live in subpackages (local; ssh in stage 4b;
+// k8s in stage 11a).
 package location
 
 import (
@@ -32,6 +33,11 @@ type Session struct {
 	AmbientAuth bool
 	// Mode is interactive or headless.
 	Mode string
+	// Secrets are the variables of the CLI's environment that carry
+	// credentials (agent.auth, and credentials delivered to: {agent:
+	// ...}), by name. A location that can deliver them out of band does
+	// so: k8s puts them in a Secret mounted into the pod.
+	Secrets map[string]string
 	// Environ is the invoking environment, from which a local location
 	// keeps only its allowlist (design §5.2).
 	Environ []string
