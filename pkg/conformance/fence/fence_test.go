@@ -10,9 +10,11 @@ import (
 
 // The backend-neutral fence cases of local-backend.md §13 (call L24):
 // isolation, origin spoofing, never-looser, links, egress, and sealed
-// and read silos, run against every target's Fence. The GCP harness's
-// own forms of them are in pkg/conformance's fence_cases_test.go and
-// grant_cases_test.go, behind the silo_conformance tag.
+// and read silos, run against every target's Fence. With the
+// silo_conformance tag, main_gcp_test.go starts the GCP harness, and
+// "gcp" runs them on real GCP; the harness's own forms of them are
+// still in pkg/conformance's fence_cases_test.go and
+// grant_cases_test.go until the nightly has shown these pass there.
 
 func eachFence(t *testing.T, fn func(t *testing.T, f conformance.F)) {
 	conformance.ForEachFence(t, targets.All(), func(t *testing.T, fe conformance.Fence) {
@@ -33,10 +35,14 @@ func mkTree(f conformance.F) tree {
 	return tr
 }
 
-// The GCP and installed local targets report their Fence as not
-// runnable here, never as passing; the fake runs.
+// The installed local targets report their Fence as not runnable here,
+// never as passing, and so does GCP without the GCP harness; the fake
+// runs.
 func TestTargetsFence(t *testing.T) {
 	for _, tg := range targets.All() {
+		if tg.Name() == "gcp" && targets.GCPHarness {
+			continue // runnable or not, as the harness's install went
+		}
 		_, err := tg.Fence(t)
 		switch tg.Name() {
 		case "local/fake":
@@ -174,19 +180,20 @@ func TestLinks(t *testing.T) {
 }
 
 // Egress: the proxy passes allowed names and refuses denied ones and
-// internal destinations; nothing reaches the metadata server, the
-// host's loopback or the outside world except through it.
+// internal destinations; nothing reaches the outside world except
+// through it. The metadata server and the host's own addresses are the
+// local structural cases' (pkg/conformance/local): on GCP every VM
+// reaches its metadata server, which no firewall rule covers
+// (gcp-backend.md, "What the fence does not cover").
 func TestEgress(t *testing.T) {
 	eachFence(t, func(t *testing.T, f conformance.F) {
 		s := f.Mk("", "e", 24, obj{"egress": obj{"allow": []string{"example.com"}}})
 		p := f.Probe(t, s, "pe")
-		proxy := "10.255.255.1:3128"
+		proxy := f.Gateway() + ":3128"
 		res := p.Run([]conformance.Check{
 			{ID: "allowed", Kind: "http", URL: "https://example.com/", Proxy: proxy},
 			{ID: "denied", Kind: "http", URL: "https://github.com/", Proxy: proxy},
 			{ID: "metadata-via-proxy", Kind: "http", URL: "http://169.254.169.254/", Proxy: proxy},
-			{ID: "metadata", Kind: "tcp", Host: "169.254.169.254", Port: 80},
-			{ID: "loopback", Kind: "tcp", Host: "127.0.0.1", Port: 22},
 			{ID: "world", Kind: "tcp", Host: "93.184.216.34", Port: 443},
 			{ID: "world-icmp", Kind: "icmp", Host: "8.8.8.8"},
 		})
@@ -200,7 +207,7 @@ func TestEgress(t *testing.T) {
 		status("allowed", 200)
 		status("denied", 403)
 		status("metadata-via-proxy", 403)
-		for _, id := range []string{"metadata", "loopback", "world", "world-icmp"} {
+		for _, id := range []string{"world", "world-icmp"} {
 			conformance.Expect(t, res, id, false)
 		}
 	})
@@ -215,7 +222,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 		sealed := f.Mk("", "s", 24, obj{"control": "none", "egress": obj{"allow": []string{"example.com"}}})
 		ro := f.Mk("", "r", 24, obj{"control": "read"})
 		open := f.Mk("", "o", 24, nil)
-		gw := "10.255.255.1"
+		gw := f.Gateway()
 		checks := []conformance.Check{
 			{ID: "api-port", Kind: "tcp", Host: gw, Port: 8080},
 			{ID: "http-port", Kind: "tcp", Host: gw, Port: 80},

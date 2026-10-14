@@ -133,9 +133,12 @@ func Main(m *testing.M) {
 		Started = true
 		if *flagAttach {
 			run.Attached = true
-			run.InstallErr = startProxy(ctx)
-			if run.InstallErr != nil {
-				run.InstallErr = fmt.Errorf("attaching to the handed-on install: %v", run.InstallErr)
+			// A run that died before its handoff leaves its silos: clear
+			// them, so that the cases start from an empty tree either way.
+			if err := startProxy(ctx); err != nil {
+				run.InstallErr = fmt.Errorf("attaching to the handed-on install: %v", err)
+			} else if err := handoff(ctx); err != nil {
+				run.InstallErr = fmt.Errorf("clearing the handed-on install's silos: %v", err)
 			}
 		} else {
 			run.InstallErr = install(ctx)
