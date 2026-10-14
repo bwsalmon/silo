@@ -38,7 +38,9 @@ builds, vets or tests the other's packages.
 
 ```sh
 go run ./cmd/silo run [--prompt text] <Silofile|dir>   # design §3
-go run ./cmd/silo gc                        # what crashed sessions left
+go run ./cmd/silo gc [--project p [--account email]]
+                                            # what crashed sessions left, and
+                                            # project accounts past their ttl
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
 go run ./cmd/silo schema [section]          # the Silofile's JSON Schema
 ```
@@ -62,6 +64,16 @@ error naming the stage that adds it. Errors name the file, line and YAML
 path, and exit 65; bad usage exits 64 (§3.3). The script checks of
 §12.3/§12.4 come with stage 4a (`silofile.Options.CheckScripts`).
 
+`silo gc` also deletes the invoking user's journey 2 service accounts
+that have gone unused past their `ttl` (design §11.5), as the user's own
+gcloud login: those listed in `$XDG_STATE_HOME/silo/accounts.json`, and
+with `--project p` any `silo-*` account in `p` whose description names
+the user. `--project p --account <email>` deletes one of the user's
+accounts whatever its ttl. Another user's account is never touched. GCP
+is not contacted when local state lists no account and `--project` is
+not given. Setting accounts up (`gcp.Client.Setup`) is in the `gcp`
+package; `silo run` uses it once stage 2b lands.
+
 The schema `silo schema` prints is generated from `silofile`'s Go types
 into `silofile/silofile.schema.json` and embedded in the binary. After
 changing a type, run `go generate ./silofile` and
@@ -83,6 +95,8 @@ changing a type, run `go generate ./silofile` and
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
+| `gcp` | Journey 2's accounts (design §11): the spec and its `silo-` name, the description, local state (`accounts.json`), the setup checks (`Check`, which `silo run --dry-run` calls), create/verify/reuse and resume (`Ensure`), the propagation wait (`WaitReady`), and `GC`. The APIs are behind the `API` interface: `Google` (with `Ambient`, the user's ADC or gcloud login) is the real one. |
+| `internal/fakegcp` | An in-memory `gcp.API` for one project, answering with Google's error codes and etag conflicts. |
 | `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. Wired into `silo run` by stage 7b. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
 | `internal/procgroup` | Process-group cancellation, copied from grain's `pkg/procgroup`. |
@@ -108,6 +122,14 @@ runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
 answers `--version`, reads the staged MCP config, calls the gateway and
 exits as told. No real `claude` or `codex` is needed (stage 1d checks
 those).
+
+`gcp`'s tests run against `internal/fakegcp`. `gcp/live_test.go`
+sets up, reuses and garbage-collects a real account when
+`SILO_V2_LIVE_GCP=1`, as the ambient login, in `GOOGLE_CLOUD_PROJECT`
+(default `bsalmon-fun-sandbox`), granting `roles/logging.viewer`; the
+login needs `roles/iam.serviceAccountAdmin`,
+`roles/resourcemanager.projectIamAdmin` and `roles/logging.viewer` on
+the project. It is not part of the CI gate.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip

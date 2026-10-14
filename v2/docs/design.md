@@ -1062,7 +1062,10 @@ Each `projects[]` entry gets a **per-user, reusable service account**.
   but **no labels**: the core model's "description and labels carry the
   spec" cannot be done literally **(call 17)**. silo writes:
   - display name: `silo: <user>` (truncated);
-  - description: one line, `silo/v2 spec=<full sha256 hex> user=<email> created=<date> used=<date>`.
+  - description: one line, `silo/v2 spec=<full sha256 hex> user=<email> created=<date> used=<date>`,
+    where a date is RFC 3339 in UTC to the second
+    (`2026-10-14T12:00:00Z`), because a ttl can be shorter than a day.
+    The user's email is lowercased in the spec and the description.
     The role list does not fit in 256 characters in general, so the
     description carries its hash, and the full spec is kept in the
     user's local state (`$XDG_STATE_HOME/silo/accounts.json`).
@@ -1071,7 +1074,11 @@ Each `projects[]` entry gets a **per-user, reusable service account**.
   that the account's bindings are exactly the declared roles: no fewer,
   and no more. It also checks that the description's `spec=` and `user=`
   match, and that only the invoking user holds
-  `roles/iam.serviceAccountTokenCreator` on the account. Any mismatch
+  `roles/iam.serviceAccountTokenCreator` on the account: the account's
+  own IAM policy may hold that one binding and nothing else (another
+  role there, such as `roles/iam.serviceAccountUser`, would also let
+  someone act as the account). A conditional binding of the account on
+  the project is a mismatch too. Any mismatch
   is refused, naming what differs. silo does not "fix" an account it
   finds altered, because something other than silo altered it **(call
   18)**. `silo gc --project p --account <email>` deletes it, and the
@@ -1089,7 +1096,10 @@ invoking machine only.
    `iam.serviceAccounts.update`, `iam.serviceAccounts.delete`,
    `iam.serviceAccounts.setIamPolicy`,
    `resourcemanager.projects.getIamPolicy` and
-   `resourcemanager.projects.setIamPolicy`. That is what
+   `resourcemanager.projects.setIamPolicy`, plus `iam.serviceAccounts.list`
+   (the quota count of §11.7, and `silo gc`) and
+   `iam.serviceAccounts.getIamPolicy` (verifying the token creator on
+   reuse). That is what
    `roles/iam.serviceAccountAdmin` plus
    `roles/resourcemanager.projectIamAdmin`, or `roles/owner`, give. Any
    missing: refuse, listing them and the roles that grant them.
@@ -1099,8 +1109,11 @@ invoking machine only.
    19)**, so the agent can never do something the user cannot. silo
    reads each role's permissions (`roles.get`; custom project roles
    too), and tests them in batches of 100 with `testIamPermissions`.
-   Permissions that cannot be tested at project level are listed as a
-   warning rather than a refusal. The role must also appear in
+   Permissions that cannot be tested at project level (those not in
+   `permissions.queryTestablePermissions` for the project) are listed as
+   a warning rather than a refusal. `queryGrantableRoles` itself needs
+   `resourcemanager.projects.getIamPolicy`; if it fails, that is a
+   warning, and step 1 has already refused the missing permission. The role must also appear in
    `roles.queryGrantableRoles` for the project. Basic roles
    (`roles/owner`, `roles/editor`, `roles/viewer`) are allowed only if
    the Silofile sets `allow_basic_roles: true` on the entry.
@@ -1115,7 +1128,8 @@ invoking machine only.
    (retrying while `generateAccessToken` returns 403, which is how a new
    token-creator grant shows up) and then calls
    `projects.testIamPermissions` *as the account*, for a sample of each
-   role's permissions, until all are granted. Progress is shown as a
+   role's permissions (three, spread across its testable ones), until
+   all are granted. Progress is shown as a
    list of roles with ticks. It gives up after 10 minutes with exit 69,
    leaving the account in place for the next run.
 
@@ -1179,7 +1193,15 @@ and its grants are kept**, so the next run starts at once.
   project bindings are removed (bindings of a deleted account linger as
   `deleted:serviceAccount:...` otherwise), then the account.
 - `ttl: 0` deletes the account and its bindings on exit.
-- `silo gc` never touches an account another user created.
+- An account found in a project with no local record (a lost state
+  file) has no ttl on record, and gets the default `7d`. An account
+  whose local record names a session that is still running is kept,
+  whatever its ttl. One the local state lists but the project no
+  longer has is forgotten, after clearing any bindings it left.
+- `silo gc --project p --account <email>` deletes that one account of
+  the user's whatever its ttl.
+- `silo gc` never touches an account another user created: one whose
+  description names another user, or that is not in silo's format.
 
 ### 11.6 Lifecycle
 
