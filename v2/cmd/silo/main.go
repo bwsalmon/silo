@@ -24,7 +24,7 @@ const (
 const usage = `usage: silo <command> [arguments]
 
 commands:
-  run [--prompt text] <Silofile|dir>
+  run [--json] [--prompt text] <Silofile|dir>
                             run one session (design §3)
   gc                        remove what crashed sessions left behind
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)

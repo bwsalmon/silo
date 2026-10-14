@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
+	"github.com/bwsalmon/silo/v2/events"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -18,8 +20,9 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 	fs := flag.NewFlagSet("silo run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	prompt := fs.String("prompt", "", "the prompt, replacing agent.prompt")
+	jsonOut := fs.Bool("json", false, "write the session's events as JSON lines on stdout (docs/events.md); mode headless only")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: silo run [--prompt text] <Silofile|dir>")
+		fmt.Fprintln(stderr, "usage: silo run [--json] [--prompt text] <Silofile|dir>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
@@ -28,15 +31,25 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 		}
 		return exitUsage
 	}
+	// Under --json every exit, even before a session exists, ends
+	// with a result event.
+	fail := func(code int, msg string) int {
+		fmt.Fprintln(stderr, msg)
+		if *jsonOut {
+			session.JSONSink{W: stdout}.Event(events.Event{
+				V: events.Version, Seq: 1, Time: time.Now().UTC(), Type: events.TypeResult,
+				Result: &events.Result{Exit: events.Exit{Code: code, Reason: events.ReasonSetupFailed, Detail: msg}},
+			})
+		}
+		return code
+	}
 	f, err := silofile.Load(fs.Arg(0))
 	if err != nil {
 		var errs silofile.Errors
 		if errors.As(err, &errs) {
-			fmt.Fprintln(stderr, errs)
-		} else {
-			fmt.Fprintf(stderr, "silo run: %v\n", err)
+			return fail(exitInvalid, errs.Error())
 		}
-		return exitInvalid
+		return fail(exitInvalid, fmt.Sprintf("silo run: %v", err))
 	}
 	res := f.Validate(silofile.Options{})
 	for _, w := range res.Warnings {
@@ -51,11 +64,18 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 		errs = append(errs, e)
 	}
 	if len(errs) > 0 {
-		fmt.Fprintln(stderr, errs)
-		return exitInvalid
+		return fail(exitInvalid, errs.Error())
 	}
 	opts.File, opts.Prompt = f, *prompt
 	opts.Stdin, opts.Stdout, opts.Stderr = stdin, stdout, stderr
+	if *jsonOut {
+		if f.Agent.Mode != "headless" {
+			return fail(exitUsage, "silo run: --json needs agent.mode: headless; the events and an interactive CLI cannot share stdout")
+		}
+		// Stdout carries the events alone; the CLI's own output is kept
+		// in the session's raw transcript.
+		opts.Sink, opts.Stdout = session.JSONSink{W: stdout}, io.Discard
+	}
 	code, err := session.Run(context.Background(), opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "silo run: %v\n", err)

@@ -1,0 +1,11 @@
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"resumable","resumable":{"cli":"claude","cli_session":"abc"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"error","text":"overloaded_error: Overloaded"}}
+outcome: {
+  "FinalText": "",
+  "CLISession": "abc",
+  "Finished": true,
+  "Failure": {
+    "kind": "overloaded",
+    "message": "API Error: 529 overloaded_error overloaded_error: Overloaded"
+  }
+}
