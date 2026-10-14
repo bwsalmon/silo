@@ -5,7 +5,8 @@
 # including the gateway's tests against real container and gVisor
 # sandboxes and gitproxy's against real git clients (SILO_V2_REQUIRE_DOCKER,
 # SILO_V2_REQUIRE_RUNSC and SILO_V2_REQUIRE_GIT make a missing Docker, runsc
-# or git a failure here rather than a skip).
+# or git a failure here rather than a skip; location/ssh's tests run a
+# real sshd in Docker, so SILO_V2_REQUIRE_DOCKER covers them too).
 name: v2
 
 on:
@@ -33,7 +34,7 @@ jobs:
     sandbox:
       cpus: 2
       memory-mb: 4096
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       # A pinned gVisor release, checked against its published sha512 (the
       # same one tests.yml's nsd job installs), registered with Docker as

@@ -9,7 +9,12 @@ Stage 4a adds the local executor: each script the Silofile declares
 becomes a gateway tool, `local_<name>`, and `silo approve` answers the
 calls of scripts marked `approve: true`. Stage 5a adds local MCP servers
 (`mcp[]` with `where: local`), launched or reached by URL, proxied
-through the gateway with an allowlist each.
+through the gateway with an allowlist each. Stage 4b adds the `ssh`
+location (journey 3): the CLI runs on a remote host with that host's
+own login, over one OpenSSH master connection, and reaches the gateway
+(and so the `local_<name>` scripts) only through a reverse forward bound
+to the remote loopback; `silo gc --host <host>` removes the remote
+session directories crashed sessions left there.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -44,7 +49,7 @@ builds, vets or tests the other's packages.
 ```sh
 go run ./cmd/silo run [--dry-run] [--json] [--prompt text] <Silofile|dir>   # design §3
 go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
-go run ./cmd/silo gc                        # what crashed sessions left
+go run ./cmd/silo gc [--host <host>]        # what crashed sessions left (there)
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
 go run ./cmd/silo schema [section]          # the Silofile's JSON Schema
 ```
@@ -119,6 +124,7 @@ changing a type, run `go generate ./silofile` and
 | `session` | One `silo run` session (design §3): setup steps and tool providers (registries), teardown, `session.json`, signals, exit codes, the control socket, the local executor's provider and approvals, `silo gc`'s local part. |
 | `location` | The `Location` and `Agent` interfaces (design §5.1). |
 | `location/local` | The CLI as a child process with a scrubbed environment (design §5.2). |
+| `location/ssh` | The CLI on a remote host (design §5.3): the system `ssh` behind a small `Transport` (so stage 10's IAP can replace it), the master connection, the probe, the loopback-only reverse forward to the gateway, staging with `umask 077` and `cat >`, the env file, exit 75 on a dropped connection, the remote half of `silo gc`, and the `--dry-run` checks. `Run` and `ForwardLocal` share the master with stage 5b's remote MCP servers. |
 | `agentcli` | Per-CLI mappings onto argv, env and staged files: `claude`, `codex` (with the reviewed-version gate for `none`), `custom`. Golden files in `agentcli/testdata`. |
 | `mcp` | MCP plumbing: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and client connections over Streamable HTTP, HTTP+SSE and stdio (`Conn`). |
 | `mcp/sources` | Reads `from: <source>:<name>` server definitions from `~/.claude.json`, `.mcp.json` files, codex's `config.toml` and agy's `mcp_config.json`, and the inline-secret test of call 25. |
@@ -158,6 +164,16 @@ answers `--version`, reads the staged MCP config, calls the gateway and
 exits as told. No real `claude` or `codex` is needed (stage 1d checks
 those). The same binary is also the MCP server those tests launch: with
 `SILO_MCPTEST=stdio` it serves `internal/mcptest` over stdio.
+
+`location/ssh`'s tests run against a real `sshd` in a Docker container
+(Debian's `openssh-server`, built on first use as `silo-v2-sshd-test`)
+with `location/ssh/testdata/fakecli`, built statically, as its `claude`.
+They cover the probe, an unknown host key, the loopback-only forward
+(and the refusal of a server whose `GatewayPorts yes` widens it),
+headless and interactive runs (on a pty), exit codes, a killed master
+(exit 75), `silo gc --host`, that no secret is in any remote argv, and
+journey 3 end to end with `docs/examples/remote-scripts`. They skip
+without Docker unless `SILO_V2_REQUIRE_DOCKER` is set.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip

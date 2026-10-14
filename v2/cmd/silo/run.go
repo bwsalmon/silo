@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/v2/events"
+	sshloc "github.com/bwsalmon/silo/v2/location/ssh"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -102,18 +103,39 @@ func dryRunChecks(f *silofile.Silofile, stdout io.Writer, environ []string) int 
 	return code
 }
 
-// gc is silo gc: for now, its local part (design §3.1).
+// gc is silo gc: its local part (design §3.1), and with --host, the
+// stale remote session directories this machine left on that host
+// (design §12.6).
 func gc(args []string, stdout, stderr io.Writer) int {
-	if _, ok := flags("gc", "", args, stderr, 0, 0); !ok {
+	fs := flag.NewFlagSet("silo gc", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	host := fs.String("host", "", "also remove stale remote session directories on this ssh host")
+	fs.Usage = func() { fmt.Fprintln(stderr, "usage: silo gc [--host <host>]") }
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		if err == nil {
+			fs.Usage()
+		}
 		return exitUsage
 	}
+	code := exitOK
 	rep, err := session.GC(context.Background(), session.GCOptions{Getenv: os.Getenv})
 	for _, line := range rep.Removed {
 		fmt.Fprintln(stdout, line)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "silo gc: %v\n", err)
-		return 1
+		code = 1
 	}
-	return exitOK
+	if *host != "" {
+		t := session.SSHTransport(&silofile.SSH{Host: *host}, os.Getenv)
+		removed, err := sshloc.GCHost(context.Background(), t, sshloc.GCOptions{Live: session.Live(os.Getenv)})
+		for _, d := range removed {
+			fmt.Fprintf(stdout, "removed stale remote session directory %s:%s\n", *host, d)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "silo gc --host %s: %v\n", *host, err)
+			code = 1
+		}
+	}
+	return code
 }

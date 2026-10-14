@@ -38,9 +38,12 @@ type Server struct {
 
 	handler   Handler
 	authority string
-	http      *http.Server
-	ctx       context.Context
-	cancel    context.CancelFunc
+	// aliases are more Host values the server answers to: a forwarded
+	// port's own address (the ssh location's reverse forward).
+	aliases sync.Map
+	http    *http.Server
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	mu      sync.Mutex
 	streams map[chan []byte]struct{}
@@ -74,6 +77,13 @@ func Listen(ctx context.Context, h Handler) (*Server, error) {
 	return s, nil
 }
 
+// AllowHost adds a Host value the server answers to, for a client that
+// reaches it through a forward to another loopback port: the forward's
+// own host:port, still on loopback, so DNS rebinding stays shut out.
+func (s *Server) AllowHost(authority string) {
+	s.aliases.Store(authority, true)
+}
+
 // Close stops the server, cancelling calls in flight and closing every
 // notification stream.
 func (s *Server) Close() error {
@@ -102,7 +112,8 @@ func (s *Server) NotifyToolsChanged() {
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if r.Host != s.authority || r.Header.Get("Origin") != "" {
+		_, alias := s.aliases.Load(r.Host)
+		if (r.Host != s.authority && !alias) || r.Header.Get("Origin") != "" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
