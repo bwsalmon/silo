@@ -14,11 +14,10 @@
 //     silod on a copy of its store and repos.
 //   - "local/sandbox" and "local/vm": silod installed with --backend
 //     local, probes made through the facade in each isolation class.
-//     They report themselves not runnable until a CI job installs
-//     the local backend, which local-conformance needs to make probes
-//     (silod serves the facade's host sockets and runs sandbox
-//     containers: local-backend.md §4, "As built in step 6"); the vm
-//     class also waits on step 10's runtime.Driver.
+//     local-conformance installs the local backend (FindInstall finds
+//     it), but no probe container is made through it yet, so their
+//     Fence and Registry report themselves not runnable; the vm class
+//     also waits on step 10's runtime.Driver.
 //   - "gcp": the GCP backend, which has no registry, so it reports the
 //     registry cases as not offered, never as passing. Its fence cases
 //     are still the GCP harness's own, in pkg/conformance behind the
@@ -59,7 +58,7 @@ type Local struct{ Class string }
 func (l Local) Name() string { return "local/" + l.Class }
 
 func (l Local) Registry(testing.TB) (conformance.Registry, error) {
-	why := "no CI job installs the local backend, whose silod serves the registry, until local-backend.md item 12's local-conformance"
+	why := "the registry cases' Registry isn't built over an installed silod yet (pkg/conformance/local's TestInstalledSandbox is the installed target's case so far)"
 	if l.Class == "vm" {
 		why += "; the vm class also waits on item 10"
 	}
@@ -67,7 +66,7 @@ func (l Local) Registry(testing.TB) (conformance.Registry, error) {
 }
 
 func (l Local) Fence(testing.TB) (conformance.Fence, error) {
-	why := "no CI job installs the local backend, so no probe container can be made (silod serves the Docker facade's host sockets and runs sandbox containers: local-backend.md §4, \"As built in step 6\")"
+	why := "no probe containers are made through an installed silod's facade yet (local-conformance installs the local backend, and pkg/conformance/local's TestInstalledSandbox runs a sandbox container in it)"
 	if l.Class == "vm" {
 		why += "; the vm class also waits on step 10's runtime.Driver"
 	}

@@ -45,9 +45,7 @@ func needNSD(t *testing.T, what string, ok bool) {
 // Docker facade as silod serve --backend=local builds it: silo-nsd and
 // silo-containerd run as `silod nsd` and `silod containerd`, the driver
 // is sandboxDriver's, the wiring is the holder's, and the image comes
-// from a docker load into silo-containerd's content store. Only the
-// shim's cgroups are changed, to none, which a CI runner doesn't
-// delegate.
+// from a docker load into silo-containerd's content store.
 func TestSandboxContainer(t *testing.T) {
 	runsc := os.Getenv("SILO_NSD_RUNSC")
 	if runsc == "" {
@@ -118,8 +116,7 @@ func TestSandboxContainer(t *testing.T) {
 	}
 	start("containerd", "--data-dir", data, "--runtime-dir", rt)
 
-	// `silod containerd` wrote the shim's options with the systemd
-	// cgroup driver; this runner has no delegated cgroups.
+	// `silod containerd` writes the shim's options before it serves.
 	p := rootless.Paths{DataDir: data, RuntimeDir: rt}
 	wait := func(what string, ok func() bool) {
 		t.Helper()
@@ -132,12 +129,8 @@ func TestSandboxContainer(t *testing.T) {
 	}
 	wait("the runsc shim's options", func() bool {
 		b, err := os.ReadFile(p.RunscOptions())
-		return err == nil && strings.Contains(string(b), "systemd-cgroup")
+		return err == nil && strings.Contains(string(b), "cgroup")
 	})
-	b, _ := os.ReadFile(p.RunscOptions())
-	if err := os.WriteFile(p.RunscOptions(), []byte(strings.Replace(string(b), `systemd-cgroup = "true"`, `ignore-cgroups = "true"`, 1)), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	db, err := sqlite.Open(filepath.Join(base, "silo.db"))
 	if err != nil {

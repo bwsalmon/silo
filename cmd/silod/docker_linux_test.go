@@ -7,13 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/gvisor"
 )
 
 // silod's sandbox driver finds the shim's options beside the holder's
 // state, where `silod containerd` writes them, runs `silod runsc` with
-// the runsc on its PATH, and puts each container in its silo's slice.
+// the runsc on its PATH, and would put each container in its silo's
+// slice if the shim used cgroups.
 func TestSandboxDriverConfig(t *testing.T) {
 	dir := t.TempDir()
 	c := sandboxConfig{Exe: "/usr/bin/silod", State: filepath.Join(dir, "rt", "nsd.state"), Containerd: filepath.Join(dir, "rt", "containerd.sock"),
@@ -28,11 +30,18 @@ func TestSandboxDriverConfig(t *testing.T) {
 	if !slices.Equal(cfg.Logger, []string{"/usr/bin/silod", gvisor.LogArg}) || !slices.Equal(cfg.Runsc, []string{"runsc", "--runsc", "/usr/bin/runsc"}) {
 		t.Errorf("logger %v, runsc %v", cfg.Logger, cfg.Runsc)
 	}
-	if got := cfg.CgroupsPath(runtime.Spec{ID: "c1", Silo: "child"}); got != "silo-root-child.slice:silo:c1" {
-		t.Errorf("cgroupsPath: %s", got)
+	// The shim ignores cgroups (rootless.RunscSystemdCgroups), so no
+	// container is given a slice.
+	if rootless.RunscSystemdCgroups != (cfg.CgroupsPath != nil) {
+		t.Fatalf("cgroupsPath set: %v", cfg.CgroupsPath != nil)
 	}
-	if got := cfg.CgroupsPath(runtime.Spec{ID: "c2", Silo: "gone"}); got != "silo-gone.slice:silo:c2" {
-		t.Errorf("cgroupsPath of a silo the store doesn't list: %s", got)
+	if cfg.CgroupsPath != nil {
+		if got := cfg.CgroupsPath(runtime.Spec{ID: "c1", Silo: "child"}); got != "silo-root-child.slice:silo:c1" {
+			t.Errorf("cgroupsPath: %s", got)
+		}
+		if got := cfg.CgroupsPath(runtime.Spec{ID: "c2", Silo: "gone"}); got != "silo-gone.slice:silo:c2" {
+			t.Errorf("cgroupsPath of a silo the store doesn't list: %s", got)
+		}
 	}
 	// With no holder, the command joins pid 0, which fails, rather than
 	// a pid the state once named. nsexec execs the arguments after the

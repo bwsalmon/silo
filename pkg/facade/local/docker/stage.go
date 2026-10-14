@@ -13,7 +13,9 @@ import (
 // it there. A pull, load or commit leaves the image's blobs in the
 // content store under the registry's namespaces; the record links
 // them, without copying a byte, and keeps them from containerd's GC
-// while it lasts. Without a RunNamespace or a content store, or for a
+// while it lasts. A load or commit stages its image as it is made:
+// its blobs are held only by its own lease until then, which goes
+// when the request ends, and containerd's GC would take them. Without a RunNamespace or a content store, or for a
 // record with no manifest, it does nothing, and Prepare says what is
 // missing.
 func (s *Server) stageImage(ctx context.Context, silo, id string) error {

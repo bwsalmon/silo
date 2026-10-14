@@ -2256,13 +2256,44 @@ Task 3420 built the split as far as silod's wiring allows:
   not runnable. Moving that harness behind `Fence` (an e2-micro probe
   per `Probe`, the checks run by `ProbeScript`) is a follow-up.
 - **"local/sandbox" and "local/vm" report themselves not runnable.**
-  No CI job installs the local backend yet, so no probe container can
-  be made. silod itself now serves the facade's host sockets and runs
-  sandbox containers (task 3669, [As built in step 6](#as-built-in-step-6)).
-  The `vm` class also waits on step 10's `runtime.Driver`. `local-conformance` prints
-  the targets it didn't test in its log, and says whether `/dev/kvm`
-  works on the runner. Once a target can run, a not-runnable target
-  should fail the job, as above.
+  Their `Fence` and `Registry` make no probe containers yet. The `vm`
+  class also waits on step 10's `runtime.Driver`. `local-conformance`
+  prints the targets it didn't test in its log, and says whether
+  `/dev/kvm` works on the runner.
+- **`local-conformance` installs the local backend** (task 3670). It
+  builds `silo` and `silod`, runs `silo install --backend local` as the
+  runner's user, which fetches the pinned gVisor, runs the three
+  packages, and uninstalls with `--delete-data` in a trap. The runner's
+  logind is masked, so the job starts `user@<uid>.service` itself and
+  writes the linger file by hand. `TestInstalledSandbox`
+  (`pkg/conformance/local`) runs a sandbox container through the
+  installed root's facade: `/info` offers `silo-sandbox`, a `docker
+  load` of a busybox image survives to the create, and the container
+  runs as its namespace's root with `eth0` at its endpoint's address.
+  `SILO_REQUIRE_LOCAL_TARGETS` makes a missing install its failure.
+  The first install in CI found four faults that the nsd job's
+  in-process test could not see, all fixed with it:
+  - a loaded or committed image's blobs were held only by the
+    request's lease, so containerd's GC took them; load and commit
+    now stage the image in the run namespace first;
+  - runsc runs as a subordinate id, which can't search the 0700
+    `~/.local/share/silo` it was installed under; `silod runsc` binds
+    the runtime's directory under `/run/silo/runtimes` in the holder
+    and runs it from there;
+  - runsc's systemd cgroup driver, inside the container's user
+    namespace, dials the system manager and is refused; the shim's
+    options say `ignore-cgroups` (`rootless.RunscSystemdCgroups`) and
+    CPU and memory are the ledger's until cgroups are delegated
+    another way;
+  - gVisor 20261005's runsc needs its `gvisor-bin/gvisor_sentry`
+    sidecar, which install now pins and fetches.
+
+  Still open: a container in the root's default network has no
+  `/etc/resolv.conf`, so names (`<id>.docker.silo.internal`) don't
+  resolve from it; probes for `Fence`; and the cases that need a real
+  install (revocation closing an open connection, exports, adoption
+  after a restart, the `Host`-header and socket rules, published
+  ports, DNS and image records).
 
 ## 14. Limitations
 

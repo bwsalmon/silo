@@ -90,9 +90,9 @@ func (c sandboxConfig) gvisor() gvisor.Config {
 	if c.Runsc != "" {
 		cfg.Runsc = []string{"runsc", "--runsc", c.Runsc}
 	}
-	// The shim's options use the systemd cgroup driver, so every
+	// Where the shim's options use the systemd cgroup driver, every
 	// container is a scope in its silo's slice.
-	if c.SiloPaths != nil {
+	if c.SiloPaths != nil && rootless.RunscSystemdCgroups {
 		cfg.CgroupsPath = func(spec runtime.Spec) string {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
