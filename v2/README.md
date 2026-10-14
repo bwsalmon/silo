@@ -5,6 +5,9 @@ Stage 1 is in: `silo run` runs `claude`, `codex` or a custom CLI on the
 local machine, interactive or headless, with `remote_permissions` none,
 all or a subset, its only reach a gateway serving container and gVisor
 sandboxes. `silo validate`, `silo schema` and `silo gc` are there too.
+Stage 4a adds the local executor: each script the Silofile declares
+becomes a gateway tool, `local_<name>`, and `silo approve` answers the
+calls of scripts marked `approve: true`.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -38,6 +41,7 @@ builds, vets or tests the other's packages.
 
 ```sh
 go run ./cmd/silo run [--prompt text] <Silofile|dir>   # design §3
+go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
 go run ./cmd/silo gc                        # what crashed sessions left
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
 go run ./cmd/silo schema [section]          # the Silofile's JSON Schema
@@ -59,8 +63,34 @@ cross-references, files, `remote_permissions` against the CLI, and
 credential destinations (§2.4). A value v2.0 reserves but does not ship
 yet (`kind: granule`, `lifetime: persistent`, ...) is refused with an
 error naming the stage that adds it. Errors name the file, line and YAML
-path, and exit 65; bad usage exits 64 (§3.3). The script checks of
-§12.3/§12.4 come with stage 4a (`silofile.Options.CheckScripts`).
+path, and exit 65; bad usage exits 64 (§3.3). Local scripts get the
+snapshot's refusals as errors (a symlink out of the folder, a file or
+directory writable by group or others, a file another user owns) and
+best-effort warnings on the obvious holes of §12.4: `eval`, `sh -c`
+with a positional parameter, an unquoted `$@`/`$*`, `xargs`, a wrapper
+that hands its arguments to an interpreter, and a script that is
+itself one.
+
+The local executor (design §12) snapshots the scripts at session start
+(name, path, size, mode, SHA-256) and re-hashes each before every call,
+refusing one that changed. A call runs the script with exactly the
+agent's `args`, no shell, in `local.workdir`, with the invoking
+environment minus `SILO_*` and every resolved credential, plus the
+credentials delivered `{local: <script>, env: NAME}`. Its result is
+JSON: `exit_code`, `signal` and `timed_out` when they apply,
+`duration`, `truncated`, `stdout_bytes`, `stderr_bytes`, `stdout`,
+`stderr`. A timeout sends SIGTERM to the script's process group and
+SIGKILL 5 seconds later. A script with `approve: true` waits, for up
+to its timeout, for the user: on silo's terminal in headless mode when
+silo has one, and otherwise for `silo approve`, with a desktop
+notification in interactive mode (`notify-send` or `osascript`, when
+installed) and the request printed on stderr in headless mode.
+
+Every session has a control socket, `control.sock` in the session
+directory (mode 0600): JSON-RPC 2.0, one message per line. Its only
+method so far is `approve`, with params `{"id": "<call>", "deny":
+true}` (both optional; with no id it answers the one call waiting).
+`silo approve` names the session by its id or a unique prefix of it.
 
 The schema `silo schema` prints is generated from `silofile`'s Go types
 into `silofile/silofile.schema.json` and embedded in the binary. After
@@ -73,7 +103,7 @@ changing a type, run `go generate ./silofile` and
 | --- | --- |
 | `silofile` | The Silofile: types, strict decoding, folder resolution, validation, JSON Schema. |
 | `cmd/silo` | The `silo` command. |
-| `session` | One `silo run` session (design §3): setup steps and tool providers (registries), teardown, `session.json`, signals, exit codes, `silo gc`'s local part. |
+| `session` | One `silo run` session (design §3): setup steps and tool providers (registries), teardown, `session.json`, signals, exit codes, the control socket, the local executor's provider and approvals, `silo gc`'s local part. |
 | `location` | The `Location` and `Agent` interfaces (design §5.1). |
 | `location/local` | The CLI as a child process with a scrubbed environment (design §5.2). |
 | `agentcli` | Per-CLI mappings onto argv, env and staged files: `claude`, `codex` (with the reviewed-version gate for `none`), `custom`. Golden files in `agentcli/testdata`. |
@@ -82,6 +112,8 @@ changing a type, run `go generate ./silofile` and
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
+| `localexec` | The local executor (design §12): script snapshot, refusals, `silo validate`'s warnings, one tool per script run with no shell, and the approvers (terminal prompt, and the queue `silo approve` answers). |
+| `control` | The session's control socket: JSON-RPC 2.0 over a Unix socket, a method table later stages add to, and a client. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
 | `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. Wired into `silo run` by stage 7b. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
