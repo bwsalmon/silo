@@ -1,0 +1,1 @@
+refused (exit 76): remote_permissions none on codex 0.162.1 is refused: silo's no-environment configuration has been reviewed only for codex-cli 0.153.0 (cli-mapping.md §2.2); install a reviewed version, or use remote_permissions: all

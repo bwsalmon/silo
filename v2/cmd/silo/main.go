@@ -1,5 +1,5 @@
 // Command silo is Silo v2's command line (design §3, §16). So far it has
-// validate and schema.
+// run, gc, validate and schema.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
 
@@ -23,6 +24,9 @@ const (
 const usage = `usage: silo <command> [arguments]
 
 commands:
+  run [--prompt text] <Silofile|dir>
+                            run one session (design §3)
+  gc                        remove what crashed sessions left behind
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)
   schema [section]          print the Silofile's JSON Schema, or one section's
 `
@@ -37,6 +41,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	switch args[0] {
+	case "run":
+		return runSession(args[1:], os.Stdin, stdout, stderr, session.Options{})
+	case "gc":
+		return gc(args[1:], stdout, stderr)
 	case "validate":
 		return validate(args[1:], stdout, stderr)
 	case "schema":

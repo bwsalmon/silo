@@ -1,0 +1,1 @@
+refused (exit 76): a custom CLI cannot be given a remote_permissions subset: declare none or all in agent.custom.permissions (design §6.1)

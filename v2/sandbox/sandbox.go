@@ -19,6 +19,16 @@ import (
 // as its value (design §3.1), so that silo gc and Find can find it.
 const SessionLabel = "silo.session"
 
+// UserLabel carries the uid of the user who created the sandbox, so
+// that silo gc on a shared Docker daemon touches only its own.
+const UserLabel = "silo.uid"
+
+// SessionLister is a Backend that can list the sessions its sandboxes
+// belong to, for silo gc.
+type SessionLister interface {
+	Sessions(ctx context.Context) ([]string, error)
+}
+
 // NameLabel carries the sandbox's name in the Silofile.
 const NameLabel = "silo.sandbox"
 

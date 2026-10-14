@@ -1,0 +1,37 @@
+tty: true
+argv:
+  "/bin/claude"
+  "--model"
+  "test-model"
+  "--mcp-config"
+  "/STAGE/mcp.json"
+  "--strict-mcp-config"
+  "--permission-mode"
+  "default"
+  "--allowedTools"
+  "mcp__silo"
+  "--disable-slash-commands"
+  "--append-system-prompt-file"
+  "/STAGE/system-prompt.md"
+  "--"
+  "do the thing"
+env:
+  PATH=/bin
+  HOME=/home/u
+  ANTHROPIC_API_KEY=sk-test
+  DELIVERED=to-agent
+  MCP_TOOL_TIMEOUT=1920000
+--- mcp.json
+{
+  "mcpServers": {
+    "silo": {
+      "headers": {
+        "Authorization": "Bearer TOKEN"
+      },
+      "type": "http",
+      "url": "http://127.0.0.1:41234/mcp"
+    }
+  }
+}
+--- system-prompt.md
+be careful
