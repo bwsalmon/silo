@@ -77,6 +77,9 @@ func cells() []cell {
 	return append(out,
 		cell{name: "claude-unknown-tool", cli: "claude", version: "2.1.197", mode: agentcli.Headless,
 			perm: silofile.RemotePermissions{Mode: silofile.PermSubset, Tools: []string{"Read", "Teleport"}}, code: 76},
+		// Named by earlier rosters, but 2.1.197 drops it in print mode.
+		cell{name: "claude-unavailable-tool", cli: "claude", version: "2.1.197", mode: agentcli.Headless,
+			perm: silofile.RemotePermissions{Mode: silofile.PermSubset, Tools: []string{"Read", "TodoWrite"}}, code: 76},
 		cell{name: "claude-attached", cli: "claude", version: "2.1.197", mode: agentcli.Attached, perm: none, code: 76},
 		cell{name: "claude-unreviewed-version-subset", cli: "claude", version: "9.9.9", mode: agentcli.Headless, perm: subset},
 		cell{name: "codex-unreviewed-none", cli: "codex", version: "0.162.1", mode: agentcli.Headless, perm: none, code: 76},
@@ -98,6 +101,7 @@ func request(c cell) agentcli.Request {
 		a.Auth.Credential = "key"
 		a.Effort = "high"
 		env["OPENAI_API_KEY"] = "sk-test"
+		env["OPENAI_BASE_URL"] = "http://127.0.0.1:9745/v1"
 	}
 	return agentcli.Request{
 		Agent: a, Mode: c.mode, Permissions: c.perm,
