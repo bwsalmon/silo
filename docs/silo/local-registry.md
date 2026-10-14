@@ -15,7 +15,9 @@ step 30's facade endpoints over the same fake. Task 3484 landed step
 test upstream ([§13](#13-staged-implementation-plan) says what is left).
 Task 3486 landed step 33's cache index per sharing domain.
 Task 3488 ran step 35's builders in `sandbox` and wrote what they
-showed into [§9](#9-building-images); the `vm` half is step 35b.
+showed into [§9](#9-building-images). Task 3590 ran them in `vm`
+(step 35b), against granule directly, since silod's `vm` driver isn't
+built yet.
 Task 3489 landed step 36's cases behind `conformance.Target`, run
 against `local/fake` until silod serves the registry.
 
@@ -115,8 +117,9 @@ documentation didn't settle were marked *unverified*. Plan item 35
 release-20261005, against this repository's registry and cache, and
 `runsc tar rootfs-upper` on a real container. It settled the
 `sandbox` claims in [§9](#9-building-images) and the whiteout claim
-in [§7](#commit). The claims about a granule VM stay *unverified*
-until step 35b.
+in [§7](#commit). Step 35b (task 3590) ran the same builders in
+granule VMs at the driver's granule pin and settled the `vm` claims
+in [§9](#9-building-images).
 
 ## Contents
 
@@ -1103,8 +1106,8 @@ fenced, charged and audited.
 
 | Builder | `sandbox` (gVisor) | `vm` (granule) |
 | --- | --- | --- |
-| **kaniko** | **Supported, run in step 35.** Builds, `chown`s to another user, pulls its base through the cache and pushes, with the facade's privileges as they are | **Supported, *unverified*.** kaniko unpacks the base image into its own root and runs `RUN` steps there with no namespaces or mounts, which the wrapped container's chroot allows. Step 35b runs it once local-backend.md item 10 lands |
-| **BuildKit, rootless** | **Not with the facade as it is (run in step 35).** It needs `no-new-privileges` off, and nothing else, below. That is [open question 33](#open-questions) | ***Unverified*.** The same `newuidmap` question, below. Step 35b |
+| **kaniko** | **Supported, run in step 35.** Builds, `chown`s to another user, pulls its base through the cache and pushes, with the facade's privileges as they are | **Supported, run in step 35b.** The same build, push and cache pull, in granule-container's chroot. It needs `--force`, because the guest has none of the files kaniko takes for a container |
+| **BuildKit, rootless** | **Not with the facade as it is (run in step 35).** It needs `no-new-privileges` off, and nothing else, below. That is [open question 33](#open-questions) | **No, and not for a privilege the facade withholds (run in step 35b).** The guest doesn't set `no-new-privileges`, so `newuidmap` isn't what stops it. The kernel refuses a user namespace to a chrooted process, and granule-container chroots. BuildKit as root fails in the same chroot. Both need a granule change, below |
 
 ### What step 35 ran
 
@@ -1150,7 +1153,9 @@ matter:
   `/run/systemd/container` and the cgroup paths (`pkg/util/proc`).
   Step 35's runs passed the check without `--force`, but only because
   Docker writes `/.dockerenv`, which silod's driver doesn't. So keep
-  `--force`, as kaniko's README says to under gVisor.
+  `--force`, as kaniko's README says to under gVisor. In `vm` it is
+  required: step 35b's run without it stopped at "kaniko should only
+  be run inside of a container".
 - kaniko "by itself **does not** make it safe to run untrusted builds",
   and "relies on the security features of your container runtime"
   (its README, "Security"). Here that runtime is the silo's class,
@@ -1195,19 +1200,19 @@ container recipe runs, with `--security-opt seccomp=unconfined`,
   rootlesskit. Its first bind mount then fails with `operation not
   permitted`, because Docker's default capabilities have no
   `CAP_SYS_ADMIN`.
-- **In `vm`**, the guest kernel is a full Linux kernel, so overlay and
-  user namespaces work if granule's guest kernel enables them. The
-  `newuidmap` question is the same, and depends on whether
-  granule-container applies `no-new-privileges` inside the guest
-  (*unverified*, step 35b).
+- **In `vm`** it doesn't get as far as `newuidmap`. Step 35b found
+  that granule-container sets no `no-new-privileges` (`NoNewPrivs: 0`
+  in the guest), so file capabilities would apply. But rootlesskit
+  can't create its user namespace, because the workload runs in a
+  `chroot`. See [What step 35b ran](#what-step-35b-ran).
 
 **Where a builder doesn't work, do this:**
 
 - **Use kaniko** in that class. It covers Dockerfile builds.
 - **If BuildKit is needed** (multi-platform output, cache mounts,
-  build secrets), it doesn't run in `sandbox` today. If step 35b shows
-  it works in `vm`, run the builder in the `vm` class, if the silo's
-  `isolation` policy allows it.
+  build secrets), it doesn't run in either class today. In `sandbox`
+  it is a facade setting (open question 33). In `vm` it is
+  granule-container's `chroot`, which a granule change would replace.
 - **What would make it run in `sandbox`** is one setting: letting a
   declared builder container run without `no-new-privileges`, so that
   `newuidmap`'s file capabilities apply. No added capability, seccomp
@@ -1216,6 +1221,71 @@ container recipe runs, with `--security-opt seccomp=unconfined`,
   sandbox (gVisor's tutorial: "gVisor never runs with capabilities on
   the host Linux kernel"). But it is a facade change, so it is
   [open question 33](#open-questions), and step 35 doesn't make it.
+
+### What step 35b ran
+
+Step 35b (task 3590) ran the same builders in `vm` on 2026-10-14. The
+rig is `pkg/registry/testdata/builders/vm.sh`:
+
+- **No silod.** silod's `vm` driver, the `runtime.Driver` half of
+  local-backend.md item 10, isn't built yet. So each builder image was
+  wrapped with `granule-shim wrap` and booted with the flags
+  `granule vm create` gives a VM container: `/dev/kvm` and
+  `/dev/net/tun`, `NET_ADMIN` only, `no-new-privileges`. These are
+  the flags the driver's spec copies (`TestVMCreateMatchesGranule`).
+  The workload's process and user were set with
+  `CHV_CONTAINER_OVERRIDE`, as the driver sets them. Inside the guest
+  the workload runs where the driver's would: in granule-container's
+  `chroot`.
+- **granule** was built at the driver's pin (`3ca10a3`,
+  `granule.Commit`), with two parts taken from the published
+  `ghcr.io/gke-labs/granule:latest` (2026-09-21) because GitHub
+  release downloads were blocked: `cloud-hypervisor` (v53.0, the
+  pinned version) and the guest kernel (6.16.9, the
+  cloud-hypervisor release build, not the one granule now compiles
+  with its own config). granule-container, the agents and the guest
+  parts are the pin's own.
+- **The registry and builders** were step 35's: `TestBuildersLive`,
+  kaniko v1.25.19 from the fork, `moby/buildkit:v0.34.0-rootless`, the
+  same Dockerfile. A wrapped workload sees its image's own
+  `/etc/hosts`, so the rig names the registry by the bridge's address
+  instead of `registry.silo.internal`.
+
+What it showed:
+
+- **kaniko works, with `--force`.** It pulled `alpine` through the
+  cache (named in full, as in `sandbox`), ran the `RUN` step as the
+  guest's root, and pushed. The last layer holds `owned` as
+  `1234/1234` and `etc/.wh.motd`. Without `--force` it refuses to
+  start. The exit status reached `docker run` both times.
+- **The guest grants everything inside the chroot.** The workload, as
+  root, has every capability (`CapEff: 000001ffffffffff`) and
+  `NoNewPrivs: 0`. granule-container sets neither, by design
+  (`cmd/granule-container`: "no namespaces, no cgroups and no seccomp
+  here"). The VM container's own `no-new-privileges` is on the host
+  side and doesn't reach the guest. So the facade's flags don't stop a
+  builder in `vm`, and open question 33 doesn't arise there.
+- **No user namespace in the chroot.** The guest kernel has user
+  namespaces (`/proc/sys/user/max_user_namespaces` is 862), and
+  `unshare -U` works in the same guest outside the chroot. Inside it,
+  `unshare -U` fails with `EPERM`, even for root with every capability.
+  This is the kernel's rule for `CLONE_NEWUSER` from a process whose
+  root isn't its mount namespace's root (unshare(2), `EPERM`). So
+  rootlesskit stops at `fork/exec /proc/self/exe: operation not
+  permitted`, before it runs `newuidmap`.
+- **BuildKit as root fails too.** With `user` 0, `buildkitd` refuses
+  `--oci-worker-no-process-sandbox` ("can't enable NoProcessSandbox
+  without Rootless"). Without that flag it reaches runc. runc needs a
+  cgroup mount, which granule-container doesn't make; the workload, as
+  root, can mount `cgroup2` itself. runc then fails with `mount
+  dst=/, flags=MS_REC|MS_SLAVE: invalid argument`, because the
+  chroot's `/` isn't a mount point.
+
+Both BuildKit failures come from the `chroot`, not from a privilege
+the facade withholds. If granule-container ran the workload in its own
+mount namespace and `pivot_root`ed into the wrapped root, with a
+cgroup mount, both modes would get the root they expect. That is a
+granule change (filed from task 3590), not a silo one.
 
 ### Using the registry and the cache from a container
 
@@ -1903,9 +1973,22 @@ earlier depends on them. Each can be filed on its own, in this order.
     profile name. The run also showed that runsc's `rootfs-upper`
     writes later whiteouts as hard links to the first, which the
     facade's `commit` copied through as links. That is fixed, with a
-    test on runsc's own tar. *Left, as step 35b:* the same runs in
-    `vm` once item 10 lands, and the runs through silod's own driver
-    and registry once steps 27b and 30's wiring land.
+    test on runsc's own tar.
+
+    *Done for `vm` in task 3590 (step 35b)*, as
+    [§9](#what-step-35b-ran) says. It ran against granule at the
+    driver's pin, booted with `granule vm create`'s flags, because
+    silod's `vm` driver isn't built yet.
+    `pkg/registry/testdata/builders/vm.sh` runs it again. kaniko works,
+    and needs `--force`. granule-container applies no
+    `no-new-privileges` and drops no capability in the guest. But it
+    runs the workload in a `chroot`, where the kernel refuses a user
+    namespace and runc can't set up a root, so neither rootless
+    BuildKit nor BuildKit as root runs. That needs a granule change,
+    not a facade one, so open question 33 stays a `sandbox` question.
+    *Left:* the runs through silod's own drivers and registry. Steps
+    27b and 30's wiring have landed, so `sandbox` can be re-run
+    through silod's gVisor driver. `vm` waits for item 10's driver.
 36. **Registry and cache conformance cases** in `local-conformance`,
     as listed in [§12](#12-conformance-cases). Depends on 12 and on
     28 to 35.
@@ -2087,7 +2170,9 @@ L76. **containerd's collector is the only one.** silod removes roots
     needs no added capability, seccomp, AppArmor or `systempaths`
     option ([§9](#9-building-images)). So the question is whether a
     declared builder container may run with new privileges allowed.
-    `vm` waits for step 35b.
+    *Not a `vm` question (step 35b):* the guest already grants
+    rootless BuildKit every privilege it asks for. What stops it there
+    is granule-container's `chroot`.
 34. **Pointing tools at the cache automatically.** Should silod set
     well-known configuration (`/etc/containers/registries.conf.d/`,
     a `buildkitd.toml`, containerd's `hosts.toml`) in containers that
