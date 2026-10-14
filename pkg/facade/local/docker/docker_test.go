@@ -470,6 +470,7 @@ func TestRefusals(t *testing.T) {
 		{403, "Silo's own namespace", obj{"Image": "alpine", "Labels": obj{"dev.silo.silo": "x"}}},
 		{400, "field MacAddress is not allowed", obj{"Image": "alpine", "MacAddress": "02:42:00:00:00:01"}},
 		{400, "field HostConfig.Dns is not allowed", hc(obj{"Dns": []string{"8.8.8.8"}})},
+		{400, "field HostConfig.MemorySwappiness is not allowed", hc(obj{"MemorySwappiness": 60})},
 		{400, "unknown runtime", hc(obj{"Runtime": "runc-custom"})},
 		{400, "can't be published", hc(obj{"PortBindings": obj{"80/tcp": []obj{{"HostPort": "2375"}}}})},
 		{400, "EndpointsConfig.x.MacAddress", obj{"Image": "alpine", "NetworkingConfig": obj{"EndpointsConfig": obj{"x": obj{"MacAddress": "02:42:00:00:00:01"}}}}},
@@ -478,10 +479,10 @@ func TestRefusals(t *testing.T) {
 		e.fail(c.code, c.want, e.a, "POST", path, c.body)
 	}
 	// Defaults are not refused: what the docker CLI sends for a plain
-	// run.
+	// run, MemorySwappiness -1 (unset) included, as 29.x sends it.
 	e.ok(e.a, "POST", path, obj{"Image": "alpine", "MacAddress": "", "HostConfig": obj{"Privileged": false, "NetworkMode": "default",
 		"Binds": []string{"cache:/cache:ro"}, "LogConfig": obj{"Type": "json-file", "Config": obj{}}, "Runtime": "runc",
-		"SecurityOpt": []string{"no-new-privileges"}}})
+		"SecurityOpt": []string{"no-new-privileges"}, "MemorySwappiness": -1}})
 	// The named volume was made, and charged.
 	if got := e.used(e.a, ClassVolumes); got != 2 {
 		t.Errorf("volumes: %d, want cache and the anonymous /data", got)

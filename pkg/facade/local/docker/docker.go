@@ -375,6 +375,11 @@ func (s *Server) readBody(q *request) error {
 		return err
 	}
 	if q.route.pattern == "/containers/create" {
+		// Docker's CLI sends MemorySwappiness -1, the engine's "unset",
+		// on every create (29.x); any other value is still refused.
+		if hc, _ := q.body["HostConfig"].(map[string]any); hc != nil && hc["MemorySwappiness"] == float64(-1) {
+			delete(hc, "MemorySwappiness")
+		}
 		if err := refuseHost(q.body); err != nil {
 			return err
 		}
