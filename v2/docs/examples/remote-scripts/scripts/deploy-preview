@@ -1,0 +1,18 @@
+#!/bin/sh
+# silo: Deploy a preview of a branch of acme/widgets and print its URL.
+# silo-args: <branch>
+#
+# Takes exactly one argument and uses it only as data: it is checked
+# against a pattern and passed as a single quoted argument, never
+# evaluated. That is what makes it safe to expose with arbitrary
+# arguments (design §12.4).
+set -eu
+if [ "$#" -ne 1 ]; then
+  echo "usage: deploy-preview <branch>" >&2
+  exit 2
+fi
+branch=$1
+case $branch in
+  *[!A-Za-z0-9._/-]*|-*|"") echo "deploy-preview: bad branch name" >&2; exit 2 ;;
+esac
+exec preview-cli deploy --repo acme/widgets --branch "$branch" --token-env PREVIEW_TOKEN

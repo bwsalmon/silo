@@ -1,0 +1,61 @@
+# A grain task run as grain would generate it (grain.md §2), shown as
+# YAML for reading. Grain builds this as a Go value and calls
+# silo.Start; the caller MCP server and the credentials' values are
+# passed in silo.Options, not written here.
+#
+#   silo run --json ./grain-run      # the subprocess form
+silo: v2
+name: grain-task-3800
+
+agent:
+  cli: claude
+  model: claude-opus-5-5
+  auth: {credential: team-anthropic}   # the connection grain's pool picked
+  mode: headless
+  prompt: prompts/task.md
+  limits:
+    deadline: 2h
+
+location:
+  kind: local
+
+remote_permissions: none
+
+sandboxes:
+  - name: sandbox
+    kind: granule                      # stage 8; `container` until then
+    image: ghcr.io/bwsalmon/grain-guest:2026-10
+    cpus: 4
+    memory: 8Gi
+    workdir: /home/debian/work
+    repos: [silo, grain-src]
+    network: {allow: [proxy.golang.org, registry.npmjs.org]}
+    package_cache: {url: "http://172.17.0.1:3142", ca: /etc/grain/pkgcache-ca.pem}
+    model_access: [anthropic]
+    lifetime: persistent               # grain re-attaches it on retry
+
+git:
+  - name: silo
+    repo: github.com/bwsalmon/silo
+    access: push
+    push: [refs/heads/grain/eu/task-3800]
+    force: false                       # the fast-forward proof
+    credential: github
+  - name: grain-src
+    repo: github.com/bwsalmon/grain
+    access: read
+    credential: github
+
+credentials:
+  - name: github
+    from: {ambient: gh}                # grain #3719; or the team's token
+    to: [{proxy: git}]
+  - name: team-anthropic
+    from: {env: GRAIN_CONNECTION_KEY}  # passed by value by the library caller
+    to: [{proxy: model}]
+
+# grain's task tools (ask_question, comment_on_issue, open_pull_request,
+# wait_for_checks, ...) arrive as a caller MCP server:
+#   silo.Options{MCP: []silo.CallerServer{{Name: "grain", Socket: ..., Token: ..., Blocking: [...]}}}
+# or, for the subprocess form:
+#   silo run --json --caller-mcp grain=unix:///run/grain/s-123.sock --caller-mcp-token-file ...

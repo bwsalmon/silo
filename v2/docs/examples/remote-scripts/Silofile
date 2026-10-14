@@ -1,0 +1,38 @@
+# Journey 3 (design §12): the agent runs on devbox over ssh, with
+# devbox's own credentials and model login. The only way back to this
+# machine is the two scripts in scripts/, through the gateway's reverse
+# tunnel.
+#
+#   silo run ./remote-scripts
+silo: v2
+name: devbox-preview
+description: Work on widgets on devbox; deploy previews and read logs from my laptop.
+
+agent:
+  cli: codex
+  auth: ambient              # codex's login on devbox
+  mode: interactive
+  workdir: ~/src/widgets     # on devbox
+
+location:
+  kind: ssh
+  ssh:
+    host: devbox             # an alias in ~/.ssh/config; host keys checked
+
+remote_permissions: all      # devbox is the agent's to use
+
+local:
+  scripts:
+    dir: scripts             # every executable here, snapshotted at start
+    list:
+      - path: scripts/deploy-preview
+        approve: true        # ask me before each deploy
+  workdir: .
+  timeout: 10m
+  output_cap: 1MiB
+
+credentials:
+  - name: preview-token
+    from: {store: acme-preview}
+    to:
+      - {local: deploy-preview, env: PREVIEW_TOKEN}

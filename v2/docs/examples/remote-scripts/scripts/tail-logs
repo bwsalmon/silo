@@ -1,0 +1,9 @@
+#!/bin/sh
+# silo: Print the last lines of the preview server's log for a branch.
+# silo-args: <branch> [lines, default 200]
+set -eu
+branch=${1:?usage: tail-logs <branch> [lines]}
+lines=${2:-200}
+case $branch in *[!A-Za-z0-9._/-]*|-*) echo "tail-logs: bad branch name" >&2; exit 2 ;; esac
+case $lines in *[!0-9]*|"") echo "tail-logs: lines must be a number" >&2; exit 2 ;; esac
+exec tail -n "$lines" -- "$HOME/.cache/preview/logs/$(printf %s "$branch" | tr / _).log"
