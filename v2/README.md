@@ -67,6 +67,7 @@ changing a type, run `go generate ./silofile` and
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
+| `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. Wired into `silo run` by stage 7b. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
 | `internal/procgroup` | Process-group cancellation, copied from grain's `pkg/procgroup`. |
 | `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
@@ -86,3 +87,7 @@ with `busybox:1.37`, and run the same suite with `kind: gvisor`. They
 skip where there is no Docker or Podman, or no runsc registered as a
 runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
 `SILO_V2_REQUIRE_RUNSC=1`, which turn those skips into failures.
+
+`gitproxy`'s tests clone and push with the real `git` binary, through
+the proxy, to `git http-backend` over repositories on disk. They skip
+without git; CI sets `SILO_V2_REQUIRE_GIT=1`.

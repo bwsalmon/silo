@@ -3,8 +3,9 @@
 # reaches, so tests.yml's jobs (v1's) do not test it and this job does
 # not test v1. It formats, builds, vets and race-tests the v2 module,
 # including the gateway's tests against real container and gVisor
-# sandboxes (SILO_V2_REQUIRE_DOCKER and SILO_V2_REQUIRE_RUNSC make a
-# missing Docker or runsc a failure here rather than a skip).
+# sandboxes and gitproxy's against real git clients (SILO_V2_REQUIRE_DOCKER,
+# SILO_V2_REQUIRE_RUNSC and SILO_V2_REQUIRE_GIT make a missing Docker, runsc
+# or git a failure here rather than a skip).
 name: v2
 
 on:
@@ -73,4 +74,5 @@ jobs:
         env:
           SILO_V2_REQUIRE_DOCKER: "1"
           SILO_V2_REQUIRE_RUNSC: "1"
+          SILO_V2_REQUIRE_GIT: "1"
         run: cd v2 && go test -race -timeout 15m ./...
