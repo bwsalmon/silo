@@ -3,15 +3,19 @@ package session
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/bwsalmon/silo/v2/agentcli"
 	"github.com/bwsalmon/silo/v2/credentials"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/gateway/proxy"
+	sshloc "github.com/bwsalmon/silo/v2/location/ssh"
+	"github.com/bwsalmon/silo/v2/mcp"
 	"github.com/bwsalmon/silo/v2/mcp/sources"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -29,7 +33,11 @@ var minimalEnv = []string{"PATH", "HOME", "USER", "LANG", "TMPDIR"}
 // and .silo/lock.json records. It names variables and headers, never
 // their values.
 type MCPResolved struct {
-	Name     string   `json:"name"`
+	Name string `json:"name"`
+	// Where is remote, with Host the agent host, for a server on the
+	// agent host.
+	Where    string   `json:"where,omitempty"`
+	Host     string   `json:"host,omitempty"`
 	From     string   `json:"from,omitempty"`
 	File     string   `json:"file,omitempty"`
 	Command  []string `json:"command,omitempty"`
@@ -49,6 +57,20 @@ type mcpResolver struct {
 	// delivered[server][env] is a credential delivered to {mcp: server,
 	// env}. In a dry run the values are placeholders.
 	delivered map[string]map[string]string
+	// remote is the agent host, for where: remote; nil when the location
+	// has none.
+	remote *remoteSide
+}
+
+// remoteSide is what resolving a where: remote entry reads from the
+// agent host (design §13.1, §13.3).
+type remoteSide struct {
+	host string
+	// environ is the remote login environment, unless err says why it
+	// could not be read.
+	environ []string
+	err     error
+	read    func(path string) ([]byte, error)
 }
 
 func newMCPResolver(f *silofile.Silofile, environ []string, vals map[string]credentials.Value) *mcpResolver {
@@ -71,24 +93,42 @@ func newMCPResolver(f *silofile.Silofile, environ []string, vals map[string]cred
 	return r
 }
 
-func (r *mcpResolver) getenv(k string) (string, bool) {
-	for i := len(r.environ) - 1; i >= 0; i-- {
-		if n, v, ok := strings.Cut(r.environ[i], "="); ok && n == k {
+func lookupEnv(environ []string, k string) (string, bool) {
+	for i := len(environ) - 1; i >= 0; i-- {
+		if n, v, ok := strings.Cut(environ[i], "="); ok && n == k {
 			return v, true
 		}
 	}
 	return "", false
 }
 
-// resolve resolves one entry. where: remote is stage 5b's.
+// resolve resolves one entry. A where: remote one is resolved against
+// the agent host: its config file is read there, and its environment
+// filtered from the remote login environment.
 func (r *mcpResolver) resolve(m silofile.MCPServer) (proxy.Spec, MCPResolved, error) {
 	res := MCPResolved{Name: m.Name, Tools: m.Tools, Required: m.Required == nil || *m.Required, Restart: m.Restart}
 	if res.Restart == "" {
 		res.Restart = "never"
 	}
 	spec := proxy.Spec{Name: m.Name, Allow: m.Tools, Required: res.Required, Restart: m.Restart == "on-failure"}
+	environ := r.environ
+	getenv := func(k string) string { v, _ := lookupEnv(environ, k); return v }
+	opts := sources.Options{Folder: r.f.Folder, Getenv: getenv}
 	if m.Where == "remote" {
-		return spec, res, fmt.Errorf("mcp %s: where: remote is not built yet; stage 5b adds it", m.Name)
+		if r.remote == nil {
+			return spec, res, fmt.Errorf("mcp %s: where: remote runs a server on the agent host, and location.kind %s has no host but this one: use where: local", m.Name, orLocal(r.f.Location.Kind))
+		}
+		if r.remote.err != nil {
+			return spec, res, fmt.Errorf("mcp %s: %w", m.Name, r.remote.err)
+		}
+		res.Where, res.Host = "remote", r.remote.host
+		environ = r.remote.environ
+		// Relative paths are the remote home directory's, where remote
+		// servers run: the silo folder is not on the agent host.
+		opts = sources.Options{Folder: getenv("HOME"), Getenv: getenv, ReadFile: r.remote.read}
+		if strings.HasPrefix(m.From, "mcp-json:") && !strings.Contains(m.From, "@") {
+			return spec, res, fmt.Errorf("mcp %s: %s is where: remote, so its file is read on %s, which has no silo folder: name it with %s@<path>", m.Name, m.From, r.remote.host, m.From)
+		}
 	}
 	if m.Tools != nil && len(m.Tools) == 0 {
 		spec.Allow = []string{}
@@ -101,7 +141,7 @@ func (r *mcpResolver) resolve(m silofile.MCPServer) (proxy.Spec, MCPResolved, er
 		if err != nil {
 			return spec, res, fmt.Errorf("mcp %s: %w", m.Name, err)
 		}
-		e, err := sources.Resolve(ref, sources.Options{Folder: r.f.Folder, Getenv: func(k string) string { v, _ := r.getenv(k); return v }})
+		e, err := sources.Resolve(ref, opts)
 		if err != nil {
 			return spec, res, fmt.Errorf("mcp %s: %w", m.Name, err)
 		}
@@ -122,7 +162,7 @@ func (r *mcpResolver) resolve(m silofile.MCPServer) (proxy.Spec, MCPResolved, er
 			headers[k] = v
 		}
 		for k, v := range cfgHeaders {
-			val, err := r.configValue(m, "header", k, v, false)
+			val, err := r.configValue(m, environ, "header", k, v, false)
 			if err != nil {
 				return spec, res, err
 			}
@@ -139,20 +179,20 @@ func (r *mcpResolver) resolve(m silofile.MCPServer) (proxy.Spec, MCPResolved, er
 	}
 	env := map[string]string{}
 	if m.InheritEnv.All {
-		for _, kv := range r.environ {
+		for _, kv := range environ {
 			if k, v, ok := strings.Cut(kv, "="); ok {
 				env[k] = v
 			}
 		}
 	}
 	for _, k := range append(append([]string(nil), minimalEnv...), m.InheritEnv.Names...) {
-		if v, ok := r.getenv(k); ok {
+		if v, ok := lookupEnv(environ, k); ok {
 			env[k] = v
 		}
 	}
 	var named []string
 	for k, v := range cfgEnv {
-		val, err := r.configValue(m, "env", k, v, true)
+		val, err := r.configValue(m, environ, "env", k, v, true)
 		if err != nil {
 			return spec, res, err
 		}
@@ -169,7 +209,10 @@ func (r *mcpResolver) resolve(m silofile.MCPServer) (proxy.Spec, MCPResolved, er
 	}
 	sort.Strings(named)
 	res.Env = dedupe(named)
-	spec.Command, spec.Dir = command, r.f.Folder
+	spec.Command = command
+	if m.Where != "remote" {
+		spec.Dir = r.f.Folder
+	}
 	for _, k := range sortedKeys(env) {
 		spec.Env = append(spec.Env, k+"="+env[k])
 	}
@@ -181,8 +224,9 @@ func (r *mcpResolver) resolve(m silofile.MCPServer) (proxy.Spec, MCPResolved, er
 // env: key} replaces it. Otherwise an inline value that looks like a
 // secret is refused, and each ${VAR} it references is filled from a
 // credential delivered with env: VAR or, for a launched server, from
-// silo's environment when VAR is inherited.
-func (r *mcpResolver) configValue(m silofile.MCPServer, kind, key, v string, launched bool) (string, error) {
+// silo's environment (the remote login environment, for where: remote)
+// when VAR is inherited.
+func (r *mcpResolver) configValue(m silofile.MCPServer, environ []string, kind, key, v string, launched bool) (string, error) {
 	delivered := r.delivered[m.Name]
 	if c, ok := delivered[key]; ok {
 		return c, nil
@@ -197,7 +241,7 @@ func (r *mcpResolver) configValue(m silofile.MCPServer, kind, key, v string, lau
 			return c, true
 		}
 		if launched && (m.InheritEnv.All || contains(m.InheritEnv.Names, ref)) {
-			return r.getenv(ref)
+			return lookupEnv(environ, ref)
 		}
 		missing = append(missing, ref)
 		return "", false
@@ -211,6 +255,13 @@ func (r *mcpResolver) configValue(m silofile.MCPServer, kind, key, v string, lau
 			m.Name, m.From, kind, key, missing[0], how, m.Name, missing[0])
 	}
 	return val, nil
+}
+
+func orLocal(kind string) string {
+	if kind == "" {
+		return "local"
+	}
+	return kind
 }
 
 func contains(list []string, s string) bool {
@@ -244,19 +295,53 @@ func sortedKeys(m map[string]string) []string {
 // mcpOptions lets tests shorten the proxy's timeouts.
 var mcpOptions proxy.Options
 
-// provideMCP starts the Silofile's local MCP servers (design §13) and
-// serves their allowed tools through the gateway.
+// remoteMCPLocation is a location with an agent host of its own that
+// where: remote servers run on or are reached at, over its connection
+// (design §13.2): the ssh location.
+type remoteMCPLocation interface {
+	Host() *sshloc.Host
+	LaunchMCP(name string, argv, env []string) (sshloc.RemoteServer, error)
+	ForwardMCP(ctx context.Context, name, rawURL string) (*http.Client, error)
+	Gone() error
+}
+
+func hasRemote(f *silofile.Silofile) bool {
+	for _, m := range f.MCP {
+		if m.Where == "remote" {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteFrom reads what resolving where: remote entries needs of h.
+func remoteFrom(ctx context.Context, h *sshloc.Host) *remoteSide {
+	env, err := h.Environ(ctx)
+	return &remoteSide{host: h.Name(), environ: env, err: err, read: func(p string) ([]byte, error) { return h.ReadFile(ctx, p) }}
+}
+
+// provideMCP starts the Silofile's MCP servers (design §13), local and
+// on the agent host, and serves their allowed tools through the gateway.
 func provideMCP(ctx context.Context, s *Session) ([]gateway.Tool, Undo, error) {
 	if len(s.File.MCP) == 0 {
 		return nil, nil, nil
 	}
 	r := newMCPResolver(s.File, s.environ(), s.Credentials)
+	rl, _ := s.Location.(remoteMCPLocation)
+	if rl != nil && hasRemote(s.File) {
+		r.remote = remoteFrom(ctx, rl.Host())
+	}
 	var specs []proxy.Spec
 	lock := map[string]MCPResolved{}
 	for _, m := range s.File.MCP {
 		spec, res, err := r.resolve(m)
 		if err != nil {
 			return nil, nil, err
+		}
+		if m.Where == "remote" {
+			if spec, err = remoteSpec(ctx, rl, spec); err != nil {
+				return nil, nil, fmt.Errorf("mcp %s: %w", m.Name, err)
+			}
 		}
 		if spec.Command != nil {
 			f, err := os.OpenFile(filepath.Join(s.StateDir, "mcp-"+m.Name+".stderr"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -278,12 +363,17 @@ func provideMCP(ctx context.Context, s *Session) ([]gateway.Tool, Undo, error) {
 	}
 	p := proxy.New(opts)
 	undo := func(ctx context.Context) error { return p.Close(ctx) }
-	for _, sp := range specs {
+	for _, m := range s.File.MCP {
+		res := lock[m.Name]
+		on := ""
+		if res.Where == "remote" {
+			on = " on " + res.Host
+		}
 		switch {
-		case sp.URL != "":
-			s.status("mcp %s: connecting to %s", sp.Name, sp.URL)
+		case res.URL != "":
+			s.status("mcp %s: connecting to %s%s", m.Name, res.URL, on)
 		default:
-			s.status("mcp %s: starting %s", sp.Name, sp.Command[0])
+			s.status("mcp %s: starting %s%s", m.Name, res.Command[0], on)
 		}
 	}
 	tools, err := p.Start(ctx, specs)
@@ -294,10 +384,55 @@ func provideMCP(ctx context.Context, s *Session) ([]gateway.Tool, Undo, error) {
 	return tools, undo, nil
 }
 
+// remoteSpec makes a resolved where: remote entry one the proxy reaches
+// over the location's connection: a launched server runs as a channel
+// of the master, with the local ssh as the proxy's process, and a url:
+// server is dialled through a local forward. A forward that fails is the
+// server not answering, which required: decides on like any other.
+func remoteSpec(ctx context.Context, rl remoteMCPLocation, spec proxy.Spec) (proxy.Spec, error) {
+	spec.Gone = rl.Gone
+	if spec.URL != "" {
+		hc, err := rl.ForwardMCP(ctx, spec.Name, spec.URL)
+		if err != nil {
+			url := spec.URL
+			spec.URL = ""
+			spec.Dial = func(context.Context) (mcp.Conn, error) {
+				return nil, fmt.Errorf("forwarding to %s: %w", url, err)
+			}
+			return spec, nil
+		}
+		spec.HTTP = hc
+		return spec, nil
+	}
+	rs, err := rl.LaunchMCP(spec.Name, spec.Command, spec.Env)
+	if err != nil {
+		return spec, err
+	}
+	// The local ssh runs with silo's own environment, as every other
+	// ssh silo runs does; the server's is in the env file.
+	spec.Command, spec.Env, spec.Dir = rs.Argv, os.Environ(), ""
+	spec.Prelaunch, spec.Reap = rs.Prelaunch, rs.Reap
+	return spec, nil
+}
+
 // checkMCP is --dry-run's check of mcp[] (design §2.4): every server
 // resolvable, its from: name found, a launched server's binary present.
-func checkMCP(_ context.Context, f *silofile.Silofile, environ []string) []CheckResult {
+// For where: remote it reads the agent host on a connection of its own.
+func checkMCP(ctx context.Context, f *silofile.Silofile, environ []string) []CheckResult {
+	var h *sshloc.Host
+	if hasRemote(f) && f.Location.Kind == "ssh" && f.Location.SSH != nil {
+		h = sshloc.DirectHost(SSHTransport(f.Location.SSH, func(k string) string { return agentcli.Getenv(environ, k) }))
+	}
+	return CheckMCPOn(ctx, f, environ, h)
+}
+
+// CheckMCPOn is checkMCP with the agent host h, nil for none, for
+// where: remote entries. It changes nothing, here or there.
+func CheckMCPOn(ctx context.Context, f *silofile.Silofile, environ []string, h *sshloc.Host) []CheckResult {
 	r := newMCPResolver(f, environ, nil)
+	if h != nil {
+		r.remote = remoteFrom(ctx, h)
+	}
 	who := "the invoking user"
 	if u, err := user.Current(); err == nil {
 		who = u.Username
@@ -311,29 +446,46 @@ func checkMCP(_ context.Context, f *silofile.Silofile, environ []string) []Check
 			out = append(out, c)
 			continue
 		}
+		remote := res.Where == "remote"
+		on, runner := "", who
+		if remote {
+			on = " on " + res.Host
+			runner = "the remote user"
+			if u, ok := lookupEnv(r.remote.environ, "USER"); ok && u != "" {
+				runner = u
+			}
+			runner += " on " + res.Host
+		}
 		var b strings.Builder
 		if res.From != "" {
-			fmt.Fprintf(&b, "%s in %s: ", res.From, res.File)
+			fmt.Fprintf(&b, "%s in %s%s: ", res.From, res.File, on)
 		}
 		if spec.URL != "" {
-			fmt.Fprintf(&b, "connects to %s, which silo neither starts nor stops", spec.URL)
+			fmt.Fprintf(&b, "connects to %s%s, which silo neither starts nor stops", spec.URL, on)
+			if remote {
+				b.WriteString(", through a local forward on the ssh connection")
+			}
 			if len(res.Headers) > 0 {
 				fmt.Fprintf(&b, "; headers %s", strings.Join(res.Headers, ", "))
 			}
 			c.OK = true
 		} else {
-			fmt.Fprintf(&b, "launches %s", quoteArgv(spec.Command))
+			fmt.Fprintf(&b, "launches %s%s", quoteArgv(spec.Command), on)
+			if remote {
+				b.WriteString(" over the ssh connection")
+			}
 			if len(res.Env) > 0 {
 				fmt.Fprintf(&b, "; env %s", strings.Join(res.Env, ", "))
 			}
-			fmt.Fprintf(&b, "; runs as %s with access to their files", who)
-			path := ""
-			for _, kv := range spec.Env {
-				if strings.HasPrefix(kv, "PATH=") {
-					path = kv[5:]
-				}
+			fmt.Fprintf(&b, "; runs as %s with access to their files", runner)
+			path, _ := lookupEnv(spec.Env, "PATH")
+			var bin string
+			if remote {
+				bin, err = h.LookPath(ctx, spec.Command[0], path)
+			} else {
+				bin, err = lookPath(spec.Command[0], path, f.Folder)
 			}
-			if bin, err := lookPath(spec.Command[0], path, f.Folder); err != nil {
+			if err != nil {
 				fmt.Fprintf(&b, "; %v", err)
 			} else {
 				fmt.Fprintf(&b, " (%s)", bin)

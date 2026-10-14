@@ -1563,8 +1563,8 @@ every launched server: "runs as <user> with access to their files".
   through the allowlist and sends `notifications/tools/list_changed` to
   the CLI.
 
-As built in stage 5a (`where: local`; `where: remote` is refused at
-run time until stage 5b):
+As built in stage 5a (`where: local`; stage 5b's `where: remote`
+follows):
 
 - **Transports.** A `url:` server is tried as Streamable HTTP first. If
   the POST of `initialize` is answered 400, 404 or 405, silo falls back
@@ -1613,6 +1613,57 @@ run time until stage 5b):
   for launched ones. It does not contact `url:` servers. `silo run`
   records the resolved entries (names of variables and headers, never
   values) under `mcp` in `.silo/lock.json`; `--dry-run` writes nothing.
+
+As built in stage 5b (`where: remote`):
+
+- **Launch.** A `command:` server runs as
+  `ssh -S <ctl> -T <host> -- exec /bin/sh -c '<preamble>'`, a channel of
+  the master that is the proxy's process for that server, so its
+  allowlist, restart and dead-server handling are a local server's. The
+  preamble records its pid (sshd makes it the leader of its own session
+  and process group) beside the env file, then runs
+  `env -i /bin/sh -c '. <env file>; rm -f <env file>; exec "$@"'`, so the
+  server has exactly the filtered environment, and the file is gone
+  before the server starts. Before each launch, the env file is written
+  with `umask 077` and `cat >` over the master. A remote server runs in
+  the remote home directory (the silo folder is not on the agent host).
+- **Environment.** The remote login environment is what `env` prints
+  over the master, read once per session; the minimal names,
+  `inherit_env` and `${VAR}` references are filled from it as from
+  silo's own for a local server.
+- **`url:`.** The local end of the `-L` forward is a Unix socket beside
+  the master's control socket (in the 0700 session directory), not a
+  loopback port, so no other local user can reach the server through
+  it. silo dials the socket but keeps the entry's URL, so the `Host`
+  header and TLS name the server as the agent host sees it. A forward
+  that fails is the server not answering: `required:` decides.
+- **Reading configs.** A `from:` file is read with `cat` over the
+  master (on its own connection, for `--dry-run`), with `HOME` and
+  `CODEX_HOME` from the remote login environment. A relative
+  `mcp-json` path is the remote home directory's, and `mcp-json:<name>`
+  with no `@<path>` is refused for `where: remote`: its defaults are in
+  the silo folder, which is not there. `where: remote` with
+  `location.kind: local` is refused when the session starts (and by
+  `--dry-run`): there is no agent host but this machine.
+- **Teardown.** Closing a remote server is SIGTERM to its local ssh,
+  which closes the channel; sshd hangs the server's stdin and stdout
+  up. Then, over the master, silo waits up to 5 s for the server's
+  process group to go, sends it SIGKILL, and removes its pid and env
+  files. After a crash, `silo gc` kills the local ssh (its process group
+  is in `session.json`), which closes the channel the same way; the
+  remote session directory is removed by the next `silo run` to that
+  host or `silo gc --host`, which does not kill by recorded pid, since a
+  pid on another host may have been reused since.
+- **A dropped connection.** Once the master has exited, every remote
+  server's tools answer "MCP server <name> is unreachable: the
+  connection to <host> is gone", a server whose channel ended with it is
+  not restarted whatever `restart:` says, and the session exits 75 as
+  in §12.
+- **`--dry-run`** reaches the agent host on its own BatchMode
+  connection, reads the login environment and the `from:` file there,
+  finds a launched server's binary with `command -v` on the `PATH` it
+  will have, and prints "runs as <remote user> on <host> with access to
+  their files". It does not contact a remote `url:` server.
 
 ### 13.5 Security
 

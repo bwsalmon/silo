@@ -63,6 +63,8 @@ type Location struct {
 
 	mu   sync.Mutex
 	torn bool
+	// sockDirs are short directories made for forwards' sockets.
+	sockDirs []string
 }
 
 var _ location.Location = (*Location)(nil)
@@ -529,6 +531,9 @@ func (l *Location) Teardown(ctx context.Context) error {
 	}
 	if l.ctlDir != "" {
 		errs = append(errs, os.RemoveAll(l.ctlDir))
+	}
+	for _, d := range l.sockDirs {
+		errs = append(errs, os.RemoveAll(d))
 	}
 	return errors.Join(errs...)
 }
