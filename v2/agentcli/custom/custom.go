@@ -32,6 +32,15 @@ func (Mapping) VersionArgs() []string { return nil }
 
 func (Mapping) ParseVersion(out string) (string, error) { return strings.TrimSpace(out), nil }
 
+// NewParser parses headless output when agent.custom.events is
+// claude-stream-json, and returns nil otherwise.
+func (Mapping) NewParser(req agentcli.Request) agentcli.Parser {
+	if c := req.Agent.Custom; c != nil && c.Events == "claude-stream-json" {
+		return claude.NewParser()
+	}
+	return nil
+}
+
 func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 	if err := agentcli.CheckMode(req.Mode); err != nil {
 		return agentcli.Plan{}, err

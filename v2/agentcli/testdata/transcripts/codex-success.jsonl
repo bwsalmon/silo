@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a066db-4912-79b0-8254-ff2d2927a870"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"reading the repo"}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"silo","tool":"sandbox_exec","arguments":{"sandbox":"work","command":"go test ./..."},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"silo","tool":"sandbox_exec","arguments":{"sandbox":"work","command":"go test ./..."},"result":{"content":[{"type":"text","text":"ok  example.com/x"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"bash -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"bash -lc ls","aggregated_output":"go.mod\nmain.go\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"the tests pass"}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122}}
