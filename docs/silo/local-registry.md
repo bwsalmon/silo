@@ -1673,11 +1673,24 @@ earlier depends on them. Each can be filed on its own, in this order.
     (`runsc tar rootfs-upper` through `silod runsc`), checked against the
     pinned runsc in `gvisor_linux_test`, as [§7](#commit) says.
 
-    *Left:* silod's wiring of
-    the facade's `Content`, `Registry` and `Login` (with step 27b's
-    containerd `registry.Content`); and moving the facade cases into
-    `pkg/conformance/docker`, so that step 36 runs them against
-    `local/sandbox` too.
+    *Landed in task 3576:* silod makes the registry before the facade
+    and gives the facade step 27b's containerd `registry.Content` as
+    `Content` and the same `registry.Service` as `Registry` and
+    `Fetcher`. `Login` is `registry.Service.Login`: it asks the
+    upstream's `/v2/` for its challenge through `Options.Egress` as the
+    caller, each host held to the caller's egress first, and tries the
+    credential against the token service on a Bearer challenge (or
+    against `/v2/` on a Basic one), keeping nothing; a refused
+    credential is 401, a refused host 403 and an unreachable upstream
+    503. Until silod has step 31's `registry.Egress`, an upstream login
+    answers 503, as a cache miss does. The facade cases of
+    [§12](#12-conformance-cases) are `pkg/conformance/docker`'s
+    (`registry_test.go`), run against `local/fake` in the `go` job and
+    against `local/sandbox` and `local/vm` once step 36 installs them;
+    the facade package keeps only the whiteout check's own tests. A
+    deletion's whiteout in a commit is checked there and by the gVisor
+    driver's test, since a conformance case has no way to delete a file
+    in a container without exec.
 31. **The pull-through cache, public content:**
     - the upstream configuration and `silo registry cache`;
     - path and `ns` addressing, Docker Hub normalisation;
