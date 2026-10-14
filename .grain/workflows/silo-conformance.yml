@@ -30,7 +30,7 @@ jobs:
     sandbox:
       cpus: 4
       memory-mb: 8192
-    timeout-minutes: 180
+    timeout-minutes: 330
     steps:
       - name: Check the GCP key
         run: |
@@ -47,6 +47,15 @@ jobs:
       # The suite uninstalls at the end of TestMain. The trap uninstalls
       # again for a run that dies before it gets there (a panic, the
       # timeout), so a failed run still leaves nothing behind.
+      #
+      # Only one install can be in the project at a time, so the two
+      # binaries share one: pkg/conformance installs, runs the GCP cases
+      # and hands the install on (-silo.handoff, which deletes its
+      # silos); pkg/conformance/fence attaches to it (-silo.attach), runs
+      # the backend-neutral fence cases against "gcp" (and the fake), and
+      # uninstalls and checks that nothing is left. If install failed,
+      # the second binary's attach fails too, and its gcp cases skip
+      # saying so.
       - name: Conformance
         env:
           GOOGLE_APPLICATION_CREDENTIALS: /home/debian/.gcp-service-account.json
@@ -55,8 +64,9 @@ jobs:
           set -o pipefail
           go build -o /tmp/silo ./cmd/silo
           trap '/tmp/silo uninstall --project bsalmon-fun-sandbox --credentials "$GOOGLE_APPLICATION_CREDENTIALS" --force --delete-data --yes || true' EXIT
-          go test -tags silo_conformance -count=1 -timeout 160m -v ./pkg/conformance/ 2>&1 | tee /tmp/conformance.log
-          status=$?
+          status=0
+          go test -tags silo_conformance -count=1 -timeout 150m -v ./pkg/conformance/ -silo.handoff 2>&1 | tee /tmp/conformance.log || status=1
+          go test -tags silo_conformance -count=1 -timeout 120m -v ./pkg/conformance/fence/ -silo.attach 2>&1 | tee -a /tmp/conformance.log || status=1
           echo "=== cases ==="
           grep -E -- '--- (PASS|FAIL|SKIP)' /tmp/conformance.log
           exit $status

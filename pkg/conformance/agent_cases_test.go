@@ -1,6 +1,6 @@
 //go:build silo_conformance
 
-package conformance
+package conformance_test
 
 // The agent cases (docs/silo/testing.md, "Cases", "Agents in a sealed
 // silo", SV-122; docs/silo/agents.md): an agent in a sealed silo, made
@@ -21,6 +21,7 @@ package conformance
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -32,6 +33,8 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/client"
+	. "github.com/bwsalmon/silo/pkg/conformance"
+	"github.com/bwsalmon/silo/pkg/conformance/gcpharness"
 )
 
 // agentModel is the agents' model: the cheapest the price table has
@@ -48,6 +51,8 @@ var (
 	credOnce sync.Once
 	credErr  error
 )
+
+var flagModelKey = flag.String("silo.model-key", os.Getenv("SILO_CONFORMANCE_MODEL_KEY"), "a file holding an Anthropic API key for the agent cases' model calls; without it they are skipped")
 
 // haveModel says whether this run has a model credential.
 func haveModel() bool { return *flagModelKey != "" }
@@ -76,7 +81,7 @@ func agentCredential(t *testing.T) {
 			}
 			secret = strings.TrimSpace(string(b))
 		}
-		_, credErr = run.api.AddCredential(context.Background(), client.CredentialRequest{
+		_, credErr = run.API.AddCredential(context.Background(), client.CredentialRequest{
 			Name: agentCredentialName, Provider: "anthropic", Kind: "api_key", Secret: secret}, client.Mutation{})
 	})
 	if credErr != nil {
@@ -90,19 +95,19 @@ func agentCredential(t *testing.T) {
 func agentSilo(t *testing.T, path, control string) siloInfo {
 	t.Helper()
 	ctx := context.Background()
-	q := client.QuotaMap{run.region: {
+	q := client.QuotaMap{run.Region: {
 		"vcpu": num(4), "spot_vcpu": num(4), "memory_mb": num(8192), "spot_memory_mb": num(8192),
 		"instances": num(3), "standard_disk_gb": num(40), "ssd_disk_gb": num(10),
 	}, "global": {"subnetworks": num(2), "agent_sessions": num(1)}}
-	s, err := run.api.Create(ctx, path, client.CreateRequest{Regions: []string{run.region}, Quota: q,
+	s, err := run.API.Create(ctx, path, client.CreateRequest{Regions: []string{run.Region}, Quota: q,
 		ModelBudgetUSD: "1", Address: &client.AddressWant{PrefixLength: 26}, Control: control}, client.Mutation{})
 	if err != nil {
 		t.Fatalf("create %s: %v", path, err)
 	}
-	t.Cleanup(func() { run.api.Delete(context.Background(), path, true, client.Mutation{}) })
+	t.Cleanup(func() { run.API.Delete(context.Background(), path, true, client.Mutation{}) })
 	blk := netip.MustParsePrefix(s.Address.Blocks[0])
 	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netOf(blk)}
-	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.region+"/subnetworks",
+	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.Region+"/subnetworks",
 		map[string]any{"name": s.ID + "-net", "network": "default", "ipCidrRange": info.subnet.String()})
 	if code != 200 {
 		t.Fatalf("subnet in %s: %d %v", path, code, op)
@@ -125,20 +130,20 @@ func createAgent(t *testing.T, s siloInfo, name, ttl, prompt string) error {
 	req.Harness.Adapter, req.Harness.Credential = "claude-code", agentCredentialName
 	req.Model = agentModel
 	req.Budget.USD = "0.50"
-	req.ToolVM = client.ToolVM{Zone: run.zone, Subnet: s.id + "-net", MachineType: agentVMType, Image: probeImage, DiskGB: 10, Spot: true}
+	req.ToolVM = client.ToolVM{Zone: run.Zone, Subnet: s.id + "-net", MachineType: agentVMType, Image: gcpharness.ProbeImage, DiskGB: 10, Spot: true}
 	req.Lease = client.Lease{TTL: ttl}
 	req.Prompt = prompt
-	_, _, err := run.api.CreateAgent(context.Background(), s.path, req, client.Mutation{})
+	_, _, err := run.API.CreateAgent(context.Background(), s.path, req, client.Mutation{})
 	if err == nil {
 		t.Cleanup(func() {
 			ctx := context.Background()
-			if _, err := run.api.DeleteAgent(ctx, agentRef(s, name), client.Mutation{}); err != nil {
+			if _, err := run.API.DeleteAgent(ctx, agentRef(s, name), client.Mutation{}); err != nil {
 				return
 			}
 			// The delete is an operation: wait for the tool VM to go, so
 			// that the silo's own delete finds it empty.
 			for i := 0; i < 60; i++ {
-				if _, err := run.api.Agent(ctx, agentRef(s, name)); apiCode(err) == "NOT_FOUND" {
+				if _, err := run.API.Agent(ctx, agentRef(s, name)); apiCode(err) == "NOT_FOUND" {
 					return
 				}
 				time.Sleep(10 * time.Second)
@@ -155,7 +160,7 @@ func waitAgent(t *testing.T, ref string, d time.Duration, what string, ok func(*
 	var last *client.Agent
 	var lastErr error
 	for time.Now().Before(deadline) {
-		a, err := run.api.Agent(context.Background(), ref)
+		a, err := run.API.Agent(context.Background(), ref)
 		if err == nil && ok(a) {
 			return a
 		}
@@ -172,7 +177,7 @@ func waitAgent(t *testing.T, ref string, d time.Duration, what string, ok func(*
 // agentPath is an agent's API path, under the client's endpoint.
 func agentPath(t *testing.T, ref string) string {
 	t.Helper()
-	p, err := run.api.AgentPath(context.Background(), ref)
+	p, err := run.API.AgentPath(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("%s: %v", ref, err)
 	}
@@ -190,7 +195,7 @@ func events(t *testing.T, ref string) []SessionEvent {
 			Events []SessionEvent `json:"events"`
 			Next   string         `json:"next_page_token"`
 		}
-		if err := run.api.Do(context.Background(), http.MethodGet, p, q, nil, &out); err != nil {
+		if err := run.API.Do(context.Background(), http.MethodGet, p, q, nil, &out); err != nil {
 			t.Fatalf("%s's session: %v", ref, err)
 		}
 		all = append(all, out.Events...)
@@ -241,7 +246,7 @@ func lastSeq(t *testing.T, ref string) int64 {
 // tell sends the agent a message from the root.
 func tell(t *testing.T, ref, text string) {
 	t.Helper()
-	if err := run.api.Do(context.Background(), http.MethodPost, agentPath(t, ref)+"/messages", nil, map[string]any{"text": text}, nil); err != nil {
+	if err := run.API.Do(context.Background(), http.MethodPost, agentPath(t, ref)+"/messages", nil, map[string]any{"text": text}, nil); err != nil {
 		t.Fatalf("a message to %s: %v", ref, err)
 	}
 }
@@ -310,13 +315,13 @@ func TestAgentsInASealedSilo(t *testing.T) {
 				Kind string `json:"kind"`
 			} `json:"requests"`
 		}
-		if err := run.api.Do(ctx, http.MethodGet, agentPath(t, ref)+"/requests", url.Values{"state": {"open"}}, nil, &reqs); err != nil {
+		if err := run.API.Do(ctx, http.MethodGet, agentPath(t, ref)+"/requests", url.Values{"state": {"open"}}, nil, &reqs); err != nil {
 			t.Fatal(err)
 		}
 		if len(reqs.Requests) != 1 || reqs.Requests[0].Kind != "question" {
 			t.Fatalf("open requests: %+v, want one question", reqs.Requests)
 		}
-		if err := run.api.Do(ctx, http.MethodPost, agentPath(t, ref)+"/requests/"+reqs.Requests[0].ID+":answer", nil,
+		if err := run.API.Do(ctx, http.MethodPost, agentPath(t, ref)+"/requests/"+reqs.Requests[0].ID+":answer", nil,
 			map[string]any{"text": "yes, continue"}, nil); err != nil {
 			t.Fatalf("answering: %v", err)
 		}
@@ -351,10 +356,10 @@ func TestAgentsInASealedSilo(t *testing.T) {
 				t.Errorf("%s worked from sealed /as: %s", tool, o.Content)
 			}
 		}
-		if _, err := run.api.Describe(ctx, s.path+"/"+child, false); apiCode(err) != "NOT_FOUND" {
+		if _, err := run.API.Describe(ctx, s.path+"/"+child, false); apiCode(err) != "NOT_FOUND" {
 			t.Errorf("/as/%s exists after a refused silo_create_child: %v", child, err)
 		}
-		if l, err := run.api.Agents(ctx, s.path); err != nil || len(l) != 1 {
+		if l, err := run.API.Agents(ctx, s.path); err != nil || len(l) != 1 {
 			t.Errorf("/as's agents after a refused agent_create: %d, %v", len(l), err)
 		}
 	}
@@ -367,7 +372,7 @@ func TestAgentsInASealedSilo(t *testing.T) {
 			"2. agent_create, to create an agent named x-agent like yourself. "+
 			"3. compute, to send POST projects/%[1]s/zones/%[2]s/instances with the body "+
 			`{"name":"%[5]s-x-agent-vm","machineType":"zones/%[2]s/machineTypes/e2-micro","disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"%[3]s"}}],"networkInterfaces":[{"subnetwork":"regions/%[4]s/subnetworks/%[5]s-net"}]}. `+
-			"4. silo_describe, for your own silo. Then reply DONE.", s.project, run.zone, probeImage, run.region, s.id))
+			"4. silo_describe, for your own silo. Then reply DONE.", s.project, run.Zone, gcpharness.ProbeImage, run.Region, s.id))
 		createRefused(t, after, "x-child", "x-agent")
 		for _, tool := range []string{"compute", "silo_describe"} {
 			if o := waitTool(t, ref, tool, after, 10*time.Minute); !o.IsError {
@@ -382,16 +387,16 @@ func TestAgentsInASealedSilo(t *testing.T) {
 	t.Run("UnderRead", func(t *testing.T) {
 		needModel(t)
 		idle(t, ref)
-		if _, err := run.api.Patch(ctx, s.path, client.Patch{"control": "read"}, client.Mutation{}); err != nil {
+		if _, err := run.API.Patch(ctx, s.path, client.Patch{"control": "read"}, client.Mutation{}); err != nil {
 			t.Fatalf("PATCH /as control read: %v", err)
 		}
-		defer run.api.Patch(ctx, s.path, client.Patch{"control": "none"}, client.Mutation{})
+		defer run.API.Patch(ctx, s.path, client.Patch{"control": "none"}, client.Mutation{})
 		after := lastSeq(t, ref)
 		tell(t, ref, steps+fmt.Sprintf("Call each of these tools once, in this order: "+
 			"1. silo_describe, for your own silo. "+
 			"2. compute, to send GET projects/%s/zones/%s/instances. "+
 			"3. silo_create_child, to create a child silo named x-child2 with a /28 address block. "+
-			"4. agent_create, to create an agent named x-agent2 like yourself. Then reply DONE.", s.project, run.zone))
+			"4. agent_create, to create an agent named x-agent2 like yourself. Then reply DONE.", s.project, run.Zone))
 		for _, tool := range []string{"silo_describe", "compute"} {
 			if o := waitTool(t, ref, tool, after, 10*time.Minute); o.IsError {
 				t.Errorf("%s refused under read: %s", tool, o.Content)
@@ -405,7 +410,7 @@ func TestAgentsInASealedSilo(t *testing.T) {
 		after := lastSeq(t, ref)
 		tell(t, ref, steps+fmt.Sprintf("Call the exec tool once, with exactly this command, and then reply DONE: "+
 			"`CLOUDSDK_API_ENDPOINT_OVERRIDES_COMPUTE=http://silo.internal:8080/compute/v1/ timeout 60 gcloud compute instances list --project %s --zones %s; echo exit=$?`",
-			s.project, run.zone))
+			s.project, run.Zone))
 		o := waitTool(t, ref, "exec", after, 10*time.Minute)
 		if !strings.Contains(o.Content, "exit=124") {
 			t.Errorf("gcloud against silo.internal:8080 from the tool VM didn't time out: %s", o.Content)
@@ -421,7 +426,7 @@ func TestAgentsInASealedSilo(t *testing.T) {
 // PERMISSION_DENIED for both.
 func manageAgents(t *testing.T, s siloInfo, ref string) {
 	ctx := context.Background()
-	sp, err := run.api.SiloPath(ctx, s.path)
+	sp, err := run.API.SiloPath(ctx, s.path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +439,7 @@ func manageAgents(t *testing.T, s siloInfo, ref string) {
 	for _, h := range holders {
 		infos[h.path] = mkSilo(t, h.path, 26, "", nil)
 		out := map[string]any{}
-		if err := run.api.Do(ctx, http.MethodPost, sp+"/manageGrants", nil, map[string]any{
+		if err := run.API.Do(ctx, http.MethodPost, sp+"/manageGrants", nil, map[string]any{
 			"name": h.grant, "holder": h.path,
 			"scope": map[string]any{"fence": h.fence},
 			"lease": map[string]any{"ttl": "1800s"},
@@ -443,9 +448,9 @@ func manageAgents(t *testing.T, s siloInfo, ref string) {
 		}
 		ids[h.path], _ = out["id"].(string)
 		grant := h.grant
-		t.Cleanup(func() { run.api.Do(context.Background(), http.MethodDelete, sp+"/manageGrants/"+grant, nil, nil, nil) })
+		t.Cleanup(func() { run.API.Do(context.Background(), http.MethodDelete, sp+"/manageGrants/"+grant, nil, nil, nil) })
 	}
-	before, err := run.api.Agent(ctx, ref)
+	before, err := run.API.Agent(ctx, ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +474,7 @@ func manageAgents(t *testing.T, s siloInfo, ref string) {
 	t.Run("WithAgentsScopeRenewsAndStops", func(t *testing.T) {
 		expectStatus(t, with, "accept", 200)
 		expectStatus(t, with, "renew", 200)
-		after, err := run.api.Agent(ctx, ref)
+		after, err := run.API.Agent(ctx, ref)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -523,7 +528,7 @@ func TestAgentUnsealed(t *testing.T) {
 	t.Run("BudgetChargedPerModelCall", func(t *testing.T) {
 		needModel(t)
 		a := idle(t, ref)
-		recs, err := run.api.Audit(ctx, s.path, client.AuditQuery{Kind: "model.call"})
+		recs, err := run.API.Audit(ctx, s.path, client.AuditQuery{Kind: "model.call"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -542,7 +547,7 @@ func TestAgentUnsealed(t *testing.T) {
 		time.Sleep(time.Until(created.Add(ttl)))
 		deadline := time.Now().Add(10 * time.Minute)
 		for {
-			_, aerr := run.api.Agent(ctx, ref)
+			_, aerr := run.API.Agent(ctx, ref)
 			code, _ := facade(t, "GET", instances(s)+"/"+s.id+"-agent-worker", nil)
 			if apiCode(aerr) == "NOT_FOUND" && code == 404 {
 				return

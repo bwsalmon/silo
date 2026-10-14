@@ -2250,11 +2250,34 @@ Task 3420 built the split as far as silod's wiring allows:
   A check reaches its destination only if a probe, a gw0 service or
   the uplink holds the address. The egress proxy's verdict is
   `egress.Allowed` and `egress.Internal`.
-- **"gcp" is unchanged.** Its fence cases are still the harness's own,
-  in `pkg/conformance` behind `silo_conformance`, run nightly by
-  `silo-conformance`. From the new packages its `Fence` reports itself
-  not runnable. Moving that harness behind `Fence` (an e2-micro probe
-  per `Probe`, the checks run by `ProbeScript`) is a follow-up.
+- **"gcp" runs them behind the build tag** (task 3671). The GCP
+  harness's install, uninstall and facade helpers moved to
+  `pkg/conformance/gcpharness`, still behind `silo_conformance`, and
+  `targets.GCP.Fence` uses it in a test binary whose `TestMain` is
+  `gcpharness.Main`. A `Probe` is an e2-micro VM:
+  - its startup script serves TCP and UDP on every port, redirecting
+    them to two listeners;
+  - it then polls its own instance metadata. Each `Run` is one round:
+    a `ProbeScript` set with `setMetadata` and read back off the
+    serial console. So a new checklist reuses the VM, and a probe
+    holds a `MaxVMs` slot while it lives.
+  - A call "as" a silo other than the root is made from a probe in
+    that silo, since the gateway names a caller by its address.
+  - Silos made through the `Fence` get the home region, a probe-sized
+    quota, a `net` subnet and allow-all tenant rules, and are deleted
+    when the test ends.
+  - `Spoof` and `Docker` are not offered.
+
+  Only one install fits in the project. So `silo-conformance` runs
+  `pkg/conformance` with `-silo.handoff`, which deletes its silos and
+  keeps the install, then `pkg/conformance/fence` with `-silo.attach`,
+  which uninstalls at its end. The neutral cases name the gateway with
+  `Fence.Gateway()`. The metadata-server and host-loopback checks left
+  `fence.TestEgress`: on GCP no firewall covers the metadata server, and
+  the local structural cases already have both. The harness's own
+  forms of the cases stay in `pkg/conformance` until a nightly has shown
+  the neutral ones passing on `gcp`. Real-GCP conformance can't install
+  yet (task 3152), so none of this has run.
 - **"local/sandbox" and "local/vm" report themselves not runnable.**
   Their `Fence` and `Registry` make no probe containers yet. The `vm`
   class also waits on step 10's `runtime.Driver`. `local-conformance`

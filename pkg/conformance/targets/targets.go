@@ -19,11 +19,13 @@
 //     Fence and Registry report themselves not runnable; the vm class
 //     also waits on step 10's runtime.Driver.
 //   - "gcp": the GCP backend, which has no registry, so it reports the
-//     registry cases as not offered, never as passing. Its fence cases
-//     are still the GCP harness's own, in pkg/conformance behind the
-//     silo_conformance tag, unchanged; its Fence reports itself not
-//     runnable from these packages until that harness is moved behind
-//     it.
+//     registry cases as not offered, never as passing. Its Fence is the
+//     GCP harness's install (pkg/conformance/gcpharness), with e2-micro
+//     probe VMs (gcp.go), behind the silo_conformance tag and in a test
+//     binary whose TestMain is gcpharness.Main; anywhere else it reports
+//     itself not runnable. The harness's own forms of the fence cases
+//     are still in pkg/conformance until the nightly has run these
+//     against it.
 package targets
 
 import (
@@ -45,11 +47,6 @@ func (GCP) Name() string { return "gcp" }
 
 func (GCP) Registry(testing.TB) (conformance.Registry, error) {
 	return nil, conformance.ErrNotOffered
-}
-
-func (GCP) Fence(testing.TB) (conformance.Fence, error) {
-	return nil, &conformance.NotRunnable{Why: "the GCP harness installs into a real project behind the silo_conformance tag " +
-		"(go test -tags silo_conformance ./pkg/conformance/), whose own forms of these cases run nightly in silo-conformance"}
 }
 
 // Local is the local backend, installed, in one isolation class.
