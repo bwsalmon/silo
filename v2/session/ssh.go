@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -8,9 +9,32 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/v2/agentcli"
+	"github.com/bwsalmon/silo/v2/location"
 	sshloc "github.com/bwsalmon/silo/v2/location/ssh"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
+
+func init() { RegisterCheck("ssh", checkSSH) }
+
+// checkSSH is --dry-run's part for location kind ssh (design §2.4): the
+// host is reachable without prompting, its host key is accepted, and the
+// CLI and its login are there. It changes nothing on the host.
+func checkSSH(ctx context.Context, f *silofile.Silofile, environ []string) []CheckResult {
+	if f.Location.Kind != "ssh" || f.Location.SSH == nil {
+		return nil
+	}
+	ls := &location.Session{CLI: f.Agent.CLI, Binary: f.Agent.Binary, AmbientAuth: f.Agent.Auth.Ambient()}
+	if m, err := agentcli.Lookup(f.Agent.CLI); err == nil {
+		ls.VersionArgs = m.VersionArgs()
+	}
+	getenv := func(k string) string { return agentcli.Getenv(environ, k) }
+	var out []CheckResult
+	for _, c := range sshloc.Check(ctx, SSHTransport(f.Location.SSH, getenv), ls) {
+		out = append(out, CheckResult{Name: c.Name, OK: c.OK, Detail: c.Detail})
+	}
+	return out
+}
 
 // SSHTransport is location.ssh's OpenSSH transport (design §5.3).
 func SSHTransport(c *silofile.SSH, getenv func(string) string) *sshloc.OpenSSH {

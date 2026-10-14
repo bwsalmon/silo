@@ -1,0 +1,12 @@
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"resumable","resumable":{"cli":"codex","cli_session":"t1"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"error","text":"Reconnecting... 5/5 (unexpected status 401 Unauthorized)"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"error","text":"unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"}}
+outcome: {
+  "FinalText": "",
+  "CLISession": "t1",
+  "Finished": true,
+  "Failure": {
+    "kind": "refused",
+    "message": "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "numStartups": 12,
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "github-mcp-server",
+      "args": ["stdio"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_inlineSecretValue"}
+    },
+    "tickets": {
+      "type": "http",
+      "url": "http://127.0.0.1:7400/mcp",
+      "headers": {"Authorization": "Bearer ${TICKETS_TOKEN}"}
+    }
+  },
+  "projects": {
+    "PROJECT": {
+      "allowedTools": [],
+      "mcpServers": {
+        "lint": {"command": "lint-mcp"}
+      }
+    }
+  }
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -384,10 +385,10 @@ func TestDroppedConnection(t *testing.T) {
 			t.Errorf("control sockets %v", ctls)
 			return
 		}
-		out, err := shErr("ssh", "-F", d.config, "-S", ctls[0], "-O", "check", "silotest")
-		m := regexp.MustCompile(`pid=(\d+)`).FindStringSubmatch(out + err)
+		out, _ := exec.Command("ssh", "-F", d.config, "-S", ctls[0], "-O", "check", "silotest").CombinedOutput()
+		m := regexp.MustCompile(`pid=(\d+)`).FindStringSubmatch(string(out))
 		if m == nil {
-			t.Errorf("no master pid in %q", out+err)
+			t.Errorf("no master pid in %q", out)
 			return
 		}
 		var pid int
@@ -431,14 +432,6 @@ func TestDroppedConnection(t *testing.T) {
 	}
 }
 
-func shErr(name string, args ...string) (string, string) {
-	out, err := sh("", name, args...)
-	if err != nil {
-		return out, err.Error()
-	}
-	return out, ""
-}
-
 func TestSignalHeadless(t *testing.T) {
 	d := server(t)
 	r := newRun(t, d)
@@ -454,6 +447,42 @@ func TestSignalHeadless(t *testing.T) {
 	}
 	if rep := d.report(t); rep.Signal != "interrupt" {
 		t.Errorf("the remote CLI got %q, want interrupt", rep.Signal)
+	}
+	if dirs := d.remoteDirs(t); len(dirs) != 0 {
+		t.Errorf("remote session directories left: %v", dirs)
+	}
+}
+
+// TestJourney3 is journey 3 end to end (design §12): the example
+// remote-scripts silo, with the fake remote claude in place of codex,
+// calling local_tail_logs on this machine through the reverse forward.
+func TestJourney3(t *testing.T) {
+	d := server(t)
+	r := newRun(t, d)
+	dir := filepath.Join(r.root, "silo")
+	if err := os.CopyFS(dir, os.DirFS("../../docs/examples/remote-scripts")); err != nil {
+		t.Fatal(err)
+	}
+	logs := filepath.Join(r.root, "home", ".cache", "preview", "logs")
+	os.MkdirAll(logs, 0o700)
+	os.WriteFile(filepath.Join(logs, "main.log"), []byte("one\ntwo\nthree\n"), 0o600)
+	f, err := silofile.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake CLI stands in for codex, in headless mode, with no
+	// workdir on the remote host and no credential store.
+	f.Agent.CLI, f.Agent.Mode, f.Agent.Workdir = "claude", "headless", ""
+	f.Location.SSH.Host = "silotest"
+	f.Credentials = nil
+	d.fake(t, fakeConfig{Call: "local_tail_logs", Args: map[string]any{"args": []any{"main", "2"}}})
+	out := r.run(f, func(o *session.Options) { o.Prompt = "show me the logs" })
+	if out.code != 0 {
+		t.Fatalf("exit %d: %v\n%s", out.code, out.err, out.stderr)
+	}
+	rep := d.report(t)
+	if rep.Error != "" || !strings.Contains(rep.Result, `"stdout": "two\nthree\n"`) {
+		t.Errorf("local_tail_logs from the remote host: %+v", rep)
 	}
 	if dirs := d.remoteDirs(t); len(dirs) != 0 {
 		t.Errorf("remote session directories left: %v", dirs)

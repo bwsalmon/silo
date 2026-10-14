@@ -1,0 +1,12 @@
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"resumable","resumable":{"cli":"claude","cli_session":"abc"}}
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"transcript","transcript":{"kind":"text","text":"Claude AI usage limit reached|1772370000"}}
+outcome: {
+  "FinalText": "",
+  "CLISession": "abc",
+  "Finished": true,
+  "Failure": {
+    "kind": "usage_limit",
+    "message": "Claude AI usage limit reached|1772370000",
+    "reset_at": "2026-03-01T13:00:00Z"
+  }
+}

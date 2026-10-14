@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
+	"github.com/bwsalmon/silo/v2/events"
 	sshloc "github.com/bwsalmon/silo/v2/location/ssh"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
@@ -19,8 +21,10 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 	fs := flag.NewFlagSet("silo run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	prompt := fs.String("prompt", "", "the prompt, replacing agent.prompt")
+	dryRun := fs.Bool("dry-run", false, "check what the session needs, changing nothing, and print a checklist")
+	jsonOut := fs.Bool("json", false, "write the session's events as JSON lines on stdout (docs/events.md); mode headless only")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: silo run [--prompt text] <Silofile|dir>")
+		fmt.Fprintln(stderr, "usage: silo run [--dry-run] [--json] [--prompt text] <Silofile|dir>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
@@ -29,15 +33,25 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 		}
 		return exitUsage
 	}
+	// Under --json every exit, even before a session exists, ends
+	// with a result event.
+	fail := func(code int, msg string) int {
+		fmt.Fprintln(stderr, msg)
+		if *jsonOut {
+			session.JSONSink{W: stdout}.Event(events.Event{
+				V: events.Version, Seq: 1, Time: time.Now().UTC(), Type: events.TypeResult,
+				Result: &events.Result{Exit: events.Exit{Code: code, Reason: events.ReasonSetupFailed, Detail: msg}},
+			})
+		}
+		return code
+	}
 	f, err := silofile.Load(fs.Arg(0))
 	if err != nil {
 		var errs silofile.Errors
 		if errors.As(err, &errs) {
-			fmt.Fprintln(stderr, errs)
-		} else {
-			fmt.Fprintf(stderr, "silo run: %v\n", err)
+			return fail(exitInvalid, errs.Error())
 		}
-		return exitInvalid
+		return fail(exitInvalid, fmt.Sprintf("silo run: %v", err))
 	}
 	res := f.Validate(validateOptions)
 	for _, w := range res.Warnings {
@@ -52,14 +66,39 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 		errs = append(errs, e)
 	}
 	if len(errs) > 0 {
-		fmt.Fprintln(stderr, errs)
-		return exitInvalid
+		return fail(exitInvalid, errs.Error())
+	}
+	if *dryRun {
+		return dryRunChecks(f, stdout, opts.Environ)
 	}
 	opts.File, opts.Prompt = f, *prompt
 	opts.Stdin, opts.Stdout, opts.Stderr = stdin, stdout, stderr
+	if *jsonOut {
+		if f.Agent.Mode != "headless" {
+			return fail(exitUsage, "silo run: --json needs agent.mode: headless; the events and an interactive CLI cannot share stdout")
+		}
+		// Stdout carries the events alone; the CLI's own output is kept
+		// in the session's raw transcript.
+		opts.Sink, opts.Stdout = session.JSONSink{W: stdout}, io.Discard
+	}
 	code, err := session.Run(context.Background(), opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "silo run: %v\n", err)
+	}
+	return code
+}
+
+// dryRunChecks is silo run --dry-run after validation (design §2.4):
+// one line per check, and exit 69 if any failed.
+func dryRunChecks(f *silofile.Silofile, stdout io.Writer, environ []string) int {
+	fmt.Fprintf(stdout, "ok    silofile: %s is valid\n", f.File)
+	code := exitOK
+	for _, c := range session.DryRun(context.Background(), f, environ) {
+		mark := "ok  "
+		if !c.OK {
+			mark, code = "FAIL", session.ExitPrerequisite
+		}
+		fmt.Fprintf(stdout, "%s  %s: %s\n", mark, c.Name, c.Detail)
 	}
 	return code
 }

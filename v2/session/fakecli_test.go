@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/v2/internal/mcptest"
 	"github.com/bwsalmon/silo/v2/mcp"
 )
 
@@ -47,6 +48,8 @@ type fakeReport struct {
 }
 
 func TestMain(m *testing.M) {
+	// The test MCP server of mcp_test.go, launched by silo.
+	mcptest.MaybeServe()
 	if filepath.Base(os.Args[0]) == "claude" {
 		os.Exit(fakeCLI())
 	}

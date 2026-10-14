@@ -4,8 +4,9 @@
 // with no dependency on an MCP SDK, as grain's pkg/mcp has none. It has
 // a server half (Handler, Dispatch, Serve) shared by the gateway and,
 // later, by anything else silo serves, and a client half (Client) for
-// talking to an MCP server over HTTP: the gateway's own tests, and later
-// the proxied servers of design §13.
+// talking to an MCP server over HTTP, and Conn, one client connection
+// over Streamable HTTP, HTTP+SSE or stdio, for the proxied servers of
+// design §13.
 //
 // Only the methods silo needs are spoken: initialize, ping, tools/list,
 // tools/call, and the server-to-client notifications/tools/list_changed.
@@ -20,7 +21,7 @@ import (
 
 const (
 	// ProtocolVersion is the MCP revision that introduced Streamable
-	// HTTP, the only transport silo speaks.
+	// HTTP, the only transport the gateway serves.
 	ProtocolVersion = "2025-03-26"
 	serverName      = "silo-gateway"
 	serverVersion   = "2.0.0-dev"
