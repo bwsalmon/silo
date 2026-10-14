@@ -29,6 +29,9 @@ type Driver struct {
 	Volumes string
 	// ExecFunc runs an exec'd process. Nil exits 0 having done nothing.
 	ExecFunc func(id string, p runtime.Process, stdio runtime.ExecIO) int
+	// NoExec, if set, is what ExecGap reports: a class whose exec
+	// doesn't enter the container, as the vm class's doesn't yet.
+	NoExec string
 
 	mu       sync.Mutex
 	probe    runtime.Probe
@@ -61,6 +64,9 @@ func New(class runtime.Class) *Driver {
 	return &Driver{class: class, probe: runtime.Probe{OK: true}, prepared: map[string]bool{},
 		cs: map[string]*container{}, now: time.Now}
 }
+
+// ExecGap implements runtime.ExecGapper.
+func (d *Driver) ExecGap() string { return d.NoExec }
 
 // Class implements runtime.Driver.
 func (d *Driver) Class() runtime.Class { return d.class }

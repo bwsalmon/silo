@@ -52,6 +52,7 @@ type createBody struct {
 	Labels          map[string]string
 	ExposedPorts    map[string]struct{}
 	Volumes         map[string]struct{}
+	Healthcheck     *HealthConfig
 	HostConfig      struct {
 		Binds           []string
 		NetworkMode     string
@@ -318,6 +319,9 @@ func (s *Server) containerCreate(q *request) error {
 	if err != nil {
 		return s.refuse(q, err)
 	}
+	if err := checkHealth(b.Healthcheck); err != nil {
+		return s.refuse(q, err)
+	}
 	for k := range b.HostConfig.StorageOpt {
 		if k != "size" {
 			return s.refuse(q, invalid("silo: storage option %q is not supported; only size is", k))
@@ -381,6 +385,7 @@ func (s *Server) containerCreate(q *request) error {
 		if err := buildProcess(c, &b, img); err != nil {
 			return err
 		}
+		c.Healthcheck = mergeHealth(b.Healthcheck, img.Config.Healthcheck)
 		var charges []fenceapi.ChargeLine
 		// Networks: the mode's, then any other the endpoints name.
 		if mode != "none" {
@@ -905,6 +910,7 @@ func (s *Server) start(q *request) error {
 	if err := s.save(q, c, nil, charges); err != nil {
 		return err
 	}
+	s.startHealth(c)
 	s.watch(q.target.ID, c)
 	return nil
 }
@@ -959,14 +965,19 @@ func (s *Server) assignPorts(ctx context.Context, tx store.Tx, silo string, c *C
 }
 
 // watch waits, in the background, for c to stop on its own, and then
-// settles it: its run charge refunded, and AutoRemove honoured.
+// settles it: its run charge refunded, the health probes this run
+// started ended, and AutoRemove honoured.
 func (s *Server) watch(silo string, c *Container) {
 	d := s.drivers[c.Class]
+	run := s.healthRunOf(c.ID)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		if _, err := d.Wait(s.bg, c.ID); err != nil {
 			return
+		}
+		if run != nil {
+			s.stopHealthRun(c.ID, run)
 		}
 		s.settle(s.bg, silo, c.ID)
 	}()
@@ -1033,6 +1044,7 @@ func (s *Server) stopContainer(q *request, c *Container) error {
 		}
 		timeout = time.Duration(n) * time.Second
 	}
+	s.stopHealth(c.ID)
 	d := s.drivers[c.Class]
 	if err := d.Stop(q.ctx(), c.ID, timeout); err != nil && !errors.Is(err, runtime.ErrState) {
 		return err
@@ -1081,6 +1093,7 @@ func (s *Server) containerKill(q *request) error {
 		return s.refuse(q, err)
 	}
 	if s.state(q.ctx(), c).State == runtime.Stopped {
+		s.stopHealth(c.ID)
 		s.settle(context.WithoutCancel(q.ctx()), q.target.ID, c.ID)
 	}
 	s.audit(q, "OK", map[string]any{"id": c.ID, "signal": int(sig)}, nil)
@@ -1226,6 +1239,7 @@ func (s *Server) containerDelete(q *request) error {
 // volumes. q, if set, is the call to audit it under.
 func (s *Server) removeContainer(ctx context.Context, silo string, c *Container, volumes bool, q *request) error {
 	ctx = context.WithoutCancel(ctx)
+	s.stopHealth(c.ID)
 	d := s.drivers[c.Class]
 	if d != nil {
 		if err := d.Kill(ctx, c.ID, syscall.SIGKILL); err == nil {
@@ -1288,6 +1302,7 @@ func (s *Server) removeContainer(ctx context.Context, silo string, c *Container,
 	}
 	if err == nil {
 		s.forgetExecs(c.ID)
+		s.forgetHealth(c.ID)
 	}
 	return err
 }

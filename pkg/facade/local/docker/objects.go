@@ -39,6 +39,10 @@ type Container struct {
 	HostConfig map[string]any
 	// Process is what the driver runs.
 	Process runtime.Process
+	// Healthcheck is its HEALTHCHECK: the create's over its image's,
+	// which silod runs while it runs (health.go). Nil, or a Test of
+	// NONE, is none.
+	Healthcheck *HealthConfig `json:",omitempty"`
 	// Networks are its endpoints, by network name.
 	Networks map[string]*Endpoint
 	// Ports are its published ports.

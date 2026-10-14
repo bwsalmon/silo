@@ -156,6 +156,11 @@ func (d *localDocker) auditHost(ctx context.Context, p docker.Published, event s
 // socketDir, if set, and, with a holder, docker.silo.internal:2375,
 // DNS and the published ports in silo-net.
 func (d *localDocker) serve(ctx context.Context, socketDir string) error {
+	// The containers still running from before a restart are watched,
+	// and their healthchecks run, again (local-backend.md §5).
+	if err := d.f.Adopt(ctx); err != nil {
+		log.Printf("adopting the running containers: %v", err)
+	}
 	go d.pub.Run(ctx)
 	if socketDir != "" {
 		s := &dockergw.Sockets{Dir: socketDir, Store: d.db, Handler: d.f}

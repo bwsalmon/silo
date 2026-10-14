@@ -38,6 +38,8 @@ type obj = map[string]any
 type images struct {
 	pulls   []string
 	content *registry.Memory
+	// healthcheck, if set, is every image's HEALTHCHECK.
+	healthcheck *HealthConfig
 }
 
 func (f *images) Pull(_ context.Context, silo, ref, _ string) (*Pulled, error) {
@@ -47,7 +49,7 @@ func (f *images) Pull(_ context.Context, silo, ref, _ string) (*Pulled, error) {
 	f.pulls = append(f.pulls, silo+" "+ref)
 	name, _, _ := strings.Cut(ref, ":")
 	cfg := ImageConfig{Cmd: []string{"/bin/app"}, Env: []string{"PATH=/bin", "A=1"},
-		ExposedPorts: map[string]struct{}{"80/tcp": {}}, Volumes: map[string]struct{}{"/data": {}}}
+		ExposedPorts: map[string]struct{}{"80/tcp": {}}, Volumes: map[string]struct{}{"/data": {}}, Healthcheck: f.healthcheck}
 	layer := testLayer(map[string]string{"bin/app": "app of " + name, "etc/conf": "base"})
 	cb, _ := json.Marshal(map[string]any{"created": time.Unix(1700000000, 0).UTC(), "architecture": goarch(), "os": "linux",
 		"config": cfg, "rootfs": map[string]any{"type": "layers", "diff_ids": []string{digestOf(layer)}}})

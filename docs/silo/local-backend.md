@@ -892,6 +892,22 @@ job here, using the same exec path. A container with a `HEALTHCHECK`
 and no working exec (a `vm` container before plan item 9) is reported
 `unhealthy` with a message saying why. It is never reported `healthy`.
 
+As built (task 3685): the create's `Healthcheck` is merged over the
+image config's, field by field, as Docker merges them. `Test` of
+`["NONE"]` turns it off. silod runs the probe while the container runs,
+from its start to its stop, kill, exit or removal. It uses the driver's
+exec, with the container's environment, user and working directory.
+The probe follows Docker's rules: `Interval`, `Timeout`, `Retries`,
+`StartPeriod` and `StartInterval`, with Docker's defaults for zero
+fields. A failure during the start period doesn't count while the
+container is still `starting`. The last five results are kept, and
+`State.Health` reports them with the status and the failing streak.
+`ps` shows the health in `Status` and filters on `health=`.
+Health is kept in silod's memory, not in the store. After a restart,
+`Adopt` watches each running container again, and its health restarts
+from `starting`. A driver whose exec doesn't enter the container says
+so through `runtime.ExecGapper`, as the granule driver does.
+
 ### testcontainers
 
 testcontainers (Go, Java, Python, Node) uses `/info`, `/version`,
@@ -2318,6 +2334,73 @@ Task 3420 built the split as far as silod's wiring allows:
   after a restart, the `Host`-header and socket rules, published
   ports, DNS and image records).
 
+### As built in step 13
+
+Task 3421 scripted §5's flows as cases in `pkg/conformance/compose`,
+which `local-conformance` runs. Each case runs against every target's
+`Fence`, once per class (`sandbox` and `vm`), in a fresh silo, through
+the Engine API calls the tools themselves make:
+
+- **`TestComposeProject`:** `compose up -d` of a web app, a database
+  and a cache on the project network, with a named volume and a
+  published port. Then:
+  - `ps` by the project's label;
+  - services reaching each other by service and container name, and
+    an unknown name resolving to nothing;
+  - `exec`, with its output and exit code;
+  - `logs` and `logs -f`, and `top`;
+  - the published port reached from another of the silo's containers
+    at `docker.silo.internal`;
+  - `stop`, `start` and `restart`;
+  - `run` as a one-off container, waited for;
+  - `down -v`, after which nothing of the project is left.
+- **`TestComposeAttach`:** `compose up` in the foreground, attaching
+  before the start.
+- **`TestComposeHealthcheck`:** `depends_on: condition:
+  service_healthy`, a passing and a failing `HEALTHCHECK`. A started
+  container without `State.Health` fails. A class whose exec doesn't
+  enter the container yet (`vm` before plan item 9) is an expected
+  skip, with the reason silod reports.
+- **`TestComposeRefused`:** `build:` is 501. A host path volume,
+  `network_mode: host`, `privileged`, `cap_add` and `devices` are each
+  403, and none leaves a container.
+- **`TestTestcontainersGeneric`:** `/_ping`, `/version` and `/info`,
+  then:
+  - a labelled container with a mapped port, and a file copied in
+    before start;
+  - the mapped port from inspect;
+  - the log and port wait strategies;
+  - the test process, a container of the silo, reaching
+    `docker.silo.internal:<mapped port>`;
+  - exec, terminate, and nothing of the session left.
+- **`TestTestcontainersRyukRefused`:** Ryuk's Docker socket bind
+  (as `Binds` and as a mount) is 403, and so is a privileged container
+  (Docker in a container).
+- **`TestTestcontainersModules`:** Postgres, MySQL, Redis and Kafka,
+  each waited for by its log line and asked with its own client by
+  exec. These need the images themselves, so a target that is
+  `conformance.Simulated` skips them.
+- **`TestGVisorGaps`:** every gap under
+  [What gVisor won't run](#what-gvisor-wont-run) is recorded as an
+  expected skip of the `sandbox` class, so each one shows in the log
+  and test history as a known gap.
+
+On "local/fake" the containers run a scripted shell
+(`targets/fakeshell.go`). A workload's `sh -c` script runs when it
+starts: it writes output, and exits unless it ends in
+`sleep infinity`. An exec runs the same way. The shell has `echo`,
+`cat`, `test`, `ps`, `exit` and `nc -z`:
+
+- `nc -z` resolves a name with the gateway's `Lookup`, as the
+  container asks it.
+- It is then judged by the fence's evaluator, as a probe's check is.
+- A container's own ports all listen.
+
+Both fake classes pass every case, the healthcheck one included since
+task 3685.
+"local/sandbox" and "local/vm" skip the cases as not runnable, as in
+step 12.
+
 ## 14. Limitations
 
 True of the local backend by design:
@@ -2465,7 +2548,9 @@ before item 7.
     sockets.
 13. **Compose and testcontainers acceptance:** the flows in [§5](#5-compose-and-testcontainers)
     as scripted cases in `local-conformance`, in both classes.
-    Depends on 12.
+    Depends on 12. Built in task 3421, as recorded under
+    [As built in step 13](#as-built-in-step-13). silod runs
+    `HEALTHCHECK` since task 3685, so the healthcheck case runs.
 14. **The data directory and the storage driver**
     ([part 2, §2](local-rootless-storage.md#2-storage-laid-out-for-later-backups)):
     - `--data-dir`, `layout.json` and the `state/`, `keys/`, `silos/`
