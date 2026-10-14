@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/bwsalmon/silo/v2/mcp"
 )
 
 // This file is what remote MCP servers (design §13.2, stage 5b) need of
@@ -239,13 +240,5 @@ func (l *Location) ForwardMCP(ctx context.Context, name, rawURL string) (*http.C
 	if err := l.ForwardLocal(ctx, sock+":"+host+":"+port); err != nil {
 		return nil, err
 	}
-	tr := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", sock)
-		},
-		ForceAttemptHTTP2: true,
-		IdleConnTimeout:   90 * time.Second,
-	}
-	return &http.Client{Transport: tr}, nil
+	return mcp.UnixClient(sock), nil
 }

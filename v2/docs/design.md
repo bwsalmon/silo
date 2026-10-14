@@ -371,6 +371,14 @@ designed in [`grain.md`](grain.md) §2.1; journeys 1–4 do not need them
 `--caller-mcp <name>=<url>` adds a caller-provided MCP server
 ([`grain.md`](grain.md) §2.2).
 
+As built in stage 6b, the socket's methods (`inject`, `cancel`,
+`extend_deadline`, `approve`) and their params are documented in
+[`events.md`](events.md). The library's `Session` methods share the same
+implementation. A caller server's token is read from
+`$SILO_CALLER_MCP_TOKEN_<NAME>` rather than the command line, so it
+never shows in `ps`. `--caller-mcp-tools` and `--caller-mcp-blocking`
+qualify a `--caller-mcp` server.
+
 ### 3.3 Exit codes
 
 `silo run` exits with the CLI's own exit code when the CLI ran to its
@@ -473,6 +481,13 @@ default). CLIs have their own MCP call timeouts, which silo raises where
 it can so the CLI does not give up first (Claude Code: the
 `MCP_TOOL_TIMEOUT` environment variable, which grain already sets for
 the same reason).
+
+As built in stage 6b, a caller's tool marked blocking ([`grain.md`](grain.md)
+§2.2) has no gateway timeout at all. In a session with one, the CLI's
+own timeout is raised from 32 minutes to 7 days: `MCP_TOOL_TIMEOUT` for
+claude, `tool_timeout_sec` for codex. Raising it means the CLI never
+abandons a call that waits on a person (§6.2). The session's deadline
+still bounds such a call.
 
 As built in stage 1b: `sandbox_exec`'s `timeout` is in seconds, default
 5 minutes. The Silofile has no field to cap it yet, so the cap is a
@@ -757,6 +772,12 @@ their semantics were exercised for this document (see
 [`cli-mapping.md`](cli-mapping.md) §3). Every location must support
 `interactive` and `headless`, except a hosted runtime that cannot give a
 TTY, which refuses `interactive`.
+
+As built in stage 6b, a headless claude's stdin stays open until its
+turn's `result`, so that an injected message can be written to it. Codex
+takes an injected message as a further turn, `codex exec resume <thread>
+-`, and so does claude after its turn has ended (`claude -p --resume`).
+Both are described in [`events.md`](events.md).
 
 ## 7. Sandboxes
 
@@ -2082,4 +2103,5 @@ list of unverified assumptions)
 18. Does grain want silo as a library (in-process) or as a subprocess
     per run? This draft offers both, from the same `session` package.
 19. Which of grain's MCP tools move to the gateway (sandbox tools) and
-    which stay grain's (task tools)?
+    which stay grain's (task tools)? Stage 6b built the mechanism, a
+    per-session rename map (`silo.Options.Rename`), and chose no names.

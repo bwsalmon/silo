@@ -159,7 +159,7 @@ func (m *emitter) totals() []events.Usage {
 
 // toolCallEvent is an audit record as a tool_call event.
 func toolCallEvent(r audit.Record) events.Event {
-	c := &events.ToolCall{Phase: r.Event, Call: r.Call, Tool: r.Tool, Outcome: r.Outcome, Reason: r.Reason, Size: r.Size, Head: r.Head, DurationMS: r.DurationMS}
+	c := &events.ToolCall{Phase: r.Event, Call: r.Call, Tool: r.Tool, As: r.As, Outcome: r.Outcome, Reason: r.Reason, Size: r.Size, Head: r.Head, DurationMS: r.DurationMS}
 	if a, ok := r.Args.(map[string]any); ok {
 		c.Args = a
 	}
@@ -177,6 +177,9 @@ type transcript struct {
 	buf    []byte
 	mu     sync.Mutex
 	closed bool
+	// onTurn is called each time the parser sees a turn end.
+	onTurn func()
+	turns  int
 }
 
 func newTranscript(em *emitter, p agentcli.Parser, rawPath, normPath string) (*transcript, error) {
@@ -224,6 +227,12 @@ func (t *transcript) line(l []byte) {
 			if b, err := events.Marshal(e); err == nil {
 				t.norm.Write(b)
 			}
+		}
+	}
+	if n := t.parser.Outcome().Turns; n > t.turns {
+		t.turns = n
+		if t.onTurn != nil {
+			t.onTurn()
 		}
 	}
 }

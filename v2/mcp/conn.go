@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -231,18 +232,17 @@ func DialHTTP(ctx context.Context, rawURL string, headers map[string]string) (Co
 	return DialHTTPClient(ctx, rawURL, headers, nil)
 }
 
-// DialHTTPClient is DialHTTP through hc (http.DefaultClient when nil):
-// one whose transport dials a forward to the server's host, so that the
-// URL, the Host header and TLS still name the server itself.
+// DialHTTPClient is DialHTTP through hc, http.DefaultClient when nil:
+// UnixClient's, for a server on a Unix socket.
 func DialHTTPClient(ctx context.Context, rawURL string, headers map[string]string, hc *http.Client) (Conn, error) {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
 	c := &Client{URL: rawURL, Headers: headers, HTTP: hc}
-	h := &httpConn{c: c, changed: make(chan struct{}, 1), done: make(chan struct{})}
+	conn := &httpConn{c: c, changed: make(chan struct{}, 1), done: make(chan struct{})}
 	if _, err := c.Initialize(ctx); err == nil {
-		h.watch(ctx)
-		return h, nil
+		conn.watch(ctx)
+		return conn, nil
 	} else if !isHTTP4xx(err) {
 		return nil, err
 	} else if sc, serr := dialSSE(ctx, rawURL, headers, hc); serr == nil {
@@ -403,4 +403,19 @@ func dialSSE(ctx context.Context, rawURL string, headers map[string]string, hc *
 		return nil, err
 	}
 	return m, nil
+}
+
+// UnixURL is the URL a server on a Unix socket is reached at through
+// UnixClient: its Streamable HTTP endpoint is /mcp on the socket.
+const UnixURL = "http://unix/mcp"
+
+// UnixClient is an HTTP client whose every connection is to the Unix
+// socket at path, whatever the URL's host.
+func UnixClient(path string) *http.Client {
+	var d net.Dialer
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, "unix", path)
+		},
+	}}
 }

@@ -121,7 +121,7 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 	}
 
 	env := map[string]string{
-		"MCP_TOOL_TIMEOUT": strconv.FormatInt(agentcli.ToolTimeout.Milliseconds(), 10),
+		"MCP_TOOL_TIMEOUT": strconv.FormatInt(req.ToolTimeout().Milliseconds(), 10),
 	}
 	if perm != silofile.PermAll {
 		env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
@@ -130,10 +130,13 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		env[k] = v
 	}
 
-	plan.Command = func(dir string) location.Command {
+	command := func(dir, resume string) location.Command {
 		argv := []string{req.Host.Binary}
 		if req.Mode == agentcli.Headless {
 			argv = append(argv, "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json")
+		}
+		if resume != "" {
+			argv = append(argv, "--resume", resume)
 		}
 		if req.Agent.Model != "" {
 			argv = append(argv, "--model", req.Agent.Model)
@@ -175,7 +178,27 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		}
 		return cmd
 	}
+	plan.Command = func(dir string) location.Command { return command(dir, "") }
+	if req.Mode == agentcli.Headless {
+		plan.Resume = func(dir, id string) location.Command {
+			cmd := command(dir, id)
+			cmd.Stdin = nil
+			return cmd
+		}
+	}
 	return plan, nil
+}
+
+// Injection: claude reads further stream-json user messages on stdin
+// mid-run (grain.md §2.1).
+func (Mapping) Injection() agentcli.Injection {
+	return agentcli.Injection{Live: true, Message: func(texts ...string) []byte {
+		var b []byte
+		for _, t := range texts {
+			b = append(b, UserMessage(t)...)
+		}
+		return b
+	}}
 }
 
 // UserMessage is one stream-json input line carrying a user message.

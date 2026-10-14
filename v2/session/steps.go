@@ -107,11 +107,7 @@ func stepCredentials(ctx context.Context, s *Session) (Undo, error) {
 		vals[name] = credentials.Value{Name: name, Secret: v, Source: "the caller"}
 	}
 	s.Credentials = vals
-	named := map[string]string{}
-	for _, v := range vals {
-		named[v.Name] = v.Secret
-	}
-	s.em.setSecrets(named)
+	s.em.setSecrets(s.secrets())
 	for _, c := range s.File.Credentials {
 		v := vals[c.Name]
 		for _, d := range c.To {
@@ -220,12 +216,21 @@ func stepGateway(ctx context.Context, s *Session) (Undo, error) {
 		return nil, err
 	}
 	s.Audit = log
-	for _, v := range s.Credentials {
-		log.Register(v.Name, v.Secret)
+	for name, v := range s.secrets() {
+		log.Register(name, v)
 	}
 	log.Observe(func(r audit.Record) { s.em.emit(toolCallEvent(r)) })
 	g := gateway.New(log)
 	g.Register(s.Tools...)
+	if len(s.opts.Rename) > 0 {
+		if err := g.SetRename(s.opts.Rename); err != nil {
+			log.Close()
+			return nil, &Error{Code: ExitUsage, Err: err}
+		}
+		for from, to := range s.opts.Rename {
+			s.status("gateway: %s is listed as %s", from, to)
+		}
+	}
 	srv, err := g.Serve(context.WithoutCancel(ctx))
 	undo := func(ctx context.Context) error {
 		var errs []error
@@ -254,8 +259,16 @@ func stepGateway(ctx context.Context, s *Session) (Undo, error) {
 		s.ToolNames = append(s.ToolNames, t.Name)
 	}
 	for _, t := range s.Tools {
+		if to, ok := s.opts.Rename[t.Name]; ok && have[to] {
+			continue
+		}
 		if !have[t.Name] {
 			return undo, fmt.Errorf("gateway: tool %s is not listed", t.Name)
+		}
+	}
+	for from := range s.opts.Rename {
+		if !served(s.Tools, from) {
+			s.warnf("gateway: the rename map names %s, which this session does not serve", from)
 		}
 	}
 	u, err := url.Parse(srv.URL)
@@ -286,6 +299,9 @@ func stepStage(ctx context.Context, s *Session) (Undo, error) {
 		GatewayURL: s.GatewayURL, GatewayToken: s.Server.Token, GatewayTools: s.ToolNames,
 		Host: s.Host, Env: s.AgentEnv, Deadline: s.Deadline,
 	}
+	for _, t := range s.Tools {
+		req.Blocking = req.Blocking || t.Blocking
+	}
 	plan, err := s.Mapping.Build(req)
 	if err != nil {
 		return nil, err
@@ -302,10 +318,35 @@ func stepStage(ctx context.Context, s *Session) (Undo, error) {
 		return undo, err
 	}
 	s.Command = plan.Command(dir)
+	s.resume, s.stageDir = plan.Resume, dir
 	if wd := s.File.Agent.Workdir; wd != "" {
 		s.Command.Workdir = expandHome(wd, s.Host.Home)
 	}
 	return undo, nil
+}
+
+func served(tools []gateway.Tool, name string) bool {
+	for _, t := range tools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// secrets are the values the session redacts, by the name they are
+// redacted as: the credentials, and the caller MCP servers' tokens.
+func (s *Session) secrets() map[string]string {
+	named := map[string]string{}
+	for _, v := range s.Credentials {
+		named[v.Name] = v.Secret
+	}
+	for _, c := range s.opts.CallerMCP {
+		if c.Token != "" {
+			named[callerSecret(c.Name)] = c.Token
+		}
+	}
+	return named
 }
 
 func expandHome(p, home string) string {

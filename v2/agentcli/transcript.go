@@ -27,6 +27,9 @@ type Outcome struct {
 	// Finished reports whether the output reached its terminal event
 	// (claude's result, codex's turn.completed or turn.failed).
 	Finished bool
+	// Turns counts the terminal events seen so far: one per turn, so a
+	// rise says a turn has just ended.
+	Turns int `json:"-"`
 	// Failure is what the output said went wrong; nil for a run it
 	// reported as a success.
 	Failure *events.CLIError

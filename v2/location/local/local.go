@@ -206,6 +206,9 @@ func (l *Location) Start(ctx context.Context, c location.Command, io location.IO
 		// CLI and everything it started, and the terminal's do not.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdin = bytes.NewReader(c.Stdin)
+		if c.Input != nil {
+			cmd.Stdin = c.Input
+		}
 	}
 	procgroup.DieWithParent(cmd)
 	if err := cmd.Start(); err != nil {

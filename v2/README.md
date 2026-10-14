@@ -50,7 +50,7 @@ builds, vets or tests the other's packages.
 ## Commands
 
 ```sh
-go run ./cmd/silo run [--dry-run] [--json] [--prompt text] <Silofile|dir>   # design §3
+go run ./cmd/silo run [--dry-run] [--json] [--prompt text] [--caller-mcp name=url ...] <Silofile|dir>   # design §3
 go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
 go run ./cmd/silo gc [--host <host>]        # what crashed sessions left (there)
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
@@ -126,10 +126,18 @@ notification in interactive mode (`notify-send` or `osascript`, when
 installed) and the request printed on stderr in headless mode.
 
 Every session has a control socket, `control.sock` in the session
-directory (mode 0600): JSON-RPC 2.0, one message per line. Its only
-method so far is `approve`, with params `{"id": "<call>", "deny":
-true}` (both optional; with no id it answers the one call waiting).
-`silo approve` names the session by its id or a unique prefix of it.
+directory (mode 0600): JSON-RPC 2.0, one message per line, with the
+methods `inject`, `cancel`, `extend_deadline` and `approve`
+(`docs/events.md`, "The control socket"). `approve` takes `{"id":
+"<call>", "deny": true}` (both optional; with no id it answers the one
+call waiting). `silo approve` names the session by its id or a unique
+prefix of it. The Go library's `Session` has the same four as methods.
+
+`--caller-mcp name=url` (or `silo.Options.CallerMCP`) adds a
+caller-provided MCP server, on HTTP or a Unix socket, whose tools the
+gateway serves as `name__<tool>`; its token is read from
+`$SILO_CALLER_MCP_TOKEN_<NAME>` (`docs/events.md`, "Caller-provided MCP
+servers").
 
 The schema `silo schema` prints is generated from `silofile`'s Go types
 into `silofile/silofile.schema.json` and embedded in the binary. After
@@ -150,7 +158,7 @@ changing a type, run `go generate ./silofile` and
 | `mcp` | MCP plumbing: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and client connections over Streamable HTTP, HTTP+SSE and stdio (`Conn`). |
 | `mcp/sources` | Reads `from: <source>:<name>` server definitions from `~/.claude.json`, `.mcp.json` files, codex's `config.toml` and agy's `mcp_config.json`, and the inline-secret test of call 25. |
 | `gateway` | The session's MCP server (design §4): tool registry, refusal, timeouts, and the sandbox tools `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_list_dir`. |
-| `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. `Prelaunch`, `Reap`, `HTTP` and `Gone` hooks let a server on the agent host be fronted the same way. A `Spec` may carry a `Dial` function, so stage 6b's caller-provided servers use it too. |
+| `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function or an HTTP client (a Unix socket's), and blocking tools; `Prelaunch`, `Reap` and `Gone` hooks front a server on the ssh agent host the same way; stage 6b's caller-provided servers are fronted the same way. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
@@ -182,7 +190,9 @@ runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
 
 `session`'s tests use the test binary itself as a fake `claude`: it
 answers `--version`, reads the staged MCP config, calls the gateway and
-exits as told. No real `claude` or `codex` is needed (stage 1d checks
+exits as told. The library's tests (`internal/fakecli`) add a claude that
+answers stream-json messages on stdin, and a fake `codex` whose turn
+can be resumed, for injection. No real `claude` or `codex` is needed (stage 1d checks
 those). The same binary is also the MCP server those tests launch: with
 `SILO_MCPTEST=stdio` it serves `internal/mcptest` over stdio.
 

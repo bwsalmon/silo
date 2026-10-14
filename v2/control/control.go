@@ -4,8 +4,9 @@
 //
 // The server holds a table of methods, so that each stage adds its own:
 // stage 4a registers approve (design §12.3); stage 6b adds inject,
-// cancel and extend_deadline. Only the invoking user can open the
-// socket, so it carries no token of its own.
+// cancel and extend_deadline (package session, docs/events.md). Only
+// the invoking user can open the socket, so it carries no token of its
+// own.
 package control
 
 import (
@@ -234,6 +235,36 @@ func (s *Server) call(line []byte) (response, bool) {
 	}
 	resp.Result = res
 	return resp, true
+}
+
+// Invoke calls a method in-process, as a call on the socket would: the
+// library's way to share the socket's implementation. params is
+// marshalled as the call's params, and the result decoded into result,
+// which may be nil.
+func (s *Server) Invoke(ctx context.Context, method string, params, result any) error {
+	s.mu.Lock()
+	m, ok := s.methods[method]
+	s.mu.Unlock()
+	if !ok {
+		return &Error{Code: CodeMethodNotFound, Message: fmt.Sprintf("no method %q on this session's control socket", method)}
+	}
+	raw := json.RawMessage("null")
+	if params != nil {
+		b, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		raw = b
+	}
+	res, err := m(ctx, raw)
+	if err != nil || result == nil {
+		return err
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, result)
 }
 
 func sorted(s []string) []string {
