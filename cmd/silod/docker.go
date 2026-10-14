@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/fake"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
@@ -59,21 +60,51 @@ type localDocker struct {
 	pub *gateway.Publisher
 }
 
+// sandboxConfig is where sandboxDriver finds what the sandbox class
+// runs on.
+type sandboxConfig struct {
+	// Exe is silod's own executable.
+	Exe string
+	// State is the holder's state file; the runsc shim's options are
+	// beside it.
+	State string
+	// Containerd is silo-containerd's socket.
+	Containerd string
+	// Dir holds each container's FIFOs and log, Volumes is the storage
+	// driver's root.
+	Dir, Volumes string
+	// Runsc is the runsc `silod containerd` names in the shim's
+	// options: runsc on the PATH. Empty, a container's writable layer
+	// can't be read (docker commit, docker export).
+	Runsc string
+	// Toolbox is a static busybox for docker cp; empty, cp needs tar in
+	// the image.
+	Toolbox string
+	// SiloPaths gives each silo's ids from the root down, which name
+	// its slice; nil leaves containers' cgroupsPath empty.
+	SiloPaths func(ctx context.Context) (map[string][]string, error)
+}
+
 // newLocalDocker builds the facade over the runtime drivers: fake ones
-// with fakeRuntime (development and tests only), and none otherwise
-// until the real drivers are wired (local-backend.md §15 steps 7 and
-// 10), so that networks, volumes and images are served and a container
+// with fakeRuntime (development and tests only), and drivers otherwise,
+// the real ones this host has (local-backend.md §15 steps 7 and 10).
+// With none, networks, volumes and images are served and a container
 // create is refused. net, if set, wires containers' links and serves
 // published ports in silo-net. reg and content, if set, are the
 // registry and silo-containerd's content store: push, pulls through
 // registry.silo.internal and the cache, save, load, commit and docker
 // login's check (local-registry.md §7).
-func newLocalDocker(db store.Store, sd storage.Driver, names docker.Names, sn siloNet, fakeRuntime bool, volumes, version string,
+func newLocalDocker(db store.Store, sd storage.Driver, names docker.Names, sn siloNet, fakeRuntime bool, drivers []runtime.Driver, volumes, version string,
 	reg *registry.Service, content registry.Content) *localDocker {
 	d := &localDocker{db: db, names: names, net: sn, pub: gateway.NewPublisher(db)}
-	o := docker.Options{Storage: sd, Content: content, Version: version, Ready: func() string { return "" }}
+	o := docker.Options{Drivers: drivers, Storage: sd, Content: content, Version: version, Ready: func() string { return "" }}
 	if reg != nil {
 		o.Registry, o.Fetcher, o.Login = reg, reg, reg.Login
+	}
+	if !fakeRuntime {
+		// The real drivers run images from silo-containerd's own
+		// namespace, where the facade records each before a create.
+		o.RunNamespace = rootless.ContainerdNamespace
 	}
 	if fakeRuntime {
 		vm, sbx := fake.New(runtime.VM), fake.New(runtime.Sandbox)
