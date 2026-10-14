@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -180,6 +181,41 @@ func (s *Server) Recover(ctx context.Context) (*Recovery, error) {
 		}
 	}
 	return out, nil
+}
+
+// Adopt picks up, when silod starts, the containers its runtimes still
+// run from before it stopped: each is watched again, so that its exit
+// is settled, and its HEALTHCHECK runs again, from starting
+// (local-backend.md §5). It is called once, before the facade serves.
+func (s *Server) Adopt(ctx context.Context) error {
+	var all map[string][]*Container
+	err := s.st.Tx(ctx, func(tx store.Tx) error {
+		var err error
+		all, err = allRows[Container](ctx, tx, kindContainer)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	running := map[string]bool{}
+	for _, d := range s.opts.Drivers {
+		cs, err := d.List(ctx)
+		if err != nil {
+			return fmt.Errorf("docker: adopt: listing %s containers: %w", d.Class(), err)
+		}
+		for _, c := range cs {
+			running[c.ID] = c.State == runtime.Running || c.State == runtime.Paused
+		}
+	}
+	for _, silo := range sortedKeys(all) {
+		for _, c := range all[silo] {
+			if running[c.ID] {
+				s.startHealth(c)
+				s.watch(silo, c)
+			}
+		}
+	}
+	return nil
 }
 
 // auditSilo writes a record of silod's own under silo, made by the

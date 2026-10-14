@@ -154,6 +154,11 @@ type Server struct {
 	execMu sync.Mutex
 	execs  map[string]*execInstance
 
+	// health is each started container's HEALTHCHECK state, by id
+	// (health.go).
+	healthMu sync.Mutex
+	health   map[string]*health
+
 	wg   sync.WaitGroup
 	bg   context.Context
 	stop context.CancelFunc
@@ -167,7 +172,8 @@ func New(st store.Store, opts Options) *Server {
 	if opts.PublishPorts == [2]int{} {
 		opts.PublishPorts = [2]int{32768, 60999}
 	}
-	s := &Server{st: st, opts: opts, drivers: map[runtime.Class]runtime.Driver{}, execs: map[string]*execInstance{}}
+	s := &Server{st: st, opts: opts, drivers: map[runtime.Class]runtime.Driver{}, execs: map[string]*execInstance{},
+		health: map[string]*health{}}
 	for _, d := range opts.Drivers {
 		s.drivers[d.Class()] = d
 	}
@@ -175,7 +181,8 @@ func New(st store.Store, opts Options) *Server {
 	return s
 }
 
-// Close stops watching running containers, and waits for the watchers.
+// Close stops watching running containers and probing their health,
+// and waits for the watchers and the probes.
 func (s *Server) Close() {
 	s.stop()
 	s.wg.Wait()

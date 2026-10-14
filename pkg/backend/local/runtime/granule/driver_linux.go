@@ -819,6 +819,12 @@ func ExecArgs(p runtime.Process) []string {
 	return append(append(a, "--"), p.Args...)
 }
 
+// ExecGap implements runtime.ExecGapper: granule exec runs in the guest
+// OS, not in the wrapped container's root, until plan item 9.
+func (d *Driver) ExecGap() string {
+	return "silo: a vm container's exec runs in its guest, not in the container (local-backend.md §4, plan item 9), so its HEALTHCHECK can't be run"
+}
+
 // Exec implements runtime.Driver: ExecArgs as a process of the VM
 // container, as `docker exec <vm> granule exec` does in granule. granule
 // exec takes a terminal when its stdin is one, and forwards the size.

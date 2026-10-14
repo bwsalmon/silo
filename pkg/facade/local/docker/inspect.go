@@ -26,9 +26,15 @@ func status(rc runtime.Container) string {
 
 // statusText is the list's Status column: "Up 3 minutes", "Exited (0)
 // 2 hours ago".
-func statusText(c *Container, rc runtime.Container) string {
+func statusText(c *Container, rc runtime.Container, health string) string {
 	switch rc.State {
 	case runtime.Running:
+		switch health {
+		case healthStarting:
+			return "Up " + ago(c.StartedAt) + " (health: starting)"
+		case healthHealthy, healthUnhealthy:
+			return "Up " + ago(c.StartedAt) + " (" + health + ")"
+		}
 		return "Up " + ago(c.StartedAt)
 	case runtime.Paused:
 		return "Up " + ago(c.StartedAt) + " (Paused)"
@@ -102,8 +108,9 @@ func mountsJSON(c *Container) []map[string]any {
 	return out
 }
 
-// containerJSON is c as inspect shows it.
-func containerJSON(c *Container, rc runtime.Container, nets map[string]*Network) map[string]any {
+// containerJSON is c as inspect shows it, with health its
+// State.Health, if it has one.
+func containerJSON(c *Container, rc runtime.Container, nets map[string]*Network, health map[string]any) map[string]any {
 	st := status(rc)
 	state := map[string]any{
 		"Status": st, "Running": rc.State == runtime.Running || rc.State == runtime.Paused,
@@ -115,6 +122,9 @@ func containerJSON(c *Container, rc runtime.Container, nets map[string]*Network)
 	}
 	if st == "dead" && c.Error == "" {
 		state["Error"] = "silo: the container is gone from its runtime"
+	}
+	if health != nil {
+		state["Health"] = health
 	}
 	cfg := map[string]any{}
 	for k, v := range c.Config {
@@ -128,6 +138,9 @@ func containerJSON(c *Container, rc runtime.Container, nets map[string]*Network)
 	cfg["Hostname"] = c.ID[:12]
 	cfg["Tty"] = c.Process.TTY
 	cfg["OpenStdin"] = c.Process.Stdin
+	if c.Healthcheck != nil {
+		cfg["Healthcheck"] = c.Healthcheck
+	}
 	if _, ok := cfg["Labels"]; !ok {
 		cfg["Labels"] = map[string]string{}
 	}
@@ -197,11 +210,11 @@ func (s *Server) containerInspect(q *request) error {
 	if err != nil {
 		return err
 	}
-	return ok(q, containerJSON(c, s.state(q.ctx(), c), nets))
+	return ok(q, containerJSON(c, s.state(q.ctx(), c), nets, s.healthJSON(c.ID)))
 }
 
 func (s *Server) containerList(q *request) error {
-	f, err := filters(q, "label", "name", "id", "status", "network", "ancestor", "volume", "exited")
+	f, err := filters(q, "label", "name", "id", "status", "network", "ancestor", "volume", "exited", "health")
 	if err != nil {
 		return err
 	}
@@ -223,6 +236,7 @@ func (s *Server) containerList(q *request) error {
 	for _, c := range cs {
 		rc := s.state(q.ctx(), c)
 		st := status(rc)
+		health := s.healthStatus(c.ID)
 		labels := stringMap(asMap(c.Config["Labels"]))
 		if (!all && st != "running" && st != "paused") ||
 			!f.labels(labels) ||
@@ -234,7 +248,8 @@ func (s *Server) containerList(q *request) error {
 				return v == c.Image || v == c.ImageID || strings.HasPrefix(imageKey(c.ImageID), v)
 			}) ||
 			!f.match("volume", func(v string) bool { return hasVolume(c, v) }) ||
-			!f.match("exited", func(v string) bool { return rc.Exit != nil && strconv.Itoa(exitCode(*rc.Exit)) == v }) {
+			!f.match("exited", func(v string) bool { return rc.Exit != nil && strconv.Itoa(exitCode(*rc.Exit)) == v }) ||
+			!f.match("health", func(v string) bool { return v == health || (v == "none" && !c.Healthcheck.probes()) }) {
 			continue
 		}
 		var ports []map[string]any
@@ -248,7 +263,7 @@ func (s *Server) containerList(q *request) error {
 		out = append(out, map[string]any{
 			"Id": c.ID, "Names": []string{"/" + c.Name}, "Image": c.Image, "ImageID": c.ImageID,
 			"Command": strings.Join(c.Process.Args, " "), "Created": c.Created.Unix(), "Ports": nonNil(ports),
-			"Labels": labels, "State": st, "Status": statusText(c, rc),
+			"Labels": labels, "State": st, "Status": statusText(c, rc, health),
 			"HostConfig":      map[string]any{"NetworkMode": c.HostConfig["NetworkMode"]},
 			"NetworkSettings": map[string]any{"Networks": networksJSON(c, nets)}, "Mounts": mountsJSON(c),
 		})

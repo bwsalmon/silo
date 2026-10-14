@@ -807,6 +807,9 @@ func containerConfig(base ImageConfig, c *Container) ImageConfig {
 			}
 		}
 	}
+	if c.Healthcheck != nil {
+		out.Healthcheck = c.Healthcheck
+	}
 	return out
 }
 

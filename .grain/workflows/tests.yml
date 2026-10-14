@@ -166,7 +166,9 @@ jobs:
   # conformance.Target's Fence, and the registry's), the Docker
   # facade's of pkg/conformance/docker and the local-only structural
   # ones of pkg/conformance/local (repos and the mirror's among them,
-  # with real git clients), against every conformance.Target, with the
+  # with real git clients), and §5's compose and testcontainers flows in
+  # both classes, with what gVisor won't run as expected skips, of
+  # pkg/conformance/compose, against every conformance.Target, with the
   # local backend installed on the runner by `silo install --backend
   # local` (which fetches the pinned runsc) and uninstalled after.
   # "local/fake" runs them in process, judging probes' packets with the
@@ -238,7 +240,7 @@ jobs:
             journalctl --user --no-pager -u silo-nsd -u silo-containerd -u silod | tail -n 100
             exit 1
           fi
-          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ > /tmp/conformance.log 2>&1
+          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ ./pkg/conformance/compose/ > /tmp/conformance.log 2>&1
           status=$?
           cat /tmp/conformance.log
           if [ $status -ne 0 ]; then

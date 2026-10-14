@@ -251,6 +251,16 @@ type Driver interface {
 	List(ctx context.Context) ([]Container, error)
 }
 
+// ExecGapper is a driver whose Exec doesn't run a process in the
+// container as Docker's exec does: the vm class's, whose exec runs in
+// the guest OS rather than the wrapped container until plan item 9
+// (local-backend.md §4, "exec"). ExecGap says why, or "" once its exec
+// is the container's. The facade reports a HEALTHCHECK in such a class
+// unhealthy, with that reason, rather than run it (§5).
+type ExecGapper interface {
+	ExecGap() string
+}
+
 // Committer is a driver that can give a container's writable layer, as
 // docker commit needs it (local-registry.md §7, "commit"). The sandbox
 // class is one; the vm class, whose writable layer is a guest disk, is

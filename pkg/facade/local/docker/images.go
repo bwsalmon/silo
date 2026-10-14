@@ -53,6 +53,7 @@ type ImageConfig struct {
 	ExposedPorts map[string]struct{} `json:",omitempty"`
 	Volumes      map[string]struct{} `json:",omitempty"`
 	Labels       map[string]string   `json:",omitempty"`
+	Healthcheck  *HealthConfig       `json:",omitempty"`
 }
 
 var refPart = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*$`)
@@ -282,7 +283,7 @@ func imageConfigJSON(c ImageConfig) map[string]any {
 	return map[string]any{
 		"Entrypoint": c.Entrypoint, "Cmd": c.Cmd, "Env": nonNil(c.Env), "WorkingDir": c.WorkingDir,
 		"User": c.User, "StopSignal": c.StopSignal, "ExposedPorts": c.ExposedPorts, "Volumes": c.Volumes,
-		"Labels": nonNilMap(c.Labels),
+		"Labels": nonNilMap(c.Labels), "Healthcheck": c.Healthcheck,
 	}
 }
 
