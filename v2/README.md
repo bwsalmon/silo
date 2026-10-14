@@ -7,7 +7,9 @@ all or a subset, its only reach a gateway serving container and gVisor
 sandboxes. `silo validate`, `silo schema` and `silo gc` are there too.
 Stage 4a adds the local executor: each script the Silofile declares
 becomes a gateway tool, `local_<name>`, and `silo approve` answers the
-calls of scripts marked `approve: true`.
+calls of scripts marked `approve: true`. Stage 5a adds local MCP servers
+(`mcp[]` with `where: local`), launched or reached by URL, proxied
+through the gateway with an allowlist each.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -40,7 +42,7 @@ builds, vets or tests the other's packages.
 ## Commands
 
 ```sh
-go run ./cmd/silo run [--prompt text] <Silofile|dir>   # design §3
+go run ./cmd/silo run [--dry-run] [--prompt text] <Silofile|dir>   # design §3
 go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
 go run ./cmd/silo gc                        # what crashed sessions left
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
@@ -56,6 +58,17 @@ otherwise; a setting the CLI cannot express exits 76, a missing
 prerequisite 69. The session directory is
 `$XDG_RUNTIME_DIR/silo/<id>/`; the audit log and the final
 `session.json` stay in `$XDG_STATE_HOME/silo/sessions/<id>/`.
+
+Each `mcp[]` entry with `where: local` (design §13) is launched over
+stdio in its own process group, in the silo folder, with a minimal
+environment plus what the entry names, or connected to by URL. Its
+allowed tools are served as `<server>__<tool>`. A `from:` entry is read
+from one of five named config files (`claude-user`, `claude-project`,
+`mcp-json`, `codex`, `agy`), and an inline secret in it is refused unless
+the Silofile delivers a credential in its place. `silo run --dry-run`
+validates, then checks what the session needs without changing
+anything, one line per check, and exits 69 if any check fails. So far it
+checks MCP servers.
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
@@ -107,8 +120,10 @@ changing a type, run `go generate ./silofile` and
 | `location` | The `Location` and `Agent` interfaces (design §5.1). |
 | `location/local` | The CLI as a child process with a scrubbed environment (design §5.2). |
 | `agentcli` | Per-CLI mappings onto argv, env and staged files: `claude`, `codex` (with the reviewed-version gate for `none`), `custom`. Golden files in `agentcli/testdata`. |
-| `mcp` | MCP over Streamable HTTP: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and a client. |
+| `mcp` | MCP plumbing: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and client connections over Streamable HTTP, HTTP+SSE and stdio (`Conn`). |
+| `mcp/sources` | Reads `from: <source>:<name>` server definitions from `~/.claude.json`, `.mcp.json` files, codex's `config.toml` and agy's `mcp_config.json`, and the inline-secret test of call 25. |
 | `gateway` | The session's MCP server (design §4): tool registry, refusal, timeouts, and the sandbox tools `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_list_dir`. |
+| `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function, so stage 6b's caller-provided servers use it too. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
@@ -118,6 +133,8 @@ changing a type, run `go generate ./silofile` and
 | `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. Wired into `silo run` by stage 7b. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
 | `internal/procgroup` | Process-group cancellation, copied from grain's `pkg/procgroup`. |
+| `internal/lockfile` | `.silo/lock.json`: one key per part of silo (`images`, `mcp`), each written without disturbing the others. |
+| `internal/mcptest` | A test MCP server over stdio or HTTP whose tool list can change, used by the proxy and session tests. |
 | `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
 
 ## Building and testing
@@ -139,7 +156,8 @@ runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
 `session`'s tests use the test binary itself as a fake `claude`: it
 answers `--version`, reads the staged MCP config, calls the gateway and
 exits as told. No real `claude` or `codex` is needed (stage 1d checks
-those).
+those). The same binary is also the MCP server those tests launch: with
+`SILO_MCPTEST=stdio` it serves `internal/mcptest` over stdio.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip

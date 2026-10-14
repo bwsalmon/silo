@@ -2,13 +2,11 @@ package session
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/bwsalmon/silo/v2/gateway"
+	"github.com/bwsalmon/silo/v2/internal/lockfile"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
 
@@ -56,50 +54,21 @@ func DryRun(ctx context.Context, f *silofile.Silofile, environ []string) []Check
 	return out
 }
 
-// LockFile is where a silo folder records what its last run resolved.
-const LockFile = ".silo/lock.json"
-
-// writeLock sets one top-level key of the folder's .silo/lock.json,
-// keeping the others.
+// writeLock sets one top-level key of the folder's .silo/lock.json.
 func writeLock(folder, key string, v any) error {
 	if folder == "" {
 		return nil
 	}
-	path := filepath.Join(folder, LockFile)
-	doc := map[string]json.RawMessage{}
-	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &doc); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	doc[key] = b
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return writeJSON(path, doc)
+	return lockfile.Set(folder, key, v)
 }
 
 // ReadLock reads one key of a folder's .silo/lock.json into v.
 func ReadLock(folder, key string, v any) error {
-	b, err := os.ReadFile(filepath.Join(folder, LockFile))
-	if err != nil {
-		return err
+	ok, err := lockfile.Get(folder, key, v)
+	if err == nil && !ok {
+		err = os.ErrNotExist
 	}
-	doc := map[string]json.RawMessage{}
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return err
-	}
-	raw, ok := doc[key]
-	if !ok {
-		return os.ErrNotExist
-	}
-	return json.Unmarshal(raw, v)
+	return err
 }
 
 func (s *Session) environ() []string { return s.opts.Environ }

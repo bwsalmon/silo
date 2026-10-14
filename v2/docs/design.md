@@ -1491,6 +1491,57 @@ every launched server: "runs as <user> with access to their files".
   through the allowlist and sends `notifications/tools/list_changed` to
   the CLI.
 
+As built in stage 5a (`where: local`; `where: remote` is refused at
+run time until stage 5b):
+
+- **Transports.** A `url:` server is tried as Streamable HTTP first. If
+  the POST of `initialize` is answered 400, 404 or 405, silo falls back
+  to the older HTTP+SSE transport (the MCP spec's
+  backwards-compatibility rule), so the entry needs no transport field.
+  Proxied results are passed on as text: content blocks other than text
+  are dropped, as the gateway serves text only.
+- **Reading configs.** Besides `url`, the JSON sources accept Gemini
+  CLI's `httpUrl` and agy's `serverUrl`. claude-project's `<dir>` and
+  mcp-json's `<path>` may be absolute, `~/...`, or relative to the silo
+  folder, and claude-project looks the cleaned absolute path up exactly.
+  Settings silo does not apply are printed as notes by `--dry-run`: a
+  config's `cwd` (servers run in the silo folder), codex's `env_vars`
+  (list them in `inherit_env` instead) and a `disabled` or
+  `enabled = false` flag (naming the server in the Silofile runs it).
+- **Secrets in configs (call 25).** One rule covers env variables and
+  headers: a credential delivered `to: {mcp: <name>, env: KEY}` replaces
+  the config's value for `KEY`, whether `KEY` is an env variable of a
+  launched server or a header of a `url:` one. A value with no such
+  credential that looks like a secret (its name says token, key,
+  password, secret, credential or auth; or it starts like a known token,
+  `Bearer ...`, or is a URL with a password) is refused. A `${VAR}`
+  reference, as Claude Code expands it (codex's `bearer_token_env_var`
+  and `env_http_headers` are read as the same references), is filled
+  from a credential delivered with `env: VAR`, or for a launched server
+  from silo's environment when `VAR` is in `inherit_env`; otherwise it
+  is refused. So the Silofile names every secret a server gets.
+- **Environment.** The minimal environment takes `PATH`, `HOME`, `USER`,
+  `LANG` and `TMPDIR` from silo's own, where set. Then, each overriding
+  the one before: `inherit_env`, the config's `env`, the entry's `env:`,
+  and delivered credentials.
+- **Lifecycle details.** A launched server's stderr goes to
+  `mcp-<name>.stderr` beside the audit log. Its process group is
+  recorded in `session.json` before it is connected to, so `silo gc`
+  kills it after a crash. A dead server is noticed when its stdout
+  closes or it exits, and its group is killed then too. `restart:
+  on-failure` retries at the same rate, once per 60 s at most, until it
+  starts or the session ends. After a restart or a `list_changed`, an
+  allowlisted tool the server no longer offers is a warning rather than
+  an error: the session is running, and the tool is simply absent.
+- **`--dry-run`.** Stage 5a adds a minimal `silo run --dry-run`, a
+  check registry in `session` that stage 3a extends. It resolves every
+  `from:`, applies the secret rule with credentials by name, finds a
+  launched server's binary on the `PATH` it will have, and prints one
+  line per server, with "runs as <user> with access to their files"
+  for launched ones. It does not contact `url:` servers. `silo run`
+  records the resolved entries (names of variables and headers, never
+  values) under `mcp` in `.silo/lock.json`; `--dry-run` writes nothing.
+
 ### 13.5 Security
 
 - **Reach:** the allowed tools of the declared servers, and through
