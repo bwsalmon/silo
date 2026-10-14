@@ -1,6 +1,7 @@
 # Silo v2: design
 
-**Status:** design only, no code yet. Written in task 3800 from the core
+**Status:** design; stage 1a (`silofile`, `silo validate`,
+`silo schema`) is implemented. Written in task 3800 from the core
 model bsalmon set out for v2. Where that model decided something, this
 document says so plainly. Where it did not, the author made a call; each
 call is marked **(call n)** and listed under [Calls made in this
@@ -104,9 +105,11 @@ YAML's known traps are closed by how silo reads it **(call 1)**:
 - Every scalar silo reads as a string is read as a string. `no`, `on`,
   and `0700` are not reinterpreted. A field that is a duration
   (`ttl: 7d`) or a number has its own parser.
-- Anchors and aliases are allowed. Merge keys (`<<:`) and custom tags
-  are refused, because they make "what does this file grant?" depend on
-  YAML features a reviewer may not know.
+- Anchors and aliases are allowed. Merge keys (`<<:`) and tags are
+  refused, because they make "what does this file grant?" depend on
+  YAML features a reviewer may not know. That includes the core tags
+  (`!!str`, `!!int`): silo already reads each value by its key, so a
+  tag can only confuse.
 - The first key is `silo: v2`, the schema version. A file without it is
   refused.
 - A JSON Schema for the Silofile is generated from silo's Go types and
@@ -121,7 +124,9 @@ A **silo folder** is a directory with a `Silofile` at its root and the
 things it references beside it. Every relative path in a Silofile is
 relative to the folder. A path may not leave the folder (`..` or a
 symlink pointing out is refused). Absolute paths are allowed only where
-the schema says so (an ssh identity file, an MCP server config source).
+the schema says so (an ssh identity file, an MCP server config source,
+a `{file: ...}` credential source, all of which live on the invoking
+machine outside the folder by nature); `~/` counts as absolute.
 
 ```text
 my-silo/
@@ -255,6 +260,10 @@ local:                        # the local executor (journey 3)
   timeout: 5m
   output_cap: 1MiB
 ```
+
+`agent.prompt` and `agent.system_prompt` take a file or inline text: a
+single line with no whitespace is a path in the folder, and anything
+else is the text itself.
 
 Built-in silos (§10) may also use `builtin_tools:` and the `folder`
 sandbox kind. A user Silofile that uses either is refused in v2.0.
