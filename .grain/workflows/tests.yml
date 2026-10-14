@@ -163,18 +163,21 @@ jobs:
   # conformance.Target's Fence, and the registry's), the Docker
   # facade's of pkg/conformance/docker and the local-only structural
   # ones of pkg/conformance/local (repos and the mirror's among them,
-  # with real git clients), against every conformance.Target.
+  # with real git clients), against every conformance.Target, with the
+  # local backend installed on the runner by `silo install --backend
+  # local` (which fetches the pinned runsc) and uninstalled after.
   # "local/fake" runs them in process, judging probes' packets with the
   # nftables evaluator; "gcp" reports them not offered or not runnable
-  # here (its own forms run nightly in silo-conformance); "local/sandbox"
-  # and "local/vm" report themselves not runnable until this job installs
-  # the local backend and makes probe containers through the Docker
-  # facade's host sockets, which silod now serves, with sandbox
-  # containers (the vm class waits on step 10's driver). The summary
-  # at the end of Test names every target that wasn't tested, and
-  # whether /dev/kvm works here for the vm class. The `go` job runs the
-  # same packages, without the distribution-spec suite, which this job
-  # requires.
+  # here (its own forms run nightly in silo-conformance). Against the
+  # install, pkg/conformance/local's TestInstalledSandbox runs a sandbox
+  # container through the installed facade; SILO_REQUIRE_LOCAL_TARGETS
+  # makes a missing install its failure rather than a skip.
+  # "local/sandbox" and "local/vm" still report their Fence and Registry
+  # not runnable: no probe containers are made yet (and the vm class
+  # waits on step 10's driver). The summary at the end of Test names
+  # every target that wasn't tested, and whether /dev/kvm works here for
+  # the vm class. The `go` job runs the same packages, without the
+  # install or the distribution-spec suite, which this job requires.
   local-conformance:
     name: local-conformance
     paths-ignore: *not-read-by-the-go-program
@@ -196,18 +199,51 @@ jobs:
           cp -r "$(go list -m -f '{{.Dir}}' github.com/opencontainers/distribution-spec/conformance)" suite
           chmod -R u+w suite && cd suite && go test -c -o /tmp/oci-conformance.test .
 
+      # The local backend's prerequisites that the runner image lacks,
+      # and the runner user's systemd manager, which install's user
+      # units run under. The runner's logind is masked, so `loginctl
+      # enable-linger` can't run: the manager is started directly, and
+      # the linger file is written by hand for install's lingering step.
+      - name: Install the local backend's prerequisites
+        infrastructure: true
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap nftables busybox-static crun >/dev/null
+          sudo systemctl start "user@$(id -u).service"
+          sudo mkdir -p /var/lib/systemd/linger
+          sudo touch "/var/lib/systemd/linger/$(id -un)"
+          grep "^$(id -un):" /etc/subuid /etc/subgid
+
       - name: Test
         env:
           SILO_REQUIRE_REGISTRY_CLIENTS: "1"
+          SILO_REQUIRE_LOCAL_TARGETS: "1"
           SILO_OCI_CONFORMANCE: /tmp/oci-conformance.test
         run: |
           set +e
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          mkdir -p /tmp/silo-bin
+          go build -o /tmp/silo-bin/ ./cmd/silo ./cmd/silod || exit 1
+          uninstall() {
+            echo "=== silo uninstall --backend local ==="
+            /tmp/silo-bin/silo uninstall --backend local --yes --delete-data
+          }
+          trap uninstall EXIT
+          echo "=== silo install --backend local ==="
+          if ! /tmp/silo-bin/silo install --backend local --yes; then
+            journalctl --user --no-pager -u silo-nsd -u silo-containerd -u silod | tail -n 100
+            exit 1
+          fi
           go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ > /tmp/conformance.log 2>&1
           status=$?
           cat /tmp/conformance.log
-          set -e
+          if [ $status -ne 0 ]; then
+            echo "=== silod's units ==="
+            journalctl --user --no-pager -u silo-nsd -u silo-containerd -u silod | tail -n 200
+          fi
           echo "=== targets not tested on this runner ==="
-          grep -oE '(gcp|local/[a-z]+): not (runnable here|offered)[^"]*' /tmp/conformance.log | sort | uniq -c || true
+          grep -oE '(gcp|local/[a-z]+): not (runnable here|offered)[^"]*' /tmp/conformance.log | sort | uniq -c
           if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
             echo "/dev/kvm: usable here"
           else
