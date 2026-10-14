@@ -25,12 +25,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bwsalmon/silo/v2/agentcli/claude"
+	"github.com/bwsalmon/silo/v2/agentcli/codex"
 	"github.com/bwsalmon/silo/v2/session"
 )
 
@@ -464,9 +466,10 @@ local:
 }
 
 // TestLiveCodex: codex authenticates from agent.auth's credential alone
-// and calls the gateway's tools; remote_permissions none is refused on
-// a Codex version nobody has reviewed (assumption 5;
-// agentcli/codex's TestLiveCodexNoneIsolation is the review probe).
+// and calls the gateway's tools, with remote_permissions all and, on a
+// reviewed version, none; none is refused on a version nobody has
+// reviewed (assumption 5; agentcli/codex's TestLiveCodexNoneIsolation
+// is the review probe).
 func TestLiveCodex(t *testing.T) {
 	liveCLI(t, "codex", "OPENAI_API_KEY")
 	s := newLiveSilo(t)
@@ -481,12 +484,15 @@ func TestLiveCodex(t *testing.T) {
 		}
 	}
 
-	r = s.run(t, codexSilofile("none", "Reply OK."))
+	r = s.run(t, codexSilofile("none", "Call the tool local_alpha with no arguments. Then reply DONE."))
 	out, _ := exec.Command("codex", "--version").Output()
-	reviewed := strings.Contains(string(out), "0.153.0")
+	version, _ := (codex.Mapping{}).ParseVersion(string(out))
+	reviewed := slices.Contains(codex.ReviewedVersions, version)
 	switch {
 	case reviewed && r.code != 0:
 		t.Errorf("none on reviewed %s:\n%s", out, r.dump())
+	case reviewed && r.toolCalls()["local_alpha"] != "ok":
+		t.Errorf("none on reviewed %s: local_alpha not called: %v\n%s", out, r.toolCalls(), r.dump())
 	case !reviewed && r.code != 76:
 		t.Errorf("none on unreviewed %s: exit %d, want 76\n%s", out, r.code, r.dump())
 	}

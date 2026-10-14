@@ -28,8 +28,12 @@ func init() { agentcli.Register("codex", Mapping{}) }
 // (grain pkg/agent/codex/runtime.go), deliberately exact, not a minimum:
 // an older CLI may ignore the configuration, and a newer one may add
 // tools that are not environment-backed. Adding a version is a reviewed
-// change (design open question 3), never automatic.
-var ReviewedVersions = []string{"0.153.0"}
+// change (design open question 3), never automatic. 0.162.1 was added
+// on the stage 1d probe (agentcli/codex's TestLiveCodexNoneIsolation:
+// the same advertised tools as 0.153.0, every native call refused), on
+// the owner's decision (task 3822), not on a source-level review like
+// grain's of 0.153.0.
+var ReviewedVersions = []string{"0.153.0", "0.162.1"}
 
 // Staged names, relative to the staging directory.
 const (

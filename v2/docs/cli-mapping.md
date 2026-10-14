@@ -101,7 +101,7 @@ do not apply. For `auth: ambient`, that home links the user's
 | Setting | Configuration | Source |
 | --- | --- | --- |
 | every setting | `config.toml`: `[mcp_servers.silo]` with `url`, `http_headers = { Authorization = "Bearer ..." }`, `required = true` | G |
-| `none` | `environments.toml` with `default = "none"`, `include_local = false`; `CODEX_EXEC_SERVER_URL=none`; `approval_policy = "never"`, `sandbox_mode = "read-only"`, `web_search = "disabled"`, `include_environment_context = false`; `[features]` `apps`, `plugins`, `multi_agent` off; skills off | G, reviewed by grain for **0.153.0 only** (grain `docs/codex-isolation.md`) |
+| `none` | `environments.toml` with `default = "none"`, `include_local = false`; `CODEX_EXEC_SERVER_URL=none`; `approval_policy = "never"`, `sandbox_mode = "read-only"`, `web_search = "disabled"`, `include_environment_context = false`; `[features]` `apps`, `plugins`, `multi_agent` off; skills off | G, reviewed by grain for **0.153.0** (grain `docs/codex-isolation.md`); L, 0.162.1 by stage 1d's probe (below) |
 | subset | **refused**: Codex has no per-tool allowlist for its built-ins | V (no such flag in 0.162.1's help); G (grain's doc says the same) |
 | `all` | no environment manifest; `-s`/`--sandbox` (`read-only`, `workspace-write`, `danger-full-access`) left at Codex's built-in default; interactive keeps Codex's approval prompts, headless adds `-c approval_policy="never"` so a run never blocks on an approval nobody can give (`codex exec` has no `-a`) | V |
 
@@ -132,8 +132,8 @@ did not stop controller reads, and that only the no-environment manifest
 removes the shell and file tools. It is a reviewed configuration, not a
 documented contract, so grain refuses any other Codex version, and silo
 does the same: `none` on an unreviewed version exits 76 naming the
-reviewed versions. 0.162.1, current when this was written, has not been
-reviewed.
+reviewed versions: 0.153.0 (grain's review) and 0.162.1 (stage 1d,
+below).
 
 Stage 1d ran `agentcli/codex`'s `TestLiveCodexNoneIsolation` on 0.162.1
 and on 0.153.0. It runs the real binary with silo's `none`
@@ -144,9 +144,11 @@ tool whether advertised or not. Both versions advertised the same tools
 `request_user_input`, `tool_search`, with the gateway's tools behind
 `tool_search`), refused `exec_command`, `shell`, `shell_command`,
 `apply_patch`, `view_image`, `write_stdin` and `request_permissions` as
-"unsupported call", and wrote nothing on the host. That is evidence for
-a review, not the review: 0.162.1 is not added to the reviewed versions
-until whoever reviews Codex versions (design open question 3) says so.
+"unsupported call", and wrote nothing on the host. On that evidence the
+owner added 0.162.1 to the reviewed versions (task 3822). It is a
+behavioural check with one model profile, not a source-level review
+like grain's of 0.153.0; the probe is what to rerun for the next
+version.
 
 ### 2.3 `agy`
 
@@ -274,9 +276,8 @@ codex-cli 0.162.1.
    (`TestLiveClaudeNone`, `TestLiveClaudeSubset`); silo keeps the server
    name.
 5. Whether Codex 0.162.1's tool registry still matches grain's 0.153.0
-   review. Until reviewed, `none` is refused on it. **Same surface**
-   in the stage 1d probe (§2.2), awaiting a reviewer's decision (design
-   open question 3). The live run also found `auth: {credential: x}`
+   review. **Same surface** in the stage 1d probe (§2.2); 0.162.1 is
+   now a reviewed version, and `none` runs on it. The live run also found `auth: {credential: x}`
    broken on 0.162.1, now fixed (§2.2).
 6. agy's JSON field names for an HTTP MCP server with a header. Still
    unchecked: agy is not installed where stage 1d ran.
