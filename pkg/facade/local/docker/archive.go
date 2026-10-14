@@ -547,6 +547,13 @@ func (s *Server) imageLoad(q *request) error {
 	if err != nil {
 		return s.refuse(q, err)
 	}
+	// The load's lease goes when this returns, and nothing else in the
+	// content store references the blobs, so they are staged first.
+	for n := range imgs {
+		if err := s.stageImage(ctx, q.target.ID, pulled[n].ID); err != nil {
+			return s.refuse(q, err)
+		}
+	}
 	q.w.Header().Set("Content-Type", "application/json")
 	q.w.WriteHeader(http.StatusOK)
 	enc := jsonLines(q.w)
@@ -972,6 +979,10 @@ func (s *Server) commit(q *request) error {
 	})
 	s.mu.Unlock()
 	if err != nil {
+		return s.refuse(q, err)
+	}
+	// As for a load: staged before the commit's lease goes.
+	if err := s.stageImage(ctx, q.target.ID, img.ID); err != nil {
 		return s.refuse(q, err)
 	}
 	writeJSON(q.w, http.StatusCreated, map[string]string{"Id": img.ID})

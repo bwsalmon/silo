@@ -105,11 +105,13 @@ var Gvisor = GvisorRelease{
 			Tarball:   "79869ae9a589355a46d46fdac068d9a954e741741ffe77c64e38c56ea955498c1cb04e9bce44e1cce5155333e6b76bee72347c6661bb7c78fd2fe3aad198c8fe",
 			Runsc:     "0e0a278f73a3017c45d6fa790ca06a3f62c272c873b504c514efafb3ddacc9ea0f372376128bff8ffe3d766d7cd5f22ceda8bab8075ea10e1064e065d21d8266",
 			RunscShim: "1a30ac91bef05cd8f00a2516a341ffcbe9a6f8a034792f17bfe1957617dfec3d64d41fa6b84ad7bcd5b13406889a6737e672fdd501be3cb349f788ff8dccf961",
+			Sentry:    "b09da3479cbfdbd989b448568d1b8305fdf1789ae05cd864f15ac4b3df2d14a9cc83d5ccd62fa0dfad5c54fe7012e249aab123d306146770a1c8b7418932a193",
 		},
 		"aarch64": {
 			Tarball:   "1bc58be6f881264ced1df8ff61db0205531abedcace005585ac5637c5c987831062b365f99f270ef0939849f130344b84e0f1a663294406f798b8f7c8cd326ac",
 			Runsc:     "3062bddd4e6ed8f8f7f1db95ba4412e9751207f3a2be8a39ae68b51d15a63306d78ad3e6833f711361afddf9f354e103c29b788a6db125ba5d0690ea1d306173",
 			RunscShim: "8ad9d9e0a94241a9767c2f7a1668e589826fcd433c16e1e26676a356967f24e2ebf7050e5aa3b0ae5a3cce8b19e19f18bfaa2ad887ce77b38a987128fceceb57",
+			Sentry:    "3fa2f387496a4afe1e84d9a954defd1c3dd638a314a8696af19ced01beea96ad67fc1b4658265a6c18633da7209c2cc5deceec4722232472c9ce81f16b7f4841",
 		},
 	},
 }
@@ -124,6 +126,10 @@ type GvisorRelease struct {
 // GvisorArch is one architecture's SHA-512 sums, in hex.
 type GvisorArch struct {
 	Tarball, Runsc, RunscShim string
+	// Sentry is gvisor-bin/gvisor_sentry's, the sidecar runsc starts
+	// as each sandbox's Sentry, from the gvisor-bin directory beside
+	// it; "" for a release that has none.
+	Sentry string
 }
 
 // URL is the release's tarball for arch.
@@ -154,8 +160,8 @@ func pinned(h Host) (GvisorArch, bool) {
 	return a, ok
 }
 
-// runtimesStep fetches the pinned runsc and containerd-shim-runsc-v1
-// into RuntimesDir, checked against their pinned SHA-512s, and the
+// runtimesStep fetches the pinned runsc, containerd-shim-runsc-v1 and
+// runsc's Sentry sidecar into RuntimesDir, checked against their pinned SHA-512s, and the
 // units put that directory first on PATH. containerd, crun and buildkitd
 // are the distribution's packages, which the prerequisites check. The
 // vm class's granule images are pinned with its driver (step 10).
@@ -175,8 +181,16 @@ func (s *runtimesStep) NewObserved() install.Observed { return &runtimesObserved
 
 // binaries are the release's binaries install takes, with their sums.
 func binaries(a GvisorArch) [][2]string {
-	return [][2]string{{"runsc", a.Runsc}, {"containerd-shim-runsc-v1", a.RunscShim}}
+	b := [][2]string{{"runsc", a.Runsc}, {"containerd-shim-runsc-v1", a.RunscShim}}
+	if a.Sentry != "" {
+		b = append(b, [2]string{SentryPath, a.Sentry})
+	}
+	return b
 }
+
+// SentryPath is the Sentry sidecar's path in the release, and under
+// RuntimesDir. runsc refuses to start a sandbox without it.
+const SentryPath = "gvisor-bin/gvisor_sentry"
 
 func (s *runtimesStep) Observe(context.Context) (install.Observed, error) {
 	o := &runtimesObserved{Have: map[string]string{}}
@@ -243,7 +257,7 @@ func (s *runtimesStep) PlanRemove(obs install.Observed) []install.Change {
 	if !o.Dir {
 		return []install.Change{{Action: install.ActionOK, Object: RuntimesDir(s.c), Detail: "not there"}}
 	}
-	return []install.Change{{Action: install.ActionDelete, Object: RuntimesDir(s.c), Detail: "the pinned runsc and its shim"}}
+	return []install.Change{{Action: install.ActionDelete, Object: RuntimesDir(s.c), Detail: "the pinned runsc, its shim and its Sentry"}}
 }
 
 func (s *runtimesStep) Apply(ctx context.Context, changes []install.Change) error {

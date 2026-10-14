@@ -3,6 +3,7 @@ package rootless
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -104,6 +105,9 @@ func RunscMain(exe string, args []string) error {
 	path, err := exec.LookPath(*runsc)
 	if err != nil {
 		return err
+	}
+	if path, err = reachableRunsc(path); err != nil {
+		return fmt.Errorf("rootless: runsc: %w", err)
 	}
 	cmd := nsd.UserNSExec(userns, exe, append([]string{path}, rargs...)...)
 	switch runscCommand(rargs) {
@@ -371,4 +375,65 @@ func unitFlags(name, bin string, args []string) (Paths, string, error) {
 		return Paths{}, "", err
 	}
 	return Paths{DataDir: *dataDir, RuntimeDir: *runtimeDir}, p, nil
+}
+
+// RuntimesMount is where reachableRunsc binds a runtime's directory in
+// the holder's private /run, one directory per path it binds.
+const RuntimesMount = "/run/silo/runtimes"
+
+// reachableRunsc is path as the container's root can exec it. runsc
+// runs as that root, a subordinate id, which can't search a directory
+// only silod's user may, as an install's data directory under
+// ~/.local/share is. Where some ancestor of path isn't searchable by
+// others, its directory is bound under RuntimesMount in the holder's
+// mount namespace, which a lookup through the bind doesn't need to
+// search, and the path through the bind is returned. A bind that is
+// already there is reused.
+func reachableRunsc(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(path)
+	searchable := true
+	for d := dir; ; d = filepath.Dir(d) {
+		fi, err := os.Stat(d)
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode().Perm()&0o001 == 0 {
+			searchable = false
+			break
+		}
+		if d == "/" {
+			break
+		}
+	}
+	if searchable {
+		return path, nil
+	}
+	target := filepath.Join(RuntimesMount, fmt.Sprintf("%x", sha256.Sum256([]byte(dir)))[:16])
+	if !sameFile(dir, target) {
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(RuntimesMount, 0o755); err != nil {
+			return "", err
+		}
+		// Two runsc calls racing here each bind it; either bind serves.
+		if err := unix.Mount(dir, target, "", unix.MS_BIND, ""); err != nil && !sameFile(dir, target) {
+			return "", fmt.Errorf("binding %s at %s: %w", dir, target, err)
+		}
+	}
+	return filepath.Join(target, filepath.Base(path)), nil
+}
+
+// sameFile reports whether a and b are the same file.
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	return err == nil && os.SameFile(fa, fb)
 }
