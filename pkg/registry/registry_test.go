@@ -564,6 +564,47 @@ func TestChunked(t *testing.T) {
 	}
 }
 
+// A PATCH larger than MaxChunk (1 MiB here) is taken a piece at a time,
+// as docker, crane and kaniko send a layer in one; a piece over the
+// grant is refused, and the pieces before it stay.
+func TestLargeChunk(t *testing.T) {
+	e := newEnv(t, nil)
+	a := e.mk(e.root, "-"+e.root, "team-a", nil)
+	blob := bytes.Repeat([]byte("0123456789abcdef"), (5<<20)/2/16)
+	r := e.req(a, "POST", "/v2/team-a/app/blobs/uploads/", "", nil)
+	loc := r.header.Get("Location")
+	if r := e.req(a, "PATCH", loc, "application/octet-stream", blob); r.code != 202 || r.header.Get("Range") != rangeOf(len(blob)) {
+		t.Fatalf("2.5 MiB in one PATCH: %d %v %s", r.code, r.header, r.body)
+	}
+	d := registry.Digest("sha256", blob)
+	if r := e.req(a, "PUT", loc+"?digest="+d, "", nil); r.code != 201 {
+		t.Fatalf("commit: %d %s", r.code, r.body)
+	}
+	// And in a monolithic PUT.
+	r = e.req(a, "POST", "/v2/team-a/app/blobs/uploads/", "", nil)
+	blob2 := append(blob, '!')
+	if r := e.req(a, "PUT", r.header.Get("Location")+"?digest="+registry.Digest("sha256", blob2), "", blob2); r.code != 201 {
+		t.Fatalf("monolithic: %d %s", r.code, r.body)
+	}
+
+	// 0.0025 GiB is 2684354 bytes: two pieces fit, the third doesn't.
+	small := e.mk(e.root, "-"+e.root, "small", obj{"quota": obj{"global": obj{"disk_gb": "0.0025", "image_repos": 1}}})
+	r = e.req(small, "POST", "/v2/small/app/blobs/uploads/", "", nil)
+	loc = r.header.Get("Location")
+	r = e.req(small, "PATCH", loc, "application/octet-stream", bytes.Repeat([]byte("a"), 4<<20))
+	if r.code != 413 || r.errCode() != "DENIED" {
+		t.Fatalf("over: %d %s", r.code, r.body)
+	}
+	if r := e.req(small, "GET", loc, "", nil); r.code != 204 || r.header.Get("Range") != rangeOf(2<<20) {
+		t.Fatalf("after the refusal: %d %v", r.code, r.header)
+	}
+	if q := used(t, e, small); q != 1954 { // 2 MiB in micro-GiB, rounded up
+		t.Fatalf("used: %d", q)
+	}
+}
+
+func rangeOf(n int) string { return fmt.Sprintf("0-%d", n-1) }
+
 // Referrers: a manifest pushed with subject is listed, filtered by
 // artifactType; the subject may be absent when it is pushed.
 func TestReferrers(t *testing.T) {

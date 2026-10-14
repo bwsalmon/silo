@@ -418,8 +418,9 @@ pulled again. A pushed image can't: the registry holds its only copy. So
   ([`local-git.md` §5](local-git.md#quota)). An upload chunk that would
   take the silo over its `disk_gb` grant is refused with 413 and the
   OCI error `DENIED`: `silo: /team-a/x is over its disk_gb grant (12.1
-  of 12 GiB)`. One upload overshoots by at most one chunk (the registry
-  caps chunks at 64 MiB).
+  of 12 GiB)`. The registry takes a request's body 64 MiB at a time,
+  charging each piece as it arrives, so one upload overshoots by at most
+  64 MiB.
 - **Whose grant pays.** The repo's silo, always. A manage-grant holder
   pushing into its target charges the target, as every object a holder
   makes is charged ([`fence-api.md`, What a holder may do](fence-api.md#what-a-holder-may-do)).
@@ -671,13 +672,20 @@ the same latency either way.
 - **Sessions** are per repo and per caller silo, with a containerd lease
   each. A session idle for 15 minutes is cancelled and its bytes
   refunded.
-- **Limits:** 64 MiB a chunk; 16 open sessions per silo; a manifest of
+- **Limits:** 16 open sessions per silo; a manifest of
   at most 4 MiB, parsed with a strict JSON decoder and validated against
   its media type before it is stored. A manifest must reference only
   blobs and manifests already in the repo, or it is
   `MANIFEST_BLOB_UNKNOWN`, as the spec requires. The one exception is
   `subject`, which may name a manifest not yet present (distribution-
   spec, "Pushing Manifests with Subject").
+- **No limit on a chunk's size.** docker, crane and kaniko send a
+  whole layer in one `PATCH`, so a cap on a chunk is a cap on a layer:
+  with the 64 MiB cap step 27 had, crane couldn't push
+  `moby/buildkit:v0.34.0-rootless`, whose largest layer is 89 MiB
+  (step 35c). The body is read and charged 64 MiB at a time instead.
+  A piece the silo has no `disk_gb` for is taken back, and the pieces
+  before it stay in the upload, as its `Range` says.
 - **The grace hour:** a completed blob that no manifest references is
   kept, charged, for an hour after its upload, so that a client can push
   blobs and then the manifest. Then its lease expires.

@@ -361,6 +361,9 @@ func (s *Server) containerCreate(q *request) error {
 	if b.NetworkDisabled {
 		mode = "none"
 	}
+	// The docker CLI names the mode's endpoint as the mode: "default"
+	// for a plain run.
+	named := mode
 	if mode == "" || mode == "default" {
 		mode = DefaultNetwork
 	}
@@ -398,11 +401,15 @@ func (s *Server) containerCreate(q *request) error {
 			if err != nil {
 				return err
 			}
-			if err := s.attach(ctx, tx, q.target.ID, c, n, b.NetworkingConfig.EndpointsConfig[mode]); err != nil {
+			ep, ok := b.NetworkingConfig.EndpointsConfig[mode]
+			if !ok {
+				ep = b.NetworkingConfig.EndpointsConfig[named]
+			}
+			if err := s.attach(ctx, tx, q.target.ID, c, n, ep); err != nil {
 				return err
 			}
 			for _, other := range sortedKeys(b.NetworkingConfig.EndpointsConfig) {
-				if other == mode || other == n.Name || other == n.ID {
+				if other == mode || other == named || other == n.Name || other == n.ID {
 					continue
 				}
 				n, err := s.network(ctx, tx, q.target.ID, other)

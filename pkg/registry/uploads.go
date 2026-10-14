@@ -278,10 +278,12 @@ func rangeOf(n int64) string {
 	return fmt.Sprintf("0-%d", n-1)
 }
 
-// chunk appends the request's body to u, at most MaxChunk bytes, and
-// charges it. A chunk the silo has no disk_gb for is taken back and
-// refused with 413 DENIED, so an upload never overshoots its grant
-// (call L61).
+// chunk appends the request's body to u and charges it, MaxChunk bytes
+// at a time: docker, crane and kaniko send a whole layer in one PATCH,
+// whatever its size. A piece the silo has no disk_gb for is taken back
+// and refused with 413 DENIED, so an upload overshoots its grant by at
+// most one piece (call L61); the pieces before it stay, as the upload's
+// Range says.
 func (s *Service) chunk(q *request, u *upload) error {
 	start := u.ingest.Offset()
 	if cr := q.r.Header.Get("Content-Range"); cr != "" {
@@ -294,10 +296,21 @@ func (s *Service) chunk(q *request, u *upload) error {
 				"silo: the chunk starts at %q; the upload holds %d bytes", cr, start)
 		}
 	}
-	n, err := io.Copy(u.ingest, io.LimitReader(q.r.Body, s.opts.MaxChunk+1))
-	if err == nil && n > s.opts.MaxChunk {
-		err = rerr(http.StatusRequestEntityTooLarge, codeSizeInvalid, "silo: a chunk is at most %d bytes", s.opts.MaxChunk)
+	for {
+		n, err := s.piece(q, u, start)
+		if err != nil || n == 0 {
+			return err
+		}
+		// Offset writes the piece to the content store, so the spool
+		// holds at most the next one.
+		start = u.ingest.Offset()
 	}
+}
+
+// piece appends at most MaxChunk bytes of the request's body to u, from
+// start, and charges them; it takes them back if either fails.
+func (s *Service) piece(q *request, u *upload, start int64) (int64, error) {
+	n, err := io.Copy(u.ingest, io.LimitReader(q.r.Body, s.opts.MaxChunk))
 	if err != nil {
 		if terr := u.ingest.Truncate(start); terr != nil {
 			log.Printf("registry: taking back a chunk of upload %s: %v", u.id, terr)
@@ -306,10 +319,10 @@ func (s *Service) chunk(q *request, u *upload) error {
 		if !errors.As(err, &re) {
 			err = rerr(http.StatusBadRequest, codeUploadInvalid, "silo: reading the chunk: %v", err)
 		}
-		return err
+		return 0, err
 	}
 	if n == 0 {
-		return nil
+		return 0, nil
 	}
 	s.mu.Lock()
 	u.size = start + n
@@ -325,8 +338,9 @@ func (s *Service) chunk(q *request, u *upload) error {
 		if terr := u.ingest.Truncate(start); terr != nil {
 			log.Printf("registry: taking back a chunk of upload %s: %v", u.id, terr)
 		}
+		return 0, err
 	}
-	return err
+	return n, nil
 }
 
 // putUpload is PUT /v2/<name>/blobs/uploads/<id>?digest=: the last
