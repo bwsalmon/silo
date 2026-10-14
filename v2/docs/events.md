@@ -11,6 +11,10 @@ A silo session reports what it does as one stream of typed events
   (`v2/silo.go`), delivers the same values on `Session.Events()` and to
   `Options.Sink`.
 
+A running session is acted on through its [control socket](#the-control-socket)
+or, in the library, through the `Session` methods that share its
+implementation.
+
 The Go types are in package `events` (`v2/events`).
 
 ## Envelope
@@ -57,9 +61,12 @@ name, with claude's `mcp__silo__` prefix removed. These are the CLI's own
 tool calls: built-in tools and the gateway's both appear here.
 
 **`tool_call`**: one gateway call, at its start and at its end, exactly as
-its line in `audit.jsonl`. `{phase: start|end, call, tool, args,
+its line in `audit.jsonl`. `{phase: start|end, call, tool, as, args,
 outcome, reason, size, head, duration_ms}`. `call` pairs a start with its
-end. A call the gateway refuses is reported here too.
+end. A call the gateway refuses is reported here too. `tool` is silo's
+name for the tool. `as` is the name the agent called it by, and is set
+only when the session's rename map gives the tool another name (see
+[the library](#the-library)).
 
 **`usage`**: tokens as the CLI reports them, tagged `source: agent`.
 `{source, model, input_tokens, output_tokens, cache_read_tokens,
@@ -137,12 +144,18 @@ question 3 asks for both):
 ## The library
 
 ```go
-s, err := silo.Start(ctx, f, silo.Options{Credentials: map[string]string{"github": tok}})
+s, err := silo.Start(ctx, f, silo.Options{
+	Credentials: map[string]string{"github": tok},
+	CallerMCP: []silo.CallerMCP{{Name: "grain", URL: "unix:/run/grain/t42.sock", Token: perSession,
+		Tools: []string{"ask_question", "wait_for_checks"}, Blocking: []string{"ask_question", "wait_for_checks"}}},
+	Rename: map[string]string{"sandbox_exec": "run_command"}, // optional; silo picks no names
+})
 for e := range s.Events() { ... }          // ends with result, then closes
 res, err := s.Wait()
 s.Cancel("superseded")                     // ends the session as cancelled
 s.ExtendDeadline(time.Now().Add(time.Hour))
-s.Inject(msg)                              // stage 6b; ErrNotYet until then
+d, err := s.Inject(msg)                    // silo.Delivered or silo.Queued
+err = s.Approve(callID, true)              // answers an approval_request
 ```
 
 - A library session runs headless. A Silofile without `agent.mode` is run
@@ -157,3 +170,102 @@ s.Inject(msg)                              // stage 6b; ErrNotYet until then
   can therefore run in one process.
 - `Events()` never blocks the session: events queue until they are read.
   Once it has been called, the channel must be drained.
+- `Inject`, `Cancel`, `ExtendDeadline` and `Approve` do what the control
+  socket's methods of the same names do. `Inject` and `Approve` wait for
+  the session to exist, which is almost at once. A message injected
+  during setup goes with the prompt (claude) or is queued (codex).
+- `Options.CallerMCP` and `Options.Rename` are described under
+  [caller-provided MCP servers](#caller-provided-mcp-servers).
+
+## The control socket
+
+Every session listens on `control.sock` in its session directory,
+`$XDG_RUNTIME_DIR/silo/<id>/control.sock` ([`grain.md`](grain.md) §2.1).
+The socket is mode 0600 in a 0700 directory, and that is its only
+authentication: whoever can open it is the invoking user. It speaks
+JSON-RPC 2.0, one request or response per line. Requests on one
+connection may be answered out of order, so a long `approve` does not
+hold up a short `inject`. A request without an `id` is a notification
+and gets no answer.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `inject` | `{"message": "..."}` | `{"delivery": "delivered" \| "queued"}` |
+| `cancel` | `{"reason": "..."}` (optional) | `{}` |
+| `extend_deadline` | `{"deadline": "<RFC 3339 time>"}` | `{"deadline": "..."}` |
+| `approve` | `{"id": "<call>", "deny": false}` (both optional) | the call answered: `{id, tool, script, args, ..., approved}` |
+
+- **`inject`** gives the CLI a user message mid-run.
+  - **claude**: silo keeps the CLI's stream-json stdin open until its
+    turn's `result`, and writes the message there. The result is
+    `delivered`. Silo then closes stdin, so the CLI exits once it has
+    answered everything it read.
+  - **codex**: `codex exec` takes no input once it has started. The
+    message is `queued`. When the turn ends cleanly (exit 0, and no
+    failure in its output), silo runs `codex exec resume <thread> -` with
+    the queued messages on stdin, joined by blank lines, as the next
+    turn.
+  - **claude, after its turn has ended**: a message is `queued`, and
+    silo resumes the CLI with `claude -p --resume <session>` in the same
+    way. Messages still queued when the session ends any other way (a
+    failed turn, cancel, the deadline) are dropped, with a warning.
+  - **Refused**: an interactive session, `cli: custom`, and a session
+    that is ending all refuse `inject`.
+  - Each delivery is reported as a `status` line.
+- **`cancel`** ends the session as `cancelled`. `exit.detail` carries the
+  reason, and the exit code is 143. It works during setup too.
+- **`extend_deadline`** moves the session's deadline to the given time. A
+  session without a deadline gets one. A move made during setup takes
+  effect when the CLI starts.
+- **`approve`** answers a gateway call waiting for approval (an
+  `approval_request` event, design §12.3). It is present only in a
+  session with local scripts.
+
+Errors use JSON-RPC's codes. Malformed JSON gets -32700, and a request
+that is not JSON-RPC 2.0 gets -32600. An unknown method gets -32601,
+with the methods the socket has. Bad params get -32602: the wrong type,
+an unknown field, a missing `message` or `deadline`, or a request the
+method refuses. `silo approve` is a client of this socket.
+
+## Caller-provided MCP servers
+
+A caller can pass the session MCP servers of its own, such as grain's
+task tools ([`grain.md`](grain.md) §2.2). The gateway connects to each
+one as a client and serves its tools as `<name>__<tool>`. Each call goes
+through the server's allowlist and is audited like any `mcp[]` call.
+Silo neither starts nor stops these servers.
+
+- **Where.** `URL` is an `http://` or `https://` Streamable HTTP
+  endpoint, or a Unix socket, written `unix:/path` or as a bare absolute
+  path. On a socket, the endpoint is `/mcp`. Only Streamable HTTP is
+  spoken on a socket; HTTP+SSE is not.
+- **Token.** `Token` is sent as `Authorization: Bearer <token>`. Silo
+  redacts it like a credential, as `[credential:caller-mcp:<name>]`. A
+  server that refuses the token fails setup: every caller server is
+  required.
+- **Allowlist.** `Tools` is the allowlist of the server's own tool names.
+  When it is nil, every tool the server lists is allowed.
+- **Blocking tools.** `Blocking` names tools the gateway runs with no
+  timeout, such as `wait_for_checks` and `ask_question`. In a session
+  with a blocking tool, silo raises the CLI's own MCP call timeout to 7
+  days: `MCP_TOOL_TIMEOUT` for claude, `tool_timeout_sec` for codex. The
+  session's deadline, `cancel` or the server itself ends such a call, not
+  the CLI.
+- **Names.** A caller server's name follows `mcp[]`'s rule, may not
+  contain `__`, and may not be the name of a Silofile `mcp[]` entry.
+- **On the command line.** `silo run --caller-mcp <name>=<url>` gives
+  the same thing; repeat the flag for each server. The token is read
+  from `$SILO_CALLER_MCP_TOKEN_<NAME>`, with the name upper-cased and
+  `-` written as `_`, so that it never appears in silo's argv.
+  `--caller-mcp-tools <name>=a,b` sets the allowlist, and
+  `--caller-mcp-blocking <name>=a,b` sets the blocking tools.
+
+`Options.Rename` is the per-session rename map (design open question
+19). Each key is silo's name for a gateway tool (`sandbox_exec`,
+`local_<script>`, `<server>__<tool>`). Its value is the name the agent
+sees instead. The gateway lists and answers the tool under the new name
+only. The audit log and `tool_call` events record both names, as `tool`
+and `as`. Two tools renamed to one name, or a rename onto another
+tool's name, fail setup with exit 64. A key the session does not serve
+is warned about. Silo ships no map of its own: which names to keep is
+the caller's choice.

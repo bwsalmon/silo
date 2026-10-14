@@ -41,17 +41,41 @@ type Options struct {
 	Grace time.Duration
 	// GC runs the local silo gc before the session starts.
 	GC bool
+	// CallerMCP are MCP servers the caller serves (grain's task tools),
+	// which the gateway fronts as <name>__<tool> (grain.md §2.2).
+	CallerMCP []CallerMCP
+	// Rename lists gateway tools under other names, keyed by silo's
+	// name (sandbox_exec, <server>__<tool>, ...), valued by the name the
+	// agent sees. The audit log records both. Silo chooses no names.
+	Rename map[string]string
 }
+
+// CallerMCP is a caller-provided MCP server: a URL or a Unix socket, a
+// per-session token, an allowlist and the tools that may block.
+type CallerMCP = session.CallerMCP
+
+// Delivery says what Inject did with a message.
+type Delivery = session.Delivery
+
+// What Inject did with a message.
+const (
+	// Delivered: the running CLI has the message now (claude reads it
+	// on its stream-json stdin).
+	Delivered = session.Delivered
+	// Queued: the message is the CLI's next turn, which starts when its
+	// current turn ends (codex exec resume, claude --resume).
+	Queued = session.Queued
+)
 
 // Result is a session's outcome, as its result event has it.
 type Result = events.Result
 
-// ErrNotYet is returned by what a later stage provides.
-var ErrNotYet = errors.New("silo: not available until stage 6b")
-
 // Session is one session started by Start. Its methods are safe for
 // concurrent use.
 type Session struct {
+	started chan struct{}
+	sess    *session.Session
+
 	cancel chan string
 	extend chan time.Time
 	extMu  sync.Mutex
@@ -91,10 +115,11 @@ func Start(ctx context.Context, f silofile.Silofile, opts Options) (*Session, er
 		return nil, errs
 	}
 	s := &Session{
-		cancel: make(chan string, 1),
-		extend: make(chan time.Time, 1),
-		done:   make(chan struct{}),
-		events: make(chan events.Event),
+		started: make(chan struct{}),
+		cancel:  make(chan string, 1),
+		extend:  make(chan time.Time, 1),
+		done:    make(chan struct{}),
+		events:  make(chan events.Event),
 	}
 	s.qcond = sync.NewCond(&s.qmu)
 	stderr := opts.Stderr
@@ -109,7 +134,12 @@ func Start(ctx context.Context, f silofile.Silofile, opts Options) (*Session, er
 		// a process-wide signal handler.
 		Signals: make(chan os.Signal),
 		Cancel:  s.cancel, ExtendDeadline: s.extend,
-		NoGC: !opts.GC,
+		NoGC:      !opts.GC,
+		CallerMCP: opts.CallerMCP, Rename: opts.Rename,
+		Started: func(ss *session.Session) {
+			s.sess = ss
+			close(s.started)
+		},
 		Sink: session.SinkFunc(func(e events.Event) {
 			if opts.Sink != nil {
 				opts.Sink(e)
@@ -179,9 +209,44 @@ func (s *Session) ExtendDeadline(t time.Time) {
 	s.extend <- t
 }
 
-// Inject delivers a user message to the CLI mid-run. It is stage 6b's,
-// and returns ErrNotYet until then.
-func (s *Session) Inject(msg string) error { return ErrNotYet }
+// Inject gives the CLI a user message mid-run (grain.md §2.1), and
+// says whether it was delivered now or queued for the CLI's next turn.
+// A session whose CLI takes no messages (interactive, cli: custom)
+// refuses it, as does one that is ending.
+func (s *Session) Inject(msg string) (Delivery, error) {
+	ss, err := s.session()
+	if err != nil {
+		return "", err
+	}
+	return ss.Inject(msg)
+}
+
+// Approve answers a gateway call waiting for approval (an
+// approval_request event): call id, or the one waiting when id is
+// empty. allow false denies it.
+func (s *Session) Approve(id string, allow bool) error {
+	ss, err := s.session()
+	if err != nil {
+		return err
+	}
+	_, err = ss.Approve(context.Background(), id, allow)
+	return err
+}
+
+// session waits for the session to exist.
+func (s *Session) session() (*session.Session, error) {
+	select {
+	case <-s.started:
+		return s.sess, nil
+	case <-s.done:
+		select {
+		case <-s.started:
+			return s.sess, nil
+		default:
+		}
+		return nil, errors.New("silo: the session ended before it started")
+	}
+}
 
 // Wait waits for the session to end and returns its result, and the
 // error that ended it, if one did.

@@ -131,3 +131,33 @@ mcp:
 		t.Error("--dry-run wrote .silo/")
 	}
 }
+
+func TestCallerMCPFlags(t *testing.T) {
+	env := map[string]string{"SILO_CALLER_MCP_TOKEN_GRAIN_TASK": "tok"}
+	c := &callerFlags{getenv: func(k string) string { return env[k] }}
+	for _, v := range []string{"grain-task=unix:/run/g.sock", "web=http://127.0.0.1:1/mcp"} {
+		if err := c.server(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.server("web=http://x"); err == nil {
+		t.Error("a server given twice was accepted")
+	}
+	c.tools("grain-task=ask_question,wait_for_checks")
+	c.blocking("grain-task=wait_for_checks")
+	got, err := c.list()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Token != "tok" || strings.Join(got[0].Tools, ",") != "ask_question,wait_for_checks" ||
+		strings.Join(got[0].Blocking, ",") != "wait_for_checks" || got[1].Tools != nil || got[1].Token != "" {
+		t.Errorf("%+v", got)
+	}
+	c.blocking("nobody=x")
+	if _, err := c.list(); err == nil {
+		t.Error("a qualifier for an unknown server was accepted")
+	}
+	if err := c.server("novalue"); err == nil {
+		t.Error("a server without a URL was accepted")
+	}
+}

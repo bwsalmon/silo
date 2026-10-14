@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/bwsalmon/silo/v2/agentcli"
@@ -25,6 +26,25 @@ type ApproveParams struct {
 type ApproveResult struct {
 	localexec.Request
 	Approved bool `json:"approved"`
+}
+
+// Approve answers a local script's call waiting for approval, as the
+// control socket's approve does (design §12.3): call id, or the one call
+// waiting when id is empty.
+func (s *Session) Approve(ctx context.Context, id string, allow bool) (ApproveResult, error) {
+	var res ApproveResult
+	s.hookMu.Lock()
+	ctl := s.Control
+	s.hookMu.Unlock()
+	if ctl == nil {
+		return res, errors.New("approve: the session has no control socket yet")
+	}
+	err := ctl.Invoke(ctx, "approve", ApproveParams{ID: id, Deny: !allow}, &res)
+	var ce *control.Error
+	if errors.As(err, &ce) && ce.Code == control.CodeMethodNotFound {
+		err = errors.New("approve: this session has no local script that asks for approval")
+	}
+	return res, err
 }
 
 // provideLocal snapshots the local executor's scripts and serves one

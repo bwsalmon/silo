@@ -108,10 +108,13 @@ const (
 // ToolCall is a gateway call's start or end, as its audit line has it
 // (credentials already redacted).
 type ToolCall struct {
-	Phase string         `json:"phase"`
-	Call  int64          `json:"call"`
-	Tool  string         `json:"tool"`
-	Args  map[string]any `json:"args,omitempty"`
+	Phase string `json:"phase"`
+	Call  int64  `json:"call"`
+	Tool  string `json:"tool"`
+	// As is the name the agent called Tool by, when the session's
+	// rename map gives it another.
+	As   string         `json:"as,omitempty"`
+	Args map[string]any `json:"args,omitempty"`
 	// End only.
 	Outcome    string `json:"outcome,omitempty"`
 	Reason     string `json:"reason,omitempty"`

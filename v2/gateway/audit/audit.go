@@ -50,7 +50,10 @@ type Record struct {
 	Caller  Caller    `json:"caller"`
 	Call    int64     `json:"call"` // pairs a call's start and end
 	Tool    string    `json:"tool"`
-	Args    any       `json:"args,omitempty"` // start only
+	// As is the name the agent called Tool by, when the session's rename
+	// map gives it another (grain.md §2.2).
+	As   string `json:"as,omitempty"`
+	Args any    `json:"args,omitempty"` // start only
 
 	Outcome    string `json:"outcome,omitempty"` // end only
 	Reason     string `json:"reason,omitempty"`  // why it was refused or failed
@@ -178,6 +181,7 @@ type Call struct {
 	log   *Log
 	id    int64
 	tool  string
+	as    string
 	start time.Time
 }
 
@@ -185,7 +189,16 @@ type Call struct {
 // writes its end line. The start line is on disk (in the kernel's page
 // cache, which survives the process) before Start returns.
 func (l *Log) Start(tool string, args map[string]any) (*Call, error) {
-	c := &Call{log: l, id: l.nextID.Add(1), tool: tool, start: time.Now()}
+	return l.StartAs(tool, "", args)
+}
+
+// StartAs is Start for a tool the agent called by another name, as: the
+// gateway's rename map. Both lines of the call record both names.
+func (l *Log) StartAs(tool, as string, args map[string]any) (*Call, error) {
+	if as == tool {
+		as = ""
+	}
+	c := &Call{log: l, id: l.nextID.Add(1), tool: tool, as: as, start: time.Now()}
 	var a any
 	if args != nil {
 		// Round-trip through JSON so redactValue sees plain JSON values
@@ -196,7 +209,7 @@ func (l *Log) Start(tool string, args map[string]any) (*Call, error) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return c, l.write(Record{Time: c.start.UTC(), Event: "start", Call: c.id, Tool: tool, Args: a})
+	return c, l.write(Record{Time: c.start.UTC(), Event: "start", Call: c.id, Tool: tool, As: as, Args: a})
 }
 
 // End writes the call's end line: its outcome, the reason when it did
@@ -214,7 +227,7 @@ func (c *Call) End(outcome, reason, result string) error {
 		head = head[:HeadBytes]
 	}
 	return l.write(Record{
-		Time: time.Now().UTC(), Event: "end", Call: c.id, Tool: c.tool,
+		Time: time.Now().UTC(), Event: "end", Call: c.id, Tool: c.tool, As: c.as,
 		Outcome: outcome, Reason: reason, Size: &size, Head: head, DurationMS: &d,
 	})
 }
