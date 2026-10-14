@@ -16,7 +16,8 @@ import (
 // TestBuildersLive serves the registry and its cache on
 // $SILO_BUILDERS_ADDR for local-registry.md §13, step 35: kaniko and
 // rootless BuildKit, run by hand in containers, push to it and pull their
-// base image through it (testdata/builders/run.sh). Every request is
+// base image through it (testdata/builders/run.sh in gVisor, vm.sh in
+// granule VMs for step 35b). Every request is
 // served as silo team-a/x, as the gateway would attribute a container of
 // that silo, and the cache's docker.io is the real Docker Hub, reached
 // directly after the silo's egress check (the gateway's proxy isn't in
