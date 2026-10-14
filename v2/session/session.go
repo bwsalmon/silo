@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/v2/agentcli"
+	"github.com/bwsalmon/silo/v2/control"
 	"github.com/bwsalmon/silo/v2/credentials"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/gateway/audit"
@@ -82,7 +83,7 @@ type Options struct {
 // Event is one thing that happened in a session.
 type Event struct {
 	Time time.Time
-	// Type is status, warning, step or exit.
+	// Type is status, warning, step, approval_request or exit.
 	Type    string
 	Message string
 	// Code is the exit code, for exit.
@@ -99,6 +100,8 @@ func (t textSink) Event(e Event) {
 	case "warning":
 		fmt.Fprintf(t.w, "silo: warning: %s\n", e.Message)
 	case "step":
+	case "approval_request":
+		fmt.Fprintf(t.w, "\nsilo: %s\n", e.Message)
 	default:
 		fmt.Fprintf(t.w, "silo: %s\n", e.Message)
 	}
@@ -145,6 +148,8 @@ type Session struct {
 	Gateway    *gateway.Gateway
 	Server     *mcp.Server
 	GatewayURL string
+	// Control is the session's control socket.
+	Control *control.Server
 
 	// Command is the CLI's command, once staged.
 	Command location.Command
