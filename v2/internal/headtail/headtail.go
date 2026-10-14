@@ -61,6 +61,13 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// Total is how many bytes were written.
+func (b *Buffer) Total() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.total
+}
+
 // Dropped is how many bytes were written but not kept.
 func (b *Buffer) Dropped() int64 {
 	b.mu.Lock()

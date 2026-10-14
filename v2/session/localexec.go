@@ -1,0 +1,104 @@
+package session
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/bwsalmon/silo/v2/agentcli"
+	"github.com/bwsalmon/silo/v2/control"
+	"github.com/bwsalmon/silo/v2/gateway"
+	"github.com/bwsalmon/silo/v2/localexec"
+)
+
+func init() { RegisterToolProvider("local", provideLocal) }
+
+// ApproveParams are the control socket's approve method's params:
+// approve (or deny) call ID, or the one call waiting when ID is empty.
+type ApproveParams struct {
+	ID   string `json:"id,omitempty"`
+	Deny bool   `json:"deny,omitempty"`
+}
+
+// ApproveResult is what approve answers: the call it answered.
+type ApproveResult struct {
+	localexec.Request
+	Approved bool `json:"approved"`
+}
+
+// provideLocal snapshots the local executor's scripts and serves one
+// tool per script (design §12). A refused script fails the session.
+func provideLocal(ctx context.Context, s *Session) ([]gateway.Tool, Undo, error) {
+	f := s.File
+	if f.Local == nil {
+		return nil, nil, nil
+	}
+	listed, errs := f.LocalScripts()
+	if len(errs) > 0 {
+		return nil, nil, &Error{Code: ExitInvalid, Err: errs}
+	}
+	scripts, err := localexec.Snapshot(f, listed)
+	if err != nil {
+		return nil, nil, &Error{Code: ExitInvalid, Err: err}
+	}
+	delivered, err := localexec.Delivered(f.Credentials, s.Credentials)
+	if err != nil {
+		return nil, nil, &Error{Code: ExitRefused, Err: err}
+	}
+	ex := localexec.New(localexec.Config{
+		Scripts:   scripts,
+		Workdir:   localexec.Workdir(f),
+		Environ:   localexec.BaseEnviron(s.opts.Environ, f.Credentials, s.Credentials),
+		Env:       delivered,
+		OutputCap: localexec.OutputCap(f),
+		Approver:  s.approver(),
+	})
+	for _, sc := range scripts {
+		note := ""
+		if sc.Approve {
+			note = ", each call approved by you"
+		}
+		s.status("local script %s as %s (sha256 %s%s)", sc.Name, sc.Tool, sc.SHA256[:12], note)
+	}
+	return ex.Tools(), func(context.Context) error { return ex.Close() }, nil
+}
+
+// approver picks how approve: true calls are asked about (design
+// §12.3): on silo's own terminal in headless mode when it has one, and
+// otherwise through silo approve on the control socket, announced by a
+// desktop notification in interactive mode and by an approval_request
+// event to a sink that is not silo's own terminal lines (--json).
+func (s *Session) approver() localexec.Approver {
+	if s.Mode == agentcli.Headless && isTerminal(s.opts.Stdin) {
+		return &localexec.Terminal{In: s.opts.Stdin, Out: s.opts.Stderr}
+	}
+	q := &localexec.Queue{Notify: func(r localexec.Request) {
+		cmd := fmt.Sprintf("silo approve %s %s", s.ID, r.ID)
+		msg := fmt.Sprintf("call %s waits for your approval: %s %s (run %q, or add --deny)", r.ID, r.Tool, r.Summary(), cmd)
+		if _, text := s.sink.(textSink); !text || s.Mode != agentcli.Interactive {
+			// In interactive mode the terminal is the CLI's.
+			s.sink.Event(Event{Time: time.Now(), Type: "approval_request", Message: msg})
+		}
+		if s.Mode == agentcli.Interactive {
+			go localexec.Notify(context.Background(), s.getenv("PATH"),
+				"silo: "+r.Tool+" waits for approval", r.Summary()+"\n"+cmd)
+		}
+	}}
+	if s.Control != nil {
+		s.Control.Handle("approve", func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var p ApproveParams
+			if string(raw) != "null" {
+				if err := json.Unmarshal(raw, &p); err != nil {
+					return nil, control.Errorf("approve: %v", err)
+				}
+			}
+			r, err := q.Answer(p.ID, !p.Deny)
+			if err != nil {
+				return nil, control.Errorf("%v", err)
+			}
+			return ApproveResult{Request: r, Approved: !p.Deny}, nil
+		})
+	}
+	return q
+}
