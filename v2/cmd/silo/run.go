@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/bwsalmon/silo/v2/gcp"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -63,18 +64,62 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 	return code
 }
 
-// gc is silo gc: for now, its local part (design §3.1).
+// gc is silo gc: the local part (design §3.1), then the user's
+// journey 2 accounts whose ttl has passed (design §11.5). GCP is only
+// contacted when local state lists an account or --project is given.
 func gc(args []string, stdout, stderr io.Writer) int {
-	if _, ok := flags("gc", "", args, stderr, 0, 0); !ok {
+	fs := flag.NewFlagSet("silo gc", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	project := fs.String("project", "", "also look for the user's silo accounts in this project")
+	account := fs.String("account", "", "with --project: delete this one account of the user's, whatever its ttl")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: silo gc [--project p [--account email]]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || (*account != "" && *project == "") {
+		if err == nil {
+			fs.Usage()
+		}
 		return exitUsage
 	}
-	rep, err := session.GC(context.Background(), session.GCOptions{Getenv: os.Getenv})
-	for _, line := range rep.Removed {
-		fmt.Fprintln(stdout, line)
+	code := exitOK
+	if *account == "" {
+		rep, err := session.GC(context.Background(), session.GCOptions{Getenv: os.Getenv})
+		for _, line := range rep.Removed {
+			fmt.Fprintln(stdout, line)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "silo gc: %v\n", err)
+			code = 1
+		}
 	}
-	if err != nil {
+	if err := gcAccounts(context.Background(), *project, *account, stdout); err != nil {
 		fmt.Fprintf(stderr, "silo gc: %v\n", err)
-		return 1
+		code = 1
 	}
-	return exitOK
+	return code
+}
+
+// gcAccounts is silo gc for journey 2's accounts, as the user's own
+// gcloud login.
+func gcAccounts(ctx context.Context, project, account string, stdout io.Writer) error {
+	store := &gcp.Store{Path: gcp.StatePath(os.Getenv)}
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if len(st.Accounts) == 0 && project == "" {
+		return nil
+	}
+	api, user, err := gcp.Ambient(ctx)
+	if err != nil {
+		return err
+	}
+	c := &gcp.Client{API: api, Store: store, Out: stdout}
+	opts := gcp.GCOptions{User: user, Account: account}
+	if project != "" {
+		opts.Projects = []string{project}
+	}
+	_, err = c.GC(ctx, opts)
+	return err
 }

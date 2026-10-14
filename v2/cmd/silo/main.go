@@ -26,7 +26,9 @@ const usage = `usage: silo <command> [arguments]
 commands:
   run [--prompt text] <Silofile|dir>
                             run one session (design §3)
-  gc                        remove what crashed sessions left behind
+  gc [--project p [--account email]]
+                            remove what crashed sessions left behind, and
+                            your project accounts gone unused past their ttl
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)
   schema [section]          print the Silofile's JSON Schema, or one section's
 `

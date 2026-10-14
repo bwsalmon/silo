@@ -362,7 +362,9 @@ func TestVerifyMismatches(t *testing.T) {
 		}, "it holds roles/editor under a condition"},
 		{"foreign token creator", func(f *fakegcp.Fake) { f.BindAccount(email, gcp.TokenCreator, "user:mallory@example.com") },
 			"user:mallory@example.com holds roles/iam.serviceAccountTokenCreator on it; only user:alice@example.com may"},
-		{"other role on the account", func(f *fakegcp.Fake) { f.BindAccount(email, "roles/iam.serviceAccountUser", "user:mallory@example.com") },
+		{"other role on the account", func(f *fakegcp.Fake) {
+			f.BindAccount(email, "roles/iam.serviceAccountUser", "user:mallory@example.com")
+		},
 			"user:mallory@example.com holds roles/iam.serviceAccountUser on it"},
 		{"user not token creator", func(f *fakegcp.Fake) { f.AccountPolicies[email].Bindings = nil }, "user:alice@example.com does not hold roles/iam.serviceAccountTokenCreator"},
 		{"wrong spec", func(f *fakegcp.Fake) {

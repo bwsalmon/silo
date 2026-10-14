@@ -228,6 +228,10 @@ func explain(what string, err error) error {
 	if err == nil {
 		return nil
 	}
+	var g *googleapi.Error
+	if errors.As(err, &g) {
+		err = shortError{g}
+	}
 	msg := err.Error()
 	if c := constraintRE.FindString(msg); c != "" {
 		return fmt.Errorf("%s: forbidden by organization policy %s: %w", what, c, err)
@@ -237,3 +241,10 @@ func explain(what string, err error) error {
 	}
 	return fmt.Errorf("%s: %w", what, err)
 }
+
+// shortError prints a Google API error as its code and message, without
+// the details JSON googleapi.Error appends.
+type shortError struct{ g *googleapi.Error }
+
+func (e shortError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.g.Code, e.g.Message) }
+func (e shortError) Unwrap() error { return e.g }

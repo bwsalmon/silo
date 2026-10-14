@@ -35,8 +35,8 @@ type Record struct {
 	TTL Duration `json:"ttl"`
 	// Incomplete is set from creation until every step has been done
 	// (design §11.6); Done lists the steps that have.
-	Incomplete bool     `json:"incomplete,omitempty"`
-	Done       []string `json:"done,omitempty"`
+	Incomplete bool      `json:"incomplete,omitempty"`
+	Done       []string  `json:"done,omitempty"`
 	Created    time.Time `json:"created"`
 	Used       time.Time `json:"used"`
 	// Session is the session using the account, if any, so that gc
