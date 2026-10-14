@@ -648,6 +648,7 @@ func serve(ctx context.Context, args []string) error {
 	}
 	var be backend.Backend
 	var dk *localDocker
+	var reg *registry.Service
 	if *backendKind == local.Kind {
 		// The holder's storage driver comes with silod's use of it for
 		// volumes; until then, the data directory's silos/ read
@@ -674,7 +675,33 @@ func serve(ctx context.Context, args []string) error {
 				return fmt.Errorf("--backend=local: the namespace holder's socket: %w", err)
 			}
 			defer sn.Close()
-			dk = newLocalDocker(db, sd, names, sn, *fakeRuntime, dd.Silos(), release)
+			// The registry for local image repos (local-registry.md §13,
+			// step 27b), over silo-containerd's content store, whose
+			// containerd silo-nsd runs. It is made before the facade,
+			// which pushes to it and keeps images in the same store
+			// (step 30), and given the fence API once there is one.
+			csock := *containerdSocket
+			if csock == "" {
+				state := *nsdState
+				if state == "" {
+					state = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "silo", "nsd.state")
+				}
+				csock = filepath.Join(filepath.Dir(state), "containerd.sock")
+			}
+			// An ingest's spool holds the chunk it may still have to take
+			// back: re-creatable, so in cache/.
+			spool := filepath.Join(dd.Cache(), "registry-spool")
+			if err := os.MkdirAll(spool, 0o700); err != nil {
+				return err
+			}
+			cs, err := containerdstore.New(containerdstore.Options{Address: csock, Spool: spool})
+			if err != nil {
+				return err
+			}
+			defer cs.Close()
+			reg = registry.New(registry.Options{Store: db, Content: cs})
+			log.Printf("serving the registry over silo-containerd's content store at %s", csock)
+			dk = newLocalDocker(db, sd, names, sn, *fakeRuntime, dd.Silos(), release, reg, cs)
 			defer dk.f.Close()
 			objects = dk.f.DeleteSilo
 		}
@@ -702,33 +729,8 @@ func serve(ctx context.Context, args []string) error {
 	} else {
 		be = gcp.New(bo)
 	}
-	// The registry for local image repos (local-registry.md §13, step
-	// 27b), over silo-containerd's content store, whose containerd
-	// silo-nsd runs. It is given the fence API once there is one.
-	var reg *registry.Service
-	if *backendKind == local.Kind && why == "" {
-		sock := *containerdSocket
-		if sock == "" {
-			state := *nsdState
-			if state == "" {
-				state = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "silo", "nsd.state")
-			}
-			sock = filepath.Join(filepath.Dir(state), "containerd.sock")
-		}
-		// An ingest's spool holds the chunk it may still have to take
-		// back: re-creatable, so in cache/.
-		spool := filepath.Join(dd.Cache(), "registry-spool")
-		if err := os.MkdirAll(spool, 0o700); err != nil {
-			return err
-		}
-		cs, err := containerdstore.New(containerdstore.Options{Address: sock, Spool: spool})
-		if err != nil {
-			return err
-		}
-		defer cs.Close()
-		reg = registry.New(registry.Options{Store: db, Content: cs})
+	if reg != nil {
 		opts.Registry = reg
-		log.Printf("serving the registry over silo-containerd's content store at %s", sock)
 	}
 	if be.Fence != nil {
 		opts.Fence, opts.Budget = be.Fence, be.Fence

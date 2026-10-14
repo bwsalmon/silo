@@ -1032,6 +1032,13 @@ func (s *Server) auth(q *request) error {
 		if errors.As(err, &e) {
 			return e
 		}
+		// The registry's own refusals other than the credentials'
+		// (an egress refusal, an upstream it can't reach) keep their
+		// status.
+		var re *registry.Error
+		if errors.As(err, &re) && re.Status != http.StatusUnauthorized {
+			return errorf(re.Status, "%s", re.Message)
+		}
 		return errorf(http.StatusUnauthorized, "Get \"https://%s/v2/\": unauthorized: incorrect username or password", server)
 	}
 	return ok(q, map[string]string{"Status": "Login Succeeded", "IdentityToken": ""})
