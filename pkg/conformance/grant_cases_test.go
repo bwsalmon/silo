@@ -1,6 +1,6 @@
 //go:build silo_conformance
 
-package conformance
+package conformance_test
 
 // The cross-silo grant cases (docs/silo/testing.md, "Cases", SV-122):
 // exports and links under "Crossing silos without consent", HTTP and
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/client"
+	. "github.com/bwsalmon/silo/pkg/conformance"
 )
 
 // hostPort splits a TCP import's "silo.internal:<port>".
@@ -42,17 +43,17 @@ func hostPort(t *testing.T, addr string) (string, int) {
 func offer(t *testing.T, exporter siloInfo, name, protocol, target string, pp bool, to ...string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := run.api.OfferExport(ctx, exporter.path, client.OfferRequest{Name: name, Target: target,
+	if _, err := run.API.OfferExport(ctx, exporter.path, client.OfferRequest{Name: name, Target: target,
 		Protocol: protocol, To: to, ProxyProtocol: pp}, client.Mutation{}); err != nil {
 		t.Fatalf("offer %s/%s: %v", exporter.path, name, err)
 	}
-	t.Cleanup(func() { run.api.WithdrawExport(context.Background(), exporter.path, name, "", client.Mutation{}) })
+	t.Cleanup(func() { run.API.WithdrawExport(context.Background(), exporter.path, name, "", client.Mutation{}) })
 }
 
 // accept accepts export ("<exporter path>/<name>") as importer.
 func accept(t *testing.T, importer siloInfo, export string) *client.Import {
 	t.Helper()
-	im, err := run.api.AcceptExport(context.Background(), importer.path, export, client.Mutation{})
+	im, err := run.API.AcceptExport(context.Background(), importer.path, export, client.Mutation{})
 	if err != nil {
 		t.Fatalf("%s accepting %s: %v", importer.path, export, err)
 	}
@@ -66,9 +67,9 @@ func accept(t *testing.T, importer siloInfo, export string) *client.Import {
 // ends (deleting either side ends both).
 func link(t *testing.T, side siloInfo, name, peer, dir string, rules ...client.LinkRule) (*client.Link, error) {
 	t.Helper()
-	l, err := run.api.ProposeLink(context.Background(), side.path, client.LinkRequest{Name: name, Peer: peer, Direction: dir, Rules: rules}, client.Mutation{})
+	l, err := run.API.ProposeLink(context.Background(), side.path, client.LinkRequest{Name: name, Peer: peer, Direction: dir, Rules: rules}, client.Mutation{})
 	if err == nil {
-		t.Cleanup(func() { run.api.DeleteLink(context.Background(), side.path, name, client.Mutation{}) })
+		t.Cleanup(func() { run.API.DeleteLink(context.Background(), side.path, name, client.Mutation{}) })
 	}
 	return l, err
 }
@@ -85,7 +86,7 @@ func mustLink(t *testing.T, side siloInfo, name, peer, dir string, rules ...clie
 // linkState is the state of side's link name.
 func linkState(t *testing.T, side siloInfo, name string) string {
 	t.Helper()
-	ls, err := run.api.Links(context.Background(), side.path)
+	ls, err := run.API.Links(context.Background(), side.path)
 	if err != nil {
 		t.Fatalf("links of %s: %v", side.path, err)
 	}
@@ -125,8 +126,8 @@ func TestExportsWithoutConsent(t *testing.T) {
 
 	t.Run("AcceptedButNotOfferedIsRefused", func(t *testing.T) {
 		for _, x := range []string{"/b/unoffered", "/b/toc"} {
-			if im, err := run.api.AcceptExport(context.Background(), "/a", x, client.Mutation{}); err == nil {
-				run.api.DeleteImport(context.Background(), "/a", im.ID, client.Mutation{})
+			if im, err := run.API.AcceptExport(context.Background(), "/a", x, client.Mutation{}); err == nil {
+				run.API.DeleteImport(context.Background(), "/a", im.ID, client.Mutation{})
 				t.Errorf("/a accepted %s, which wasn't offered to it: %+v", x, im)
 			}
 		}
@@ -145,7 +146,7 @@ func TestExportsWithoutConsent(t *testing.T) {
 	})
 	t.Run("NoDirectPath", func(t *testing.T) { expect(t, res, "direct", false) })
 	t.Run("TCPOfferedNotAcceptedHasNoPort", func(t *testing.T) {
-		offers, err := run.api.Offers(context.Background(), "/a")
+		offers, err := run.API.Offers(context.Background(), "/a")
 		if err != nil {
 			t.Fatalf("offers of /a: %v", err)
 		}
@@ -231,7 +232,7 @@ for i in $(seq 60); do [ -f /tmp/connected ] && exit 0; sleep 1; done; exit 1`, 
 			t.Fatalf("the probe never connected to the import: %+v", r)
 		}
 		time.Sleep(5 * time.Second)
-		if _, err := run.api.WithdrawExport(context.Background(), "/b", "raw", "", client.Mutation{}); err != nil {
+		if _, err := run.API.WithdrawExport(context.Background(), "/b", "raw", "", client.Mutation{}); err != nil {
 			t.Fatalf("withdraw /b/raw: %v", err)
 		}
 		revoked := time.Now()
@@ -290,7 +291,7 @@ func TestLinksWithoutConsent(t *testing.T) {
 		}
 	})
 	t.Run("Deleted", func(t *testing.T) {
-		if _, err := run.api.DeleteLink(context.Background(), "/a", "web", client.Mutation{}); err != nil {
+		if _, err := run.API.DeleteLink(context.Background(), "/a", "web", client.Mutation{}); err != nil {
 			t.Fatalf("delete link: %v", err)
 		}
 		if s := linkState(t, b, "web"); s == "ACTIVE" {
@@ -323,7 +324,7 @@ func TestLinksPolicy(t *testing.T) {
 		t.Fatalf("the link before the policy is %s, want ACTIVE", s)
 	}
 	setLinks := func(v string) error {
-		_, err := run.api.Patch(ctx, "/a/c", client.Patch{"grant_policy": map[string]string{"links": v}}, client.Mutation{})
+		_, err := run.API.Patch(ctx, "/a/c", client.Patch{"grant_policy": map[string]string{"links": v}}, client.Mutation{})
 		return err
 	}
 	if err := setLinks("deny"); err != nil {
@@ -391,7 +392,7 @@ func TestSealedSiloKeepsGrants(t *testing.T) {
 // still no probe in /a or /a/c reaches the database's PSC endpoint.
 func TestDatabaseWithGrants(t *testing.T) {
 	tree(t)
-	addr, err := run.compute.Addresses.Get(run.project, run.region, "silo-db-psc").Do()
+	addr, err := run.Compute.Addresses.Get(run.Project, run.Region, "silo-db-psc").Do()
 	if err != nil {
 		t.Fatalf("the PSC endpoint's address: %v", err)
 	}

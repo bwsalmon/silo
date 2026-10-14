@@ -187,6 +187,8 @@ func (f *fakeRegistry) asCaller(h http.Handler) http.Handler {
 
 func (f *fakeRegistry) Root() string { return f.root }
 
+func (f *fakeRegistry) Gateway() string { return gatewayAPI.String() }
+
 func (f *fakeRegistry) API(caller, method, path string, body any) (int, map[string]any) {
 	f.t.Helper()
 	b, _ := json.Marshal(body)

@@ -1,6 +1,6 @@
 //go:build silo_conformance
 
-package conformance
+package conformance_test
 
 // The fence's cases (docs/silo/testing.md, "Cases", SV-122): origin
 // spoofing, crossing silos without consent (TCP, UDP and ICMP; the
@@ -30,6 +30,8 @@ import (
 
 	"github.com/bwsalmon/silo/pkg/backend/gcp/gce/fake/fenceeval"
 	"github.com/bwsalmon/silo/pkg/client"
+	. "github.com/bwsalmon/silo/pkg/conformance"
+	"github.com/bwsalmon/silo/pkg/conformance/gcpharness"
 	"github.com/bwsalmon/silo/pkg/gateway"
 	compute "google.golang.org/api/compute/v1"
 )
@@ -56,19 +58,19 @@ func addrIn(s siloInfo, n int) string {
 func mkSilo(t *testing.T, path string, prefix int, control string, egress *client.Egress) siloInfo {
 	t.Helper()
 	ctx := context.Background()
-	q := client.QuotaMap{run.region: {
+	q := client.QuotaMap{run.Region: {
 		"vcpu": num(2), "spot_vcpu": num(2), "memory_mb": num(4096), "spot_memory_mb": num(4096),
 		"instances": num(3), "standard_disk_gb": num(40), "ssd_disk_gb": num(10),
 	}, "global": {"subnetworks": num(2)}}
-	s, err := run.api.Create(ctx, path, client.CreateRequest{Regions: []string{run.region}, Quota: q,
+	s, err := run.API.Create(ctx, path, client.CreateRequest{Regions: []string{run.Region}, Quota: q,
 		Address: &client.AddressWant{PrefixLength: prefix}, Control: control, Egress: egress}, client.Mutation{})
 	if err != nil {
 		t.Fatalf("create %s: %v", path, err)
 	}
-	t.Cleanup(func() { run.api.Delete(context.Background(), path, true, client.Mutation{}) })
+	t.Cleanup(func() { run.API.Delete(context.Background(), path, true, client.Mutation{}) })
 	blk := netip.MustParsePrefix(s.Address.Blocks[0])
 	info := siloInfo{path: path, id: s.ID, project: "silo-" + s.ID, block: blk, subnet: netOf(blk)}
-	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.region+"/subnetworks",
+	code, op := facade(t, "POST", "projects/"+info.project+"/regions/"+run.Region+"/subnetworks",
 		map[string]any{"name": s.ID + "-net", "network": "default", "ipCidrRange": info.subnet.String()})
 	if code != 200 {
 		t.Fatalf("subnet in %s: %d %v", path, code, op)
@@ -89,7 +91,7 @@ type vm struct {
 // returns at once. wait reads its report and deletes it.
 func startProbe(t *testing.T, s siloInfo, name, ip string, checks []Check) *vm {
 	t.Helper()
-	run.vms <- struct{}{}
+	run.VMs <- struct{}{}
 	name = s.id + "-" + name
 	body := instanceBody(name, s, func(m map[string]any) {
 		m["metadata"] = map[string]any{"items": []any{map[string]any{"key": "startup-script", "value": ProbeScript(checks)}}}
@@ -99,7 +101,7 @@ func startProbe(t *testing.T, s siloInfo, name, ip string, checks []Check) *vm {
 	})
 	code, op := facade(t, "POST", instances(s), body)
 	if code != 200 {
-		<-run.vms
+		<-run.VMs
 		t.Fatalf("probe %s in %s: %d %v", name, s.path, code, op)
 	}
 	waitOp(t, s.project, op)
@@ -149,7 +151,7 @@ func (v *vm) delete() {
 	v.stopped = true
 	_, op := facade(v.t, "DELETE", instances(v.s)+"/"+v.name, nil)
 	waitOp(v.t, v.s.project, op)
-	<-run.vms
+	<-run.VMs
 }
 
 // mark is a check a probe reports as soon as it boots, so a case can act
@@ -262,8 +264,8 @@ func TestOriginSpoofing(t *testing.T) {
 		t.Fatalf("a Google token for the host project: %v", err)
 	}
 	forged := gateway.FormatOrigin(b.id, 1)
-	bList := api + "/compute/v1/projects/" + b.project + "/zones/" + run.zone + "/instances"
-	hostList := api + "/compute/v1/projects/" + run.project + "/zones/" + run.zone + "/instances"
+	bList := api + "/compute/v1/projects/" + b.project + "/zones/" + run.Zone + "/instances"
+	hostList := api + "/compute/v1/projects/" + run.Project + "/zones/" + run.Zone + "/instances"
 	res := probe(t, a, "probe-origin", []Check{
 		{ID: "forged-self", Kind: "http", URL: api + "/silo/v1/self", Headers: []string{"Silo-Origin: " + forged}},
 		{ID: "forged-b", Kind: "http", URL: bList, Headers: []string{"Silo-Origin: " + forged}},
@@ -310,12 +312,12 @@ EOF`, spoof, lis)}})
 	t.Run("JustAfterChildDeleted", func(t *testing.T) {
 		d := mkSilo(t, "/a/d", 26, "", nil)
 		ip := addrIn(d, 5)
-		if _, err := run.api.Delete(ctx, "/a/d", true, client.Mutation{}); err != nil {
+		if _, err := run.API.Delete(ctx, "/a/d", true, client.Mutation{}); err != nil {
 			t.Fatalf("delete /a/d: %v", err)
 		}
 		// /a/d's block is /a's again: a subnet of /a's over it, and a
 		// probe at the address /a/d's VM would have had, acts as /a.
-		p := "projects/" + a.project + "/regions/" + run.region + "/subnetworks"
+		p := "projects/" + a.project + "/regions/" + run.Region + "/subnetworks"
 		code, op := facade(t, "POST", p, map[string]any{"name": a.id + "-was-d", "network": "default", "ipCidrRange": d.subnet.String()})
 		if code != 200 {
 			t.Fatalf("a subnet over /a/d's old block: %d %v", code, op)
@@ -366,7 +368,7 @@ func TestCrossingSilosWithoutConsent(t *testing.T) {
 // setEgress sets s's own egress policy.
 func setEgress(t *testing.T, path string, e client.Egress) {
 	t.Helper()
-	if _, err := run.api.Patch(context.Background(), path, client.Patch{"egress": e}, client.Mutation{}); err != nil {
+	if _, err := run.API.Patch(context.Background(), path, client.Patch{"egress": e}, client.Mutation{}); err != nil {
 		t.Fatalf("egress of %s: %v", path, err)
 	}
 }
@@ -410,13 +412,13 @@ func TestEgressAndGateway(t *testing.T) {
 // targeting it is refused.
 func TestDatabaseThroughTheGateway(t *testing.T) {
 	tree(t)
-	addr, err := run.compute.Addresses.Get(run.project, run.region, "silo-db-psc").Do()
+	addr, err := run.Compute.Addresses.Get(run.Project, run.Region, "silo-db-psc").Do()
 	if err != nil {
 		t.Fatalf("the PSC endpoint's address: %v", err)
 	}
 	ep := addr.Address
 	dnsName := ""
-	if l, err := run.sql.Instances.List(run.project).Do(); err == nil {
+	if l, err := run.SQL.Instances.List(run.Project).Do(); err == nil {
 		for _, o := range l.Items {
 			if o.Settings != nil && o.Settings.UserLabels["silo-install"] != "" {
 				dnsName = strings.TrimSuffix(o.DnsName, ".")
@@ -438,9 +440,9 @@ func TestDatabaseThroughTheGateway(t *testing.T) {
 		expect(t, res, "connect-name", false)
 	})
 	t.Run("ExportTargetingEndpointRefused", func(t *testing.T) {
-		_, err := run.api.OfferExport(context.Background(), "/a", client.OfferRequest{Name: "db", Target: ep + ":5432", Protocol: "tcp", To: []string{"/b"}}, client.Mutation{})
+		_, err := run.API.OfferExport(context.Background(), "/a", client.OfferRequest{Name: "db", Target: ep + ":5432", Protocol: "tcp", To: []string{"/b"}}, client.Mutation{})
 		if err == nil {
-			run.api.WithdrawExport(context.Background(), "/a", "db", "", client.Mutation{})
+			run.API.WithdrawExport(context.Background(), "/a", "db", "", client.Mutation{})
 			t.Fatal("an export of the database endpoint was offered")
 		}
 	})
@@ -450,7 +452,7 @@ func TestDatabaseThroughTheGateway(t *testing.T) {
 // or the replicas of silo-control-mig.
 func controlVMs(t *testing.T) []*compute.Instance {
 	t.Helper()
-	l, err := run.compute.Instances.List(run.project, run.zone).Filter(`name = "silo-control*"`).Do()
+	l, err := run.Compute.Instances.List(run.Project, run.Zone).Filter(`name = "silo-control*"`).Do()
 	if err != nil {
 		t.Fatalf("listing the control VMs: %v", err)
 	}
@@ -476,12 +478,12 @@ func TestLeaderFailover(t *testing.T) {
 	}
 	for i, v := range vms {
 		t.Run("Stop_"+v.Name, func(t *testing.T) {
-			op, err := run.compute.Instances.Stop(run.project, run.zone, v.Name).Do()
+			op, err := run.Compute.Instances.Stop(run.Project, run.Zone, v.Name).Do()
 			if err != nil {
 				t.Fatalf("stopping %s: %v", v.Name, err)
 			}
 			defer func() {
-				run.compute.Instances.Start(run.project, run.zone, v.Name).Do()
+				run.Compute.Instances.Start(run.Project, run.Zone, v.Name).Do()
 				waitHealthy(t, 10*time.Minute)
 			}()
 			_ = op
@@ -489,7 +491,7 @@ func TestLeaderFailover(t *testing.T) {
 			var s *client.Silo
 			deadline := time.Now().Add(5 * time.Minute)
 			for {
-				s, err = run.api.Create(ctx, path, client.CreateRequest{Regions: []string{run.region},
+				s, err = run.API.Create(ctx, path, client.CreateRequest{Regions: []string{run.Region},
 					Address: &client.AddressWant{PrefixLength: 26}}, client.Mutation{RequestID: fmt.Sprintf("failover-%d-%d", i, time.Now().Unix()/3600)})
 				if err == nil || time.Now().After(deadline) {
 					break
@@ -499,7 +501,7 @@ func TestLeaderFailover(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a fence change after stopping %s: %v", v.Name, err)
 			}
-			defer run.api.Delete(ctx, path, true, client.Mutation{})
+			defer run.API.Delete(ctx, path, true, client.Mutation{})
 			// Applied: the silo's rules are in the policy, each once.
 			deadline = time.Now().Add(3 * time.Minute)
 			for {
@@ -523,7 +525,7 @@ func TestLeaderFailover(t *testing.T) {
 // any rule (by its match and action) that appears twice.
 func fenceRulesOf(t *testing.T, id string) (int, string) {
 	t.Helper()
-	pol, err := run.compute.NetworkFirewallPolicies.Get(run.project, "silo-fence").Do()
+	pol, err := run.Compute.NetworkFirewallPolicies.Get(run.Project, "silo-fence").Do()
 	if err != nil {
 		t.Fatalf("the fence policy: %v", err)
 	}
@@ -545,7 +547,7 @@ func fenceRulesOf(t *testing.T, id string) (int, string) {
 func waitHealthy(t *testing.T, d time.Duration) {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if _, err := run.api.Describe(context.Background(), "/", false); err == nil {
+		if _, err := run.API.Describe(context.Background(), "/", false); err == nil {
 			return
 		}
 		time.Sleep(10 * time.Second)
@@ -571,7 +573,7 @@ func setSwitches(t *testing.T, names ...string) {
 			items = append(items, &compute.MetadataItems{Key: "silo-test-switches", Value: &val})
 		}
 		md.Items = items
-		if _, err := run.compute.Instances.SetMetadata(run.project, run.zone, v.Name, md).Do(); err != nil {
+		if _, err := run.Compute.Instances.SetMetadata(run.Project, run.Zone, v.Name, md).Do(); err != nil {
 			t.Fatalf("switches on %s: %v", v.Name, err)
 		}
 	}
@@ -584,10 +586,10 @@ func TestSealedAndReadSilos(t *testing.T) {
 	ctx := context.Background()
 	s := mkSilo(t, "/s", 26, "none", &client.Egress{Allow: []string{"example.com"}})
 	r := mkSilo(t, "/r", 26, "read", nil)
-	sList := "/compute/v1/projects/" + s.project + "/zones/" + run.zone + "/instances"
+	sList := "/compute/v1/projects/" + s.project + "/zones/" + run.Zone + "/instances"
 	apiChecks := []Check{
 		{ID: "facade-read", Kind: "http", URL: api + sList},
-		{ID: "facade-write", Kind: "http", Method: "POST", URL: api + "/compute/v1/projects/" + s.project + "/regions/" + run.region + "/subnetworks",
+		{ID: "facade-write", Kind: "http", Method: "POST", URL: api + "/compute/v1/projects/" + s.project + "/regions/" + run.Region + "/subnetworks",
 			Body: `{"name":"x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 32), 28).String() + `"}`},
 		{ID: "fence-read", Kind: "http", URL: api + "/silo/v1/self"},
 		{ID: "fence-write", Kind: "http", Method: "PATCH", URL: api + "/silo/v1/self", Body: `{"labels":{"x":"y"}}`},
@@ -610,7 +612,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 		expectStatus(t, res, "facade-write", 403, "forbidden")
 		expectStatus(t, res, "fence-read", 403, "CONTROL_DENIED")
 		expectStatus(t, res, "fence-write", 403, "CONTROL_DENIED")
-		code, out := facade(t, "GET", "projects/"+s.project+"/regions/"+run.region+"/subnetworks/x", nil)
+		code, out := facade(t, "GET", "projects/"+s.project+"/regions/"+run.Region+"/subnetworks/x", nil)
 		if code != 404 {
 			t.Errorf("a refused subnet exists: %d %v", code, out)
 		}
@@ -631,12 +633,12 @@ func TestSealedAndReadSilos(t *testing.T) {
 	t.Run("ReadSilo", func(t *testing.T) {
 		rp := "/compute/v1/projects/" + r.project
 		writes := map[string][2]string{
-			"instances.insert":   {"POST", rp + "/zones/" + run.zone + "/instances"},
-			"disks.insert":       {"POST", rp + "/zones/" + run.zone + "/disks"},
-			"subnetworks.insert": {"POST", rp + "/regions/" + run.region + "/subnetworks"},
+			"instances.insert":   {"POST", rp + "/zones/" + run.Zone + "/instances"},
+			"disks.insert":       {"POST", rp + "/zones/" + run.Zone + "/disks"},
+			"subnetworks.insert": {"POST", rp + "/regions/" + run.Region + "/subnetworks"},
 			"firewalls.insert":   {"POST", rp + "/global/firewalls"},
 			"images.insert":      {"POST", rp + "/global/images"},
-			"subnetworks.delete": {"DELETE", rp + "/regions/" + run.region + "/subnetworks/" + r.id + "-net"},
+			"subnetworks.delete": {"DELETE", rp + "/regions/" + run.Region + "/subnetworks/" + r.id + "-net"},
 			"fence.create":       {"POST", "/silo/v1/self/children"},
 			"fence.patch":        {"PATCH", "/silo/v1/self"},
 			"fence.grow":         {"POST", "/silo/v1/self:grow"},
@@ -656,10 +658,10 @@ func TestSealedAndReadSilos(t *testing.T) {
 			"control.full":      `{"control":"full"}`, "control.none": `{"control":"none"}`,
 		}
 		checks := []Check{
-			{ID: "read-list", Kind: "http", URL: api + rp + "/zones/" + run.zone + "/instances"},
-			{ID: "read-subnets", Kind: "http", URL: api + rp + "/regions/" + run.region + "/subnetworks"},
+			{ID: "read-list", Kind: "http", URL: api + rp + "/zones/" + run.Zone + "/instances"},
+			{ID: "read-subnets", Kind: "http", URL: api + rp + "/regions/" + run.Region + "/subnetworks"},
 			{ID: "read-self", Kind: "http", URL: api + "/silo/v1/self"},
-			{ID: "read-wait", Kind: "http", Method: "POST", URL: api + rp + "/zones/" + run.zone + "/operations/no-such-op/wait"},
+			{ID: "read-wait", Kind: "http", Method: "POST", URL: api + rp + "/zones/" + run.Zone + "/operations/no-such-op/wait"},
 		}
 		for id, w := range writes {
 			checks = append(checks, Check{ID: id, Kind: "http", Method: w[0], URL: api + w[1], Body: bodies[id]})
@@ -678,22 +680,22 @@ func TestSealedAndReadSilos(t *testing.T) {
 			}
 			refusedFromProbe(t, res, id)
 		}
-		for _, p := range []string{rp + "/zones/" + run.zone + "/instances/" + r.id + "-x", rp + "/zones/" + run.zone + "/disks/" + r.id + "-x",
-			rp + "/regions/" + run.region + "/subnetworks/" + r.id + "-x", rp + "/global/firewalls/" + r.id + "-x", rp + "/global/images/" + r.id + "-x"} {
+		for _, p := range []string{rp + "/zones/" + run.Zone + "/instances/" + r.id + "-x", rp + "/zones/" + run.Zone + "/disks/" + r.id + "-x",
+			rp + "/regions/" + run.Region + "/subnetworks/" + r.id + "-x", rp + "/global/firewalls/" + r.id + "-x", rp + "/global/images/" + r.id + "-x"} {
 			if code, _ := facade(t, "GET", strings.TrimPrefix(p, "/compute/v1/"), nil); code != 404 {
 				t.Errorf("%s exists after a refused write (%d)", p, code)
 			}
 		}
-		if kids, err := run.api.Children(ctx, "/r"); err == nil && len(kids) > 0 {
+		if kids, err := run.API.Children(ctx, "/r"); err == nil && len(kids) > 0 {
 			t.Errorf("/r has children after a refused create: %d", len(kids))
 		}
-		if d, err := run.api.Describe(ctx, "/r", false); err == nil && d.Control.Own != "read" {
+		if d, err := run.API.Describe(ctx, "/r", false); err == nil && d.Control.Own != "read" {
 			t.Errorf("/r's control is %q after refused PATCHes", d.Control.Own)
 		}
 	})
 	t.Run("AncestorWritesAndAllocations", func(t *testing.T) {
 		for _, x := range []siloInfo{s, r} {
-			p := "projects/" + x.project + "/regions/" + run.region + "/subnetworks"
+			p := "projects/" + x.project + "/regions/" + run.Region + "/subnetworks"
 			code, op := facade(t, "POST", p, map[string]any{"name": x.id + "-from-root", "network": "default",
 				"ipCidrRange": netip.PrefixFrom(addrOf(x.block, 32), 28).String()})
 			if code != 200 {
@@ -703,7 +705,7 @@ func TestSealedAndReadSilos(t *testing.T) {
 			waitOp(t, x.project, op)
 			_, op = facade(t, "DELETE", p+"/"+x.id+"-from-root", nil)
 			waitOp(t, x.project, op)
-			if _, err := run.api.Patch(ctx, x.path, client.Patch{"quota": client.QuotaMap{run.region: {"vcpu": num(3)}}}, client.Mutation{}); err != nil {
+			if _, err := run.API.Patch(ctx, x.path, client.Patch{"quota": client.QuotaMap{run.Region: {"vcpu": num(3)}}}, client.Mutation{}); err != nil {
 				t.Errorf("the root changing %s's allocation: %v", x.path, err)
 			}
 		}
@@ -735,16 +737,16 @@ func TestControlInheritance(t *testing.T) {
 	ctx := context.Background()
 	t.Run("LooserThanParent", func(t *testing.T) {
 		mkSilo(t, "/ri", 27, "read", nil)
-		_, err := run.api.Create(ctx, "/ri/c", client.CreateRequest{Control: "full", Address: &client.AddressWant{PrefixLength: 29}}, client.Mutation{})
+		_, err := run.API.Create(ctx, "/ri/c", client.CreateRequest{Control: "full", Address: &client.AddressWant{PrefixLength: 29}}, client.Mutation{})
 		if apiCode(err) != "LOOSER_THAN_PARENT" {
 			t.Errorf("creating a full child of a read silo: %v", err)
-			run.api.Delete(ctx, "/ri/c", true, client.Mutation{})
+			run.API.Delete(ctx, "/ri/c", true, client.Mutation{})
 		}
-		if _, err := run.api.Create(ctx, "/ri/k", client.CreateRequest{Control: "read", Address: &client.AddressWant{PrefixLength: 29}}, client.Mutation{}); err != nil {
+		if _, err := run.API.Create(ctx, "/ri/k", client.CreateRequest{Control: "read", Address: &client.AddressWant{PrefixLength: 29}}, client.Mutation{}); err != nil {
 			t.Fatalf("a read child of a read silo: %v", err)
 		}
-		defer run.api.Delete(ctx, "/ri/k", true, client.Mutation{})
-		if _, err := run.api.Patch(ctx, "/ri/k", client.Patch{"control": "full"}, client.Mutation{}); apiCode(err) != "LOOSER_THAN_PARENT" {
+		defer run.API.Delete(ctx, "/ri/k", true, client.Mutation{})
+		if _, err := run.API.Patch(ctx, "/ri/k", client.Patch{"control": "full"}, client.Mutation{}); apiCode(err) != "LOOSER_THAN_PARENT" {
 			t.Errorf("PATCHing a read child of a read silo to full: %v", err)
 		}
 	})
@@ -757,18 +759,18 @@ func TestControlInheritance(t *testing.T) {
 			t.Fatal("the probe never got to its mark")
 		}
 		time.Sleep(20 * time.Second)
-		if _, err := run.api.Patch(ctx, "/a", client.Patch{"control": "none"}, client.Mutation{}); err != nil {
+		if _, err := run.API.Patch(ctx, "/a", client.Patch{"control": "none"}, client.Mutation{}); err != nil {
 			t.Fatalf("sealing /a: %v", err)
 		}
 		unsealed := false
 		unseal := func() {
 			if !unsealed {
 				unsealed = true
-				run.api.Patch(ctx, "/a", client.Patch{"control": "full"}, client.Mutation{})
+				run.API.Patch(ctx, "/a", client.Patch{"control": "full"}, client.Mutation{})
 			}
 		}
 		defer unseal()
-		d, err := run.api.Describe(ctx, "/a/c", false)
+		d, err := run.API.Describe(ctx, "/a/c", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -780,12 +782,12 @@ func TestControlInheritance(t *testing.T) {
 		expect(t, res, "held", true)
 		expect(t, res, "after", false)
 		unseal()
-		if d, err = run.api.Describe(ctx, "/a/c", false); err != nil || d.Control.Effective != "full" {
+		if d, err = run.API.Describe(ctx, "/a/c", false); err != nil || d.Control.Effective != "full" {
 			t.Errorf("/a/c after unsealing /a: %+v %v", d, err)
 		}
 	})
 	t.Run("DescribeShowsOwnEffectiveFrom", func(t *testing.T) {
-		d, err := run.api.Describe(ctx, "/a/c", false)
+		d, err := run.API.Describe(ctx, "/a/c", false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -804,7 +806,7 @@ func TestManageGrants(t *testing.T) {
 	p := mkSilo(t, "/mp", 26, "", &client.Egress{Allow: []string{"releases.hashicorp.com", "registry.terraform.io", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}})
 	offer := func(t *testing.T, target, holder string) (map[string]any, error) {
 		out := map[string]any{}
-		err := run.api.Do(ctx, "POST", "silos/"+strings.TrimPrefix(target, "/")+"/manageGrants", nil, map[string]any{
+		err := run.API.Do(ctx, "POST", "silos/"+strings.TrimPrefix(target, "/")+"/manageGrants", nil, map[string]any{
 			"name": "rollout", "holder": holder,
 			"scope": map[string]any{"facade": map[string]any{"resources": []string{"instances", "disks"}, "access": "write"}, "fence": []string{"read"}},
 			"lease": map[string]any{"ttl": "1800s", "renew_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
@@ -816,20 +818,20 @@ func TestManageGrants(t *testing.T) {
 		t.Fatalf("the offer: %v", err)
 	}
 	id, _ := g["id"].(string)
-	defer run.api.Do(ctx, "DELETE", "silos/"+strings.TrimPrefix(s.path, "/")+"/manageGrants/rollout", nil, nil, nil)
+	defer run.API.Do(ctx, "DELETE", "silos/"+strings.TrimPrefix(s.path, "/")+"/manageGrants/rollout", nil, nil, nil)
 	sp := "/compute/v1/projects/" + s.project
-	sInstances := api + sp + "/zones/" + run.zone + "/instances"
+	sInstances := api + sp + "/zones/" + run.Zone + "/instances"
 	inst := func(name string) string {
-		return `{"name":"` + name + `","machineType":"zones/` + run.zone + `/machineTypes/e2-micro","scheduling":{"provisioningModel":"SPOT","instanceTerminationAction":"DELETE"},"disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"` + probeImage + `","diskSizeGb":"10"}}],"networkInterfaces":[{"subnetwork":"regions/` + run.region + `/subnetworks/` + s.id + `-net"}]}`
+		return `{"name":"` + name + `","machineType":"zones/` + run.Zone + `/machineTypes/e2-micro","scheduling":{"provisioningModel":"SPOT","instanceTerminationAction":"DELETE"},"disks":[{"boot":true,"autoDelete":true,"initializeParams":{"sourceImage":"` + gcpharness.ProbeImage + `","diskSizeGb":"10"}}],"networkInterfaces":[{"subnetwork":"regions/` + run.Region + `/subnetworks/` + s.id + `-net"}]}`
 	}
 	res := probe(t, p, "probe-holder", []Check{
 		{ID: "pending-get", Kind: "http", URL: api + "/silo/v1/silos/" + strings.TrimPrefix(s.path, "/")},
 		{ID: "pending-facade", Kind: "http", URL: sInstances},
 		{ID: "accept", Kind: "http", Method: "POST", URL: api + "/silo/v1/self/manageGrants/" + id + ":accept"},
 		{ID: "insert", Kind: "http", Method: "POST", URL: sInstances, Body: inst(s.id + "-held")},
-		{ID: "subnet", Kind: "http", Method: "POST", URL: api + sp + "/regions/" + run.region + "/subnetworks", Body: `{"name":"` + s.id + `-x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 32), 28).String() + `"}`},
+		{ID: "subnet", Kind: "http", Method: "POST", URL: api + sp + "/regions/" + run.Region + "/subnetworks", Body: `{"name":"` + s.id + `-x","network":"default","ipCidrRange":"` + netip.PrefixFrom(addrOf(s.block, 32), 28).String() + `"}`},
 		{ID: "firewall", Kind: "http", Method: "POST", URL: api + sp + "/global/firewalls", Body: `{"name":"` + s.id + `-x","network":"default","allowed":[{"IPProtocol":"tcp"}]}`},
-		{ID: "quota", Kind: "http", Method: "PATCH", URL: api + "/silo/v1/silos/ms", Body: `{"quota":{"` + run.region + `":{"vcpu":"1"}}}`},
+		{ID: "quota", Kind: "http", Method: "PATCH", URL: api + "/silo/v1/silos/ms", Body: `{"quota":{"` + run.Region + `":{"vcpu":"1"}}}`},
 		{ID: "child", Kind: "http", Method: "POST", URL: api + "/silo/v1/silos/ms/children", Body: `{"name":"x","address":{"prefix_length":28}}`},
 		{ID: "member", Kind: "http", Method: "PUT", URL: api + "/silo/v1/silos/ms/members/user:x@example.com", Body: `{}`},
 		{ID: "control", Kind: "http", Method: "PATCH", URL: api + "/silo/v1/silos/ms", Body: `{"control":"full"}`},
@@ -842,11 +844,11 @@ func TestManageGrants(t *testing.T) {
 	t.Run("AfterAccept", func(t *testing.T) {
 		expectStatus(t, res, "accept", 200)
 		expectStatus(t, res, "insert", 200)
-		code, _ := facade(t, "GET", "projects/"+s.project+"/zones/"+run.zone+"/instances/"+s.id+"-held", nil)
+		code, _ := facade(t, "GET", "projects/"+s.project+"/zones/"+run.Zone+"/instances/"+s.id+"-held", nil)
 		if code != 200 {
 			t.Errorf("the holder's instance isn't /ms's: %d", code)
 		}
-		recs, err := run.api.Audit(ctx, s.path, client.AuditQuery{})
+		recs, err := run.API.Audit(ctx, s.path, client.AuditQuery{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -859,7 +861,7 @@ func TestManageGrants(t *testing.T) {
 		if !found {
 			t.Errorf("no audit record of /ms's with via=manage:%s", p.id)
 		}
-		_, op := facade(t, "DELETE", "projects/"+s.project+"/zones/"+run.zone+"/instances/"+s.id+"-held", nil)
+		_, op := facade(t, "DELETE", "projects/"+s.project+"/zones/"+run.Zone+"/instances/"+s.id+"-held", nil)
 		waitOp(t, s.project, op)
 	})
 	t.Run("OutOfScope", func(t *testing.T) {
@@ -873,8 +875,8 @@ func TestManageGrants(t *testing.T) {
 		if _, err := offer(t, s.path, s.path); apiCode(err) != "INVALID_ARGUMENT" {
 			t.Errorf("a grant on /ms to itself: %v", err)
 		}
-		if _, err := run.api.Create(ctx, "/ms/k", client.CreateRequest{Address: &client.AddressWant{PrefixLength: 28}, Control: "none"}, client.Mutation{}); err == nil {
-			defer run.api.Delete(ctx, "/ms/k", true, client.Mutation{})
+		if _, err := run.API.Create(ctx, "/ms/k", client.CreateRequest{Address: &client.AddressWant{PrefixLength: 28}, Control: "none"}, client.Mutation{}); err == nil {
+			defer run.API.Delete(ctx, "/ms/k", true, client.Mutation{})
 			if _, err := offer(t, s.path, "/ms/k"); apiCode(err) != "INVALID_ARGUMENT" {
 				t.Errorf("a grant on /ms to its child: %v", err)
 			}
@@ -903,7 +905,7 @@ EOF
 ../terraform init -input=false >/dev/null
 echo "SILO-PROBE mark ok"
 ../terraform apply -auto-approve -input=false -parallelism=1 >/tmp/tf.log 2>&1 && exit 1
-grep -q 403 /tmp/tf.log`, proxy, s.project, run.zone, api)
+grep -q 403 /tmp/tf.log`, proxy, s.project, run.Zone, api)
 		v := startProbe(t, p, "probe-terraform", "", []Check{{ID: "tf", Kind: "sh", Script: tf}})
 		if _, ok := v.until("mark", 10*time.Minute); !ok {
 			t.Fatal("terraform never got to apply")
@@ -911,18 +913,18 @@ grep -q 403 /tmp/tf.log`, proxy, s.project, run.zone, api)
 		// Revoke once the first disk exists.
 		deadline := time.Now().Add(5 * time.Minute)
 		for time.Now().Before(deadline) {
-			if code, _ := facade(t, "GET", "projects/"+s.project+"/zones/"+run.zone+"/disks/tf-0", nil); code == 200 {
+			if code, _ := facade(t, "GET", "projects/"+s.project+"/zones/"+run.Zone+"/disks/tf-0", nil); code == 200 {
 				break
 			}
 			time.Sleep(3 * time.Second)
 		}
-		if err := run.api.Do(ctx, "DELETE", "silos/ms/manageGrants/rollout", nil, nil, nil); err != nil {
+		if err := run.API.Do(ctx, "DELETE", "silos/ms/manageGrants/rollout", nil, nil, nil); err != nil {
 			t.Fatalf("revoking: %v", err)
 		}
 		revoked := time.Now()
 		res := v.wait()
 		expect(t, res, "tf", true)
-		_, list := facade(t, "GET", "projects/"+s.project+"/zones/"+run.zone+"/disks", nil)
+		_, list := facade(t, "GET", "projects/"+s.project+"/zones/"+run.Zone+"/disks", nil)
 		items, _ := list["items"].([]any)
 		for _, it := range items {
 			m := it.(map[string]any)
@@ -931,7 +933,7 @@ grep -q 403 /tmp/tf.log`, proxy, s.project, run.zone, api)
 			if strings.HasPrefix(name, "tf-") && ct.After(revoked.Add(2*time.Second)) {
 				t.Errorf("%s was created after the revoke", name)
 			}
-			_, op := facade(t, "DELETE", "projects/"+s.project+"/zones/"+run.zone+"/disks/"+name, nil)
+			_, op := facade(t, "DELETE", "projects/"+s.project+"/zones/"+run.Zone+"/disks/"+name, nil)
 			waitOp(t, s.project, op)
 		}
 	})
@@ -941,7 +943,7 @@ grep -q 403 /tmp/tf.log`, proxy, s.project, run.zone, api)
 			t.Fatalf("offering again: %v", err)
 		}
 		id, _ := g["id"].(string)
-		if _, err := run.api.Patch(ctx, p.path, client.Patch{"control": "none"}, client.Mutation{}); err != nil {
+		if _, err := run.API.Patch(ctx, p.path, client.Patch{"control": "none"}, client.Mutation{}); err != nil {
 			t.Fatalf("sealing /mp: %v", err)
 		}
 		res := probe(t, p, "probe-sealed-holder", []Check{
@@ -1017,7 +1019,7 @@ func TestFenceMatchesEvaluator(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	pol, err := run.compute.NetworkFirewallPolicies.Get(run.project, "silo-fence").Do()
+	pol, err := run.Compute.NetworkFirewallPolicies.Get(run.Project, "silo-fence").Do()
 	if err != nil {
 		t.Fatalf("the fence policy: %v", err)
 	}

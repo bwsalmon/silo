@@ -39,6 +39,10 @@ type Target interface {
 type Fence interface {
 	// Root is the root silo's id.
 	Root() string
+	// Gateway is the gateway as a probe's checks name it, its fence API
+	// on port 8080 and its egress proxy on 3128: gw0's address on a
+	// local target, silo.internal on GCP.
+	Gateway() string
 	// API makes a fence API call as caller (the root's members when
 	// caller is the root, nobody when ""), and decodes its JSON answer.
 	API(caller, method, path string, body any) (int, map[string]any)
