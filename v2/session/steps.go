@@ -232,6 +232,7 @@ func stepGateway(ctx context.Context, s *Session) (Undo, error) {
 		return undo, err
 	}
 	s.Gateway, s.Server = g, srv
+	s.runGatewayHooks(g)
 
 	c := mcp.NewClient(srv.URL, srv.Token)
 	if _, err := c.Initialize(ctx); err != nil {

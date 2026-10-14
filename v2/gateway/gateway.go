@@ -68,8 +68,29 @@ func New(log *audit.Log) *Gateway {
 
 // Register adds tools, or replaces ones of the same name in place, and
 // tells connected clients the list changed.
-func (g *Gateway) Register(tools ...Tool) {
+func (g *Gateway) Register(tools ...Tool) { g.Update(nil, tools) }
+
+// Update removes the named tools and adds or replaces tools, then tells
+// connected clients the list changed: a proxied server's tool set
+// changing (design §13.4).
+func (g *Gateway) Update(remove []string, tools []Tool) {
 	g.mu.Lock()
+	if len(remove) > 0 {
+		gone := map[string]bool{}
+		for _, n := range remove {
+			if _, ok := g.tools[n]; ok {
+				gone[n] = true
+				delete(g.tools, n)
+			}
+		}
+		kept := g.order[:0]
+		for _, n := range g.order {
+			if !gone[n] {
+				kept = append(kept, n)
+			}
+		}
+		g.order = kept
+	}
 	for _, t := range tools {
 		if _, ok := g.tools[t.Name]; !ok {
 			g.order = append(g.order, t.Name)

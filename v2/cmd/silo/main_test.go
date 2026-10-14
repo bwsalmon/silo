@@ -92,3 +92,42 @@ func TestRunUsageAndInvalid(t *testing.T) {
 		t.Fatalf("attached: exit %d: %s", code, stderr.String())
 	}
 }
+
+func TestRunDryRun(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "mcp"), 0o755)
+	os.WriteFile(filepath.Join(dir, "mcp", "servers.json"), []byte(`{"mcpServers": {"docs": {"command": "sh"}, "web": {"url": "http://127.0.0.1:1/mcp"}}}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "Silofile"), []byte(`silo: v2
+name: x
+agent: {cli: claude}
+mcp:
+  - name: docs
+    from: mcp-json:docs
+    tools: [search]
+  - name: web
+    from: mcp-json:web
+  - name: gone
+    from: mcp-json:gone
+`), 0o644)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"run", "--dry-run", dir}, &stdout, &stderr)
+	out := stdout.String()
+	for _, want := range []string{
+		"ok    silofile: ",
+		"ok    mcp docs: mcp-json:docs in " + filepath.Join(dir, "mcp", "servers.json") + ": launches sh; runs as ",
+		"with access to their files",
+		"ok    mcp web: mcp-json:web in ",
+		"connects to http://127.0.0.1:1/mcp, which silo neither starts nor stops",
+		"FAIL  mcp gone: ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+	if code != 69 {
+		t.Errorf("exit %d, want 69 for the failed check; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".silo")); err == nil {
+		t.Error("--dry-run wrote .silo/")
+	}
+}

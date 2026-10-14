@@ -5,3 +5,5 @@ go 1.26.6
 toolchain go1.26.9
 
 require gopkg.in/yaml.v3 v3.0.1
+
+require github.com/BurntSushi/toml v1.6.0

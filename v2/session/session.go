@@ -144,6 +144,9 @@ type Session struct {
 	parser     agentcli.Parser
 	transcript *transcript
 	result     *events.Result
+
+	hookMu       sync.Mutex
+	gatewayHooks []func(*gateway.Gateway)
 }
 
 func (s *Session) getenv(k string) string { return agentcli.Getenv(s.opts.Environ, k) }

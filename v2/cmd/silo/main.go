@@ -25,8 +25,9 @@ const (
 const usage = `usage: silo <command> [arguments]
 
 commands:
-  run [--json] [--prompt text] <Silofile|dir>
-                            run one session (design §3)
+  run [--dry-run] [--json] [--prompt text] <Silofile|dir>
+                            run one session (design §3), or with --dry-run
+                            check what it needs and change nothing
   gc                        remove what crashed sessions left behind
   approve <session> [--deny] [<call-id>]
                             answer a local script's call waiting for approval
