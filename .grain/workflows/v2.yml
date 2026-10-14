@@ -1,7 +1,10 @@
 # Silo v2's CI (v2/README.md): v2/ is its own Go module,
 # github.com/bwsalmon/silo/v2, which the root module's ./... never
 # reaches, so tests.yml's jobs (v1's) do not test it and this job does
-# not test v1. It formats, builds, vets and race-tests the v2 module.
+# not test v1. It formats, builds, vets and race-tests the v2 module,
+# including the gateway's tests against real container and gVisor
+# sandboxes (SILO_V2_REQUIRE_DOCKER and SILO_V2_REQUIRE_RUNSC make a
+# missing Docker or runsc a failure here rather than a skip).
 name: v2
 
 on:
@@ -29,8 +32,28 @@ jobs:
     sandbox:
       cpus: 2
       memory-mb: 4096
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
+      # A pinned gVisor release, checked against its published sha512 (the
+      # same one tests.yml's nsd job installs), registered with Docker as
+      # the runtime runsc for the gvisor sandbox kind.
+      - name: Install runsc
+        infrastructure: true
+        run: |
+          set -e
+          mkdir -p /tmp/gvisor && cd /tmp/gvisor
+          curl -sfLO https://storage.googleapis.com/gvisor/releases/release/20261005/x86_64/gvisor.tar.bz2
+          echo "79869ae9a589355a46d46fdac068d9a954e741741ffe77c64e38c56ea955498c1cb04e9bce44e1cce5155333e6b76bee72347c6661bb7c78fd2fe3aad198c8fe  gvisor.tar.bz2" | sha512sum -c -
+          tar xjf gvisor.tar.bz2
+          sudo install -m 0755 runsc containerd-shim-runsc-v1 /usr/local/bin/
+          # The release's own sidecars, so `runsc install` does not fetch them.
+          sudo cp -r gvisor-bin /usr/local/bin/
+          runsc --version
+          sudo /usr/local/bin/runsc install --download-sidecars=NEVER
+          sudo systemctl restart docker
+          for i in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+          docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' | grep -w runsc
+
       - name: Format
         run: |
           cd v2
@@ -47,4 +70,7 @@ jobs:
         run: cd v2 && go vet ./...
 
       - name: Test
-        run: cd v2 && go test -race -timeout 10m ./...
+        env:
+          SILO_V2_REQUIRE_DOCKER: "1"
+          SILO_V2_REQUIRE_RUNSC: "1"
+        run: cd v2 && go test -race -timeout 15m ./...
