@@ -873,7 +873,12 @@ one.
   command list *before* forwarding, and every updated ref must match the
   entry's `push:` patterns. Deleting a ref and updating a tag are each
   refused unless a pattern names them. A body whose command list cannot
-  be read in full is refused (fail closed).
+  be read in full is refused (fail closed). In `v2/gitproxy` a pattern
+  is a `RefRule` (grain's `model.RefPush`): `refs/heads/...` or
+  `refs/tags/...`, so only a `refs/tags/` pattern names a tag, with
+  `force` and `delete` flags, so only a rule with `delete` names a
+  deletion. How a Silofile's `push:` strings ask for `delete` is
+  stage 7b's to settle.
 - **Fast-forward proof**, optional per entry (`force: false`, the
   default): a non-fast-forward update is refused, proved from the pushed
   pack's commit graph and the upstream's history, as grain does.
@@ -890,12 +895,20 @@ one.
 | --- | --- | --- |
 | `protocol.go`, `pack.go`, `ancestry.go`, `spool.go`, `forward.go` (the HTTP forwarding, `ValidateForwardTarget`, no redirects), `refupdates.go`'s receive-pack parser (`ParseReceivePackCommands`, `decodedPush`) | **Copy** | Protocol mechanics with no grain dependency apart from small types. These are the hard, tested parts. |
 | `core.go` (`GitProxy.HandleRequest`) | **Adapt** | Keep the request pipeline (body limits, spool, ref check, forward). Replace grain's lookups by one `Policy` built from the Silofile. |
-| `authorize.go` (`ModelAuthorizer`), `refupdates.go`'s `AuthorizeRefUpdates`, `RefGrant`, `declaredUpdate` | **Adapt** | Grain's authorizer reads `model.Store` (task branches, team grants, declarations). silo's reads a static per-session policy: repos, access, ref patterns, force. Grain's "only the run's own branch" becomes a `push:` pattern the caller writes. |
-| `ambient.go`, `hosts.go` | **Adapt** | Ambient sources and per-host settings carry over, minus the daemon-wide credential directory. |
-| `audit.go` | **Adapt** | Same entry shape. `Task`/`Template`/`Declaration` become a free-form `caller` map, for grain to fill. |
-| `server.go`, `tokens.go` | **Adapt** | One proxy per session, one token, in memory. Grain's sealed token file exists for a long-lived daemon. |
-| `credentials.go` (pattern ladder, extra names), `apptoken.go`, `teamaudit.go`, `readscope.go`/`WriteScopes`/`SandboxTeams`, `packages.go`, `local.go` | **Drop** for silo | Multi-tenant daemon concerns: teams, credential ladders, GitHub App minting, per-sandbox scope maps. A Silofile names its credential directly. (`local.go` may be kept as a test upstream.) App-token minting can come back as a credential source later. |
+| `authorize.go` (`ModelAuthorizer`), `refupdates.go`'s `AuthorizeRefUpdates`, `RefGrant`, `declaredUpdate` | **Adapt** | Grain's authorizer reads `model.Store` (task branches, team grants, declarations). silo's reads a static per-session policy: repos, access, ref patterns, force (`StaticPolicy`). Grain's "only the run's own branch" becomes a `push:` pattern the caller writes. `declaredUpdate` and grain's `model.RefPushSet` become `RefRules.Check`, in `v2/gitproxy`, so grain's own `Policy` checks its branch and declared refs with the same code. |
+| `ambient.go` | **Adapt**, in `v2/credentials` | Stage 1b already adapted the ambient sources (`gh`, `git-credential`) into `credentials.Resolver`, which caches them. The proxy does not copy them a second time: a `StaticPolicy` credential is a `CredentialSource` whose `Token` func asks for the secret on every request, and an upstream 401 calls `CredentialRefused` so a cached token is dropped. |
+| `hosts.go` | **Adapt** | `NormalizeHost` (grain's `model.NormalizeGitHost`) and a per-host base URL (`GitProxy.Hosts`). Grain's per-credential `<name>.host.json` becomes `Credential.Host`, which the proxy still checks: a credential for another host is refused, not sent. |
+| `audit.go` | **Adapt** | Same entry shape. `Sandbox`/`Task`/`Template`/`Declaration` become a free-form `caller` map, for grain to fill: the caller's on every entry, and each allowed ref's own (`RefGrant.Caller`). Exactly one entry per request, 401s included: the per-ref grants and the fast-forward proof's upstream fetches, which grain logs as entries of their own, are fields of the push's entry. Written through an `AuditLog` interface stage 7b points at the session's audit log. |
+| `server.go`, `tokens.go` | **Adapt** | One proxy per session (`Serve`), one token, in memory (`SessionToken`). Grain's sealed token file exists for a long-lived daemon. |
+| `refusals.go` | **Mostly later** | Only `isPush` and an upstream 401's handling carry over: it is answered as a 403 naming the credential, so git does not ask for a new password for the proxy. Grain's rewriting of GitHub's 403/404 bodies to name the credential and where to fix it is grain-shaped (team settings, `credentials.json`) and can come back with silo's own wording. |
+| `credentials.go` (pattern ladder, extra names), `apptoken.go`, `teamaudit.go`, `readscope.go`/`WriteScopes`/`SandboxTeams`, `packages.go`, `forbidden.go`, `reach.go`, `reach_refusal.go` | **Drop** for silo | Multi-tenant daemon concerns: teams, credential ladders, GitHub App minting, per-sandbox scope maps, grain's own state repository, credential reach queries. A Silofile names its credential directly. App-token minting can come back as a credential source later. |
+| `local.go` | **Kept as a test upstream** | `LocalForwarder`: git http-backend over bare repositories on disk, under the same receive hardening, behind the `Forwarder` interface. The package's integration tests clone and push through the proxy to it with real git; stage 7b's can too. |
 | `sshforward.go`, `sshkey.go` | **Later** | Git-over-ssh upstreams. v2.0 is HTTPS only. |
+
+`v2/gitproxy` was copied from grain at commit
+`5789160c875aa7abb6b4978c3fa337ea6f985a94`; its package doc records
+it, and each file names the grain file it came from, so a later sync
+diffs grain's `pkg/gitproxy` from there.
 
 **Where the shared code lives** **(call 13)**: in silo v2, as
 `v2/gitproxy`, a package with no dependency on grain, holding the
