@@ -200,7 +200,7 @@ func TestMCPDryRunFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := session.DryRun(context.Background(), f, e.environ)
-	want := map[string]string{"mcp a": "not defined", "mcp b": "not found on the server's PATH", "mcp c": "stage 5b"}
+	want := map[string]string{"mcp a": "not defined", "mcp b": "not found on the server's PATH", "mcp c": "location.kind local has no host but this one"}
 	if len(checks) != 3 {
 		t.Fatalf("checks: %+v", checks)
 	}

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -58,9 +59,26 @@ type Spec struct {
 	// Stderr receives a launched server's stderr; discarded when nil.
 	Stderr io.Writer
 
-	// URL is a running server to connect to, sending Headers.
+	// Prelaunch runs before each launch of Command, and a launch it
+	// fails does not happen: a server on the ssh agent host writes its
+	// env file there (design §13.2).
+	Prelaunch func(ctx context.Context) error
+	// Reap runs after a launched server's local process has stopped,
+	// given the stop grace: for a server on the agent host, whose local
+	// process is the ssh channel, it waits that long for what the
+	// channel ran to go and then kills what is left.
+	Reap func(ctx context.Context, grace time.Duration)
+
+	// URL is a running server to connect to, sending Headers, through
+	// HTTP when it is set (a forward to the agent host).
 	URL     string
 	Headers map[string]string
+	HTTP    *http.Client
+
+	// Gone, when set, reports the loss of a connection the server is
+	// reached through (the ssh master): a call made after it, and the
+	// warning when the server dies of it, name it.
+	Gone func() error
 
 	// Dial connects to a server given in code.
 	Dial func(ctx context.Context) (mcp.Conn, error)
@@ -287,9 +305,14 @@ func (s *server) connect(ctx context.Context) (mcp.Conn, *process, error) {
 		}
 		return c, nil, nil
 	case s.spec.URL != "":
-		c, err := mcp.DialHTTP(ctx, s.spec.URL, s.spec.Headers)
+		c, err := mcp.DialHTTPClient(ctx, s.spec.URL, s.spec.Headers, s.spec.HTTP)
 		return c, nil, err
 	case s.spec.launched():
+		if s.spec.Prelaunch != nil {
+			if err := s.spec.Prelaunch(ctx); err != nil {
+				return nil, nil, err
+			}
+		}
 		proc, conn, err := s.launch()
 		if err != nil {
 			return nil, nil, err
@@ -440,6 +463,9 @@ func (s *server) tool(t mcp.ToolInfo) gateway.Tool {
 // live returns the connection, or the error a call to a dead server
 // gets: a tool error naming the server.
 func (s *server) live() (mcp.Conn, error) {
+	if err := s.gone(0); err != nil {
+		return nil, fmt.Errorf("MCP server %s is unreachable: %v", s.name(), err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
@@ -449,6 +475,23 @@ func (s *server) live() (mcp.Conn, error) {
 		return nil, fmt.Errorf("MCP server %s is not running", s.name())
 	}
 	return s.conn, nil
+}
+
+// gone is Spec.Gone's answer, waiting up to wait for it: the end of a
+// channel and that of the connection it runs on are noticed in either
+// order.
+func (s *server) gone(wait time.Duration) error {
+	if s.spec.Gone == nil {
+		return nil
+	}
+	end := time.Now().Add(wait)
+	for {
+		err := s.spec.Gone()
+		if err != nil || !time.Now().Before(end) {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // watch follows one connection until it ends.
@@ -550,15 +593,21 @@ func (s *server) died(conn mcp.Conn, proc *process, cause error) {
 	} else if cause != nil {
 		why = cause.Error()
 	}
+	lost := s.gone(2 * time.Second)
+	if lost != nil {
+		why = lost.Error()
+	}
 	_ = conn.Close()
 	s.mu.Lock()
 	if s.closed || s.conn != conn {
 		s.mu.Unlock()
 		return
 	}
-	restart := s.spec.Restart && s.spec.launched()
+	restart := s.spec.Restart && s.spec.launched() && lost == nil
 	msg := fmt.Sprintf("MCP server %s is not running: %s", s.name(), why)
-	if restart {
+	if lost != nil {
+		msg += "; it is not restarted"
+	} else if restart {
 		msg += "; it is restarted at most once per " + s.p.opts.RestartInterval.String()
 	} else {
 		msg += "; it is not restarted (restart: never)"
@@ -657,4 +706,7 @@ func (s *server) terminate(ctx context.Context, proc *process) {
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	<-proc.exited
+	if s.spec.Reap != nil {
+		s.spec.Reap(ctx, s.p.opts.StopGrace)
+	}
 }

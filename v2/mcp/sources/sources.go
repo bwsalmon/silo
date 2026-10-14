@@ -99,6 +99,10 @@ type Options struct {
 	Folder string
 	// Getenv reads HOME and CODEX_HOME; os.Getenv when nil.
 	Getenv func(string) string
+	// ReadFile reads a config file; os.ReadFile when nil. For a server
+	// where: remote it reads on the agent host over ssh (design §13.1),
+	// and returns an error wrapping os.ErrNotExist for a missing file.
+	ReadFile func(string) ([]byte, error)
 }
 
 func (o Options) getenv(k string) string {
@@ -209,7 +213,11 @@ func Resolve(ref Ref, o Options) (*Entry, error) {
 	file := ""
 	var data []byte
 	for _, f := range files {
-		b, err := os.ReadFile(f)
+		read := o.ReadFile
+		if read == nil {
+			read = os.ReadFile
+		}
+		b, err := read(f)
 		if errors.Is(err, os.ErrNotExist) && len(files) > 1 {
 			continue
 		}
