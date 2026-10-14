@@ -2,8 +2,12 @@
 
 Complete silo folders for the [design](../design.md)'s first journeys,
 and a grain-style headless run. Nothing here runs yet: they are written
-against the schema in design §2.3, and stage 1's tests should parse
-every one of them.
+against the schema in design §2.3, and `silofile`'s `TestExamples`
+validates every one of them. Two are checked as what they are:
+`create/` is a built-in silo's template (its `{{...}}` substituted, and
+`builtin_tools` and the `folder` sandbox allowed), and `grain-run/` uses
+values reserved for later stages, so `silo validate` refuses it with one
+error per later value, each naming what adds it.
 
 | Folder | Journey |
 | --- | --- |
