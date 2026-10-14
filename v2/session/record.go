@@ -102,6 +102,9 @@ const (
 	KindProcessGroup = "process-group"
 	// KindDir: a directory, Path, removed by teardown.
 	KindDir = "dir"
+	// KindPod: the k8s location's pod and Secret, labelled with the
+	// session, in Context and Namespace.
+	KindPod = "k8s-pod"
 )
 
 // Resource is one thing set up that teardown, or silo gc after a crash,
@@ -111,6 +114,10 @@ type Resource struct {
 	Runtime string `json:"runtime,omitempty"`
 	PGID    int    `json:"pgid,omitempty"`
 	Path    string `json:"path,omitempty"`
+	// Context and Namespace are KindPod's kubeconfig context and
+	// namespace, empty for kubectl's defaults.
+	Context   string `json:"context,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // Result is how the session ended.

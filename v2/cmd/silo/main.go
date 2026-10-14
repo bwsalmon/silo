@@ -34,8 +34,10 @@ commands:
                             replay a session's events after seq and follow them
   ls [--label key=value] [--json]
                             list the running sessions
-  gc [--host <host>]        remove what crashed sessions left behind, and with
-                            --host their remote session directories there
+  gc [--host <host>] [--k8s [--context <c>] [--namespace <ns>]]
+                            remove what crashed sessions left behind, with
+                            --host their remote session directories there,
+                            and with --k8s their pods in a namespace
   approve <session> [--deny] [<call-id>]
                             answer a local script's call waiting for approval
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)

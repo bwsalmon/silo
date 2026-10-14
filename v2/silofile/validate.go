@@ -277,15 +277,19 @@ func (v *validator) credentialNamed(name string) bool {
 func (v *validator) location() {
 	l := v.f.Location
 	switch l.Kind {
-	case "", "local", "ssh":
+	case "", "local", "ssh", "k8s":
 	case "vm":
 		v.later("location.kind", "kind vm", "stage 10")
-	case "k8s":
-		v.later("location.kind", "kind k8s", "stage 11")
 	case "ax", "capsule":
 		v.later("location.kind", "kind "+l.Kind, "stage 12")
 	default:
 		v.oneOf("location.kind", l.Kind, "local", "ssh", "vm", "k8s", "ax", "capsule")
+	}
+	if l.Kind != "k8s" && l.K8s != nil {
+		v.errorf("location.k8s", "k8s is only for kind: k8s")
+	}
+	if l.Kind == "k8s" {
+		v.k8s()
 	}
 	if l.Kind != "ssh" {
 		if l.SSH != nil {
@@ -313,6 +317,38 @@ func (v *validator) location() {
 		v.later("location.ssh.gateway_transport", "gateway_transport unix", "design §5.3")
 	default:
 		v.oneOf("location.ssh.gateway_transport", s.GatewayTransport, "tcp", "unix")
+	}
+}
+
+// k8sQuantity is a plain Kubernetes quantity: digits with an optional
+// fraction and suffix (2, 0.5, 500m, 4Gi).
+var k8sQuantity = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$`)
+
+// k8sName is a DNS-1123 label, which namespaces are.
+var k8sName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+func (v *validator) k8s() {
+	k := v.f.Location.K8s
+	if k == nil {
+		v.errorf("location", "kind k8s needs k8s: {image: ...}")
+		return
+	}
+	if k.Image == "" {
+		v.errorf("location.k8s.image", "empty image")
+	}
+	if k.Namespace != "" && !k8sName.MatchString(k.Namespace) {
+		v.errorf("location.k8s.namespace", "%q is not a namespace name", k.Namespace)
+	}
+	if r := k.Resources; r != nil {
+		if r.CPU != "" && !k8sQuantity.MatchString(r.CPU) {
+			v.errorf("location.k8s.resources.cpu", "%q is not a CPU quantity (2, 500m)", r.CPU)
+		}
+		if r.Memory != nil && *r.Memory <= 0 {
+			v.errorf("location.k8s.resources.memory", "memory must be more than 0")
+		}
+	}
+	if k.Identity != nil {
+		v.later("location.k8s.identity", "workload identity", "design §5.4")
 	}
 }
 
@@ -417,7 +453,7 @@ func (v *validator) sandboxes() {
 			}
 		}
 		if s.Backend.K8s != nil {
-			v.later(p+".backend", "backend k8s", "stage 11")
+			v.later(p+".backend", "backend k8s", "stage 11b")
 		}
 		switch s.Lifetime {
 		case "", "session":

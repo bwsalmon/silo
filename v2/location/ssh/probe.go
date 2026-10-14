@@ -156,3 +156,10 @@ func (p Probe) check(host string, s *location.Session) error {
 	}
 	return nil
 }
+
+// ProbeScript is the probe script, for another location whose agent
+// host has a POSIX sh (k8s runs it in the pod).
+func ProbeScript(s *location.Session) string { return probeScript(s) }
+
+// ParseProbe parses the probe script's output.
+func ParseProbe(out string) Probe { return parseProbe(out) }
