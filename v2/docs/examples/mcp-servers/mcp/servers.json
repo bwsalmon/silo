@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "docs": {
+      "command": "docs-search-mcp",
+      "args": ["--index", "/home/alice/.cache/docs-index"]
+    }
+  }
+}

@@ -7,7 +7,22 @@ The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
 v1 keeps working, and keeps being developed, until v2 replaces it.
 
-v2's design documents will go under [`docs/`](docs/) in this directory.
+v2 runs one agent CLI in a chosen location, with access to a declared
+set of MCP tools, credentials, cloud permissions, git access and local
+scripts, and nothing else. A silo is a `Silofile`, or a folder holding
+one; `silo run` carries it out once.
+
+## Design
+
+- [`docs/design.md`](docs/design.md): the design, organised around the
+  user journeys (`silo create`, a Google project, a remote agent with
+  narrow local reach, existing MCP servers), with the staged
+  implementation plan.
+- [`docs/cli-mapping.md`](docs/cli-mapping.md): how each setting maps
+  onto the real `claude`, `codex` and `agy` flags.
+- [`docs/grain.md`](docs/grain.md): grain as silo's first client, and
+  its migration path.
+- [`docs/examples/`](docs/examples/): example silo folders.
 
 ## Layout
 

@@ -1,0 +1,41 @@
+# Journey 2 (design §11): a local agent that acts only in one GCP
+# project, through gcloud, gsutil and bq, as a per-user service account
+# with exactly these roles. No built-in tools, no scripts, no checkout.
+#
+#   silo run ./google-project
+silo: v2
+name: staging-ops
+description: Investigate and tidy logging and storage in acme-staging, read-mostly.
+
+agent:
+  cli: claude
+  auth: ambient
+  mode: interactive
+  system_prompt: |
+    You operate on the GCP project acme-staging only, through the gcloud,
+    gsutil and bq tools. You have no access to the user's machine. Ask
+    before deleting anything.
+
+location:
+  kind: local
+
+remote_permissions: none
+
+sandboxes:
+  - name: cloud
+    kind: container
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
+    network: open            # it has to reach Google's APIs
+    cpus: 1
+    memory: 1Gi
+
+projects:
+  - project: acme-staging
+    roles:
+      - roles/logging.viewer
+      - roles/monitoring.viewer
+      - roles/storage.objectAdmin
+      - roles/bigquery.dataViewer
+      - roles/bigquery.jobUser
+    ttl: 7d                  # delete the account after a week unused
+    deliver_to: [cloud]      # the token goes into the cloud sandbox only

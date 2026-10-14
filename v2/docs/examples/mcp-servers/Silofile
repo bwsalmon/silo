@@ -1,0 +1,53 @@
+# Journey 4 (design §13): MCP servers that already exist, on this
+# machine and on the remote host, all routed through silo's gateway with
+# an allowlist each.
+#
+#   silo run ./mcp-servers
+silo: v2
+name: triage
+description: Triage widgets issues from devbox, with GitHub, our docs search and devbox's database tools.
+
+agent:
+  cli: claude
+  auth: ambient
+  mode: interactive
+
+location:
+  kind: ssh
+  ssh: {host: devbox}
+
+remote_permissions: [Read, Grep, Glob]    # read-only on devbox
+
+mcp:
+  # Defined in my ~/.claude.json, started by silo on this machine.
+  - name: github
+    where: local
+    from: claude-user:github
+    tools: [get_issue, list_issues, search_issues, add_issue_comment]
+
+  # Defined in this folder's mcp/servers.json (.mcp.json shape).
+  - name: docs
+    where: local
+    from: mcp-json:docs              # default path: mcp/servers.json
+    required: false                  # triage works without it
+
+  # Already running on this machine; silo connects, never stops it.
+  - name: tickets
+    where: local
+    url: http://127.0.0.1:7400/mcp
+    tools: [search, get]
+
+  # Defined in devbox's codex config; silo starts it on devbox over ssh
+  # and proxies it into the gateway.
+  - name: db
+    where: remote
+    from: codex:postgres
+    tools: [query_readonly, describe_table]
+
+credentials:
+  - name: gh
+    from: {ambient: gh}
+    to: [{mcp: github, env: GITHUB_PERSONAL_ACCESS_TOKEN}]
+  - name: db-ro
+    from: {store: widgets-db-readonly}
+    to: [{mcp: db, env: DATABASE_URL}]

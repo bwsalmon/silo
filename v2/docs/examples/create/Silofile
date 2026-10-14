@@ -1,0 +1,37 @@
+# The built-in silo that `silo create [dir]` runs (design §10).
+# Embedded in the silo binary. silo substitutes {{target}} (the absolute
+# path of the directory being created or edited), {{cli}} (from --cli,
+# the user config, or the first of claude/codex on PATH) and {{mode}}
+# ("create" or "edit") before parsing it. It is otherwise an ordinary
+# Silofile: the same gateway and remote_permissions machinery as any
+# silo run.
+silo: v2
+name: silo-create
+description: Author a Silofile or silo folder together with the user.
+
+agent:
+  cli: "{{cli}}"             # claude or codex; agy cannot express `none`
+  auth: ambient
+  mode: interactive
+  system_prompt: prompts/system.md
+  prompt: "We are going to {{mode}} the silo in {{target}}. Start by asking me what I want the agent in it to do."
+
+location:
+  kind: local
+
+remote_permissions: none     # the gateway is the agent's only capability
+
+sandboxes:
+  # The target directory, served by path-confined file tools
+  # (workspace_list/read/write/delete). No exec. The `folder` kind is
+  # available to built-in silos only in v2.0.
+  - name: workspace
+    kind: folder
+    path: "{{target}}"
+    rw: true
+
+# silo_schema, silo_docs, silo_examples, silo_source, silo_validate and
+# silo_check are served by the gateway for this built-in silo only; they
+# read material embedded in the binary, and silo_check is the read-only
+# `silo run --dry-run` on {{target}}.
+builtin_tools: [silo_schema, silo_docs, silo_examples, silo_source, silo_validate, silo_check]
