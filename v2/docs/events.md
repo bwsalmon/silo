@@ -69,9 +69,14 @@ Codex reports usage per turn (`turn.completed`). Codex does not name the
 model, so `model` is `agent.model` and is empty when that is unset.
 
 **`approval_request`**: a gateway call to a tool with `approve: true`,
-waiting for an answer (design §12.3). `{id, tool, args}`. Stage 4a emits
-it through `session.Session.RequestApproval`. The answer arrives through
-the control socket's `approve` method (stage 6b).
+waiting for an answer (design §12.3). `{id, tool, args, message,
+deadline}`. For a local script, `args` is `{script, args, stdin_bytes}`,
+and `message` is the request in a sentence, with the `silo approve`
+command that answers it. Answer it with `silo approve <session> <id>
+[--deny]`, or with the control socket's `approve` method. An
+interactive session shown on silo's own terminal lines does not emit
+this event: the CLI owns that terminal, so a desktop notification
+announces the request instead.
 
 **`resumable`**: the CLI's own session id, emitted when the CLI first names
 it or names a new one. `{cli, cli_session}`. For claude it is the

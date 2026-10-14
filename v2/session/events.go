@@ -40,6 +40,8 @@ type TextSink struct{ W io.Writer }
 
 func (t TextSink) Event(e events.Event) {
 	switch {
+	case e.ApprovalRequest != nil:
+		fmt.Fprintf(t.W, "\nsilo: %s\n", e.ApprovalRequest.Message)
 	case e.Status != nil && e.Status.Message != "":
 		if e.Status.State == events.StateWarning {
 			fmt.Fprintf(t.W, "silo: warning: %s\n", e.Status.Message)

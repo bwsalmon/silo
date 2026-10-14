@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/v2/agentcli"
+	"github.com/bwsalmon/silo/v2/control"
 	"github.com/bwsalmon/silo/v2/credentials"
 	"github.com/bwsalmon/silo/v2/events"
 	"github.com/bwsalmon/silo/v2/gateway"
@@ -129,6 +130,8 @@ type Session struct {
 	Gateway    *gateway.Gateway
 	Server     *mcp.Server
 	GatewayURL string
+	// Control is the session's control socket.
+	Control *control.Server
 
 	// Command is the CLI's command, once staged.
 	Command location.Command
@@ -158,10 +161,10 @@ func (s *Session) emitStatus(step, state, msg string) {
 }
 
 // RequestApproval emits an approval_request event: a gateway call with
-// approve: true waiting for its answer (stage 4a's hook; the answer
-// arrives over the control socket, stage 6b).
-func (s *Session) RequestApproval(id, tool string, args map[string]any) {
-	s.em.emit(events.Event{Type: events.TypeApprovalRequest, ApprovalRequest: &events.ApprovalRequest{ID: id, Tool: tool, Args: args}})
+// approve: true waiting for its answer, which arrives over the control
+// socket's approve method (design §12.3).
+func (s *Session) RequestApproval(r events.ApprovalRequest) {
+	s.em.emit(events.Event{Type: events.TypeApprovalRequest, ApprovalRequest: &r})
 }
 
 // AddResource records something set up outside the session directory

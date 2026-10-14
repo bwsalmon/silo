@@ -149,6 +149,11 @@ type ApprovalRequest struct {
 	ID   string         `json:"id"`
 	Tool string         `json:"tool"`
 	Args map[string]any `json:"args,omitempty"`
+	// Message is the request in a sentence, with the silo approve
+	// command that answers it.
+	Message string `json:"message,omitempty"`
+	// Deadline is when the call gives up waiting.
+	Deadline *time.Time `json:"deadline,omitempty"`
 }
 
 // Resumable is the CLI's own session id, which resumes the
@@ -290,6 +295,7 @@ func (e *Event) Redact(redact func(string) string) {
 	}
 	if a := e.ApprovalRequest; a != nil {
 		a.Args = redactMap(a.Args, redact)
+		a.Message = redact(a.Message)
 	}
 	if r := e.Result; r != nil {
 		r.FinalText = redact(r.FinalText)

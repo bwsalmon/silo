@@ -1326,6 +1326,31 @@ parameter, an unquoted `$@` or `$*`, or `xargs`, and on a script that
 is itself an interpreter or shell (a symlink to `/bin/sh`, `python3`)
 **(call 23)**. A warning is not a refusal. The user wrote the script.
 
+As built in stage 4a (§12.2–§12.4):
+
+- The result also carries `signal` and `timed_out` when they apply, and
+  `stdout_bytes`/`stderr_bytes`, how much the script wrote; past
+  `output_cap` silo keeps the first and last halves of the cap and
+  marks the cut, so the difference is what was dropped. `exit_code`
+  comes first, so the audit log's head of the result always holds it.
+- An approval waits up to the script's timeout, and the run then has
+  its own timeout. A script that changed while its call waited for
+  approval is refused then too.
+- In `headless` mode without a terminal, approvals go through
+  `silo approve` as in `interactive` mode, with the request printed on
+  silo's stderr instead of a desktop notification. `silo approve` takes
+  the session id or a unique prefix of it, and the call id may be left
+  out when only one call is waiting.
+- The control socket exists in every session from the start of setup:
+  JSON-RPC 2.0, one message per line. `approve` takes
+  `{"id"?: string, "deny"?: bool}` and answers with the call it
+  answered. Under `--json` (stage 6) the same queue answers, announced
+  by an `approval_request` event.
+- A symlink to an interpreter outside the folder is already refused at
+  snapshot, so the interpreter warning covers a file in the folder that
+  is not a `#!` script and is named like a shell or interpreter, and a
+  wrapper that hands `"$@"` straight to one (`exec python3 "$@"`).
+
 ### 12.5 On the remote host
 
 `remote_permissions` governs what the agent does there: `none`, `all`,

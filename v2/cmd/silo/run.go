@@ -51,7 +51,7 @@ func runSession(args []string, stdin io.Reader, stdout, stderr io.Writer, opts s
 		}
 		return fail(exitInvalid, fmt.Sprintf("silo run: %v", err))
 	}
-	res := f.Validate(silofile.Options{})
+	res := f.Validate(validateOptions)
 	for _, w := range res.Warnings {
 		fmt.Fprintf(stderr, "warning: %v\n", w)
 	}

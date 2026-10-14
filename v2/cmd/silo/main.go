@@ -1,5 +1,5 @@
 // Command silo is Silo v2's command line (design §3, §16). So far it has
-// run, gc, validate and schema.
+// run, approve, gc, validate and schema.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bwsalmon/silo/v2/localexec"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -27,6 +28,8 @@ commands:
   run [--json] [--prompt text] <Silofile|dir>
                             run one session (design §3)
   gc                        remove what crashed sessions left behind
+  approve <session> [--deny] [<call-id>]
+                            answer a local script's call waiting for approval
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)
   schema [section]          print the Silofile's JSON Schema, or one section's
 `
@@ -45,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runSession(args[1:], os.Stdin, stdout, stderr, session.Options{})
 	case "gc":
 		return gc(args[1:], stdout, stderr)
+	case "approve":
+		return approve(args[1:], os.Getenv, stdout, stderr)
 	case "validate":
 		return validate(args[1:], stdout, stderr)
 	case "schema":
@@ -73,6 +78,10 @@ func flags(name, argsUsage string, args []string, stderr io.Writer, min, max int
 	return fs.Args(), true
 }
 
+// validateOptions are silo validate's and silo run's: with the local
+// executor's script checks and warnings (design §2.4, §12.4).
+var validateOptions = silofile.Options{CheckScripts: localexec.Check}
+
 func validate(args []string, stdout, stderr io.Writer) int {
 	args, ok := flags("validate", "<Silofile|dir>", args, stderr, 1, 1)
 	if !ok {
@@ -88,7 +97,7 @@ func validate(args []string, stdout, stderr io.Writer) int {
 		}
 		return exitInvalid
 	}
-	res := f.Validate(silofile.Options{})
+	res := f.Validate(validateOptions)
 	for _, w := range res.Warnings {
 		fmt.Fprintf(stderr, "warning: %v\n", w)
 	}
