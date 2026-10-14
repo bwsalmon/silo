@@ -1,0 +1,50 @@
+# Silo v2's CI (v2/README.md): v2/ is its own Go module,
+# github.com/bwsalmon/silo/v2, which the root module's ./... never
+# reaches, so tests.yml's jobs (v1's) do not test it and this job does
+# not test v1. It formats, builds, vets and race-tests the v2 module.
+name: v2
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  v2:
+    name: v2
+    # v1's files, which the v2 module does not read. Anything else -- v2/
+    # itself, this workflow, a new top-level file -- runs the job.
+    paths-ignore:
+      - cmd/**
+      - pkg/**
+      - docs/**
+      - go.mod
+      - go.sum
+      - Makefile
+      - "*.md"
+    sandbox:
+      cpus: 2
+      memory-mb: 4096
+    timeout-minutes: 15
+    steps:
+      - name: Format
+        run: |
+          cd v2
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: cd v2 && go build ./...
+
+      - name: Vet
+        run: cd v2 && go vet ./...
+
+      - name: Test
+        run: cd v2 && go test -race -timeout 10m ./...
