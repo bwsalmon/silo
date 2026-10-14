@@ -1,0 +1,17 @@
+tty: false
+argv:
+  "/bin/custom"
+  "--run"
+  "--safe"
+env:
+  PATH=/bin
+  HOME=/home/u
+  DELIVERED=to-agent
+  MY_AGENT_MCP_CONFIG=/STAGE/mcp.toml
+--- mcp.toml
+[mcp_servers.silo]
+url = "http://127.0.0.1:41234/mcp"
+http_headers = { Authorization = "Bearer TOKEN" }
+required = true
+--- prompt.md
+do the thing

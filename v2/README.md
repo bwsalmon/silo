@@ -1,10 +1,10 @@
 # Silo v2
 
 This is Silo v2, a fresh and smaller design of Silo, under construction.
-Nothing runs an agent yet: so far there is the Silofile, two commands,
-`silo validate` and `silo schema`, and the parts `silo run` will put
-together (stage 1b): the gateway, container and gVisor sandboxes, and
-credentials.
+Stage 1 is in: `silo run` runs `claude`, `codex` or a custom CLI on the
+local machine, interactive or headless, with `remote_permissions` none,
+all or a subset, its only reach a gateway serving container and gVisor
+sandboxes. `silo validate`, `silo schema` and `silo gc` are there too.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -37,9 +37,21 @@ builds, vets or tests the other's packages.
 ## Commands
 
 ```sh
+go run ./cmd/silo run [--prompt text] <Silofile|dir>   # design §3
+go run ./cmd/silo gc                        # what crashed sessions left
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
 go run ./cmd/silo schema [section]          # the Silofile's JSON Schema
 ```
+
+`silo run` validates the Silofile, then runs one session: it resolves
+credentials, finds the CLI and checks its version, starts the
+sandboxes, starts the gateway, writes the CLI's MCP config and settings
+(cli-mapping.md), and runs the CLI until it exits, the deadline passes
+(exit 124) or Ctrl-C ends it (130). It exits with the CLI's own code
+otherwise; a setting the CLI cannot express exits 76, a missing
+prerequisite 69. The session directory is
+`$XDG_RUNTIME_DIR/silo/<id>/`; the audit log and the final
+`session.json` stay in `$XDG_STATE_HOME/silo/sessions/<id>/`.
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
@@ -61,6 +73,10 @@ changing a type, run `go generate ./silofile` and
 | --- | --- |
 | `silofile` | The Silofile: types, strict decoding, folder resolution, validation, JSON Schema. |
 | `cmd/silo` | The `silo` command. |
+| `session` | One `silo run` session (design §3): setup steps and tool providers (registries), teardown, `session.json`, signals, exit codes, `silo gc`'s local part. |
+| `location` | The `Location` and `Agent` interfaces (design §5.1). |
+| `location/local` | The CLI as a child process with a scrubbed environment (design §5.2). |
+| `agentcli` | Per-CLI mappings onto argv, env and staged files: `claude`, `codex` (with the reviewed-version gate for `none`), `custom`. Golden files in `agentcli/testdata`. |
 | `mcp` | MCP over Streamable HTTP: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and a client. |
 | `gateway` | The session's MCP server (design §4): tool registry, refusal, timeouts, and the sandbox tools `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_list_dir`. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
@@ -82,11 +98,16 @@ go build ./... && go vet ./... && go test -race ./...
 
 grain CI runs the same in `.grain/workflows/v2.yml`.
 
-The gateway's and `sandbox/container`'s tests create real containers,
+The gateway's, `sandbox/container`'s and `session`'s tests create real containers,
 with `busybox:1.37`, and run the same suite with `kind: gvisor`. They
 skip where there is no Docker or Podman, or no runsc registered as a
 runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
 `SILO_V2_REQUIRE_RUNSC=1`, which turn those skips into failures.
+
+`session`'s tests use the test binary itself as a fake `claude`: it
+answers `--version`, reads the staged MCP config, calls the gateway and
+exits as told. No real `claude` or `codex` is needed (stage 1d checks
+those).
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip

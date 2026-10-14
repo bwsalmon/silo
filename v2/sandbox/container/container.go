@@ -220,6 +220,7 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	args := []string{"run", "-d", "--name", name,
 		"--label", sandbox.SessionLabel + "=" + spec.Session,
 		"--label", sandbox.NameLabel + "=" + spec.Name,
+		"--label", sandbox.UserLabel + "=" + strconv.Itoa(os.Getuid()),
 		"--hostname", spec.Name,
 		"--security-opt", "no-new-privileges",
 	}
@@ -287,6 +288,28 @@ func (b *Backend) Find(ctx context.Context, session string) ([]sandbox.Sandbox, 
 		found = append(found, &Container{backend: b, ID: id, Name: strings.TrimSpace(string(name)), Session: session})
 	}
 	return found, nil
+}
+
+// Sessions lists the sessions this user's labelled containers belong
+// to, running or not, for silo gc.
+func (b *Backend) Sessions(ctx context.Context) ([]string, error) {
+	out, err := b.cli(ctx, nil, nil, "ps", "-a", "-q", "--no-trunc", "--filter", "label="+sandbox.UserLabel+"="+strconv.Itoa(os.Getuid()))
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var sessions []string
+	for _, id := range strings.Fields(string(out)) {
+		s, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.SessionLabel+`"}}`, id)
+		if err != nil {
+			continue
+		}
+		if name := strings.TrimSpace(string(s)); name != "" && !seen[name] {
+			seen[name] = true
+			sessions = append(sessions, name)
+		}
+	}
+	return sessions, nil
 }
 
 // Container is one container sandbox.

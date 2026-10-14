@@ -1,0 +1,24 @@
+tty: true
+argv:
+  "/bin/custom"
+  "--tui"
+  "--mcp"
+  "/STAGE/mcp.json"
+env:
+  PATH=/bin
+  HOME=/home/u
+  DELIVERED=to-agent
+--- mcp.json
+{
+  "mcpServers": {
+    "silo": {
+      "headers": {
+        "Authorization": "Bearer TOKEN"
+      },
+      "type": "http",
+      "url": "http://127.0.0.1:41234/mcp"
+    }
+  }
+}
+--- prompt.md
+do the thing

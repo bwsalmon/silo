@@ -1,0 +1,1 @@
+refused (exit 76): remote_permissions names "Teleport", which is not a built-in tool of claude 2.1.197 (its roster: Agent, AskUserQuestion, Bash, BashOutput, Edit, EnterPlanMode, ExitPlanMode, Glob, Grep, KillShell, LSP, MultiEdit, NotebookEdit, Read, Skill, SlashCommand, Task, TaskOutput, TaskStop, TodoWrite, WebFetch, WebSearch, Write)

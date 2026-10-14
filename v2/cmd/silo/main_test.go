@@ -79,3 +79,16 @@ func TestRun(t *testing.T) {
 		})
 	}
 }
+
+func TestRunUsageAndInvalid(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run"}, &stdout, &stderr); code != exitUsage {
+		t.Fatalf("no Silofile: exit %d", code)
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "Silofile"), []byte("silo: v2\nname: x\nagent: {cli: claude, mode: attached}\n"), 0o644)
+	stderr.Reset()
+	if code := run([]string{"run", dir}, &stdout, &stderr); code != exitInvalid || !strings.Contains(stderr.String(), "attached") {
+		t.Fatalf("attached: exit %d: %s", code, stderr.String())
+	}
+}

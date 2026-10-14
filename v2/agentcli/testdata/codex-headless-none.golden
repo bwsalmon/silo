@@ -1,0 +1,47 @@
+tty: false
+argv:
+  "/bin/codex"
+  "exec"
+  "--json"
+  "--skip-git-repo-check"
+  "-m"
+  "test-model"
+  "-"
+env:
+  PATH=/bin
+  HOME=/home/u
+  CODEX_EXEC_SERVER_URL=none
+  CODEX_HOME=/STAGE/codex-home
+  DELIVERED=to-agent
+  OPENAI_API_KEY=sk-test
+stdin: "do the thing"
+--- codex-home/config.toml
+# Written by silo for one session; see cli-mapping.md §2.2.
+approval_policy = "never"
+sandbox_mode = "read-only"
+web_search = "disabled"
+include_environment_context = false
+model_reasoning_effort = "high"
+developer_instructions = "be careful"
+[features]
+apps = false
+plugins = false
+multi_agent = false
+multi_agent_v2 = false
+[orchestrator.skills]
+enabled = false
+[skills.bundled]
+enabled = false
+[mcp_servers.silo]
+url = "http://127.0.0.1:41234/mcp"
+http_headers = { Authorization = "Bearer TOKEN" }
+required = true
+tool_timeout_sec = 1920
+enabled_tools = ["sandbox_exec","sandbox_read_file"]
+[mcp_servers.silo.tools."sandbox_exec"]
+approval_mode = "approve"
+[mcp_servers.silo.tools."sandbox_read_file"]
+approval_mode = "approve"
+--- codex-home/environments.toml
+default = "none"
+include_local = false

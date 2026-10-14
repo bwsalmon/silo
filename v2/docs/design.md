@@ -383,6 +383,19 @@ end. Codes silo itself owns are 64 and above, chosen from the BSD
 | 76 | Refused: a setting the CLI cannot express (`agy` with `none`). |
 | 124 | The session deadline passed (the `timeout(1)` convention). |
 | 130 | Ended by Ctrl-C (128 + SIGINT). |
+| 143 | Ended by SIGTERM to silo (128 + SIGTERM). |
+
+As built in stage 1c: any other failure during setup (a sandbox that
+does not start, an image that does not pull, a missing credential
+source) exits 69. In headless mode, a session whose first Ctrl-C the
+CLI obeyed still exits 130, since silo sent the signal. The session
+directory holds `session.json` and the staged CLI files (`agent/`) and
+the private workdir (`work/`); the audit log is written straight to
+`$XDG_STATE_HOME/silo/sessions/<id>/audit.jsonl`, so a crash keeps it,
+and the final `session.json` is copied beside it. Where
+`XDG_RUNTIME_DIR` is unset, session directories go in
+`$TMPDIR/silo-<uid>/`. Containers also carry `silo.uid=<uid>`, so
+`silo gc` on a shared Docker daemon removes only the invoking user's.
 
 ## 4. The gateway
 
@@ -431,8 +444,8 @@ grain's design for its Codex endpoint (grain `docs/codex-isolation.md`),
 reused as is.
 
 - **`local`:** the MCP config names `http://127.0.0.1:<port>/mcp` with
-  the token in a header (or, for Codex, an environment variable named by
-  `bearer_token_env_var`).
+  the token in a header (for Codex too: `http_headers`, as grain writes
+  it, in the private `CODEX_HOME`, cli-mapping.md §2.2).
 - **`ssh`:** silo asks the ssh master connection for a reverse forward
   from a remote loopback port to the gateway, and the remote MCP config
   names that remote port (§5.3).

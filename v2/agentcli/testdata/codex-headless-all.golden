@@ -1,0 +1,32 @@
+tty: false
+argv:
+  "/bin/codex"
+  "exec"
+  "--json"
+  "--skip-git-repo-check"
+  "-c"
+  "approval_policy=\"never\""
+  "-m"
+  "test-model"
+  "-"
+env:
+  PATH=/bin
+  HOME=/home/u
+  CODEX_HOME=/STAGE/codex-home
+  DELIVERED=to-agent
+  OPENAI_API_KEY=sk-test
+stdin: "do the thing"
+--- codex-home/config.toml
+# Written by silo for one session; see cli-mapping.md §2.2.
+model_reasoning_effort = "high"
+developer_instructions = "be careful"
+[mcp_servers.silo]
+url = "http://127.0.0.1:41234/mcp"
+http_headers = { Authorization = "Bearer TOKEN" }
+required = true
+tool_timeout_sec = 1920
+enabled_tools = ["sandbox_exec","sandbox_read_file"]
+[mcp_servers.silo.tools."sandbox_exec"]
+approval_mode = "approve"
+[mcp_servers.silo.tools."sandbox_read_file"]
+approval_mode = "approve"

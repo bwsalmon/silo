@@ -1,0 +1,1 @@
+refused (exit 76): codex cannot express a remote_permissions subset: it has no per-tool allowlist for its built-in tools; use none or all (cli-mapping.md §2.2)

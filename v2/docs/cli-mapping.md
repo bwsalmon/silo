@@ -59,7 +59,18 @@ MCP config file (G):
   "headers": {"Authorization": "Bearer <token>"}}}}
 ```
 
-`MCP_TOOL_TIMEOUT` is set so long gateway calls are not abandoned (G).
+`MCP_TOOL_TIMEOUT` is set so long gateway calls are not abandoned (G):
+32 minutes, sandbox_exec's 30-minute cap plus slack.
+
+As built in stage 1c: `--setting-sources user` and
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` are set for `none` and subsets, not
+for `all`. Headless `none` adds no permission flag (nothing is left to
+approve but `mcp__silo`). `agent.system_prompt` is staged as a file and
+passed with `--append-system-prompt-file`. The headless prompt is one
+stream-json user message on stdin, which is then closed (injection is
+stage 6a), never argv. The interactive prompt follows `--`. A Claude
+version with no roster table is checked against the newest table, with a
+warning. `--bare` is not used (design open question 4).
 
 ### 2.2 `codex`
 
@@ -73,7 +84,17 @@ do not apply. For `auth: ambient`, that home links the user's
 | every setting | `config.toml`: `[mcp_servers.silo]` with `url`, `http_headers = { Authorization = "Bearer ..." }`, `required = true` | G |
 | `none` | `environments.toml` with `default = "none"`, `include_local = false`; `CODEX_EXEC_SERVER_URL=none`; `approval_policy = "never"`, `sandbox_mode = "read-only"`, `web_search = "disabled"`, `include_environment_context = false`; `[features]` `apps`, `plugins`, `multi_agent` off; skills off | G, reviewed by grain for **0.153.0 only** (grain `docs/codex-isolation.md`) |
 | subset | **refused**: Codex has no per-tool allowlist for its built-ins | V (no such flag in 0.162.1's help); G (grain's doc says the same) |
-| `all` | no environment manifest; `-s`/`--sandbox` (`read-only`, `workspace-write`, `danger-full-access`) left at Codex's built-in default; interactive keeps Codex's approval prompts, headless adds `-a never` so a run never blocks on an approval nobody can give | V |
+| `all` | no environment manifest; `-s`/`--sandbox` (`read-only`, `workspace-write`, `danger-full-access`) left at Codex's built-in default; interactive keeps Codex's approval prompts, headless adds `-c approval_policy="never"` so a run never blocks on an approval nobody can give (`codex exec` has no `-a`) | V |
+
+As built in stage 1c, following grain's `configTOML`: `config.toml` also
+sets `tool_timeout_sec`, `enabled_tools` naming the gateway's listed
+tools, and `approval_mode = "approve"` for each of them;
+`cli_auth_credentials_store = "file"` with `auth: ambient`, whose
+`auth.json` is `$CODEX_HOME/auth.json` or `~/.codex/auth.json` of the
+invoking user (missing: exit 69, "run `codex login`");
+`model_reasoning_effort` from `agent.effort`; and
+`developer_instructions` from `agent.system_prompt` (A). With
+`auth: {credential: x}`, `OPENAI_API_KEY` is set.
 
 **Version pinning for `none`.** Grain found that read-only mode alone
 did not stop controller reads, and that only the no-environment manifest
@@ -119,6 +140,10 @@ agent:
     events: claude-stream-json     # how silo parses headless output, or: none
 ```
 
+As built in stage 1c: `{prompt}` is a staged file holding the prompt,
+`{file}` the staged MCP config; `stdio-bridge` is refused (exit 76)
+until `silo mcp-bridge` exists; a custom CLI's version is not checked.
+
 ## 3. Modes
 
 ### 3.1 `interactive`
@@ -137,7 +162,7 @@ side gets a pty and the CLI its TUI.
 | CLI | Command | Events | Injection mid-run | Source |
 | --- | --- | --- | --- | --- |
 | `claude` | `claude -p --output-format stream-json --verbose --input-format stream-json` | stream-json lines | yes: a user message on stdin (stream-json input) | V, G |
-| `codex` | `codex exec --json --skip-git-repo-check [-o last.txt] <prompt>` | JSONL events | between turns only: `codex exec resume <id> <msg>`; `codex queue` (V, exists; A, semantics) | V, G |
+| `codex` | `codex exec --json --skip-git-repo-check [-m m] -` (the prompt on stdin, as grain passes it, so it is not in argv) | JSONL events | between turns only: `codex exec resume <id> <msg>`; `codex queue` (V, exists; A, semantics) | V, G |
 | `agy` | `agy -p --output-format stream-json --input-format stream-json --disable-slash-commands --print-timeout <d>` | stream-json lines | yes: stdin, one NDJSON message per turn | V (agy-surface), G |
 
 `--print-timeout` for agy is set from the session deadline, because agy's
@@ -146,6 +171,9 @@ claude: grain found it turns a long run into an error rather than a
 result (G).
 
 On `ssh`, headless runs use `ssh -T` with the same argv.
+
+As built in stage 1c, `silo run` without `--json` passes the CLI's
+stdout through to its own; parsing it into events is stage 6a.
 
 ### 3.3 `attached` (reserved)
 
