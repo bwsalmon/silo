@@ -688,6 +688,9 @@ func (s *Server) makeContainer(ctx context.Context, silo string, c *Container, m
 		}
 	}
 	d := s.drivers[c.Class]
+	if err := s.stageImage(ctx, silo, c.ImageID); err != nil {
+		return err
+	}
 	if err := d.Prepare(ctx, c.ImageID); err != nil {
 		return err
 	}

@@ -15,9 +15,9 @@
 //   - "local/sandbox" and "local/vm": silod installed with --backend
 //     local, probes made through the facade in each isolation class.
 //     They report themselves not runnable until a CI job installs
-//     the local backend and silod serves the facade's host
-//     sockets (local-backend.md §4, "As built in step 6", "left to
-//     wiring"), which local-conformance needs to make probes; the vm
+//     the local backend, which local-conformance needs to make probes
+//     (silod serves the facade's host sockets and runs sandbox
+//     containers: local-backend.md §4, "As built in step 6"); the vm
 //     class also waits on step 10's runtime.Driver.
 //   - "gcp": the GCP backend, which has no registry, so it reports the
 //     registry cases as not offered, never as passing. Its fence cases
@@ -67,7 +67,7 @@ func (l Local) Registry(testing.TB) (conformance.Registry, error) {
 }
 
 func (l Local) Fence(testing.TB) (conformance.Fence, error) {
-	why := "silod serves the Docker facade's host sockets, but with no real runtime driver passed in (local-backend.md §4, \"As built in step 6\") and no CI job installing the local backend, so no probe container can be made"
+	why := "no CI job installs the local backend, so no probe container can be made (silod serves the Docker facade's host sockets and runs sandbox containers: local-backend.md §4, \"As built in step 6\")"
 	if l.Class == "vm" {
 		why += "; the vm class also waits on step 10's runtime.Driver"
 	}

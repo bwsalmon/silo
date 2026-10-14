@@ -91,6 +91,11 @@ type Options struct {
 	// Content is silo-containerd's content store, which save reads, and
 	// load and commit write. Nil refuses them.
 	Content registry.Content
+	// RunNamespace is the content store namespace the drivers run
+	// images from (rootless.ContainerdNamespace). Set, a container's
+	// image is recorded there before its driver prepares it; empty,
+	// the drivers find images themselves, as the fake ones do.
+	RunNamespace string
 	// Registry is the local registry, which push writes and pulls of
 	// registry.silo.internal names read, as the caller. Nil refuses
 	// them.

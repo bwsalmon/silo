@@ -811,23 +811,60 @@ open, or leaves something for later:
     record rows with their charges, gives the networks' subnets back,
     deletes the volumes' directories, and closes and unwires each
     container.
+- **The sandbox class in silod** (task 3669). Without
+  `--fake-runtime`, `silod serve --backend=local` passes the facade the
+  step 7 gVisor driver, built over what the units run:
+  - silo-containerd's socket (`--containerd-socket`), and the runsc
+    shim's options `runsc.toml` beside `--nsd-state`, which
+    `silod containerd` writes when runsc is on its `PATH`;
+  - silod itself as the log copier, `silod runtime-remap` and
+    `silod runsc`, joined to the holder the state file names at each
+    call, so a restarted holder is followed;
+  - runsc from silod's `PATH` for reading a writable layer, and
+    `--toolbox`, a static busybox for `docker cp`;
+  - containers' FIFOs and logs in `cache/containers`;
+  - each container's `cgroupsPath` a scope in its silo's slice
+    (`silo-<root>-…-<silo>.slice:silo:<id>`), as the shim's systemd
+    cgroup driver needs.
+
+  The driver is passed in even when its probe fails, so a create says
+  why the class can't run (409). The vm class still has no
+  `runtime.Driver` (step 10).
+- **Images reach the driver by staging.** A pull, load or commit
+  leaves an image's blobs under the registry's containerd namespaces
+  (`silo-registry`, `silo-cache`), but the driver runs images from
+  `silo`. `docker.Options.RunNamespace` closes the gap. Before a
+  driver's `Prepare`, the facade records the image's manifest there
+  as `silo.internal/staged@<digest>`. The record's references are the
+  config and layers, or an index's platform child and that child's.
+  This links the blobs without copying them. The pull path itself is
+  the registry's fetcher (task 3576): the production puller.
+- **Tested in the nsd job.** `cmd/silod`'s `TestSandboxContainer`
+  builds silod and runs `silod nsd` and `silod containerd`. It then
+  serves the facade as `serve` builds it and makes a container from
+  a `docker load`ed busybox image. The container runs under runsc as
+  its namespace's root, and its `eth0` holds its endpoint's address.
+  The test changes only the shim's cgroups, to none, because the
+  runner doesn't delegate them.
 - **Still to do after step 6:**
-  - silod has no real runtime drivers yet. Without `--fake-runtime`
-    (development and tests only), the facade serves networks, volumes
-    and images, and refuses container creates. Steps 7 and 10 have to
-    pass their drivers in.
   - Wiring always uses container range 0, the shared one. Giving each
     silo its own range is left for install and the units (steps 8
     and 17).
   - A deleted network's bridge stays in `silo-net` until the holder
     restarts.
-  - None of the `silo-net` side has run against a real holder, and the
-    published ports haven't been reached from a real container. That
-    needs the gVisor driver wired into silod, and an install that
-    starts it with the holder (steps 7, 8 and 17). It is tested on
-    loopback listeners, a fake holder and the fake driver.
-  - The production image puller and the root's capacity of the local
-    classes are still open.
+  - Staged image records aren't removed when the last container of
+    an image goes. They hold the image's blobs from containerd's GC
+    until silo-containerd's `silo` namespace is cleaned.
+  - Published ports, DNS and `docker.silo.internal` haven't been
+    reached from a real container yet. The test above calls the
+    facade directly. Reaching them needs an install that starts silod
+    with the holder (steps 8 and 17).
+  - The root's capacity of the local classes is still open: the
+    local backend has no `Capacity` refresh, so the root's capacity
+    is what bootstrap set.
+  - On a real host, an upstream pull answers 503 until silod has a
+    `registry.Egress` (local-registry.md step 31's "Left"). `docker
+    load` and pulls of `registry.silo.internal` names work.
 
 ## 5. Compose and testcontainers
 
@@ -2219,9 +2256,10 @@ Task 3420 built the split as far as silod's wiring allows:
   not runnable. Moving that harness behind `Fence` (an e2-micro probe
   per `Probe`, the checks run by `ProbeScript`) is a follow-up.
 - **"local/sandbox" and "local/vm" report themselves not runnable.**
-  silod doesn't serve the Docker facade's host sockets yet (step 6's
-  "left to wiring"), so no probe container can be made. The `vm` class
-  also waits on step 10's `runtime.Driver`. `local-conformance` prints
+  No CI job installs the local backend yet, so no probe container can
+  be made. silod itself now serves the facade's host sockets and runs
+  sandbox containers (task 3669, [As built in step 6](#as-built-in-step-6)).
+  The `vm` class also waits on step 10's `runtime.Driver`. `local-conformance` prints
   the targets it didn't test in its log, and says whether `/dev/kvm`
   works on the runner. Once a target can run, a not-runnable target
   should fail the job, as above.
