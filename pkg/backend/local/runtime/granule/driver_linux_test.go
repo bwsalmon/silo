@@ -108,19 +108,20 @@ func TestMakeDir(t *testing.T) {
 
 func TestStopVirtiofsds(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "v0.sock")
-	// A process whose command line names the socket, as virtiofsd's
-	// does, and one that doesn't, at a pid file of its own.
-	served := exec.Command("sh", "-c", "sleep 60; :", "--socket-path="+sock)
-	other := exec.Command("sh", "-c", "sleep 60; :")
+	served := exec.Command("sleep", "60")
+	other := exec.Command("sleep", "60")
 	for _, c := range []*exec.Cmd{served, other} {
 		if err := c.Start(); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { c.Process.Kill(); c.Wait() })
 	}
-	os.WriteFile(sock+".pid", []byte(strconv.Itoa(served.Process.Pid)), 0o644)
-	os.WriteFile(filepath.Join(dir, "v1.sock.pid"), []byte(strconv.Itoa(other.Process.Pid)), 0o644)
+	write := func(name string, pid int, start string) {
+		os.WriteFile(filepath.Join(dir, name), []byte(strconv.Itoa(pid)+" "+start), 0o644)
+	}
+	write("v0.sock.pid", served.Process.Pid, startTime(served.Process.Pid))
+	// A pid file whose process has since gone, its pid taken by another.
+	write("v1.sock.pid", other.Process.Pid, "1")
 	if err := stopVirtiofsds(dir); err != nil {
 		t.Fatal(err)
 	}

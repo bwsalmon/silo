@@ -14,7 +14,7 @@ func TestWrapArgs(t *testing.T) {
 		"-rootfs", "/w/rootfs", "-config", "/w/config.json", "-guest-rootfs", "/w/guest",
 		"-parts", "/w/granule/usr/local/share/granule/guest-parts",
 		"-runtime-kernel", "/w/granule/var/lib/granule/guest/vmlinux",
-		"-out", "/w/out", "-work-dir", "/w/stage", "sha256:ab"}
+		"-out", "/w/out", "-work-dir", "/w/stage", "sha256:ab", WrapCommand}
 	if !slices.Equal(got, want) {
 		t.Errorf("WrapArgs\n got %q\nwant %q", got, want)
 	}

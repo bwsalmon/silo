@@ -19,9 +19,11 @@ import (
 
 	runcoptions "github.com/containerd/containerd/api/types/runc/options"
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
@@ -49,8 +51,12 @@ type Config struct {
 	// rootless.ContainerdNamespace when empty.
 	Address, Namespace string
 	// Crun is crun's path, which the runc shim (rootless.RuntimeCrun)
-	// runs as its runc (call L31).
-	Crun string
+	// runs as its runc (call L31), through `silod runtime-crun`
+	// (CrunMain): Silod is silod, and SilodEnv is added to its
+	// environment there.
+	Crun     string
+	Silod    string
+	SilodEnv []string
 	// Dir holds each container's directory, mounted at IODir: its
 	// FIFOs, exit record, virtiofsd sockets and log. The shim and the
 	// holder open them, so it must name the same directory there as on
@@ -119,7 +125,7 @@ func New(cfg Config) (*Driver, error) {
 		cfg.Devices = DefaultHostDevices
 	}
 	if cfg.Dir == "" || cfg.Wraps == "" || cfg.Address == "" || len(cfg.Logger) == 0 || cfg.InHolder == nil ||
-		cfg.Image == "" || cfg.GuestImage == "" || cfg.Granule == "" || cfg.Crun == "" || cfg.DNS == nil {
+		cfg.Image == "" || cfg.GuestImage == "" || cfg.Granule == "" || cfg.Crun == "" || cfg.Silod == "" || cfg.DNS == nil {
 		return nil, errors.New("granule: a driver needs containerd's address, its directories, a log copier, the holder, crun, granule, its images and DNS")
 	}
 	for _, d := range []string{cfg.Dir, cfg.Wraps} {
@@ -127,12 +133,21 @@ func New(cfg Config) (*Driver, error) {
 			return nil, err
 		}
 	}
+	d := &Driver{cfg: cfg}
+	if err := os.WriteFile(d.crunWrapper(), []byte(CrunWrapperScript(cfg.Silod, cfg.Crun, cfg.SilodEnv)), 0o700); err != nil {
+		return nil, err
+	}
 	c, err := containerd.New(cfg.Address, containerd.WithDefaultNamespace(cfg.Namespace), containerd.WithTimeout(10*time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("granule: silo-containerd: %w", err)
 	}
-	return &Driver{cfg: cfg, client: c}, nil
+	d.client = c
+	return d, nil
 }
+
+// crunWrapper is the shim's runc: CrunWrapperScript, beside the
+// containers' directories.
+func (d *Driver) crunWrapper() string { return filepath.Join(d.cfg.Dir, "crun.sh") }
 
 // Close closes the driver's connection. Containers keep running.
 func (d *Driver) Close() error { return d.client.Close() }
@@ -332,6 +347,11 @@ func (d *Driver) Create(ctx context.Context, spec runtime.Spec) (err error) {
 	if err != nil {
 		return err
 	}
+	if cg == "" {
+		opts = append(opts, withoutCgroups)
+	}
+	// For `silod runtime-crun`, which gives the bundle to this root.
+	opts = append(opts, oci.WithAnnotations(map[string]string{rootless.AnnotationRoot: strconv.FormatUint(uint64(spec.Root.Outside), 10)}))
 	runtimeImg, err := d.client.GetImage(ctx, d.cfg.Image)
 	if err != nil {
 		return fmt.Errorf("granule: the granule image: %w", err)
@@ -359,7 +379,7 @@ func (d *Driver) Create(ctx context.Context, spec runtime.Spec) (err error) {
 		containerd.WithSnapshot(spec.ID),
 		containerd.WithImageName(runtimeImg.Name()),
 		containerd.WithContainerLabels(labels),
-		containerd.WithRuntime(rootless.RuntimeCrun, &runcoptions.Options{BinaryName: d.cfg.Crun}),
+		containerd.WithRuntime(rootless.RuntimeCrun, &runcoptions.Options{BinaryName: d.crunWrapper()}),
 		containerd.WithNewSpec(opts...),
 	)
 	if err != nil {
@@ -386,6 +406,12 @@ func (d *Driver) Create(ctx context.Context, spec runtime.Spec) (err error) {
 	}
 	vfs := Virtiofsd{Binary: d.cfg.Virtiofsd, Start: d.startVirtiofsd}
 	if err := vfs.StartAll(ctx, v, spec.UserNS); err != nil {
+		logs, _ := filepath.Glob(filepath.Join(v.Dir, "fs", "*.log"))
+		for _, l := range logs {
+			if b, _ := os.ReadFile(l); len(b) > 0 {
+				err = fmt.Errorf("%w; %s: %s", err, filepath.Base(l), strings.TrimSpace(string(b)))
+			}
+		}
 		return err
 	}
 	// granule-shim's own output, which isn't the workload's, goes to a
@@ -394,6 +420,19 @@ func (d *Driver) Create(ctx context.Context, spec runtime.Spec) (err error) {
 	shimLog := filepath.Join(d.cfg.Dir, spec.ID+".shim.log")
 	if _, err := c.NewTask(ctx, cio.LogFile(shimLog)); err != nil {
 		return fmt.Errorf("granule: creating %s's VM container: %w", spec.ID, err)
+	}
+	return nil
+}
+
+// withoutCgroups drops the VM container's cgroup limits where cgroups
+// aren't delegated, which crun, as the holder's root, would otherwise
+// fail to create, as the sandbox class's shim ignores them there. The
+// guest is still held to its charges inside the VM, by CHV_CPUS and
+// CHV_MEMORY_MB; the VMM's own overhead is not.
+func withoutCgroups(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+	if s.Linux != nil {
+		s.Linux.Resources = nil
+		s.Linux.CgroupsPath = ""
 	}
 	return nil
 }
@@ -911,12 +950,20 @@ func exists(p string) bool {
 }
 
 // Stats implements runtime.Driver, from the shim's cgroup metrics: the
-// VM container's, which is the VMM's and so the guest's.
+// VM container's, which is the VMM's and so the guest's. A container
+// made without a cgroup (withoutCgroups) has no use of its own to
+// report: the shim's metrics would be its parent's.
 func (d *Driver) Stats(ctx context.Context, id string) (runtime.Stats, error) {
 	ctx = d.ns(ctx)
-	t, err := d.task(ctx, id)
+	c, t, err := d.load(ctx, id)
 	if err != nil {
 		return runtime.Stats{}, err
+	}
+	if t == nil {
+		return runtime.Stats{}, fmt.Errorf("%w: %s has no VM container", runtime.ErrState, id)
+	}
+	if s, err := c.Spec(ctx); err != nil || s.Linux == nil || s.Linux.CgroupsPath == "" {
+		return runtime.Stats{SampledAt: time.Now()}, err
 	}
 	return gvisor.TaskStats(ctx, t)
 }

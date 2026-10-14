@@ -7,11 +7,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 )
@@ -25,7 +27,10 @@ const VirtiofsdArg = "runtime-virtiofsd"
 // the virtiofsd command line after "--" inside that namespace as its
 // root, through exe's nsexec constructor, in a session of its own and
 // with its output in <socket>.log, so that it outlives both this command
-// and silod as the shims do; its pid goes to <socket>.pid. With --stop
+// and silod as the shims do; its pid goes to <socket>.pid. The socket is
+// made here and passed as --fd: virtiofsd, as the container's root,
+// can't reach the containers' directory, which is silod's and 0700.
+// With --stop
 // dir, it kills every virtiofsd whose pid file is in dir: silod, on the
 // host, can't signal a process of a container's subuids, and the holder's
 // root can.
@@ -49,19 +54,61 @@ func VirtiofsdMain(exe string, args []string) error {
 		return err
 	}
 	defer logf.Close()
-	cmd := nsd.UserNSExec(*userns, exe, argv...)
+	os.Remove(sock)
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		return err
+	}
+	// The socket outlives this listener: virtiofsd has it.
+	l.SetUnlinkOnClose(false)
+	defer l.Close()
+	lf, err := l.File()
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+	// granule-shim, as the container's root, connects.
+	if err := os.Chmod(sock, 0o666); err != nil {
+		return err
+	}
+	vargs := make([]string, 0, len(argv))
+	for _, a := range argv {
+		if strings.HasPrefix(a, "--socket-path=") {
+			a = "--fd=3"
+		}
+		vargs = append(vargs, a)
+	}
+	cmd := nsd.UserNSExec(*userns, exe, vargs...)
+	cmd.ExtraFiles = []*os.File{lf}
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if err := os.WriteFile(sock+".pid", []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+	if err := os.WriteFile(sock+".pid", []byte(strconv.Itoa(cmd.Process.Pid)+" "+startTime(cmd.Process.Pid)), 0o644); err != nil {
 		cmd.Process.Kill()
 		return err
 	}
-	// Not waited for: init reaps it once this exits.
-	return cmd.Process.Release()
+	// A virtiofsd that refuses its command line (an older one, without
+	// --readonly) exits at once, which the socket made here would hide
+	// until the VM failed to boot.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case err := <-exited:
+		os.Remove(sock)
+		os.Remove(sock + ".pid")
+		b, _ := os.ReadFile(sock + ".log")
+		return fmt.Errorf("virtiofsd exited at start (%v): %s", err, strings.TrimSpace(string(b)))
+	case <-time.After(virtiofsdSettle):
+	}
+	// Not waited for past this: init reaps it once this exits.
+	return nil
 }
+
+// virtiofsdSettle is how long VirtiofsdMain watches a virtiofsd for an
+// exit at start.
+const virtiofsdSettle = 300 * time.Millisecond
 
 // socketArg is a virtiofsd command line's --socket-path.
 func socketArg(argv []string) string {
@@ -73,9 +120,25 @@ func socketArg(argv []string) string {
 	return ""
 }
 
+// startTime is a process's start time, in clock ticks since boot
+// (proc(5), /proc/pid/stat field 22): with its pid, what names it
+// across pid reuse. "" if it has gone.
+func startTime(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	// The command, field 2, is in parentheses and may hold spaces.
+	_, rest, ok := bytes.Cut(b, []byte(") "))
+	if f := strings.Fields(string(rest)); ok && len(f) > 19 {
+		return f[19]
+	}
+	return ""
+}
+
 // stopVirtiofsds kills each virtiofsd whose pid file is in dir, if the
-// pid is still that virtiofsd: its command line names the socket beside
-// the pid file, so a pid reused since is left alone.
+// pid is still that virtiofsd: one whose start time differs from the
+// recorded one is a pid reused since, and is left alone.
 func stopVirtiofsds(dir string) error {
 	pids, err := filepath.Glob(filepath.Join(dir, "*.sock.pid"))
 	if err != nil {
@@ -87,12 +150,13 @@ func stopVirtiofsds(dir string) error {
 		if err != nil {
 			continue
 		}
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-		if pid <= 0 {
+		f := strings.Fields(string(b))
+		if len(f) != 2 {
+			os.Remove(pf)
 			continue
 		}
-		cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-		if err == nil && bytes.Contains(cmdline, []byte("--socket-path="+strings.TrimSuffix(pf, ".pid")+"\x00")) {
+		pid, _ := strconv.Atoi(f[0])
+		if st := startTime(pid); pid > 0 && st != "" && st == f[1] {
 			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 				errs = append(errs, fmt.Errorf("virtiofsd %d: %w", pid, err))
 			}

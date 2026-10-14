@@ -14,7 +14,6 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/opencontainers/image-spec/identity"
@@ -56,7 +55,7 @@ func WrapMain(args []string) error {
 	}
 	defer c.Close()
 	ctx := namespaces.WithNamespace(context.Background(), *ns)
-	ctx, done, err := c.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(0))
+	ctx, done, err := c.WithLease(ctx)
 	if err != nil {
 		return err
 	}
