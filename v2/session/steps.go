@@ -122,7 +122,8 @@ func stepCredentials(ctx context.Context, s *Session) (Undo, error) {
 func stepLocation(ctx context.Context, s *Session) (Undo, error) {
 	ls := &location.Session{
 		ID: s.ID, Dir: s.Dir, CLI: s.File.Agent.CLI, Binary: s.File.Agent.Binary,
-		VersionArgs: s.Mapping.VersionArgs(), Mode: s.Mode, Environ: s.opts.Environ,
+		VersionArgs: s.Mapping.VersionArgs(), AmbientAuth: s.File.Agent.Auth.Ambient(),
+		Mode: s.Mode, Environ: s.opts.Environ,
 	}
 	undo := func(ctx context.Context) error { return s.Location.Teardown(ctx) }
 	host, err := s.Location.Prepare(ctx, ls)
@@ -136,6 +137,11 @@ func stepLocation(ctx context.Context, s *Session) (Undo, error) {
 		}
 	}
 	s.Host = host
+	if r, ok := s.Location.(interface{ RemoteGC() []string }); ok {
+		for _, d := range r.RemoteGC() {
+			s.status("gc: removed stale remote session directory %s", d)
+		}
+	}
 	s.status("agent CLI: %s %s (%s)", s.File.Agent.CLI, host.Version, host.Binary)
 	return undo, s.rec.update(func(r *Record) { r.CLIBinary, r.CLIVersion = host.Binary, host.Version })
 }
@@ -242,6 +248,11 @@ func stepGateway(ctx context.Context, s *Session) (Undo, error) {
 	}
 	if s.GatewayURL, err = s.Location.Gateway(ctx, addr); err != nil {
 		return undo, err
+	}
+	// A forwarded gateway is named by the forward's address on the agent
+	// host (ssh: a remote loopback port).
+	if gu, err := url.Parse(s.GatewayURL); err == nil && gu.Host != u.Host {
+		srv.AllowHost(gu.Host)
 	}
 	s.status("gateway: %d tools at %s", len(listed), s.GatewayURL)
 	return undo, nil

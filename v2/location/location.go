@@ -27,6 +27,9 @@ type Session struct {
 	// VersionArgs asks the binary for its version (["--version"]); nil
 	// skips the check.
 	VersionArgs []string
+	// AmbientAuth is set when the CLI uses its own login on the agent
+	// host (agent.auth: ambient), which a remote location checks.
+	AmbientAuth bool
 	// Mode is interactive or headless.
 	Mode string
 	// Environ is the invoking environment, from which a local location
@@ -104,6 +107,9 @@ type ExitStatus struct {
 	Code int
 	// Signaled names the signal that killed it, if one did.
 	Signaled string
+	// ConnLost is set when the connection to the agent host dropped
+	// before the CLI's own exit status came back (ssh: exit 75).
+	ConnLost bool
 }
 
 // Location is where one session's agent CLI runs (design §5.1).

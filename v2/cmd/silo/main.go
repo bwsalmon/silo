@@ -27,7 +27,8 @@ const usage = `usage: silo <command> [arguments]
 commands:
   run [--prompt text] <Silofile|dir>
                             run one session (design §3)
-  gc                        remove what crashed sessions left behind
+  gc [--host <host>]        remove what crashed sessions left behind, and with
+                            --host their remote session directories there
   approve <session> [--deny] [<call-id>]
                             answer a local script's call waiting for approval
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)

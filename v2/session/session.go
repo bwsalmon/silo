@@ -283,6 +283,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		switch f.Location.Kind {
 		case "", "local":
 			s.Location = local.New()
+		case "ssh":
+			s.Location = SSHLocation(f.Location.SSH, getenv, opts.Stderr)
 		default:
 			return ExitRefused, fmt.Errorf("location kind %s is not supported by silo run yet", f.Location.Kind)
 		}
@@ -437,6 +439,10 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 		case e := <-exited:
 			if silo != 0 {
 				return silo, nil
+			}
+			if e.st.ConnLost {
+				reason = "the connection to the agent host dropped"
+				return ExitConnLost, e.err
 			}
 			reason = "the agent CLI exited"
 			if e.st.Signaled != "" {
