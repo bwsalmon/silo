@@ -19,8 +19,9 @@ import (
 // The tests run against a real sshd in a Docker container: Debian with
 // openssh-server, a user silo (GatewayPorts clientspecified, so the
 // server would honour a wildcard bind if silo asked for one), a user
-// wide (GatewayPorts yes, which overrides silo's loopback bind), and testdata/fakecli installed as
-// /usr/local/bin/claude. Without Docker they skip, unless
+// wide (GatewayPorts yes, which overrides silo's loopback bind),
+// testdata/fakecli installed as /usr/local/bin/claude, and stage 5a's
+// test MCP server installed as /usr/local/bin/mcpserver. Without Docker they skip, unless
 // SILO_V2_REQUIRE_DOCKER is set, as it is in CI.
 
 const image = "silo-v2-sshd-test"
@@ -89,11 +90,13 @@ func startSSHD() (*sshd, error) {
 	ctx := filepath.Join(dir, "image")
 	os.MkdirAll(ctx, 0o755)
 	_, file, _, _ := runtime.Caller(0)
-	build := exec.Command("go", "build", "-o", filepath.Join(ctx, "claude"), "./testdata/fakecli")
-	build.Dir = filepath.Dir(file)
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
-	if out, err := build.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("building the fake CLI: %v: %s", err, out)
+	for bin, pkg := range map[string]string{"claude": "./testdata/fakecli", "mcpserver": "./testdata/mcpserver"} {
+		build := exec.Command("go", "build", "-o", filepath.Join(ctx, bin), pkg)
+		build.Dir = filepath.Dir(file)
+		build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+		if out, err := build.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("building %s: %v: %s", pkg, err, out)
+		}
 	}
 	dockerfile := `FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-server procps net-tools \
@@ -101,7 +104,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-server 
  && useradd -m -s /bin/sh silo && usermod -p '*' silo \
  && useradd -m -s /bin/sh wide && usermod -p '*' wide \
  && printf 'AllowTcpForwarding yes\nGatewayPorts clientspecified\nMatch User wide\n  GatewayPorts yes\n' >> /etc/ssh/sshd_config
-COPY claude /usr/local/bin/claude
+COPY claude mcpserver /usr/local/bin/
 COPY entry.sh /entry.sh
 CMD ["/bin/sh", "/entry.sh"]
 `

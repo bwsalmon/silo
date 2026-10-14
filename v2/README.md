@@ -14,7 +14,10 @@ location (journey 3): the CLI runs on a remote host with that host's
 own login, over one OpenSSH master connection, and reaches the gateway
 (and so the `local_<name>` scripts) only through a reverse forward bound
 to the remote loopback; `silo gc --host <host>` removes the remote
-session directories crashed sessions left there.
+session directories crashed sessions left there. Stage 5b adds remote
+MCP servers (`where: remote`, journey 4 in full): servers on the ssh
+agent host, started or reached over the master connection and proxied
+into the gateway, so the remote CLI still sees the gateway only.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -70,10 +73,28 @@ environment plus what the entry names, or connected to by URL. Its
 allowed tools are served as `<server>__<tool>`. A `from:` entry is read
 from one of five named config files (`claude-user`, `claude-project`,
 `mcp-json`, `codex`, `agy`), and an inline secret in it is refused unless
-the Silofile delivers a credential in its place. `silo run --dry-run`
+the Silofile delivers a credential in its place.
+
+An entry with `where: remote` (design §13.2) lives on the ssh agent
+host. A `command:` server runs there as its own channel of the master
+(`ssh -S <ctl> -T <host> -- ...`), speaking MCP over that channel's
+stdin and stdout, in the remote home directory, with the remote login
+environment filtered the same way and the credentials delivered to it;
+its environment goes in a 0600 env file in the remote session
+directory, which the command's preamble sources and deletes, so no
+value is in a remote argv. A `url:` server is reached through a local
+forward on the master (`-O forward -L`) whose local end is a Unix
+socket beside the control socket. A `from:` entry's file is read on the
+agent host. Teardown closes the channel, waits 5 s for the server's
+process group to go and then kills it over the master; a dropped
+connection makes every remote server's tools fail with a tool error
+naming the server and the host, and the session exits 75.
+`silo run --dry-run`
 validates, then checks what the session needs without changing
 anything, one line per check, and exits 69 if any check fails. So far it
-checks MCP servers.
+checks MCP servers (a remote one on its own BatchMode connection to the
+agent host: its config read there, its binary found on its remote
+`PATH`) and the ssh location.
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
@@ -132,12 +153,12 @@ changing a type, run `go generate ./silofile` and
 | `session` | One `silo run` session (design §3): setup steps and tool providers (registries), teardown, `session.json`, signals, exit codes, the control socket, the local executor's provider and approvals, `silo gc`'s local part. |
 | `location` | The `Location` and `Agent` interfaces (design §5.1). |
 | `location/local` | The CLI as a child process with a scrubbed environment (design §5.2). |
-| `location/ssh` | The CLI on a remote host (design §5.3): the system `ssh` behind a small `Transport` (so stage 10's IAP can replace it), the master connection, the probe, the loopback-only reverse forward to the gateway, staging with `umask 077` and `cat >`, the env file, exit 75 on a dropped connection, the remote half of `silo gc`, and the `--dry-run` checks. `Run` and `ForwardLocal` share the master with stage 5b's remote MCP servers. |
+| `location/ssh` | The CLI on a remote host (design §5.3): the system `ssh` behind a small `Transport` (so stage 10's IAP can replace it), the master connection, the probe, the loopback-only reverse forward to the gateway, staging with `umask 077` and `cat >`, the env file, exit 75 on a dropped connection, the remote half of `silo gc`, and the `--dry-run` checks. `Run` and `ForwardLocal` share the master, and `mcp.go` is what remote MCP servers need of it: `Host` (the remote login environment, files and `PATH` lookups, over the master or, for `--dry-run`, on a connection of its own), `LaunchMCP` (the env file, the preamble, and the reap of the server's process group) and `ForwardMCP` (the `-L` forward and an HTTP client that dials it). |
 | `agentcli` | Per-CLI mappings onto argv, env and staged files: `claude`, `codex` (with the reviewed-version gate for `none`), `custom`. Golden files in `agentcli/testdata`. |
 | `mcp` | MCP plumbing: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and client connections over Streamable HTTP, HTTP+SSE and stdio (`Conn`). |
 | `mcp/sources` | Reads `from: <source>:<name>` server definitions from `~/.claude.json`, `.mcp.json` files, codex's `config.toml` and agy's `mcp_config.json`, and the inline-secret test of call 25. |
 | `gateway` | The session's MCP server (design §4): tool registry, refusal, timeouts, and the sandbox tools `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_list_dir`. |
-| `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function or an HTTP client (a Unix socket's), and blocking tools; stage 6b's caller-provided servers are fronted the same way. |
+| `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function or an HTTP client (a Unix socket's), and blocking tools; `Prelaunch`, `Reap` and `Gone` hooks front a server on the ssh agent host the same way; stage 6b's caller-provided servers are fronted the same way. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
@@ -177,12 +198,20 @@ those). The same binary is also the MCP server those tests launch: with
 
 `location/ssh`'s tests run against a real `sshd` in a Docker container
 (Debian's `openssh-server`, built on first use as `silo-v2-sshd-test`)
-with `location/ssh/testdata/fakecli`, built statically, as its `claude`.
+with `location/ssh/testdata/fakecli`, built statically, as its `claude`,
+and `location/ssh/testdata/mcpserver` (`internal/mcptest` as a binary)
+as `/usr/local/bin/mcpserver`.
 They cover the probe, an unknown host key, the loopback-only forward
 (and the refusal of a server whose `GatewayPorts yes` widens it),
 headless and interactive runs (on a pty), exit codes, a killed master
 (exit 75), `silo gc --host`, that no secret is in any remote argv, and
-journey 3 end to end with `docs/examples/remote-scripts`. They skip
+journey 3 end to end with `docs/examples/remote-scripts`; and remote MCP
+servers: a stdio server's allowlisted tools through the gateway, a
+`url:` server through `-L`, `from: claude-user:x` read from the remote
+`~/.claude.json`, no credential in a remote argv, the env file deleted
+and the server stopped (and reaped after the grace when it ignores the
+closed channel), and a killed master turning calls into tool errors
+and the session into exit 75. They skip
 without Docker unless `SILO_V2_REQUIRE_DOCKER` is set.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
