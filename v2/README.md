@@ -1,8 +1,10 @@
 # Silo v2
 
 This is Silo v2, a fresh and smaller design of Silo, under construction.
-Nothing runs an agent yet: so far there is the Silofile and two commands,
-`silo validate` and `silo schema`.
+Nothing runs an agent yet: so far there is the Silofile, two commands,
+`silo validate` and `silo schema`, and the parts `silo run` will put
+together (stage 1b): the gateway, container and gVisor sandboxes, and
+credentials.
 
 The code at the repository root (`cmd/`, `pkg/`, the root `go.mod`) and
 its specification in [`docs/silo/`](../docs/silo/README.md) are Silo v1.
@@ -59,7 +61,15 @@ changing a type, run `go generate ./silofile` and
 | --- | --- |
 | `silofile` | The Silofile: types, strict decoding, folder resolution, validation, JSON Schema. |
 | `cmd/silo` | The `silo` command. |
+| `mcp` | MCP over Streamable HTTP: JSON-RPC dispatch, the authenticated loopback server (bearer token, Host and Origin checks), and a client. |
+| `gateway` | The session's MCP server (design §4): tool registry, refusal, timeouts, and the sandbox tools `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_list_dir`. |
+| `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
+| `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
+| `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
+| `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
+| `internal/procgroup` | Process-group cancellation, copied from grain's `pkg/procgroup`. |
+| `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
 
 ## Building and testing
 
@@ -70,3 +80,9 @@ go build ./... && go vet ./... && go test -race ./...
 ```
 
 grain CI runs the same in `.grain/workflows/v2.yml`.
+
+The gateway's and `sandbox/container`'s tests create real containers,
+with `busybox:1.37`, and run the same suite with `kind: gvisor`. They
+skip where there is no Docker or Podman, or no runsc registered as a
+runtime; CI installs runsc and sets `SILO_V2_REQUIRE_DOCKER=1` and
+`SILO_V2_REQUIRE_RUNSC=1`, which turn those skips into failures.

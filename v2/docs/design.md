@@ -457,6 +457,12 @@ it can so the CLI does not give up first (Claude Code: the
 `MCP_TOOL_TIMEOUT` environment variable, which grain already sets for
 the same reason).
 
+As built in stage 1b: `sandbox_exec`'s `timeout` is in seconds, default
+5 minutes. The Silofile has no field to cap it yet, so the cap is a
+fixed 30 minutes until one is added. The file tools are bounded at 2
+minutes, and any other tool at 10. A call whose start line cannot be
+written to the audit log is not run.
+
 ## 5. Locations
 
 ### 5.1 The interface
@@ -763,6 +769,22 @@ type Sandbox interface {
 A sandbox entry may name a backend (`backend: local` by default,
 `backend: {k8s: {context: ..., namespace: ...}}` later).
 
+As built in stage 1b (`sandbox/container`): the runtime is
+`SILO_CONTAINER_RUNTIME` if set, else Podman (rootless as an ordinary
+user) if installed, else Docker. A sandbox runs with
+`--security-opt no-new-privileges`, `--network none` unless `open` (the
+runtime's default network, never the host's), and its credential
+variables passed by name so values never appear on a command line. The
+file tools and `DeliverFile` run through `exec` with the image's own
+`sh`, `cat`, `head`, `ls` and `mv`, not the runtime's copy API, because
+gVisor keeps a container's writes in its own overlay where the runtime
+cannot see them. An image therefore needs those, as any image with
+`/bin/sh` has. A cancelled `Exec` kills the command inside the sandbox,
+not only the runtime CLI. Each sandbox's image is resolved to a digest
+(a repository digest when pulled, the image id when built) and recorded
+under `images` in `.silo/lock.json`; stage 3a adds the grants summary
+beside it.
+
 ## 8. Credentials
 
 ### 8.1 Sources
@@ -812,6 +834,13 @@ Every resolved credential value is registered with the audit writer and
 the event stream, which replace any occurrence of it with
 `[credential:<name>]` before writing. That is best-effort: a secret
 transformed by a command (base64, split across lines) is not caught.
+
+As built in stage 1b: values shorter than 4 bytes are not redacted
+(they would rewrite ordinary text all over the log while hiding nothing
+a guess would not find). The ambient `gh` and `git-credential` sources
+ask for `github.com` until the git proxy (stage 7) chooses the host per
+`git[]` entry. A `{file:}` source drops one trailing newline.
+`{store:}` is refused as not yet supported.
 
 ## 9. The git proxy
 
