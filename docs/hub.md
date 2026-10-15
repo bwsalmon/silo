@@ -4,9 +4,9 @@ This is the design of the Silo **hub**, which is all that this
 repository holds (Track 2). Its first parts are built: the node
 registry and the rendezvous (stage 2.1, `hub/registry` and
 `hub/rendezvous`), identity and teams (stage 2.2, §5, `hub/identity`
-and `hub/directory`), and task intake and dispatch (stage 2.3, §6,
-`hub/tasks`). Live events (§7) are designed here and built in a later
-stage (§9).
+and `hub/directory`), task intake and dispatch (stage 2.3, §6,
+`hub/tasks`), and live events with the SILO_ONLY view-through (stage
+2.4, §7, `hub/live`). Its deployment is a later stage (§9).
 
 ## 1. What the hub is
 
@@ -448,7 +448,7 @@ When the dispatcher starts, it has no streams. A task that was
 its node resumes it. The dispatcher assumes it is the only one (one
 hub replica, §10).
 
-## 7. Live events and privacy (stage 2.4)
+## 7. Live events and privacy (built: `hub/live`)
 
 ### 7.1 Streaming up
 
@@ -470,6 +470,41 @@ WebSocket for the SDK. A subscriber replays what the hub holds after
 `seq`, then follows.
 Access is checked against the subscriber's teams at every subscription.
 
+As built (`hub/live`):
+
+- **The upstream stream.** Each line is one event with `"task"` added.
+  The first line binds the stream to its task, which must be one the
+  dispatcher placed on that node; a stream for another node's task, or
+  a later line naming another task, is closed. The hub writes nothing
+  back. A node that reconnects may replay its task's events from the
+  start: an event at or below the task's last `seq` is a duplicate and
+  is dropped. The node keeps a task's `seq` increasing across the
+  sessions it runs for it.
+- **The classes.** `status`, `usage`, `resumable` and `result` are
+  lifecycle. `approval_request` is conversation. A `transcript` item of
+  kind `text`, `thinking` or `error` is the token stream. Everything
+  else is node-only: `tool_call`, transcript `tool_call` and
+  `tool_result` items, `artifact`, any type the hub does not know, and
+  any schema version it does not read. A `result`'s paths on the node's
+  disk (`audit_path` and the transcript paths) are not kept.
+- **Rejection.** A lifecycle, conversation or token event with a field
+  outside its type's schema, at the top level or anywhere in its
+  payload, is neither kept nor broadcast. A token item carrying a tool's
+  `id`, `tool` or `args` is rejected the same way.
+- **The ring.** Each task's token and node-only references are kept in
+  memory, the last 1024 events or 1 MiB of them. A task's ring is
+  dropped 10 minutes after its last stream and subscriber have gone.
+- **Subscribers.** An SSE message is `id: <seq>`, `event: <type>` and
+  `data: <the event>`. An `EventSource` reconnecting sends
+  `Last-Event-ID`, which is the cursor when `from` is absent. A
+  WebSocket gets one text message per event; a browser's must come from
+  the hub's own origin. Both end with `{"type":"end"}` (SSE: `event:
+  end`) after the task's `result`, or when the task is over and its
+  node's last stream has closed. A subscriber that falls 512 events
+  behind is dropped without `end`, and reconnects from its last `seq`.
+  Seqs have gaps: rejected events, and token events the ring no longer
+  holds, are not replayed.
+
 ### 7.2 SILO_ONLY: view-through, never at rest
 
 A node-only event reaches the hub as a reference only:
@@ -485,6 +520,24 @@ authorised viewer opens it:
 
 If the node is offline, the artifact is unavailable. This is the
 intended trade.
+
+As built, a viewer asks `GET /v1/tasks/{id}/artifacts?ref=<ref>`, with
+the same access check as the task's events. The view stream carries
+one JSON line each way and then the bytes:
+
+```
+hub → node  {"type":"view","task":"<hub id>","node_task":"<local id>","ref":"<ref>"}
+node → hub  {"type":"ok"}, then the artifact's bytes until the node closes the stream
+            or {"type":"error","error":"..."}   (answered 404)
+```
+
+The hub flushes each write to the viewer, and answers with `text/plain`,
+`nosniff`, a sandboxing CSP and `Cache-Control: no-store`, so the bytes
+are never rendered as the hub's own page or cached on the way. An
+offline node answers 503. `live.ServeView` is the node's end. Whatever
+the node streams, a node-only event reaches the hub's store in no
+form: only its reference is broadcast, and the store itself refuses
+any class but lifecycle and conversation.
 
 The **node** classifies each event, because only the node knows what it
 holds. The **hub** enforces the classification by schema. An event type
@@ -514,7 +567,7 @@ anything leaves it.
 | 2.1 | This design. The registry (`hub/registry`). The rendezvous: WebSocket, auth hook, admission hook, heartbeats, supersession, streams both ways, client with reconnect (`hub/rendezvous`). | here, built |
 | 2.2 | Human sign-on (IAP JWT verification and OIDC, `hub/identity`). Node tokens, the team directory, `Admit` and per-team visibility, in a store (`hub/directory`). | here, built |
 | 2.3 | The backlog and its store, the intake API, the dispatcher (per-team ordering, constraints, admission rechecked, refusal, lost nodes, resume, cancel) and the task-stream protocol (`hub/tasks`). `registry.ClaimFor`. | here, built |
-| 2.4 | Event streaming up, the classification, fan-out to SSE and WebSocket, view-through | silo |
+| 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
 | 2.5 | A `silo hub serve` command and its deployment (Cloud Run or GKE behind IAP) | silo |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 

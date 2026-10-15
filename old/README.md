@@ -43,9 +43,10 @@ reach"):
 `old/` is its own Go module, `github.com/bwsalmon/silo/old` (it was
 `github.com/bwsalmon/silo/v2`); the move changed only import paths. The
 hub's module at the repository root stops at this directory's `go.mod`.
-`old/internal/tunnel/mux` is this module's own copy of the stream
-multiplexer the hub also keeps, at `internal/tunnel/mux` in the root
-module.
+`old/internal/tunnel/mux` and `old/events` have copies in the root
+module, at `internal/tunnel/mux` (the stream multiplexer the rendezvous
+carries) and `events` (the event schema `hub/live` reads); each module
+keeps its own.
 
 The documents under [`docs/`](docs/) (`design.md`, `cli-mapping.md`,
 `events.md`, `grain.md`, `examples/`) are unchanged from `v2/docs/` and
