@@ -265,12 +265,22 @@ func (r *Registry) List() []Entry {
 // ForRepo returns the nodes registered for repo, whatever their status,
 // the ones with the most available slots first.
 func (r *Registry) ForRepo(repo string) []Entry {
-	repo = strings.ToLower(repo)
+	return r.forRepos([]string{repo})
+}
+
+// forRepos is ForRepo for the nodes registered for any of repos.
+func (r *Registry) forRepos(repos []string) []Entry {
+	want := map[string]bool{}
+	for _, repo := range repos {
+		want[strings.ToLower(repo)] = true
+	}
 	var out []Entry
 	for _, e := range r.List() {
-		i := sort.SearchStrings(e.Repos, repo)
-		if i < len(e.Repos) && e.Repos[i] == repo {
-			out = append(out, e)
+		for _, repo := range e.Repos {
+			if want[repo] {
+				out = append(out, e)
+				break
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Available() > out[j].Available() })
@@ -284,9 +294,21 @@ func (r *Registry) ForRepo(repo string) []Entry {
 // dispatcher releases a claim whose task the node refused, and lets the
 // heartbeat settle one it accepted.
 func (r *Registry) Claim(repo string) (*Claim, error) {
-	for _, e := range r.ForRepo(repo) {
+	return r.ClaimFor([]string{repo}, nil)
+}
+
+// ClaimFor is Claim for a task that any node registered for one of
+// repos may run (a team's task, docs/hub.md §6.2), on a node ok accepts:
+// the task's constraints, and the nodes it is not to go to. ok sees a
+// copy of each candidate's entry and is called without the registry's
+// lock held; nil accepts every node.
+func (r *Registry) ClaimFor(repos []string, ok func(Entry) bool) (*Claim, error) {
+	for _, e := range r.forRepos(repos) {
 		if e.Available() == 0 {
 			break
+		}
+		if ok != nil && !ok(e) {
+			continue
 		}
 		r.mu.Lock()
 		n := r.nodes[e.ID]
@@ -299,7 +321,7 @@ func (r *Registry) Claim(repo string) (*Claim, error) {
 		}
 		r.mu.Unlock()
 	}
-	return nil, fmt.Errorf("%w for %s", ErrNoNode, repo)
+	return nil, fmt.Errorf("%w for %s", ErrNoNode, strings.Join(repos, ", "))
 }
 
 // Changes returns a channel that receives (without blocking the
