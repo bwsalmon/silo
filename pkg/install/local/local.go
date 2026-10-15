@@ -360,7 +360,7 @@ func Steps(c Config, h Host) []install.Step {
 // is installed, and the pinned gVisor first on the runtimes' PATH.
 func unitsConfig(c Config, h Host, report rootless.Report) units.Config {
 	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort,
-		ImageCacheSizeGB: imageCacheGB(c, h)}
+		ImageCacheSizeGB: imageCacheGB(c, h), CPUOvercommit: c.CPUOvercommit}
 	if _, ok := pinned(h); ok {
 		uc.RuntimePath = []string{RuntimesDir(c)}
 	}

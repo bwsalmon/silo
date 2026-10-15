@@ -859,9 +859,6 @@ open, or leaves something for later:
     reached from a real container yet. The test above calls the
     facade directly. Reaching them needs an install that starts silod
     with the holder (steps 8 and 17).
-  - The root's capacity of the local classes is still open: the
-    local backend has no `Capacity` refresh, so the root's capacity
-    is what bootstrap set.
   - On a real host, an upstream pull answers 503 until silod has a
     `registry.Egress` (local-registry.md step 31's "Left"). `docker
     load` and pulls of `registry.silo.internal` names work.
@@ -1636,7 +1633,9 @@ text above in these places:
 - **`gw0`** is still the holder's bridge from step 15, not a dummy.
 - **What `local.New` builds.** It builds the `Fence`, and `Inventory`,
   `Contents` and `Targets` over the runtime drivers (fake only, so
-  far). It builds no `Capacity`, `Classes` or `ToolVMs`.
+  far), and, given `Options.Capacity`, the `Capacity` refresh of
+  [§11](#root-capacity-and-overcommit-call-l20) (task 3792). It builds
+  no `Classes` or `ToolVMs`.
 
 ## 10. Agents on the local backend
 
@@ -1841,6 +1840,38 @@ root capacity = (host total − reserve) × overcommit
   only slows things down.
 - **`describe` on the root shows all three numbers,** so the operator
   can see what was promised.
+
+*As built* (task 3792), `pkg/backend/local/hostcap` computes the
+formula, for install's root step and for silod, and refreshes it:
+
+- **`Capacity(Totals, Reserve)`** gives `vcpu_m`, `memory_mb` and
+  `disk_gb` from the host's online CPUs, `MemTotal` and the data
+  filesystem's size. The reserve is the fixed one above, the CPU
+  overcommit, and the registry cache's budget, which `disk_gb` leaves
+  out ([local-registry.md](local-registry.md) call L74). install's root
+  step uses it for bootstrap. The count classes (`containers` 1000,
+  `networks` 256, `volumes` 1000) are `hostcap.Counts`, which only
+  bootstrap sets: the host's totals don't bound them.
+- **The refresh** is `local.Options.Capacity` (a `hostcap.Config`),
+  which `local.New` makes the backend's `Capacity`. silod gives it on
+  a leader-led replica with a data directory, so the leader duty "root
+  capacity" (`cmd/silod/leader.go`) runs it hourly, as `rootcap` on
+  GCP. Each run reads the host again. It takes the overcommit from
+  silod's `--cpu-overcommit`, which install's units pass from install's
+  own (`units.Config.CPUOvercommit`; default 2, 1 to 8). It takes the
+  cache's budget from the store's registry cache settings
+  (`size_limit_gb`), so a budget the operator changes moves `disk_gb`
+  too. It sets the three classes with `ledger.SetCapacity`, under the
+  leader's guard, and logs `quota.root_resync` (the host's totals, the
+  overcommit, the budget, what changed and what was refused) whenever
+  it changes or refuses anything. A read that fails changes nothing.
+  Before bootstrap there is no root, and the duty does nothing.
+- **A host that shrank** can't take back what the tree holds. Unlike a
+  GCE quota cut, which over-commits the root, a class whose new
+  capacity would fall below the root's delegated plus used keeps the
+  capacity it had. The other classes are still set, the audit record
+  lists it under `refused`, and the duty fails with `hostcap.ErrHeld`,
+  which the leader logs every hour until the grants fit.
 
 ### Enforcement beside the ledger
 
@@ -2054,11 +2085,13 @@ order: `account` (system install only), `prerequisites`, `lingering`
   - the installing user as admin, by `uid:<n>`: the user who ran
     `sudo` for the system install.
 
-  The capacity is call L20's: `vcpu_m` is (CPUs − 1) × 1000 ×
-  `--cpu-overcommit` (default 2, at most 8). `memory_mb` is MemTotal
-  less the larger of 2 GiB and 10%. `disk_gb` is 90% of the data
-  filesystem. The count classes, which the host's totals don't bound,
-  get 1000 containers, 256 networks and 1000 volumes. `/silod/health`
+  The capacity is call L20's, as `hostcap.Capacity` computes it and
+  silod's leader refreshes it hourly after (see
+  [§11](#root-capacity-and-overcommit-call-l20)): `vcpu_m` is (CPUs −
+  1) × 1000 × `--cpu-overcommit` (default 2, at most 8). `memory_mb`
+  is MemTotal less the larger of 2 GiB and 10%. `disk_gb` is 90% of the
+  data filesystem, less the cache's budget. The count classes, which
+  the host's totals don't bound, get 1000 containers, 256 networks and 1000 volumes. `/silod/health`
   now also answers `root_id`, because a later run has no other way to
   learn the root's id without being a member.
 - **`docker context`** writes the context `silo-root` into the

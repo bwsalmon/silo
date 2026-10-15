@@ -129,8 +129,9 @@ type Config struct {
 	CPUOvercommit float64
 	// Read reads the host's totals; nil is ReadHost(DataDir).
 	Read func() (Totals, error)
-	// Guard, if set, is called first in the transaction that writes the
-	// root's capacity, and refuses the write by returning an error:
+	// Guard, if set, is called in the transaction that writes the root's
+	// capacity, once there is a root and before anything is read for the
+	// write, and refuses the write by returning an error:
 	// silod's leader checks its epoch there (leader.Guard).
 	Guard func(ctx context.Context, tx store.Tx) error
 }
@@ -184,15 +185,15 @@ func (r *Refresher) Refresh(ctx context.Context) (*Result, error) {
 	}
 	res := &Result{Totals: totals}
 	err = r.db.Tx(ctx, func(tx store.Tx) error {
-		if r.config.Guard != nil {
-			if err := r.config.Guard(ctx, tx); err != nil {
-				return err
-			}
-		}
 		res.Capacity, res.Changed, res.Refused = nil, nil, nil
 		root, err := tree.Root(ctx, tx)
 		if err != nil {
 			return err
+		}
+		if r.config.Guard != nil {
+			if err := r.config.Guard(ctx, tx); err != nil {
+				return err
+			}
 		}
 		cache, err := fenceapi.ReadCacheSettings(ctx, tx)
 		if err != nil {

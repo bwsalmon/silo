@@ -6,10 +6,10 @@
 //
 // This is the skeleton (§15 step 5). It has the fence
 // (local/netfence), the inventory, contents and targets over the
-// runtime drivers (local/runtime), and nothing yet for Capacity,
-// Classes or ToolVMs: the host's capacity reader, the local quota
-// classes and tool containers come with later steps, and a nil part
-// is one silod serves nothing through.
+// runtime drivers (local/runtime), and the root's capacity from the
+// host (local/hostcap), and nothing yet for Classes or ToolVMs: the
+// local quota classes and tool containers come with later steps, and a
+// nil part is one silod serves nothing through.
 package local
 
 import (
@@ -20,6 +20,7 @@ import (
 	"syscall"
 
 	"github.com/bwsalmon/silo/pkg/backend"
+	"github.com/bwsalmon/silo/pkg/backend/local/hostcap"
 	"github.com/bwsalmon/silo/pkg/backend/local/netfence"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
@@ -69,6 +70,9 @@ type Options struct {
 	// Guard and OnDrift are netfence.Applier's.
 	Guard   func(ctx context.Context, tx store.Tx) error
 	OnDrift func(ctx context.Context, drift []string, repaired bool)
+	// Capacity configures the root capacity refresh, or nil for none.
+	// Its Guard, if unset, is Guard.
+	Capacity *hostcap.Config
 }
 
 // New builds the local backend.
@@ -82,7 +86,29 @@ func New(o Options) backend.Backend {
 		c := Containers{Drivers: o.Drivers, Storage: o.Storage, Store: o.Store, Records: o.Records, Objects: o.Objects}
 		b.Inventory, b.Contents, b.Targets = c, c, c
 	}
+	if o.Capacity != nil && o.Store != nil {
+		cc := *o.Capacity
+		if cc.Guard == nil {
+			cc.Guard = o.Guard
+		}
+		b.Capacity = Capacity{Refresher: hostcap.New(o.Store, cc)}
+	}
 	return b
+}
+
+// Capacity sets the root's capacity of the local classes from the
+// host's CPUs, memory and data filesystem (local-backend.md §11, call
+// L20).
+type Capacity struct {
+	Refresher *hostcap.Refresher
+}
+
+var _ backend.Capacity = Capacity{}
+
+// Refresh is the refresher's Refresh.
+func (c Capacity) Refresh(ctx context.Context) error {
+	_, err := c.Refresher.Refresh(ctx)
+	return err
 }
 
 var _ backend.Fence = (*netfence.Applier)(nil)
