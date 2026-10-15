@@ -15,10 +15,13 @@ env:
   CODEX_HOME=/STAGE/codex-home
   DELIVERED=to-agent
   OPENAI_API_KEY=sk-test
+  OPENAI_BASE_URL=http://127.0.0.1:9745/v1
 stdin: "do the thing"
 --- codex-home/config.toml
 # Written by silo for one session; see cli-mapping.md §2.2.
+openai_base_url = "http://127.0.0.1:9745/v1"
 model_reasoning_effort = "high"
+cli_auth_credentials_store = "file"
 developer_instructions = "be careful"
 [mcp_servers.silo]
 url = "http://127.0.0.1:41234/mcp"
@@ -30,3 +33,8 @@ enabled_tools = ["sandbox_exec","sandbox_read_file"]
 approval_mode = "approve"
 [mcp_servers.silo.tools."sandbox_read_file"]
 approval_mode = "approve"
+--- codex-home/auth.json
+{
+  "OPENAI_API_KEY": "sk-test",
+  "auth_mode": "apikey"
+}
