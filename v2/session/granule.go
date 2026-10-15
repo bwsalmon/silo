@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/bwsalmon/silo/v2/sandbox"
 	"github.com/bwsalmon/silo/v2/sandbox/granule"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -12,16 +13,23 @@ import (
 func init() { RegisterCheck("granule", checkGranule) }
 
 // checkGranule is --dry-run's part for granule sandboxes (design §14,
-// journey 7): granule is on PATH, `granule doctor` passes -- /dev/kvm
-// above all -- and each sandbox's VM image is local or can be pulled.
+// journeys 7 and 10): granule is on PATH, `granule doctor` passes --
+// /dev/kvm above all -- each sandbox's VM image is local or can be
+// pulled, and each Granulefile is either built already (its cache key's
+// tag is local) or will be built at run.
 func checkGranule(ctx context.Context, f *silofile.Silofile, environ []string) []CheckResult {
 	var images []string
+	var built []silofile.Sandbox
 	for _, sc := range f.Sandboxes {
-		if sc.Kind == "granule" && sc.Image != "" {
+		switch {
+		case sc.Kind != "granule":
+		case sc.Image != "":
 			images = append(images, sc.Image)
+		case sc.Granulefile != "":
+			built = append(built, sc)
 		}
 	}
-	if len(images) == 0 {
+	if len(images) == 0 && len(built) == 0 {
 		return nil
 	}
 	b, err := granule.NewFrom(func(k string) string { return getenvFrom(environ, k) })
@@ -53,6 +61,23 @@ func checkGranule(ctx context.Context, f *silofile.Silofile, environ []string) [
 			res.Detail = err.Error()
 		} else {
 			res.OK = true
+		}
+		out = append(out, res)
+	}
+	for _, sc := range built {
+		res := CheckResult{Name: "granulefile " + sc.Granulefile}
+		spec, err := sandbox.SpecFor(f, sc.Name, "")
+		var key string
+		if err == nil {
+			key, err = granule.CacheKey(spec.Build, spec.Target, spec.BuildArgs)
+		}
+		switch {
+		case err != nil:
+			res.Detail = err.Error()
+		case b.Cached(ctx, key) != "":
+			res.OK, res.Detail = true, "built already, as "+granule.BuiltTag(key)
+		default:
+			res.OK, res.Detail = true, "not built yet: silo run builds it with granule granulefile build"
 		}
 		out = append(out, res)
 	}

@@ -1,6 +1,7 @@
 package silofile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,7 +23,21 @@ type Options struct {
 	// errors and warnings. Stage 4a supplies it; until then it is nil and
 	// the scripts are only resolved.
 	CheckScripts func(f *Silofile, scripts []LocalScript) (errs, warnings Errors)
+
+	// CheckGranulefile, when set, checks a granule sandbox's Granulefile
+	// (design §14, journey 10) -- file is its absolute path, target the
+	// stage to build -- and reports whether that stage builds a granule
+	// VM image (true) or a container image (false). An error wrapping
+	// ErrUnchecked is a warning: the check could not run here. Stage 8b
+	// supplies granule.CheckGranulefile; when nil, Granulefiles are only
+	// resolved.
+	CheckGranulefile func(file, target string) (vm bool, err error)
 }
+
+// ErrUnchecked is what a check returns when it could not run on this
+// machine (granule is not installed), which validation reports as a
+// warning rather than an error.
+var ErrUnchecked = errors.New("not checked")
 
 // Result is what Validate found.
 type Result struct {
@@ -417,22 +432,40 @@ func (v *validator) sandboxes() {
 				v.errorf(p, "give exactly one of image and build")
 			}
 			if s.Build != "" {
-				v.path(p+".build", s.Build, regularFile)
+				if real := v.path(p+".build", s.Build, regularFile); real != "" {
+					v.dockerfile(p+".build", real, s.Kind)
+				}
 			}
 		case "granule":
 			switch {
 			case s.Build != "":
-				v.errorf(p+".build", "a granule sandbox is booted from a granule VM image: give image (or, later, granulefile)")
+				v.errorf(p+".build", "a granule sandbox is booted from a granule VM image: give image, or granulefile for a Granulefile that builds one")
+			case s.Image != "" && s.Granulefile != "":
+				v.errorf(p, "give exactly one of image and granulefile")
 			case s.Granulefile != "":
-				v.later(p+".granulefile", "granulefile", "stage 8b")
+				if real := v.path(p+".granulefile", s.Granulefile, regularFile); real != "" {
+					v.granulefile(p, real, s.Target)
+				}
 			case s.Image == "":
-				v.errorf(p, "kind granule needs image: a granule VM image")
+				v.errorf(p, "kind granule needs image (a granule VM image) or granulefile (a Granulefile that builds one)")
 			}
-			if s.Target != "" {
-				v.later(p+".target", "target", "stage 8b")
+			if s.Granulefile == "" {
+				for _, k := range []struct {
+					set bool
+					key string
+				}{{s.Target != "", "target"}, {s.Args != nil, "args"}, {s.PushTo != "", "push_to"}} {
+					if k.set {
+						v.errorf(p+"."+k.key, "%s is for a sandbox built from a granulefile", k.key)
+					}
+				}
 			}
-			if s.Args != nil {
-				v.later(p+".args", "args", "stage 8b")
+			if s.PushTo != "" && s.Granulefile != "" {
+				switch {
+				case !pushRepository.MatchString(s.PushTo):
+					v.errorf(p+".push_to", "%q is not a registry repository (host/path, with no tag or digest)", s.PushTo)
+				case s.Backend.K8s == nil:
+					v.warnf(p+".push_to", "push_to is for a remote backend (stage 11b): the local backend runs the image where it is built and pushes nothing")
+				}
 			}
 			if len(s.Mounts) > 0 {
 				v.errorf(p+".mounts", "kind granule takes no mounts: a host directory would have to cross into the guest over virtio-fs, which silo does not set up (design §7.2)")
@@ -450,6 +483,7 @@ func (v *validator) sandboxes() {
 			only("granule", s.Granulefile != "", "granulefile")
 			only("granule", s.Target != "", "target")
 			only("granule", s.Args != nil, "args")
+			only("granule", s.PushTo != "", "push_to")
 		}
 		if s.Kind != "folder" {
 			only("folder", s.Path != "", "path")

@@ -29,6 +29,8 @@ type env struct {
 	root    string
 	home    string
 	environ []string
+	// timeout bounds each run; zero is a minute.
+	timeout time.Duration
 }
 
 func newEnv(t *testing.T) *env {
@@ -112,7 +114,11 @@ func (e *env) run(f *silofile.Silofile, mod func(*session.Options)) result {
 	if mod != nil {
 		mod(&opts)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	timeout := e.timeout
+	if timeout == 0 {
+		timeout = time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	code, err := session.Run(ctx, opts)
 	return result{code, err, stderr.String()}

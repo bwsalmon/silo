@@ -145,10 +145,12 @@ type Sandbox struct {
 	PackageCache *PackageCache `yaml:"package_cache" doc:"Later (grain.md §2.3)."`
 	ModelAccess  []string      `yaml:"model_access" doc:"Later: the model proxy (grain.md §2.5)."`
 
-	// kind: granule; granulefile, target and args are stage 8b.
-	Granulefile string            `yaml:"granulefile" doc:"Granule only (later, stage 8b): a Granulefile in the silo folder."`
-	Target      string            `yaml:"target" doc:"Granule only (later, stage 8b)."`
-	Args        map[string]string `yaml:"args" doc:"Granule only (later, stage 8b)."`
+	// kind: granule, in place of image (journey 10): the granule
+	// counterpart of build.
+	Granulefile string            `yaml:"granulefile" doc:"Granule only, instead of image: a Granulefile in the silo folder whose target stage builds a granule VM image, built with its directory as the context."`
+	Target      string            `yaml:"target" doc:"Granule only: the Granulefile stage to build, by name or index; the last stage when empty."`
+	Args        map[string]string `yaml:"args" doc:"Granule only: the Granulefile's build arguments (--build-arg)."`
+	PushTo      string            `yaml:"push_to" doc:"Granule only, with granulefile: a registry repository the built image is pushed to, for a remote backend (stage 11b); the local backend pushes nothing."`
 
 	// kind: folder (built-in silos only).
 	Path string `yaml:"path" doc:"Folder sandboxes only (built-in silos)."`

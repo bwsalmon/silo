@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/silo/v2/localexec"
+	"github.com/bwsalmon/silo/v2/sandbox/granule"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -95,8 +96,10 @@ func flags(name, argsUsage string, args []string, stderr io.Writer, min, max int
 }
 
 // validateOptions are silo validate's and silo run's: with the local
-// executor's script checks and warnings (design §2.4, §12.4).
-var validateOptions = silofile.Options{CheckScripts: localexec.Check}
+// executor's script checks and warnings (design §2.4, §12.4), and
+// granule granulefile check on each granule sandbox's Granulefile
+// (design §14, journey 10).
+var validateOptions = silofile.Options{CheckScripts: localexec.Check, CheckGranulefile: granule.CheckGranulefile}
 
 func validate(args []string, stdout, stderr io.Writer) int {
 	args, ok := flags("validate", "<Silofile|dir>", args, stderr, 1, 1)

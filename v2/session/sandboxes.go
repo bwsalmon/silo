@@ -67,5 +67,28 @@ func provideSandboxes(ctx context.Context, s *Session) ([]gateway.Tool, Undo, er
 			return nil, undo, fmt.Errorf("sandbox %s: %w", sc.Name, err)
 		}
 	}
+	s.recordImages(made)
 	return gateway.SandboxTools(made), undo, nil
+}
+
+// recordImages writes what each sandbox's image resolved to into the
+// silo folder's .silo/lock.json (design §7.3): a digest, and for a
+// built Granulefile its cache key (journey 10). A lock file that cannot
+// be written costs the record, not the session.
+func (s *Session) recordImages(made map[string]sandbox.Sandbox) {
+	if s.File.Folder == "" {
+		return
+	}
+	images := map[string]sandbox.Image{}
+	for name, sb := range made {
+		if im, ok := sb.(sandbox.Imaged); ok && im.ResolvedImage().Digest != "" {
+			images[name] = im.ResolvedImage()
+		}
+	}
+	if len(images) == 0 {
+		return
+	}
+	if err := sandbox.RecordImages(s.File.Folder, images); err != nil {
+		s.warnf("recording sandbox images in %s: %v", sandbox.LockFile, err)
+	}
 }

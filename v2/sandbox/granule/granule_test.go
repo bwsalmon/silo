@@ -172,7 +172,7 @@ func TestCreateRefusals(t *testing.T) {
 	}{
 		{sandbox.SandboxSpec{Kind: "granule", Image: "g"}, "needs a session and a name"},
 		{sandbox.SandboxSpec{Session: "s", Name: "n", Kind: "container", Image: "g"}, "is not granule"},
-		{sandbox.SandboxSpec{Session: "s", Name: "n", Kind: "granule", Build: "/Dockerfile"}, "not build"},
+		{sandbox.SandboxSpec{Session: "s", Name: "n", Kind: "granule", Image: "g", Build: "/dev.Granulefile"}, "not both"},
 		{sandbox.SandboxSpec{Session: "s", Name: "n", Kind: "granule", Image: "g", Mounts: []sandbox.Mount{{From: "/a", To: "/b"}}}, "no mounts"},
 		{sandbox.SandboxSpec{Session: "s", Name: "n", Kind: "granule"}, "needs image"},
 		{sandbox.SandboxSpec{Session: "s", Name: "n", Kind: "granule", Image: "g", Env: map[string]string{"A-B": "x"}}, "not a valid environment variable"},

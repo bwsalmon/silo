@@ -11,7 +11,8 @@
 # kubectl a failure). The granule sandbox kind's tests boot real granule
 # microVMs (SILO_V2_REQUIRE_GRANULE): the job reads gke-labs/granule
 # through the git proxy (repo-read, below), builds its CLI at a pinned
-# commit, and pulls grain's published guest image.
+# commit, and pulls grain's published guest image and the images
+# granule builds Granulefiles with.
 name: v2
 
 on:
@@ -93,6 +94,17 @@ jobs:
           sudo install -m 0755 /tmp/granule-bin/granule /usr/local/bin/granule
           granule doctor
           docker pull -q ghcr.io/bwsalmon/grain/guest:latest
+          # What `granule granulefile build` builds VM images with, by
+          # granule's own default names (journey 10's tests): its VMM
+          # image, granule:latest, and its guest rootfs. The VMM half
+          # has to be the pinned CLI's own, which granule's published
+          # VM image for that commit carries; the rootfs is pinned by
+          # digest (published from that commit) and tagged as the name
+          # granule writes FROM, so a later publish does not move it.
+          docker pull -q ghcr.io/gke-labs/granule/debian:4411ce45e5c04cea29a2fb343d7c44232bc3ac7e
+          docker tag ghcr.io/gke-labs/granule/debian:4411ce45e5c04cea29a2fb343d7c44232bc3ac7e granule:latest
+          docker pull -q ghcr.io/gke-labs/granule/debian.rootfs@sha256:5f8de1ecfb8057064198f09325102d61b277136b2186ffab8258ab1029681f4c
+          docker tag ghcr.io/gke-labs/granule/debian.rootfs@sha256:5f8de1ecfb8057064198f09325102d61b277136b2186ffab8258ab1029681f4c ghcr.io/gke-labs/granule/debian.rootfs:latest
 
       - name: Format
         run: |
