@@ -130,6 +130,8 @@ sets up, reuses and garbage-collects a real account when
 login needs `roles/iam.serviceAccountAdmin`,
 `roles/resourcemanager.projectIamAdmin` and `roles/logging.viewer` on
 the project. It is not part of the CI gate.
+[`deploy/terraform/gcp-agent-pool`](deploy/terraform/gcp-agent-pool/README.md)
+grants those roles to a grain `gcp-key` pool, or creates such a pool.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip
