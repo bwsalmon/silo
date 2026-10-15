@@ -140,7 +140,7 @@ type Sandbox struct {
 	Repos   []string          `yaml:"repos" doc:"git[] entries checked out through the git proxy: one at workdir, several each at workdir/<name>. Needs an absolute workdir and git in the image."`
 	Env     map[string]string `yaml:"env"`
 
-	Backend      Backend       `yaml:"backend" doc:"local (default) | {k8s: {...}} (later, stage 11b)"`
+	Backend      Backend       `yaml:"backend" doc:"local (default) | {k8s: {context, namespace}}: a granule sandbox as a pod in a cluster (journey 9)."`
 	Lifetime     string        `yaml:"lifetime" doc:"session (default) | persistent (later)"`
 	PackageCache *PackageCache `yaml:"package_cache" doc:"Later (grain.md §2.3)."`
 	ModelAccess  []string      `yaml:"model_access" doc:"Later: the model proxy (grain.md §2.5)."`

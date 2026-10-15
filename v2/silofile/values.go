@@ -100,16 +100,18 @@ func (Network) jsonSchema() map[string]any {
 	return oneOf(enum("none", "open"), object(map[string]any{"allow": array(str())}, "allow"))
 }
 
-// Backend is a sandbox's backend: local, or {k8s: {...}} (later). The
+// Backend is a sandbox's backend: local, or {k8s: {...}}. The
 // zero value is local.
 type Backend struct {
 	K8s *K8sBackend
 }
 
-// K8sBackend is reserved for stage 11 (journey 9).
+// K8sBackend is backend.k8s: the cluster a granule sandbox's pod runs
+// in (journey 9).
 type K8sBackend struct {
-	Context   string `yaml:"context"`
-	Namespace string `yaml:"namespace"`
+	Context   string `yaml:"context" doc:"A context in the kubeconfig; kubectl's current context when empty."`
+	Namespace string `yaml:"namespace" doc:"The namespace the sandbox's pod goes in; the context's namespace when empty."`
+	KVMGroup  int    `yaml:"kvm_group" doc:"The group id that owns /dev/kvm on the nodes, given to a guest with no network (which runs as nobody) where /dev/kvm is 0660; GKE's nested-virtualisation nodes make it 0666 and need none."`
 }
 
 func (b *Backend) decodeYAML(d *decoder, n *yaml.Node, path string) {

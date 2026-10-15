@@ -104,6 +104,20 @@ type SandboxSpec struct {
 	// Env is the sandbox's environment on top of the image's: the
 	// Silofile's env, and credentials delivered as {sandbox, env}.
 	Env map[string]string
+	// K8s, when set, is the cluster the sandbox runs in (backend: {k8s:
+	// ...}, journey 9) rather than the invoking machine.
+	K8s *K8sTarget
+}
+
+// K8sTarget is a kubeconfig context and namespace; either empty means
+// kubectl's current one.
+type K8sTarget struct {
+	Context, Namespace string
+	// KVMGroup, when not zero, is the group that may open /dev/kvm on
+	// the cluster's nodes, which a guest with no network (whose VMM is
+	// not root) is given: GKE's nested-virtualisation nodes make
+	// /dev/kvm 0666 and need none, a node where it is 0660 does.
+	KVMGroup int64
 }
 
 // Mount is a host directory or file bound into the sandbox.
@@ -159,6 +173,9 @@ func SpecFor(f *silofile.Silofile, name, session string) (SandboxSpec, error) {
 		}
 		if s.Disk != nil {
 			spec.Disk = int64(*s.Disk)
+		}
+		if k := s.Backend.K8s; k != nil {
+			spec.K8s = &K8sTarget{Context: k.Context, Namespace: k.Namespace, KVMGroup: int64(k.KVMGroup)}
 		}
 		if s.Build != "" {
 			real, err := safepath.Within(f.Folder, s.Build)

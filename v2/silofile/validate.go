@@ -474,7 +474,16 @@ func (v *validator) sandboxes() {
 			v.errorf(p+".workdir", "repos are checked out into workdir, which needs to be an absolute path in the sandbox")
 		}
 		if s.Backend.K8s != nil {
-			v.later(p+".backend", "backend k8s", "stage 11b")
+			// Journey 9: a granule VM image as a pod (design §7.3).
+			if s.Kind != "granule" {
+				v.errorf(p+".backend", "backend k8s runs kind granule sandboxes only, not %s", s.Kind)
+			}
+			if s.Backend.K8s.KVMGroup < 0 {
+				v.errorf(p+".backend.k8s.kvm_group", "%d is not a group id", s.Backend.K8s.KVMGroup)
+			}
+			if len(s.Repos) > 0 {
+				v.later(p+".repos", "repos in a sandbox with backend k8s (the git proxy has no path into a cluster yet)", "design §9.3")
+			}
 		}
 		switch s.Lifetime {
 		case "", "session":

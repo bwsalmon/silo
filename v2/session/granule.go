@@ -17,7 +17,7 @@ func init() { RegisterCheck("granule", checkGranule) }
 func checkGranule(ctx context.Context, f *silofile.Silofile, environ []string) []CheckResult {
 	var images []string
 	for _, sc := range f.Sandboxes {
-		if sc.Kind == "granule" && sc.Image != "" {
+		if sc.Kind == "granule" && sc.Image != "" && sc.Backend.K8s == nil {
 			images = append(images, sc.Image)
 		}
 	}

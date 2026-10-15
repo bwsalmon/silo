@@ -1,0 +1,131 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "silo.dev/origin": "debian@host",
+      "silo.dev/sandbox": "dev",
+      "silo.dev/workdir": "/work"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "silo",
+      "silo.dev/role": "sandbox",
+      "silo.dev/session": "s-abcdefghijkl"
+    },
+    "name": "silo-s-abcdefghijkl-bogpbrhv"
+  },
+  "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "args": [
+          "run"
+        ],
+        "env": [
+          {
+            "name": "CHV_NET_MODE",
+            "value": "inline"
+          },
+          {
+            "name": "NETSHIM_VM",
+            "value": "vm"
+          },
+          {
+            "name": "CHV_CPUS",
+            "value": "2"
+          },
+          {
+            "name": "CHV_MEMORY_MB",
+            "value": "2048"
+          },
+          {
+            "name": "CHV_DISK_SIZE_MB",
+            "value": "20480"
+          },
+          {
+            "name": "CHV_SHUTDOWN_TIMEOUT",
+            "value": "20s"
+          }
+        ],
+        "image": "ghcr.io/acme/dev-guest:2026-10",
+        "name": "vm",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "/usr/local/bin/granule",
+              "ready",
+              "-timeout",
+              "0"
+            ]
+          },
+          "periodSeconds": 2,
+          "timeoutSeconds": 5
+        },
+        "resources": {
+          "limits": {
+            "devic.es/kvm": "1",
+            "devic.es/tun": "1",
+            "memory": "2684354560"
+          },
+          "requests": {
+            "cpu": "1.5",
+            "memory": "2684354560"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "add": [
+              "NET_ADMIN"
+            ],
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/run",
+            "name": "run"
+          },
+          {
+            "mountPath": "/tmp",
+            "name": "tmp"
+          },
+          {
+            "mountPath": "/var/lib/granule/overlay",
+            "name": "overlay"
+          }
+        ]
+      }
+    ],
+    "enableServiceLinks": false,
+    "nodeSelector": {
+      "cloud.google.com/gke-nodepool": "kvm"
+    },
+    "restartPolicy": "Never",
+    "securityContext": {
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "terminationGracePeriodSeconds": 40,
+    "volumes": [
+      {
+        "emptyDir": {
+          "medium": "Memory"
+        },
+        "name": "run"
+      },
+      {
+        "emptyDir": {},
+        "name": "tmp"
+      },
+      {
+        "emptyDir": {},
+        "name": "overlay"
+      }
+    ]
+  }
+}

@@ -20,6 +20,7 @@ import (
 	"github.com/bwsalmon/silo/v2/sandbox"
 	"github.com/bwsalmon/silo/v2/sandbox/container"
 	"github.com/bwsalmon/silo/v2/sandbox/granule"
+	k8ssb "github.com/bwsalmon/silo/v2/sandbox/k8s"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
 
@@ -315,16 +316,33 @@ func (s *Session) backend() (sandbox.Backend, error) {
 // newBackend is the backend for f's sandboxes: the container backend,
 // and with granule sandboxes the granule backend beside it, on the
 // Docker granule runs its VMs on, so that the two share the session's
-// network.
+// network; and with sandboxes on a cluster (backend: {k8s: ...}), the
+// k8s backend, which needs neither.
 func newBackend(f *silofile.Silofile) (sandbox.Backend, error) {
-	usesGranule := false
+	usesGranule, local := false, false
+	var specs []sandbox.SandboxSpec
 	for _, sc := range f.Sandboxes {
+		if sc.Backend.K8s != nil {
+			specs = append(specs, sandbox.SandboxSpec{K8s: &sandbox.K8sTarget{Context: sc.Backend.K8s.Context, Namespace: sc.Backend.K8s.Namespace}})
+			continue
+		}
+		local = true
 		usesGranule = usesGranule || sc.Kind == "granule"
+	}
+	var kb sandbox.Backend
+	if len(specs) > 0 {
+		kb = &k8ssb.Backend{Targets: k8ssb.TargetsOf(specs)}
+		if !local {
+			return &sandbox.Kinds{K8s: kb}, nil
+		}
 	}
 	if !usesGranule {
 		b, err := container.New()
 		if err != nil {
 			return nil, err
+		}
+		if kb != nil {
+			return &sandbox.Kinds{Default: b, K8s: kb}, nil
 		}
 		return b, nil
 	}
@@ -335,6 +353,7 @@ func newBackend(f *silofile.Silofile) (sandbox.Backend, error) {
 	return &sandbox.Kinds{
 		Default: &container.Backend{Runtime: gb.Docker},
 		ByKind:  map[string]sandbox.Backend{"granule": gb},
+		K8s:     kb,
 	}, nil
 }
 

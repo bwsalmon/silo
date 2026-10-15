@@ -37,8 +37,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -267,8 +265,7 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	if len(spec.Mounts) > 0 {
 		return nil, fmt.Errorf("sandbox %q: kind granule takes no mounts: a host directory would have to cross into the guest over virtio-fs, which silo does not set up", spec.Name)
 	}
-	keys, err := envKeys(spec.Env)
-	if err != nil {
+	if err := CheckEnv(spec.Env); err != nil {
 		return nil, fmt.Errorf("sandbox %q: %w", spec.Name, err)
 	}
 	img, err := b.ResolveImage(ctx, spec)
@@ -311,46 +308,11 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 		cleanup()
 		return nil, fmt.Errorf("sandbox %q: %w\n%s", spec.Name, err, strings.TrimSpace(string(logs)))
 	}
-	setup := `set -e; if [ -n "$1" ]; then mkdir -p -- "$1"; fi
-if [ "$2" = 1 ]; then umask 077; mkdir -p -- "$(dirname -- "$3")"; cat > "$3"; fi`
-	hasEnv := "0"
-	var envData []byte
-	if len(keys) > 0 {
-		hasEnv = "1"
-		envData = envFile(spec.Env, keys)
-	}
-	if _, err := v.run(ctx, envData, setup, spec.Workdir, hasEnv, EnvFile); err != nil {
+	if err := v.guest().Setup(ctx, spec.Workdir, spec.Env); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("sandbox %q: setting up the guest: %w", spec.Name, err)
 	}
 	return v, nil
-}
-
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-func envKeys(env map[string]string) ([]string, error) {
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		if !envName.MatchString(k) {
-			return nil, fmt.Errorf("%q is not a valid environment variable name", k)
-		}
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys, nil
-}
-
-// envFile is env as sh assignments, each value single-quoted.
-func envFile(env map[string]string, keys []string) []byte {
-	var buf bytes.Buffer
-	for _, k := range keys {
-		fmt.Fprintf(&buf, "export %s=%s\n", k, shellQuote(env[k]))
-	}
-	return buf.Bytes()
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // psFormat lists a VM container's VM, sandbox, workdir, network and
@@ -432,47 +394,14 @@ var _ sandbox.Sandbox = (*VM)(nil)
 // killing granule as well.
 const killGrace = 3 * time.Second
 
-// execScript loads the sandbox's environment, records the command's
-// pid so that a cancelled Exec can kill it in the guest (killing
-// granule alone would leave it running there), and becomes the
-// command.
-const execScript = `echo $$ > "/tmp/.silo-exec-$0" 2>/dev/null
-if [ -r ` + EnvFile + ` ]; then set -a; . ` + EnvFile + `; set +a; fi
-exec "$@"`
-
-// killScript kills a recorded command and its descendants.
-const killScript = `f="/tmp/.silo-exec-$0"; [ -f "$f" ] || exit 0
-kill_tree() { for c in $(cat /proc/$1/task/*/children 2>/dev/null); do kill_tree "$c"; done; kill -KILL "$1" 2>/dev/null; }
-kill_tree "$(cat "$f")"; rm -f "$f"`
-
 // ExecArgs returns the granule arguments that run argv in the VM as
 // req asks: in req.Cwd, or the sandbox's workdir, with req.Env on top
 // of the sandbox's environment, which execScript loads.
 func (v *VM) ExecArgs(req sandbox.ExecRequest, tag string) ([]string, error) {
-	keys, err := envKeys(req.Env)
+	flags, argv, err := ExecCommand(req, v.Workdir, tag)
 	if err != nil {
 		return nil, err
 	}
-	var flags []string
-	cwd := req.Cwd
-	if cwd == "" {
-		cwd = v.Workdir
-	}
-	if cwd != "" {
-		if !strings.HasPrefix(cwd, "/") && v.Workdir != "" {
-			cwd = v.Workdir + "/" + cwd
-		}
-		flags = append(flags, "-w", cwd)
-	}
-	argv := []string{"/bin/sh", "-c", execScript, tag}
-	if len(keys) > 0 {
-		// After the sandbox's environment, so that the request's wins.
-		argv = append(argv, "env")
-		for _, k := range keys {
-			argv = append(argv, k+"="+req.Env[k])
-		}
-	}
-	argv = append(argv, req.Argv...)
 	return v.backend.vmArgs("exec", v.VM, append(append(flags, "--"), argv...)...), nil
 }
 
@@ -507,7 +436,7 @@ func (v *VM) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecRes
 	case <-ctx.Done():
 		ctxErr = ctx.Err()
 		killCtx, cancel := context.WithTimeout(context.Background(), killGrace)
-		_, _ = v.backend.vm(killCtx, nil, "exec", v.VM, "--", "/bin/sh", "-c", killScript, tag)
+		_, _ = v.backend.vm(killCtx, nil, "exec", v.VM, append([]string{"--"}, KillCommand(tag)...)...)
 		cancel()
 		select {
 		case runErr = <-done:
@@ -539,73 +468,24 @@ func (v *VM) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecRes
 	return res, nil
 }
 
-// run is Exec of a shell script with arguments, as a plain call: a
-// non-zero exit is an error carrying the script's stderr.
-func (v *VM) run(ctx context.Context, stdin []byte, script string, args ...string) ([]byte, error) {
-	argv := append([]string{"/bin/sh", "-c", script, "silo"}, args...)
-	res, err := v.Exec(ctx, sandbox.ExecRequest{Argv: argv, Stdin: stdin, Cwd: "/"})
-	if err != nil {
-		return nil, err
-	}
-	if res.ExitCode != 0 {
-		msg := strings.TrimSpace(string(res.Stderr))
-		if msg == "" {
-			msg = fmt.Sprintf("exit status %d", res.ExitCode)
-		}
-		return nil, errors.New(msg)
-	}
-	return res.Stdout, nil
-}
-
-// abs makes a relative path relative to the workdir, as the container
-// kinds' file tools take it.
-func (v *VM) abs(path string) string {
-	if strings.HasPrefix(path, "/") || v.Workdir == "" {
-		return path
-	}
-	return v.Workdir + "/" + path
-}
+func (v *VM) guest() Guest { return Guest{Exec: v.Exec, Workdir: v.Workdir} }
 
 // ReadFile returns at most limit bytes of the file at path; a relative
 // path is relative to the sandbox's workdir.
 func (v *VM) ReadFile(ctx context.Context, path string, limit int64) ([]byte, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-	out, err := v.run(ctx, nil, `if [ -d "$1" ]; then echo "$1: is a directory" >&2; exit 1; fi; exec head -c "$2" -- "$1"`,
-		v.abs(path), strconv.FormatInt(limit, 10))
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if int64(len(out)) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return v.guest().ReadFile(ctx, path, limit)
 }
 
 // WriteFile writes data to path, creating its parent directories, and
 // sets its mode.
 func (v *VM) WriteFile(ctx context.Context, path string, data []byte, mode fs.FileMode) error {
-	_, err := v.run(ctx, data, `mkdir -p -- "$(dirname -- "$1")" && cat > "$1" && chmod "$2" -- "$1"`,
-		v.abs(path), fmt.Sprintf("%04o", mode.Perm()))
-	if err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	return nil
+	return v.guest().WriteFile(ctx, path, data, mode)
 }
 
-// DeliverFile writes a credential file, mode 0400, by writing a
-// temporary file beside it and renaming it into place, so that a reader
-// sees the old file or the new one and never a partial one.
+// DeliverFile writes a credential file atomically, mode 0400
+// (Guest.DeliverFile).
 func (v *VM) DeliverFile(ctx context.Context, path string, data []byte) error {
-	_, err := v.run(ctx, data, `umask 077; d="$(dirname -- "$1")"; mkdir -p -- "$d" || exit 1
-t="$d/.silo-deliver.$$"
-if cat > "$t" && chmod 0400 "$t" && mv -f -- "$t" "$1"; then exit 0; fi
-rm -f -- "$t"; exit 1`, v.abs(path))
-	if err != nil {
-		return fmt.Errorf("delivering %s: %w", path, err)
-	}
-	return nil
+	return v.guest().DeliverFile(ctx, path, data)
 }
 
 // Destroy deletes the VM, its container and its saved state, and the
