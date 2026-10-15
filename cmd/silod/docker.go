@@ -60,6 +60,11 @@ type localDocker struct {
 	pub *gateway.Publisher
 }
 
+// cgroupTree makes containers' cgroups (rootless.SandboxTree).
+type cgroupTree interface {
+	Path(ctx context.Context, container string, siloPath ...string) (string, error)
+}
+
 // sandboxConfig is where sandboxDriver finds what the sandbox class
 // runs on.
 type sandboxConfig struct {
@@ -81,8 +86,11 @@ type sandboxConfig struct {
 	// the image.
 	Toolbox string
 	// SiloPaths gives each silo's ids from the root down, which name
-	// its slice; nil leaves containers' cgroupsPath empty.
+	// its cgroup; nil gives containers no cgroup of their own.
 	SiloPaths func(ctx context.Context) (map[string][]string, error)
+	// Cgroups is the tree containers' cgroups are made in; nil is
+	// rootless.SandboxTree's default, the user manager's scope.
+	Cgroups cgroupTree
 }
 
 // newLocalDocker builds the facade over the runtime drivers: fake ones

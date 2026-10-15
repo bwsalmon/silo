@@ -25,7 +25,8 @@ import (
 // local-conformance installs it (`silo install --backend local`): the
 // root's /info offers the class, a docker load of a busybox image
 // survives until the create, and the container runs under runsc as its
-// namespace's root with eth0 at its endpoint's address. It skips with
+// namespace's root with eth0 at its endpoint's address, and a
+// container's memory limit is enforced by its cgroup. It skips with
 // no install, unless targets.RequireLocalEnv is set.
 func TestInstalledSandbox(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -114,6 +115,33 @@ func TestInstalledSandbox(t *testing.T) {
 	if !slices.ContainsFunc(addrs, func(a string) bool { return a != "" && strings.Contains(logs, " "+a+"/") }) {
 		t.Errorf("the container's eth0 is none of its endpoints' %v: %q", addrs, logs)
 	}
+
+	// The kernel holds a container to its memory: under a 128 MiB limit,
+	// tail holding 16 MiB of a line runs, and holding 400 MiB is killed.
+	// local-conformance's runner delegates memory to the user's manager.
+	run := func(memory int64, script string) (int, string) {
+		t.Helper()
+		var made struct{ Id string }
+		call("POST", "/containers/create", "application/json", js(map[string]any{"Image": tag,
+			"HostConfig": map[string]any{"Runtime": "silo-sandbox", "Memory": memory},
+			"Cmd":        []string{"sh", "-c", script}}), &made)
+		t.Cleanup(func() { call("DELETE", "/containers/"+made.Id+"?force=1", "", nil, nil) })
+		call("POST", "/containers/"+made.Id+"/start", "", nil, nil)
+		var waited struct{ StatusCode int }
+		call("POST", "/containers/"+made.Id+"/wait", "", nil, &waited)
+		var logs string
+		call("GET", "/containers/"+made.Id+"/logs?stdout=1&stderr=1", "", nil, &logs)
+		return waited.StatusCode, logs
+	}
+	const limit = 128 << 20
+	if code, logs := run(limit, "head -c 16m /dev/zero | tail | wc -c"); code != 0 || !strings.Contains(logs, "16777216") {
+		t.Errorf("16 MiB under a 128 MiB limit: exit %d, logs %q", code, logs)
+	}
+	if code, logs := run(limit, "head -c 400m /dev/zero | tail | wc -c"); code == 0 {
+		t.Errorf("400 MiB under a 128 MiB limit wasn't stopped: exit %d, logs %q", code, logs)
+	} else {
+		t.Logf("400 MiB under a 128 MiB limit: exit %d, logs %q", code, logs)
+	}
 }
 
 // busyboxArchive is a docker save archive of one image, tagged tag,
@@ -131,7 +159,7 @@ func busyboxArchive(t *testing.T, busybox, tag string) []byte {
 	}
 	tw.WriteHeader(&tar.Header{Name: "bin/busybox", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(bb))})
 	tw.Write(bb)
-	for _, a := range []string{"sh", "echo", "id", "ip", "cat", "sleep", "nc", "ping", "wget", "nslookup"} {
+	for _, a := range []string{"sh", "echo", "id", "ip", "cat", "sleep", "nc", "ping", "wget", "nslookup", "head", "tail", "wc"} {
 		tw.WriteHeader(&tar.Header{Name: "bin/" + a, Typeflag: tar.TypeSymlink, Linkname: "busybox"})
 	}
 	tw.Close()

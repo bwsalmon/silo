@@ -65,7 +65,8 @@ func nsPaths(s spec) map[string]string {
 var testNS = nsd.ContainerNS{User: "/run/silo/netns/c1.user", Net: "/run/silo/netns/c1.net", Range: nsd.Range{Inside: 0, Outside: 65537, Size: 65536}}
 
 func TestSandboxPatch(t *testing.T) {
-	s := apply(t, SandboxPatch(testNS, CgroupsPath("c1", "aaaaaa")))
+	const cg = "/user.slice/user-1000.slice/user@1000.service/silo.slice/silo-sandboxes.scope/aaaaaa/c1"
+	s := apply(t, SandboxPatch(testNS, cg))
 	ns := nsPaths(s)
 	if _, ok := ns["user"]; ok {
 		t.Errorf("the sandbox spec names a user namespace; runsc is started inside it instead: %v", ns)
@@ -76,11 +77,15 @@ func TestSandboxPatch(t *testing.T) {
 	if len(s.Linux.UIDMappings) != 0 {
 		t.Errorf("uid mappings kept: %s", s.Linux.UIDMappings)
 	}
-	if s.Annotations[AnnotationUserNS] != testNS.User || s.Annotations[AnnotationRoot] != "65537" {
+	if s.Annotations[AnnotationUserNS] != testNS.User || s.Annotations[AnnotationRoot] != "65537" || s.Annotations[AnnotationCgroup] != cg {
 		t.Errorf("annotations = %v", s.Annotations)
 	}
-	if s.Linux.CgroupsPath != "silo-aaaaaa.slice:silo:c1" {
+	// runsc ignores cgroups; `silod runsc create` starts it in this one.
+	if s.Linux.CgroupsPath != "" {
 		t.Errorf("cgroupsPath = %q", s.Linux.CgroupsPath)
+	}
+	if s := apply(t, SandboxPatch(testNS, "")); s.Annotations[AnnotationCgroup] != "" {
+		t.Errorf("a cgroup with none given: %v", s.Annotations)
 	}
 }
 

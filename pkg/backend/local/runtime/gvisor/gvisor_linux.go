@@ -101,9 +101,11 @@ type Config struct {
 	// read-only at runtime.ToolsPath in an agent's tool container
 	// (Spec.SiloTools). Without it, no tool container is made.
 	SiloTools string
-	// CgroupsPath gives a container's linux.cgroupsPath
-	// (rootless.CgroupsPath), or "" for none, when cgroups aren't
-	// delegated and the shim's options say ignore-cgroups.
+	// CgroupsPath gives a container's cgroup, from the cgroup mount's
+	// root (rootless.SandboxTree.Path), or "" for none, when cgroups
+	// aren't delegated. It travels as rootless.AnnotationCgroup: the
+	// shim's options say ignore-cgroups, and `silod runsc create`
+	// starts runsc in it.
 	CgroupsPath func(runtime.Spec) string
 	// Snapshotter is DefaultSnapshotter when empty.
 	Snapshotter string

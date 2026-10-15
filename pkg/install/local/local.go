@@ -956,6 +956,11 @@ func (s *unitsStep) remove(ctx context.Context, o *unitsObserved, del map[string
 		}
 		stop(n)
 	}
+	// Sandbox containers run in silod's scope, not the runtimes'
+	// cgroups (rootless.SandboxScope). There is none if no container
+	// ran, so its errors are not this step's.
+	systemctl(ctx, s.c, s.h, "kill", "--signal=SIGKILL", rootless.SandboxScope)
+	systemctl(ctx, s.c, s.h, "stop", rootless.SandboxScope)
 	if s.c.DeleteData && s.c.Mode == units.Rootless && o.Active[units.NSD] {
 		args := []string{"unshare", "--", "rm", "-rf"}
 		for _, d := range []string{"silos", "containerd", "cache"} {

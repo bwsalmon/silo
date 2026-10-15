@@ -610,12 +610,14 @@ func TestUninstall(t *testing.T) {
 			"systemctl --user stop silo-buildkitd.service",
 			"systemctl --user kill --signal=SIGKILL silo-containerd.service",
 			"systemctl --user stop silo-containerd.service",
+			"systemctl --user kill --signal=SIGKILL silo-sandboxes.scope",
+			"systemctl --user stop silo-sandboxes.scope",
 			"systemctl --user stop silo-nsd.service",
 			"systemctl --user disable silo-nsd.service silo-containerd.service silo-buildkitd.service silod.service",
 			"systemctl --user daemon-reload",
 		}
 		if deleteData {
-			want = slices.Insert(want, 5, "/usr/bin/silo unshare -- rm -rf /home/op/.local/share/silo/silos /home/op/.local/share/silo/containerd /home/op/.local/share/silo/cache")
+			want = slices.Insert(want, 7, "/usr/bin/silo unshare -- rm -rf /home/op/.local/share/silo/silos /home/op/.local/share/silo/containerd /home/op/.local/share/silo/cache")
 		}
 		var acted []string
 		for _, r := range f.ran {

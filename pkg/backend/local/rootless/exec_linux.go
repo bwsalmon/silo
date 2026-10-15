@@ -227,7 +227,17 @@ func reap(cmd *exec.Cmd, bundle string, args []string) error {
 	status := os.NewFile(3, "status")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	code := 0
-	if err := cmd.Run(); err != nil {
+	// runsc, and the sandbox and gofer it forks, start in the
+	// container's cgroup; the reaper stays where the shim is.
+	cg, cgf, err := containerCgroup(bundle)
+	if cgf != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd())}
+		defer cgf.Close()
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "silod runsc:", err)
+		code = 125
+	} else if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
 			fmt.Fprintln(os.Stderr, "silod runsc:", err)
@@ -245,6 +255,9 @@ func reap(cmd *exec.Cmd, bundle string, args []string) error {
 		null.Close()
 	}
 	if code != 0 {
+		if cg != "" {
+			os.Remove(cg)
+		}
 		return nil
 	}
 	pidFile := flagValue(args, "pid-file")
@@ -260,6 +273,11 @@ func reap(cmd *exec.Cmd, bundle string, args []string) error {
 			continue
 		}
 		if err != nil {
+			// The sandbox and everything it started are gone, and with
+			// them the cgroup's processes.
+			if cg != "" {
+				os.Remove(cg)
+			}
 			return nil
 		}
 		if pid == sandbox && sandbox > 0 {
