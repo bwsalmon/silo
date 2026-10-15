@@ -116,6 +116,10 @@ more. It holds teams, the backlog and the event metadata. The
 when the node connects, so it would only go stale in a database. A hub
 that restarts relearns its nodes within one reconnect backoff.
 
+The hub is deployed on **GKE behind IAP**: a GKE Ingress or Gateway
+fronts it with Google's HTTPS load balancer, and IAP is enabled on that
+load balancer's backend service (§4.1, §5.1).
+
 ## 3. The node registry (built: `hub/registry`)
 
 A node registers with a `registry.Node`:
@@ -176,7 +180,9 @@ The node dials out to `wss://<hub>/v1/nodes/connect`, a WebSocket with
 the subprotocol `silo-node.v1`. The hub never dials a node, so nothing
 has to be open inbound wherever the Grain runs. A WebSocket, rather than a raw
 HTTP Upgrade or gRPC, is what Google's HTTPS load balancer and IAP pass
-through unchanged.
+through unchanged. The hub runs on GKE, so that load balancer is the one
+the GKE Ingress or Gateway provisions, with IAP enabled on its backend
+service.
 
 The WebSocket carries binary frames, and those frames carry the mux
 in `internal/tunnel/mux` (from grain's `pkg/tunnel`). The mux provides independent, flow-controlled
@@ -622,7 +628,7 @@ anything leaves it.
 | 2.2 | Human sign-on (IAP JWT verification and OIDC, `hub/identity`). Node tokens, the team directory, `Admit` and per-team visibility, in a store (`hub/directory`). | here, built |
 | 2.3 | The backlog and its store, the intake API, the dispatcher (per-team ordering, constraints, admission rechecked, refusal, lost nodes, resume, cancel) and the task-stream protocol (`hub/tasks`). `registry.ClaimFor`. | here, built |
 | 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
-| 2.5 | A `silo hub serve` command and its deployment (Cloud Run or GKE behind IAP) | silo |
+| 2.5 | A `silo hub serve` command and its deployment (GKE behind IAP) | silo |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 
 ## 10. Open questions
