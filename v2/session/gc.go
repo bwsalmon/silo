@@ -119,6 +119,10 @@ func undoResource(ctx context.Context, b sandbox.Backend, id string, r Resource)
 			_, err := destroySession(ctx, b, id)
 			return err
 		}
+	case KindNetwork:
+		if nw, ok := b.(sandbox.Networker); ok && r.Network != "" {
+			return nw.RemoveNetwork(ctx, r.Network)
+		}
 	case KindDir:
 		return os.RemoveAll(r.Path)
 	case KindPod:

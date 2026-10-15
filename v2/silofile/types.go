@@ -137,7 +137,7 @@ type Sandbox struct {
 	Disk    *Size             `yaml:"disk" doc:"A size, such as 20Gi."`
 	Network Network           `yaml:"network" doc:"none (default) | open | {allow: [host, ...]} (later)"`
 	Mounts  []Mount           `yaml:"mounts" doc:"Read-only unless rw: true."`
-	Repos   []string          `yaml:"repos" doc:"git[] entries checked out into workdir through the git proxy."`
+	Repos   []string          `yaml:"repos" doc:"git[] entries checked out through the git proxy: one at workdir, several each at workdir/<name>. Needs an absolute workdir and git in the image."`
 	Env     map[string]string `yaml:"env"`
 
 	Backend      Backend       `yaml:"backend" doc:"local (default) | {k8s: {...}} (later, stage 11b)"`
@@ -229,7 +229,7 @@ type GitRepo struct {
 	Name       string   `yaml:"name" schema:"required"`
 	Repo       string   `yaml:"repo" schema:"required" doc:"host/owner/name, such as github.com/acme/widgets."`
 	Access     string   `yaml:"access" doc:"read (default) | push"`
-	Push       []string `yaml:"push" doc:"Ref patterns a push may update."`
+	Push       []string `yaml:"push" doc:"Ref patterns a push may update: refs/heads/... or refs/tags/..., globbing with * and ?, each optionally followed by (force), (delete) or (force, delete)."`
 	Force      bool     `yaml:"force" doc:"false (default): non-fast-forward pushes are refused."`
 	Credential string   `yaml:"credential" doc:"A credentials[] entry delivered to {proxy: git}."`
 }

@@ -29,6 +29,25 @@ type SessionLister interface {
 	Sessions(ctx context.Context) ([]string, error)
 }
 
+// Networker is a Backend that can make a session a private network:
+// its sandboxes reach the invoking machine on HostIP through it, and
+// nothing else (design §9.3).
+type Networker interface {
+	CreateNetwork(ctx context.Context, session string) (Network, error)
+	// RemoveNetwork removes a network CreateNetwork made, once no
+	// sandbox is attached to it. A network already gone is not an
+	// error.
+	RemoveNetwork(ctx context.Context, name string) error
+}
+
+// Network is a private network a Networker made.
+type Network struct {
+	Name string
+	// HostIP is the invoking machine's address on the network: where
+	// a service the session's sandboxes reach listens.
+	HostIP string
+}
+
 // NameLabel carries the sandbox's name in the Silofile.
 const NameLabel = "silo.sandbox"
 
@@ -72,7 +91,12 @@ type SandboxSpec struct {
 	Memory int64
 	// Network is "none" (the default) or "open".
 	Network string
-	Mounts  []Mount
+	// PrivateNetwork, when set, is a network made by Networker.
+	// CreateNetwork that the sandbox joins: in place of no network for
+	// "none", beside the runtime's default for "open". It is how a
+	// sandbox reaches the session's git proxy (design §9.3).
+	PrivateNetwork string
+	Mounts         []Mount
 	// Env is the sandbox's environment on top of the image's: the
 	// Silofile's env, and credentials delivered as {sandbox, env}.
 	Env map[string]string

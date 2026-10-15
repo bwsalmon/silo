@@ -105,6 +105,9 @@ const (
 	// KindPod: the k8s location's pod and Secret, labelled with the
 	// session, in Context and Namespace.
 	KindPod = "k8s-pod"
+	// KindNetwork: the session's private network, Network, made by
+	// the container Runtime for the git proxy.
+	KindNetwork = "network"
 )
 
 // Resource is one thing set up that teardown, or silo gc after a crash,
@@ -118,6 +121,8 @@ type Resource struct {
 	// namespace, empty for kubectl's defaults.
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Network is KindNetwork's network name.
+	Network string `json:"network,omitempty"`
 }
 
 // Result is how the session ended.

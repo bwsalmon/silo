@@ -227,10 +227,17 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	args = append(args, runtimeArgs...)
 	switch spec.Network {
 	case "none", "":
-		args = append(args, "--network", "none")
+		if spec.PrivateNetwork != "" {
+			// The session's internal network, which reaches the
+			// invoking machine's git proxy and nothing else.
+			args = append(args, "--network", spec.PrivateNetwork)
+		} else {
+			args = append(args, "--network", "none")
+		}
 	case "open":
 		// The runtime's default network: a bridge, or Podman's rootless
-		// user-mode network. Never the host's.
+		// user-mode network. Never the host's. A PrivateNetwork is
+		// connected once the container exists.
 	default:
 		return nil, fmt.Errorf("sandbox %q: network %q is not supported yet", spec.Name, spec.Network)
 	}
@@ -268,6 +275,12 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	id := strings.TrimSpace(string(out))
 	if i := strings.LastIndexByte(id, '\n'); i >= 0 {
 		id = id[i+1:]
+	}
+	if spec.Network == "open" && spec.PrivateNetwork != "" {
+		if _, err := b.cli(ctx, nil, nil, "network", "connect", spec.PrivateNetwork, id); err != nil {
+			_, _ = b.cli(context.WithoutCancel(ctx), nil, nil, "rm", "-f", id)
+			return nil, fmt.Errorf("sandbox %q: joining the session's network: %w", spec.Name, err)
+		}
 	}
 	return &Container{backend: b, ID: id, Name: spec.Name, Session: spec.Session, Image: img}, nil
 }

@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/bwsalmon/silo/v2/gitproxy"
 )
 
 // Options changes what Validate accepts.
@@ -452,6 +454,9 @@ func (v *validator) sandboxes() {
 				v.errorf(fmt.Sprintf("%s.repos[%d]", p, j), "no git entry is named %q", r)
 			}
 		}
+		if len(s.Repos) > 0 && !strings.HasPrefix(s.Workdir, "/") {
+			v.errorf(p+".workdir", "repos are checked out into workdir, which needs to be an absolute path in the sandbox")
+		}
 		if s.Backend.K8s != nil {
 			v.later(p+".backend", "backend k8s", "stage 11b")
 		}
@@ -565,6 +570,17 @@ func (v *validator) mcpFrom(p string, m MCPServer) {
 
 func (v *validator) git() {
 	v.names("git", len(v.f.Git), func(i int) string { return v.f.Git[i].Name })
+	// A git entry with no credential: uses the one credential delivered
+	// to {proxy: git}, if there is exactly one.
+	var proxied []string
+	for _, c := range v.f.Credentials {
+		for _, d := range c.To {
+			if d.Proxy == "git" {
+				proxied = append(proxied, c.Name)
+				break
+			}
+		}
+	}
 	for i, g := range v.f.Git {
 		p := fmt.Sprintf("git[%d]", i)
 		if strings.Count(g.Repo, "/") < 2 {
@@ -577,6 +593,11 @@ func (v *validator) git() {
 			if len(g.Push) == 0 {
 				v.errorf(p, "access push needs push: the ref patterns a push may update")
 			}
+			for j, pat := range g.Push {
+				if _, err := gitproxy.ParseRefRule(pat); err != nil {
+					v.errorf(fmt.Sprintf("%s.push[%d]", p, j), "%v", err)
+				}
+			}
 		} else {
 			if g.Push != nil {
 				v.errorf(p+".push", "push is only for access: push")
@@ -586,6 +607,9 @@ func (v *validator) git() {
 			}
 		}
 		if g.Credential == "" {
+			if len(proxied) > 1 {
+				v.errorf(p+".credential", "credentials %s are all delivered to {proxy: git}: name the one this repository uses", strings.Join(proxied, ", "))
+			}
 			continue
 		}
 		var cred *Credential

@@ -6,7 +6,8 @@ package gitproxy
 // enough for a proxy whose whole job is decide-then-stream, no routing
 // framework needed. grain builds one proxy for its daemon from files under
 // its data directory (BuildProxy); a silo session builds its own, from its
-// Silofile, and serves it on loopback for as long as the session runs
+// Silofile, and serves it on the session's private network for as
+// long as the session runs
 // (Serve).
 
 import (

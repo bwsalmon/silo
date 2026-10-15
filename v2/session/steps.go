@@ -48,8 +48,8 @@ var (
 )
 
 // RegisterStep adds a setup step. The built-in steps are numbered as in
-// design §3, times ten: credentials 20, location 30, tools 40, gateway
-// 50, stage 60.
+// design §3, times ten: credentials 20, audit 25, location 30, the git
+// proxy 35, tools 40, gateway 50, stage 60.
 func RegisterStep(st Step) {
 	regMu.Lock()
 	defer regMu.Unlock()
@@ -73,6 +73,7 @@ func Steps() []Step {
 
 func init() {
 	RegisterStep(Step{Name: "credentials", Order: 20, Run: stepCredentials})
+	RegisterStep(Step{Name: "audit", Order: 25, Run: stepAudit})
 	RegisterStep(Step{Name: "location", Order: 30, Run: stepLocation})
 	RegisterStep(Step{Name: "tools", Order: 40, Run: stepTools})
 	RegisterStep(Step{Name: "gateway", Order: 50, Run: stepGateway})
@@ -90,18 +91,36 @@ func stepCredentials(ctx context.Context, s *Session) (Undo, error) {
 	if r == nil {
 		r = &credentials.Resolver{Folder: s.File.Folder, Getenv: s.getenv}
 	}
+	s.resolver = r
 	var resolve []silofile.Credential
+	hosts := gitHosts(s.File)
+	vals := map[string]credentials.Value{}
 	for _, c := range s.File.Credentials {
-		if _, ok := s.opts.Credentials[c.Name]; !ok {
+		if _, ok := s.opts.Credentials[c.Name]; ok {
+			continue
+		}
+		if !proxyOnlyAmbient(c) {
 			resolve = append(resolve, c)
+			continue
+		}
+		// An ambient login used only by the git proxy is asked for each
+		// git host its entries are on, not for credentials.DefaultHost.
+		for _, h := range hosts[c.Name] {
+			v, err := r.ResolveHost(ctx, c, h)
+			if err != nil {
+				return nil, &location.PrerequisiteError{What: err.Error()}
+			}
+			if _, ok := vals[c.Name]; !ok {
+				vals[c.Name] = v
+			}
 		}
 	}
-	vals, err := r.ResolveAll(ctx, resolve, nil)
+	more, err := r.ResolveAll(ctx, resolve, nil)
 	if err != nil {
 		return nil, &location.PrerequisiteError{What: err.Error()}
 	}
-	if vals == nil {
-		vals = map[string]credentials.Value{}
+	for name, v := range more {
+		vals[name] = v
 	}
 	for name, v := range s.opts.Credentials {
 		vals[name] = credentials.Value{Name: name, Secret: v, Source: "the caller"}
@@ -129,6 +148,26 @@ func stepCredentials(ctx context.Context, s *Session) (Undo, error) {
 		s.AgentEnv[key] = vals[a.Credential].Secret
 	}
 	return nil, nil
+}
+
+// stepAudit opens the session's audit log, which the gateway and the
+// git proxy both write, with every credential value registered for
+// redaction.
+func stepAudit(ctx context.Context, s *Session) (Undo, error) {
+	log, err := audit.Open(filepath.Join(s.StateDir, audit.FileName), s.ID, audit.Caller{CLI: s.File.Agent.CLI, Host: s.File.Location.Kind})
+	if err != nil {
+		return nil, err
+	}
+	s.Audit = log
+	for name, v := range s.secrets() {
+		log.Register(name, v)
+	}
+	log.Observe(func(r audit.Record) {
+		if r.Event != audit.EventGit {
+			s.em.emit(toolCallEvent(r))
+		}
+	})
+	return func(context.Context) error { return log.Close() }, nil
 }
 
 // stepLocation prepares the location (step 3) and checks the CLI's
@@ -225,20 +264,11 @@ func stepTools(ctx context.Context, s *Session) (Undo, error) {
 // stepGateway starts the gateway (step 5) and confirms it lists every
 // tool.
 func stepGateway(ctx context.Context, s *Session) (Undo, error) {
-	log, err := audit.Open(filepath.Join(s.StateDir, "audit.jsonl"), s.ID, audit.Caller{CLI: s.File.Agent.CLI, Host: s.File.Location.Kind})
-	if err != nil {
-		return nil, err
-	}
-	s.Audit = log
-	for name, v := range s.secrets() {
-		log.Register(name, v)
-	}
-	log.Observe(func(r audit.Record) { s.em.emit(toolCallEvent(r)) })
+	log := s.Audit
 	g := gateway.New(log)
 	g.Register(s.Tools...)
 	if len(s.opts.Rename) > 0 {
 		if err := g.SetRename(s.opts.Rename); err != nil {
-			log.Close()
 			return nil, &Error{Code: ExitUsage, Err: err}
 		}
 		for from, to := range s.opts.Rename {
@@ -251,7 +281,7 @@ func stepGateway(ctx context.Context, s *Session) (Undo, error) {
 		if srv != nil {
 			errs = append(errs, srv.Close())
 		}
-		return errors.Join(append(errs, log.Close())...)
+		return errors.Join(errs...)
 	}
 	if err != nil {
 		return undo, err
