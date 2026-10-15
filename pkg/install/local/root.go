@@ -3,12 +3,12 @@ package local
 import (
 	"context"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/hostcap"
 	"github.com/bwsalmon/silo/pkg/backend/local/units"
 	"github.com/bwsalmon/silo/pkg/install"
 )
@@ -25,17 +25,16 @@ type Silod interface {
 var SilodTimeout = 2 * time.Minute
 
 // The root's capacity (local-backend.md call L20): (host total −
-// reserve) × overcommit. The reserve is 1 vCPU, 2 GiB or 10% of memory
-// (whichever is larger), and 10% of the data filesystem. Memory and
-// disk aren't overcommitted.
+// reserve) × overcommit, as hostcap computes it, which silod's leader
+// refreshes every hour after bootstrap.
 const (
-	DefaultCPUOvercommit = 2.0
-	MaxCPUOvercommit     = 8.0
+	DefaultCPUOvercommit = hostcap.DefaultCPUOvercommit
+	MaxCPUOvercommit     = hostcap.MaxCPUOvercommit
 )
 
 // RootCounts are the root's count classes, which the host's totals
-// don't bound: as many as any one machine is likely to want.
-var RootCounts = map[string]int64{"containers": 1000, "networks": 256, "volumes": 1000}
+// don't bound.
+var RootCounts = hostcap.Counts
 
 // silodSocket is where silod.service serves: units.Config.Socket, with
 // the user manager's %t filled in.
@@ -98,7 +97,7 @@ func (s *rootStep) Observe(ctx context.Context) (install.Observed, error) {
 	o.Classes = classesOn(s.c, s.h, report)
 	o.CPUs = s.h.CPUs
 	if b, err := s.h.ReadFile("/proc/meminfo"); err == nil {
-		o.MemoryMB = memTotalMB(string(b))
+		o.MemoryMB = hostcap.MemTotalMB(string(b))
 	}
 	if fs, err := s.h.Statfs(existing(s.h, s.c.DataDir)); err == nil {
 		o.DiskGB = int64(fs.Size >> 30)
@@ -120,17 +119,6 @@ func health(ctx context.Context, c Config, h Host) (*install.SilodHealth, string
 	return &got, ""
 }
 
-// memTotalMB is /proc/meminfo's MemTotal, in MiB.
-func memTotalMB(meminfo string) int64 {
-	for _, line := range strings.Split(meminfo, "\n") {
-		if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
-			kb, _ := strconv.ParseInt(f[1], 10, 64)
-			return kb / 1024
-		}
-	}
-	return 0
-}
-
 // existing is path, or its nearest ancestor that exists: the data
 // directory's filesystem before the directory is made.
 func existing(h Host, path string) string {
@@ -143,10 +131,7 @@ func existing(h Host, path string) string {
 
 // overcommit is --cpu-overcommit, DefaultCPUOvercommit when unset.
 func (s *rootStep) overcommit() float64 {
-	if s.c.CPUOvercommit == 0 {
-		return DefaultCPUOvercommit
-	}
-	return s.c.CPUOvercommit
+	return hostcap.Reserve{CPUOvercommit: s.c.CPUOvercommit}.Overcommit()
 }
 
 // capacity is the root's capacity from o's host totals (call L20).
@@ -154,13 +139,8 @@ func (s *rootStep) overcommit() float64 {
 // (local-registry.md call L74), which is charged to nobody, so that
 // every byte on disk is charged to some silo or inside the budget.
 func (s *rootStep) capacity(o *rootObserved) map[string]int64 {
-	mem := o.MemoryMB - max(2048, o.MemoryMB/10)
-	cache := int64(math.Ceil(imageCacheGB(s.c, s.h)))
-	out := map[string]int64{
-		"vcpu_m":    int64(float64(max(0, o.CPUs-1)*1000) * s.overcommit()),
-		"memory_mb": max(0, mem),
-		"disk_gb":   max(0, o.DiskGB-(o.DiskGB+9)/10-cache),
-	}
+	out := hostcap.Capacity(hostcap.Totals{CPUs: o.CPUs, MemoryMB: o.MemoryMB, DiskGB: o.DiskGB},
+		hostcap.Reserve{CPUOvercommit: s.c.CPUOvercommit, CacheGB: imageCacheGB(s.c, s.h)})
 	for k, v := range RootCounts {
 		out[k] = v
 	}
