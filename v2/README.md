@@ -44,9 +44,11 @@ one; `silo run` carries it out once.
 - [`docs/grain.md`](docs/grain.md): grain as silo's first client, and
   its migration path.
 - [`docs/hub.md`](docs/hub.md): the collection hub that links many
-  grain nodes (Track 2.1): its architecture, the node registry
-  (`hub/registry`) and the outbound rendezvous (`hub/rendezvous`), both
-  built, and the identity, dispatch and event stages after them.
+  grain nodes (Track 2): its architecture, the node registry
+  (`hub/registry`), the outbound rendezvous (`hub/rendezvous`), human
+  sign-on (`hub/identity`) and the team directory with node tokens
+  (`hub/directory`), all built, and the dispatch and event stages after
+  them.
 - [`docs/examples/`](docs/examples/): example silo folders.
 
 ## Module
@@ -209,6 +211,11 @@ changing a type, run `go generate ./silofile` and
 | `internal/lockfile` | `.silo/lock.json`: one key per part of silo (`images`, `mcp`), each written without disturbing the others. |
 | `internal/mcptest` | A test MCP server over stdio or HTTP whose tool list can change, used by the proxy and session tests. |
 | `internal/githubsim` | A stand-in for github.com's git endpoints (who may fetch and push, with GitHub's statuses) over `git http-backend`, copied from grain's `pkg/github/githubsim`; the session's git proxy tests run against it over HTTPS. |
+| `hub/registry` | The hub's in-memory node directory (hub.md §3): registration, ownership of node IDs, status, slot claims. |
+| `hub/rendezvous` | The node's outbound WebSocket to the hub and its reverse tunnel (hub.md §4): authentication bound to a node ID, admission, heartbeats, streams both ways, the per-caller filtered directory. |
+| `hub/identity` | Human sign-on (hub.md §5.1): IAP assertion and OIDC ID-token verification against the issuer's JWKS, and the OIDC relying party (code flow with PKCE, signed session cookie). |
+| `hub/directory` | The team directory in SQLite or PostgreSQL (hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
+| `internal/pgtest` | Throwaway PostgreSQL servers for tests, copied from v1's `pkg/internal/pgtest`. |
 | `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
 
 ## The tunnel sidecar image
