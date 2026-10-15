@@ -109,6 +109,11 @@ type Mirror struct {
 	passes sync.Map // repo id -> *sync.Mutex, so passes never overlap
 	seq    atomic.Uint64
 
+	// running counts the goroutines Run has started -- the change
+	// follower, repo passes and index passes -- so that Run returns only
+	// once none of them is left.
+	running sync.WaitGroup
+
 	// indexAt is when the index pass is next due (zero: not due), and
 	// indexBackoff how long it waits after a failure. indexMu keeps
 	// index passes from overlapping.
@@ -225,7 +230,8 @@ func (m *Mirror) markAll(ctx context.Context, seq uint64) error {
 // Run runs the mirror loop until ctx ends: at start every repo is
 // dirty once, which also covers a crash between a push and its store
 // write; then each change to a repo, or to the tree or policies its
-// path and mirroring come from, makes it dirty again.
+// path and mirroring come from, makes it dirty again. Run returns only
+// once every pass it started has finished.
 func (m *Mirror) Run(ctx context.Context) error {
 	var seq uint64
 	if err := m.opts.Store.Tx(ctx, func(tx store.Tx) error {
@@ -242,8 +248,11 @@ func (m *Mirror) Run(ctx context.Context) error {
 	if err := m.markAll(ctx, seq); err != nil {
 		return err
 	}
+	defer m.running.Wait()
 	m.indexDue(0)
+	m.running.Add(1)
 	go func() {
+		defer m.running.Done()
 		for c := range changes {
 			switch c.Kind {
 			case repos.PushChangeKind, repos.ChangeKind:
@@ -297,7 +306,9 @@ func (m *Mirror) dispatch(ctx context.Context, sem chan struct{}) {
 		s := m.repos[id]
 		s.running, s.force = true, false
 		seq := s.dirty
+		m.running.Add(1)
 		go func() {
+			defer m.running.Done()
 			defer func() { <-sem; m.poke() }()
 			err := m.pass(ctx, id, seq)
 			m.done(id, seq, err)
@@ -359,7 +370,9 @@ func (m *Mirror) dispatchIndex(ctx context.Context) {
 		}
 	}
 	m.indexAt, m.indexRunning = time.Time{}, true
+	m.running.Add(1)
 	go func() {
+		defer m.running.Done()
 		err := m.Index(ctx)
 		m.mu.Lock()
 		m.indexRunning = false
