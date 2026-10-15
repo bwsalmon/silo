@@ -103,7 +103,9 @@ anything, one line per check, and exits 69 if any check fails. So far it
 checks MCP servers (a remote one on its own BatchMode connection to the
 agent host: its config read there, its binary found on its remote
 `PATH`), the ssh location, and for granule sandboxes the granule binary,
-`granule doctor` (KVM) and that each VM image can be pulled.
+`granule doctor` (KVM) and that each VM image can be pulled; for
+granule sandboxes with `backend: {k8s: ...}`, that some node offers
+`devic.es/kvm` (and `devic.es/tun` with `network: open`).
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
@@ -173,6 +175,8 @@ changing a type, run `go generate ./silofile` and
 | `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function or an HTTP client (a Unix socket's), and blocking tools; `Prelaunch`, `Reap` and `Gone` hooks front a server on the ssh agent host the same way; stage 6b's caller-provided servers are fronted the same way. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
+| `sandbox/granule` | `kind: granule` on the local Docker (journey 7): the `granule` binary's `vm create`, `vm wait`, `vm exec` and `vm delete`. `Guest` is what both granule backends share: the environment file, the kill of a cancelled command, the file tools and `DeliverFile`, all through `granule exec`. |
+| `sandbox/k8s` | `kind: granule` with `backend: {k8s: ...}` (journey 9): one unprivileged pod per sandbox from the granule VM image, given `/dev/kvm` by granule's KVM device plugin, reached with `kubectl exec ... granule exec`, labelled like the k8s location's pods so `silo gc` removes them; the `--dry-run` device check. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. A session's internal network, which sandboxes with `repos` join to reach the git proxy. |
 | `localexec` | The local executor (design §12): script snapshot, refusals, `silo validate`'s warnings, one tool per script run with no shell, and the approvers (terminal prompt, and the queue `silo approve` answers). |
 | `control` | The session's control socket: JSON-RPC 2.0 over a Unix socket, a method table later stages add to, and a client. |
@@ -241,6 +245,21 @@ spec, that teardown deletes the pod and the Secret, that `silo gc`'s
 k8s part removes a leaked pod and keeps a live one, and the `--dry-run`
 checks. They need Docker, `kind` and `kubectl`, which the sandbox image
 carries; `SILO_V2_REQUIRE_DOCKER=1` makes their absence a failure.
+
+`sandbox/k8s`'s unit tests compare pod specs with golden files and
+check the no-network pod against the `restricted` Pod Security
+Standard. `TestGranulePod` boots a real granule sandbox pod on a kind
+cluster whose node has the host's `/dev/kvm`. It loads granule's
+device plugin and grain's guest image (`SILO_V2_GRANULE_IMAGE`
+overrides it) into the cluster, puts the sandbox in a namespace that
+enforces `restricted`, and checks exec, exit codes, stdin, the
+environment, that the guest has no network, the file tools,
+`DeliverFile`, a cancelled exec, `Find`, `kubectl logs` and `Destroy`.
+Loading an 8 GB guest image into kind takes about two minutes and
+twice the image's size in disk, so the test runs only with
+`SILO_V2_REQUIRE_K8S_KVM=1`, which also makes missing Docker, kind,
+kubectl or `/dev/kvm` a failure. grain CI sets it. The kind node's udev gives `/dev/kvm` its own kvm
+group, which changes it on the host too, so the test gives it back.
 
 `location/ssh`'s tests run against a real `sshd` in a Docker container
 (Debian's `openssh-server`, built on first use as `silo-v2-sshd-test`)

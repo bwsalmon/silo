@@ -214,7 +214,7 @@ sandboxes:
       - {from: ., to: /silo, rw: false}
     repos: [widgets]          # git[] entries checked out into workdir through the git proxy
     env: {GOFLAGS: -mod=mod}
-    backend: local            # local | {k8s: {...}} (later, journey 9)
+    backend: local            # local | {k8s: {context, namespace, kvm_group}} (granule only, journey 9)
     lifetime: session         # session | persistent (later, grain.md §2.3)
     package_cache: {url: ..., ca: ...}   # later, grain.md §2.3
     model_access: [anthropic] # later: the model proxy, grain.md §2.5
@@ -1015,6 +1015,66 @@ on the host is reached as well. `--dry-run` checks that granule is
 found, that `granule doctor` passes (`/dev/kvm` above all), and that
 each image is local or offered by its registry, without pulling it.
 
+As built in stage 11b (`sandbox/k8s`, journey 9): a `granule` sandbox
+with `backend: {k8s: {context, namespace}}` is a pod in that cluster,
+named `silo-<session>-<digest of the sandbox's name>`, made with the
+system `kubectl` as the k8s location makes its own (§5.4). The pod has
+one container, `vm`, whose image is the sandbox's granule VM image; its
+`args` are `[run]`, which leaves the image's entrypoint (granule's shim)
+in place to boot the VM, and its readiness probe is `granule ready
+-timeout 0`, so `Ready` means the guest answers rather than that the
+container started. Its shape is granule's own `deploy/k8s` manifests'.
+It is never privileged. It asks for `devic.es/kvm` from granule's KVM
+device plugin, which puts `/dev/kvm` in the container and in its device
+cgroup. With `network: none` the guest has no network device at all
+(`CHV_NET_MODE=none`) and the pod runs as nobody (65534) with every
+capability dropped, `allowPrivilegeEscalation: false`, a read-only root
+filesystem, seccomp `RuntimeDefault` and only `emptyDir` volumes, which
+the `restricted` Pod Security Standard admits. Where the nodes' `/dev/kvm`
+is `0660` rather than GKE's `0666`, `kvm_group` names the group that
+owns it, given to the pod as a supplemental group. With `network: open`
+the guest takes over the pod's own address (`CHV_NET_MODE=inline`), and
+the pod asks for `devic.es/tun` as well. It runs as root with
+`NET_ADMIN`, in the pod's own network namespace only, which no Pod
+Security level short of `privileged` admits. `cpus`, `memory` and `disk`
+become `CHV_CPUS`, `CHV_MEMORY_MB` and `CHV_DISK_SIZE_MB`; the pod
+requests the cpus and limits memory to the guest's plus 512 MiB for the
+VMM. `Exec` is `kubectl exec <pod> -c vm -- granule exec [-w <dir>] --
+<argv>`, which granule relays to its in-guest agent over the VM's vsock
+device. `env`, the file tools, `DeliverFile` and a cancelled `Exec`'s
+kill are the local granule backend's, shared as `granule.Guest`: values
+reach the guest over `kubectl exec`'s stdin, never a command line or the
+pod spec. `kubectl logs <pod>` is the guest console. Create fails at once
+on an image that cannot be pulled or a VM that exits, with the end of
+that console. Otherwise it waits up to ten minutes, since guest images
+are gigabytes. The image's digest is the one the node pulled. Pods carry
+the k8s location's labels (`app.kubernetes.io/managed-by: silo`,
+`silo.dev/session`, the `silo.dev/origin` annotation) plus
+`silo.dev/role: sandbox`. The session records a `k8s-pod` resource for
+each cluster before creating any, so `silo gc` after a crash, and `silo
+gc --k8s`, delete sandbox pods as they delete the location's.
+`--dry-run` lists the nodes and checks that some node offers
+`devic.es/kvm`, and `devic.es/tun` too when a sandbox there has
+`network: open`. It creates no pod, so whether a node can pull the guest
+image is left to `silo run`. `backend: k8s` is for `kind: granule`
+only. `repos` are refused there until the git proxy has a path into a
+cluster (§9.3).
+
+**Where this departs from grain's `docs/k8s-granule-design.md`.** Grain
+settled on privileged pods with a `/dev/kvm` hostPath, in a namespace
+the operator relabels `privileged`. silo instead uses granule's device
+plugin and unprivileged pods, as journey 9 asks. granule's `deploy/k8s`
+(at the commit stage 11b copied from) adopted that plugin after grain's
+document was written, and its `gke.md` shows it working on GKE and on
+kind. A privileged container is root on the node if a guest escapes the
+VMM; the device plugin's pod is not. What silo does take from grain: it
+never relabels a namespace (the operator chooses its Pod Security level,
+and a sandbox with no network needs no more than `restricted`); the
+readiness probe; `args`, not `command`; and the guest checked by a real
+boot rather than by `/dev/kvm` existing. Grain's node-pool pinning
+(`-k8s-node-selector`) exists as `Backend.NodeSelector` but is not yet
+in the Silofile.
+
 ## 8. Credentials
 
 ### 8.1 Sources
@@ -1132,7 +1192,12 @@ one.
   other callers out. A rootless Podman network's gateway is inside
   Podman's network namespace, not on the host, so there the proxy
   cannot listen and the session fails at start saying so: sandboxes with
-  `repos` need Docker or rootful Podman in v2.0.
+  `repos` need Docker or rootful Podman in v2.0. A sandbox with `backend: k8s`
+  (journey 9) is on no network of the invoking machine's, so the
+  stage 7b proxy cannot reach it, and `repos` are refused for it until a
+  later stage gives the proxy a path into the cluster. That path should
+  be a tunnel like the k8s location's gateway tunnel (§5.4) rather than
+  a listener beyond loopback.
 - **Tokens.** One per sandbox with `repos` (`gitproxy.TokenSet`), in
   memory, so each audit line's `caller` names the session and the
   sandbox. They die with the proxy at teardown.
@@ -2047,7 +2112,7 @@ agent: {cli: claude, auth: {credential: anthropic}, mode: headless, prompt: prom
   through granule's in-guest agent, which is what `Sandbox.Exec` maps
   to; `kubectl logs` gives the guest console. The cluster needs nodes
   with nested virtualisation and the device plugin; `--dry-run` checks
-  for the device resource on some node.
+  for the device resource on some node. Stage 11b built this (§7.3).
 - **Grain:** grain's `docs/k8s-granule-design.md` records what running
   granule pods in a cluster settled for grain (privileged vs device
   plugin, node pools). silo should follow it rather than decide again.

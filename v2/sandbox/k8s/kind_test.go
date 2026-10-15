@@ -24,6 +24,7 @@ import (
 // cluster -- Docker, kind, kubectl and a /dev/kvm this user may open --
 // a failure rather than a skip. Without it the test is skipped: it
 // loads a guest image of several gigabytes into the cluster.
+// grain CI sets it.
 const RequireEnv = "SILO_V2_REQUIRE_K8S_KVM"
 
 // The images as the kind node holds them, loaded rather than pulled.
@@ -79,7 +80,7 @@ func kindKVM(t *testing.T) *cluster {
 	t.Helper()
 	var missing error
 	if os.Getenv(RequireEnv) == "" {
-		t.Skipf("granule pods on kind are not run here: set %s=1 on a machine with Docker, kind, kubectl and /dev/kvm (grain CI does not: see v2/README.md)", RequireEnv)
+		t.Skipf("granule pods on kind are not run here: set %s=1 on a machine with Docker, kind, kubectl and /dev/kvm (grain CI does)", RequireEnv)
 	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		missing = fmt.Errorf("docker is not working: %v", err)
@@ -235,10 +236,11 @@ func TestGranulePod(t *testing.T) {
 	if got, want := string(res.Stdout), "it's here\n/work\nLinux\nin\n"; got != want || res.ExitCode != 3 {
 		t.Errorf("exec: stdout %q, exit %d, stderr %q; want %q, exit 3", got, res.ExitCode, res.Stderr, want)
 	}
-	// The guest has no network device beyond loopback.
-	res, err = sb.Exec(ctx, sandbox.ExecRequest{Argv: []string{"/bin/sh", "-c", "ls /sys/class/net"}})
-	if err != nil || strings.TrimSpace(string(res.Stdout)) != "lo" {
-		t.Errorf("guest network devices: %q %q %v; want only lo", res.Stdout, res.Stderr, err)
+	// The guest has no network device: only virtual ones (loopback,
+	// and the guest image's own docker0), none with a device behind it.
+	res, err = sb.Exec(ctx, sandbox.ExecRequest{Argv: []string{"/bin/sh", "-c", "for d in /sys/class/net/*; do [ -e $d/device ] && echo ${d##*/}; done; true"}})
+	if err != nil || strings.TrimSpace(string(res.Stdout)) != "" {
+		t.Errorf("guest network devices: %q %q %v; want none", res.Stdout, res.Stderr, err)
 	}
 
 	if err := sb.WriteFile(ctx, "sub/note.txt", []byte("hello"), 0o640); err != nil {
