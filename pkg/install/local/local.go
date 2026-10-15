@@ -70,6 +70,10 @@ type Config struct {
 	// CPUOvercommit is the root's vcpu_m overcommit (call L20); 0 is
 	// DefaultCPUOvercommit.
 	CPUOvercommit float64
+	// EgressAllow is the root's egress allowlist (--egress-allow);
+	// empty is none, install's default: nothing in the tree reaches the
+	// outside world until an admin allows it.
+	EgressAllow []string
 	// Uninstall is set for silo uninstall, which needs no silod binary,
 	// and DeleteData is its --delete-data.
 	Uninstall  bool

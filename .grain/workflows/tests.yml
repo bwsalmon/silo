@@ -236,7 +236,9 @@ jobs:
           }
           trap uninstall EXIT
           echo "=== silo install --backend local ==="
-          if ! /tmp/silo-bin/silo install --backend local --yes; then
+          # --egress-allow '*': the fence cases' silos ask for any name,
+          # which no child may have that the root hasn't.
+          if ! /tmp/silo-bin/silo install --backend local --yes --egress-allow '*'; then
             journalctl --user --no-pager -u silo-nsd -u silo-containerd -u silod | tail -n 100
             exit 1
           fi

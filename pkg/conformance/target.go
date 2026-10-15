@@ -128,6 +128,8 @@ func FenceOf(t *testing.T, target Target) Fence {
 	switch {
 	case errors.Is(err, ErrNotOffered):
 		t.Skipf("not offered: %s has no probes", target.Name())
+	case errors.As(err, &nr) && nr.Required:
+		t.Fatalf("%s: %v, but this environment requires it", target.Name(), err)
 	case errors.As(err, &nr):
 		t.Skipf("%s: %v", target.Name(), err)
 	case err != nil:
@@ -154,7 +156,13 @@ var ErrNotOffered = errors.New("not offered")
 
 // NotRunnable is a Target's answer for a capability its backend has
 // but that can't be run in this environment, or not yet.
-type NotRunnable struct{ Why string }
+// Required, set, makes it a failure of the cases that need the
+// capability rather than a skip: the environment promised it (the
+// local-conformance job sets SILO_REQUIRE_LOCAL_TARGETS).
+type NotRunnable struct {
+	Why      string
+	Required bool
+}
 
 func (e *NotRunnable) Error() string { return "not runnable here: " + e.Why }
 
@@ -209,6 +217,8 @@ func RegistryOf(t *testing.T, target Target) Registry {
 	switch {
 	case errors.Is(err, ErrNotOffered):
 		t.Skipf("not offered: %s has no registry", target.Name())
+	case errors.As(err, &nr) && nr.Required:
+		t.Fatalf("%s: %v, but this environment requires it", target.Name(), err)
 	case errors.As(err, &nr):
 		t.Skipf("%s: %v", target.Name(), err)
 	case err != nil:

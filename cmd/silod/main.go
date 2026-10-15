@@ -63,6 +63,7 @@ import (
 	localusage "github.com/bwsalmon/silo/pkg/backend/local/usage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/facade/local/docker"
+	"github.com/bwsalmon/silo/pkg/facade/local/dockergw"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
 	"github.com/bwsalmon/silo/pkg/gateway"
@@ -1035,8 +1036,16 @@ func serve(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		ssrv := srv
+		if *backendKind == local.Kind && !*callerHeader {
+			// The local backend's front door: the peer uid's member silo
+			// is the caller (local-backend.md §2).
+			pu := &dockergw.ByPeerUID{Store: db, Handler: handler}
+			ssrv = &http.Server{Handler: pu, ConnContext: pu.ConnContext, ReadHeaderTimeout: 10 * time.Second, ConnState: countSessions(&sessions)}
+			defer ssrv.Close()
+		}
 		log.Printf("serving on %s", *socket)
-		go func() { errc <- srv.Serve(l) }()
+		go func() { errc <- ssrv.Serve(l) }()
 	}
 	if *listen != "" {
 		l, err := net.Listen("tcp", *listen)

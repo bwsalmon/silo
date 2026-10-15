@@ -2,6 +2,7 @@ package fence_test
 
 import (
 	"net/netip"
+	"os"
 	"testing"
 
 	"github.com/bwsalmon/silo/pkg/conformance"
@@ -35,22 +36,30 @@ func mkTree(f conformance.F) tree {
 	return tr
 }
 
-// The installed local targets report their Fence as not runnable here,
-// never as passing, and so does GCP without the GCP harness; the fake
-// runs.
+// local/vm reports its Fence as not runnable here, never as passing,
+// and so does GCP without the GCP harness, and local/sandbox without a
+// local install; the fake runs.
 func TestTargetsFence(t *testing.T) {
 	for _, tg := range targets.All() {
 		if tg.Name() == "gcp" && targets.GCPHarness {
 			continue // runnable or not, as the harness's install went
 		}
 		_, err := tg.Fence(t)
+		nr, notRunnable := err.(*conformance.NotRunnable)
 		switch tg.Name() {
 		case "local/fake":
 			if err != nil {
 				t.Errorf("local/fake: %v", err)
 			}
+		case "local/sandbox":
+			if err != nil && !notRunnable {
+				t.Errorf("local/sandbox: %v", err)
+			}
+			if notRunnable && nr.Required != (os.Getenv(targets.RequireLocalEnv) != "") {
+				t.Errorf("local/sandbox: Required %v with %s=%q", nr.Required, targets.RequireLocalEnv, os.Getenv(targets.RequireLocalEnv))
+			}
 		default:
-			if _, ok := err.(*conformance.NotRunnable); !ok {
+			if !notRunnable {
 				t.Errorf("%s: %v, want not runnable", tg.Name(), err)
 			}
 		}

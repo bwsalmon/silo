@@ -16,10 +16,12 @@
 //     cases, not their images, which it says as conformance.Simulated.
 //   - "local/sandbox" and "local/vm": silod installed with --backend
 //     local, probes made through the facade in each isolation class.
-//     local-conformance installs the local backend (FindInstall finds
-//     it), but no probe container is made through it yet, so their
-//     Fence and Registry report themselves not runnable; the vm class
-//     also waits on step 10's runtime.Driver.
+//     local-conformance installs the local backend, and FindInstall
+//     finds it: local/sandbox's Fence is that install (localfence.go),
+//     and with RequireLocalEnv set, a local/sandbox Fence that can't be
+//     run fails its cases rather than skipping them. Its Registry isn't
+//     built over the install yet, and the vm class waits on step 10's
+//     runtime.Driver; both report themselves not runnable.
 //   - "gcp": the GCP backend, which has no registry, so it reports the
 //     registry cases as not offered, never as passing. Its Fence is the
 //     GCP harness's install (pkg/conformance/gcpharness), with e2-micro
@@ -31,6 +33,8 @@
 package targets
 
 import (
+	"errors"
+	"os"
 	"testing"
 
 	"github.com/bwsalmon/silo/pkg/conformance"
@@ -64,10 +68,14 @@ func (l Local) Registry(testing.TB) (conformance.Registry, error) {
 	return nil, &conformance.NotRunnable{Why: why}
 }
 
-func (l Local) Fence(testing.TB) (conformance.Fence, error) {
-	why := "no probe containers are made through an installed silod's facade yet (local-conformance installs the local backend, and pkg/conformance/local's TestInstalledSandbox runs a sandbox container in it)"
+func (l Local) Fence(t testing.TB) (conformance.Fence, error) {
 	if l.Class == "vm" {
-		why += "; the vm class also waits on step 10's runtime.Driver"
+		return nil, &conformance.NotRunnable{Why: "the vm class waits on step 10's runtime.Driver"}
 	}
-	return nil, &conformance.NotRunnable{Why: why}
+	f, err := l.installedFence(t)
+	var nr *conformance.NotRunnable
+	if errors.As(err, &nr) {
+		nr.Required = os.Getenv(RequireLocalEnv) != ""
+	}
+	return f, err
 }
