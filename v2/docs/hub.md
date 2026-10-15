@@ -568,6 +568,7 @@ anything leaves it.
 | 2.3 | The backlog and its store, the intake API, the dispatcher (per-team ordering, constraints, admission rechecked, refusal, lost nodes, resume, cancel) and the task-stream protocol (`hub/tasks`). `registry.ClaimFor`. | here, built |
 | 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
 | 2.5 | A `silo hub serve` command and its deployment (Cloud Run or GKE behind IAP) | silo |
+| 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 
 ## 10. Open questions
