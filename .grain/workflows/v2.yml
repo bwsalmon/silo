@@ -107,6 +107,22 @@ jobs:
           docker pull -q ghcr.io/gke-labs/granule/debian.rootfs@sha256:5f8de1ecfb8057064198f09325102d61b277136b2186ffab8258ab1029681f4c
           docker tag ghcr.io/gke-labs/granule/debian.rootfs@sha256:5f8de1ecfb8057064198f09325102d61b277136b2186ffab8258ab1029681f4c ghcr.io/gke-labs/granule/debian.rootfs:latest
 
+      # The hub's team directory (v2/hub/directory) runs its store
+      # tests against PostgreSQL as well as SQLite; v2/internal/pgtest
+      # starts a throwaway server from these binaries.
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+          ls /usr/lib/postgresql/*/bin/initdb
+
       - name: Format
         run: |
           cd v2
@@ -131,4 +147,5 @@ jobs:
           # sandbox/k8s's TestGranulePod: a granule sandbox pod on a kind
           # cluster whose node has this runner's /dev/kvm.
           SILO_V2_REQUIRE_K8S_KVM: "1"
+          SILO_V2_REQUIRE_POSTGRES: "1"
         run: cd v2 && go test -race -timeout 20m ./...

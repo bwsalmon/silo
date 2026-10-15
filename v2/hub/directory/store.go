@@ -1,0 +1,476 @@
+// Package directory is the Silo hub's team directory (docs/hub.md §5):
+// which teams exist, who is in each, which team owns each repository,
+// and the node tokens the hub has minted. It lives in a store, SQLite
+// for one replica and PostgreSQL for several, and it decides:
+//
+//   - whom a node's token proves it to be (Authenticate, for
+//     rendezvous.Server.Authenticate);
+//   - whether a node's owner may serve the repositories it lists
+//     (Admit, for rendezvous.Server.Admit);
+//   - what a human may see and change (Access, and the HTTP API).
+//
+// A node token is shown once, when it is minted; the store keeps only
+// its SHA-256, so a leaked database proves nobody.
+package directory
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
+	_ "modernc.org/sqlite"             // "sqlite"
+)
+
+// Role is a member's role in a team.
+type Role string
+
+const (
+	// Member may serve the team's repositories from their nodes and see
+	// its tasks and nodes.
+	Member Role = "member"
+	// Admin is a member who also assigns repositories to the team and
+	// manages its members.
+	Admin Role = "admin"
+)
+
+func (r Role) valid() bool { return r == Member || r == Admin }
+
+var (
+	// ErrNotFound is a team, member, repository or token that does not
+	// exist.
+	ErrNotFound = errors.New("directory: not found")
+	// ErrExists is a team that already exists.
+	ErrExists = errors.New("directory: already exists")
+	// ErrOwned is a repository another team already owns: every
+	// repository has exactly one owning team.
+	ErrOwned = errors.New("directory: repository is owned by another team")
+	// ErrNodeOwner is a node token asked for a node ID that a live token
+	// already binds to another owner.
+	ErrNodeOwner = errors.New("directory: node belongs to another owner")
+	// ErrInvalid is a malformed team ID, repository or role.
+	ErrInvalid = errors.New("directory: invalid")
+)
+
+// Team is one team, with its members and repositories.
+type Team struct {
+	ID      string          `json:"id"`
+	Name    string          `json:"name"`
+	Members map[string]Role `json:"members"`
+	Repos   []string        `json:"repos"`
+}
+
+// Store is the team directory.
+type Store struct {
+	db       *sql.DB
+	postgres bool
+	// Now, when set, is the clock tokens are stamped with.
+	Now func() time.Time
+}
+
+// Open opens the directory at url: "postgres://..." (or
+// "postgresql://...") for PostgreSQL, "sqlite:PATH" or a bare path for
+// SQLite (":memory:" for a throwaway one). It creates the tables if
+// they are missing.
+func Open(ctx context.Context, url string) (*Store, error) {
+	var (
+		db       *sql.DB
+		err      error
+		postgres = strings.HasPrefix(url, "postgres://") || strings.HasPrefix(url, "postgresql://")
+	)
+	if postgres {
+		db, err = sql.Open("pgx", url)
+	} else {
+		path := strings.TrimPrefix(url, "sqlite:")
+		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+		// One connection: an in-memory database is per connection, and
+		// SQLite serialises writers anyway.
+		db.SetMaxOpenConns(1)
+	}
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{db: db, postgres: postgres}
+	if err := s.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close closes the store.
+func (s *Store) Close() error { return s.db.Close() }
+
+const schema = `
+CREATE TABLE IF NOT EXISTS teams (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	created_at BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_members (
+	team TEXT NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+	principal TEXT NOT NULL,
+	role TEXT NOT NULL CHECK (role IN ('member', 'admin')),
+	PRIMARY KEY (team, principal)
+);
+CREATE INDEX IF NOT EXISTS team_members_principal ON team_members (principal);
+CREATE TABLE IF NOT EXISTS team_repos (
+	repo TEXT PRIMARY KEY,
+	team TEXT NOT NULL REFERENCES teams (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS team_repos_team ON team_repos (team);
+CREATE TABLE IF NOT EXISTS node_tokens (
+	id TEXT PRIMARY KEY,
+	hash TEXT NOT NULL UNIQUE,
+	owner TEXT NOT NULL,
+	node TEXT NOT NULL,
+	created_at BIGINT NOT NULL,
+	revoked_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS node_tokens_node ON node_tokens (node);
+CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_live ON node_tokens (node) WHERE revoked_at IS NULL;
+`
+
+func (s *Store) migrate(ctx context.Context) error {
+	for _, stmt := range strings.Split(schema, ";") {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("directory: creating tables: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+// q rewrites the ? placeholders of a query for PostgreSQL. No query
+// here has a ? anywhere else.
+func (s *Store) q(query string) string {
+	if !s.postgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, c := range query {
+		if c == '?' {
+			n++
+			b.WriteString("$" + strconv.Itoa(n))
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// tx runs f in a transaction, committing if it returns nil.
+func (s *Store) tx(ctx context.Context, f func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := f(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+var teamID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// repoName is "owner/name", as package registry normalises it.
+var repoName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9._-]+$`)
+
+func normRepo(repo string) (string, error) {
+	r := strings.ToLower(strings.TrimSpace(repo))
+	if !repoName.MatchString(r) {
+		return "", fmt.Errorf("%w repository %q: want owner/name", ErrInvalid, repo)
+	}
+	return r, nil
+}
+
+// normPrincipal is how principals are stored and compared: an email or
+// group address, lower-cased.
+func normPrincipal(p string) (string, error) {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if p == "" || strings.ContainsAny(p, " \t\n/") {
+		return "", fmt.Errorf("%w principal %q", ErrInvalid, p)
+	}
+	return p, nil
+}
+
+func isUnique(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "unique") || strings.Contains(m, "duplicate key") || strings.Contains(m, "primary key")
+}
+
+// CreateTeam creates a team. Its ID is 1-63 characters of [a-z0-9-].
+func (s *Store) CreateTeam(ctx context.Context, id, name string) error {
+	if !teamID.MatchString(id) {
+		return fmt.Errorf("%w team ID %q: want 1-63 of [a-z0-9-]", ErrInvalid, id)
+	}
+	if name == "" {
+		name = id
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)`), id, name, s.now().UnixMilli())
+	if isUnique(err) {
+		return fmt.Errorf("%w: team %s", ErrExists, id)
+	}
+	return err
+}
+
+// DeleteTeam deletes a team, its memberships and its repositories,
+// which are left with no owner, so no node serves them until another
+// team takes them.
+func (s *Store) DeleteTeam(ctx context.Context, id string) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		for _, q := range []string{`DELETE FROM team_members WHERE team = ?`, `DELETE FROM team_repos WHERE team = ?`} {
+			if _, err := tx.ExecContext(ctx, s.q(q), id); err != nil {
+				return err
+			}
+		}
+		res, err := tx.ExecContext(ctx, s.q(`DELETE FROM teams WHERE id = ?`), id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: team %s", ErrNotFound, id)
+		}
+		return nil
+	})
+}
+
+// Teams lists every team, with its members and repositories, by ID.
+func (s *Store) Teams(ctx context.Context) ([]Team, error) {
+	byID := map[string]*Team{}
+	var ids []string
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name FROM teams`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		t := &Team{Members: map[string]Role{}, Repos: []string{}}
+		if err := rows.Scan(&t.ID, &t.Name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		byID[t.ID] = t
+		ids = append(ids, t.ID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT team, principal, role FROM team_members`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var team, p, role string
+		if err := rows.Scan(&team, &p, &role); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if t := byID[team]; t != nil {
+			t.Members[p] = Role(role)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT team, repo FROM team_repos ORDER BY repo`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var team, repo string
+		if err := rows.Scan(&team, &repo); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if t := byID[team]; t != nil {
+			t.Repos = append(t.Repos, repo)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	sort.Strings(ids)
+	out := make([]Team, len(ids))
+	for i, id := range ids {
+		out[i] = *byID[id]
+	}
+	return out, nil
+}
+
+func (s *Store) teamExists(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, id string) error {
+	var one int
+	err := q.QueryRowContext(ctx, s.q(`SELECT 1 FROM teams WHERE id = ?`), id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: team %s", ErrNotFound, id)
+	}
+	return err
+}
+
+// SetMember adds principal (an email, or a group the identity provider
+// reports) to team with role, or changes their role.
+func (s *Store) SetMember(ctx context.Context, team, principal string, role Role) error {
+	p, err := normPrincipal(principal)
+	if err != nil {
+		return err
+	}
+	if !role.valid() {
+		return fmt.Errorf("%w role %q: want member or admin", ErrInvalid, role)
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if err := s.teamExists(ctx, tx, team); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_members (team, principal, role) VALUES (?, ?, ?)
+			ON CONFLICT (team, principal) DO UPDATE SET role = excluded.role`), team, p, string(role))
+		return err
+	})
+}
+
+// RemoveMember removes principal from team.
+func (s *Store) RemoveMember(ctx context.Context, team, principal string) error {
+	p, _ := normPrincipal(principal)
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM team_members WHERE team = ? AND principal = ?`), team, p)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: %s in team %s", ErrNotFound, p, team)
+	}
+	return nil
+}
+
+// AssignRepo makes team the owner of repo. A repository another team
+// owns is refused (ErrOwned): it has to be released first, so one
+// team's admin cannot take another team's repository.
+func (s *Store) AssignRepo(ctx context.Context, team, repo string) error {
+	r, err := normRepo(repo)
+	if err != nil {
+		return err
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if err := s.teamExists(ctx, tx, team); err != nil {
+			return err
+		}
+		var owner string
+		err := tx.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&owner)
+		switch {
+		case err == nil && owner == team:
+			return nil
+		case err == nil:
+			return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, r, owner)
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO team_repos (repo, team) VALUES (?, ?)`), r, team)
+		if isUnique(err) {
+			return fmt.Errorf("%w: %s", ErrOwned, r)
+		}
+		return err
+	})
+}
+
+// ReleaseRepo removes team's ownership of repo, leaving it with no
+// owner.
+func (s *Store) ReleaseRepo(ctx context.Context, team, repo string) error {
+	r, err := normRepo(repo)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM team_repos WHERE repo = ? AND team = ?`), r, team)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: %s in team %s", ErrNotFound, r, team)
+	}
+	return nil
+}
+
+// RepoOwner is the team that owns repo, or "" if none does.
+func (s *Store) RepoOwner(ctx context.Context, repo string) (string, error) {
+	r, err := normRepo(repo)
+	if err != nil {
+		return "", err
+	}
+	var team string
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&team)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return team, err
+}
+
+// memberships are the teams any of principals is in, with the highest
+// role any of them has there.
+func (s *Store) memberships(ctx context.Context, principals []string) (map[string]Role, error) {
+	out := map[string]Role{}
+	if len(principals) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(principals))
+	for i, p := range principals {
+		args[i] = p
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, role FROM team_members WHERE principal IN (?`+strings.Repeat(", ?", len(principals)-1)+`)`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var team, role string
+		if err := rows.Scan(&team, &role); err != nil {
+			return nil, err
+		}
+		if out[team] != Admin {
+			out[team] = Role(role)
+		}
+	}
+	return out, rows.Err()
+}
+
+// reposOf maps each repository the teams own to its team.
+func (s *Store) reposOf(ctx context.Context, teams map[string]Role) (map[string]string, error) {
+	out := map[string]string{}
+	if len(teams) == 0 {
+		return out, nil
+	}
+	var args []any
+	for t := range teams {
+		args = append(args, t)
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team FROM team_repos WHERE team IN (?`+strings.Repeat(", ?", len(args)-1)+`)`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var repo, team string
+		if err := rows.Scan(&repo, &team); err != nil {
+			return nil, err
+		}
+		out[repo] = team
+	}
+	return out, rows.Err()
+}
