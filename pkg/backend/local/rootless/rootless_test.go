@@ -271,6 +271,15 @@ func TestRunscCommandLine(t *testing.T) {
 	}
 }
 
+func TestContainerdEnv(t *testing.T) {
+	p := Paths{DataDir: "/d", RuntimeDir: "/run/user/1000/silo"}
+	got := ContainerdEnv(p, []string{"PATH=/bin", "XDG_RUNTIME_DIR=/run/user/1000", "HOME=/h"})
+	want := []string{"PATH=/bin", "HOME=/h", "XDG_RUNTIME_DIR=/run/containerd"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestPrepareTarFile(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {

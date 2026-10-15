@@ -172,6 +172,14 @@ func setup(t *testing.T) *env {
 		cmd.Run()
 	})
 	p := rootless.Paths{DataDir: filepath.Join(base, "data"), RuntimeDir: filepath.Join(base, "rt")}
+	// As under a rootless install's user units, containerd is started
+	// with an $XDG_RUNTIME_DIR that only the holder's root can reach,
+	// which exec's process file must not be written to.
+	xdg := filepath.Join(base, "xdg")
+	if err := os.Mkdir(xdg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", xdg)
 	cmd, err := rootless.StartContainerd(p, pid, os.Args[0], containerd)
 	if err != nil {
 		t.Fatal(err)

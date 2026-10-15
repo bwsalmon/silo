@@ -33,7 +33,12 @@ func StartContainerd(p Paths, holderPid int, exe, containerd string) (*exec.Cmd,
 	if err := os.WriteFile(p.ContainerdConfig(), []byte(ContainerdConfigTOML(p)), 0o600); err != nil {
 		return nil, err
 	}
-	return holderExec(holderPid, exe, ContainerdArgs(p, containerd))
+	cmd, err := holderExec(holderPid, exe, ContainerdArgs(p, containerd))
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = ContainerdEnv(p, cmd.Env)
+	return cmd, nil
 }
 
 // StartBuildkitd returns silo-buildkitd, not yet started, run inside

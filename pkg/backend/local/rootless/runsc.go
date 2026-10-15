@@ -142,8 +142,8 @@ func prepareRunscRoot(root string) error {
 }
 
 // processFile is the --process in a `runsc exec` command line, if any:
-// the exec'd process's spec, which the shim writes to its own temporary
-// directory, mode 0600, as the holder's root.
+// the exec'd process's spec, which the shim writes to $XDG_RUNTIME_DIR
+// (ContainerdEnv), mode 0600, as the holder's root.
 func processFile(args []string) string {
 	for i, a := range args {
 		if (a == "--process" || a == "-process") && i+1 < len(args) {
