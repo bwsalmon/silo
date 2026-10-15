@@ -62,7 +62,7 @@ one agent session, and the only thing the agent is told about.
 | **invoking machine** | Where `silo run` was typed. silo, the gateway, credentials and the local executor always live here in v2.0. |
 | **agent host** | Where the agent CLI process runs: the invoking machine for `local`, another machine for `ssh`. |
 | **gateway** | silo's one MCP server per session. The CLI's MCP config names it and nothing else. |
-| **sandbox** | A named place where commands run on the agent's behalf (a container, a gVisor container, later a granule VM). Reached only through gateway tools. |
+| **sandbox** | A named place where commands run on the agent's behalf (a container, a gVisor container, a granule VM). Reached only through gateway tools. |
 | **remote permissions** | What the CLI's *own* built-in tools may do on the agent host. |
 | **local executor** | The gateway's tools that run declared scripts on the invoking machine (journey 3). |
 
@@ -204,7 +204,7 @@ remote_permissions: none      # none (default) | all | [Read, Grep, Glob, Edit]
 
 sandboxes:
   - name: build
-    kind: container           # container | gvisor | granule (later)
+    kind: container           # container | gvisor | granule
     image: golang:1.25        # or build: sandboxes/tools.Dockerfile
     workdir: /work
     cpus: 2
@@ -218,7 +218,7 @@ sandboxes:
     lifetime: session         # session | persistent (later, grain.md §2.3)
     package_cache: {url: ..., ca: ...}   # later, grain.md §2.3
     model_access: [anthropic] # later: the model proxy, grain.md §2.5
-  # kind: granule (later) takes image: <granule VM image> or
+  # kind: granule takes image: <granule VM image>, or (stage 8b)
   #   granulefile: sandboxes/dev.Granulefile, with target: and args:
   # kind: folder (built-in silos only) takes path: and rw:
 
@@ -910,14 +910,15 @@ call (`sandbox_exec {sandbox: build, command: ...}`).
 | --- | --- | --- |
 | `container` | yes | An OCI container run by the local Docker or Podman, rootless where available. `image:`, or `build:` a Dockerfile in the folder. |
 | `gvisor` | yes | A `container` run with the `runsc` runtime. Refused at `--dry-run` if the runtime is not installed. Same fields. |
-| `granule` | later (stage 8) | A granule microVM: `image:` (a granule VM image) or `granulefile:` (journeys 7, 10). |
+| `granule` | stage 8 (`image:` in 8a, `granulefile:` in 8b) | A granule microVM: `image:` (a granule VM image) or `granulefile:` (journeys 7, 10). |
 | `folder` | yes, built-in only | A directory on the invoking machine served by file tools only, path-confined, with no exec. `silo create` uses it (§10). Not offered in user Silofiles in v2.0 **(call 10)**. |
 
 v2.0 ships `container` and `gvisor` **(call 11)**. They need nothing
 silo does not already need for journey 2 (a container runtime), and
 `gvisor` is one flag more. Granule waits for stage 8 because it needs
 granule's own driver, and the deployment notes say granule's Go module
-cannot yet be fetched by CI.
+cannot yet be fetched by CI. Stage 8a therefore drives the `granule`
+binary rather than importing granule's packages (§7.3).
 
 ### 7.2 Fields
 
@@ -982,6 +983,37 @@ not only the runtime CLI. Each sandbox's image is resolved to a digest
 (a repository digest when pulled, the image id when built) and recorded
 under `images` in `.silo/lock.json`; stage 3a adds the grants summary
 beside it.
+
+As built in stage 8a (`sandbox/granule`, journey 7): a `granule`
+sandbox is a VM made by `granule vm create <vm> -kontur-image <image>`,
+waited for with `granule vm wait`, reached with `granule vm exec` and
+removed with `granule vm delete`, all on the local Docker. The binary is
+`SILO_GRANULE` if set, else `granule` on `PATH`; silo never imports
+granule's Go packages. The VM's name is a digest of the session and
+the sandbox (granule names a tap device after it, which leaves room for
+eleven characters), and silo's session, sandbox and user labels go on
+the VM's container through `-docker-run-opt --label=...`, so `Find`,
+`silo gc` and the container backend's own listing (which skips
+containers carrying granule's `granule.dev/vm` label) see it as a
+sandbox of its session. `cpus` and `memory` become `-cpus` and
+`-memory-mb`, and `disk` becomes `-disk-size-mb`, the VM's writable
+overlay; left out, the image's own are used. `mounts` are refused for
+`granule`: a host directory would have to cross into the guest over
+virtio-fs, which silo does not set up. `env` is written to
+`/run/silo/env` in the guest (mode 0600) and loaded by every `Exec`,
+rather than passed as `vm exec -e`, which would put credential values on
+the invoking machine's command lines. The file tools and `DeliverFile`
+run through `exec` as the container kinds' do, so the guest needs `sh`
+and coreutils, and git for `repos`. A guest has exactly one network
+interface, which takes over its container's address (granule's flat
+networking), so a VM is on one network only: the session's private
+network when it has `repos` (where the git proxy listens, §9.3), a
+private `--internal` network of its own when it has neither `repos` nor
+`network: open` (a VM container on `--network none` cannot boot), and
+Docker's default bridge with `network: open`, from which the git proxy
+on the host is reached as well. `--dry-run` checks that granule is
+found, that `granule doctor` passes (`/dev/kvm` above all), and that
+each image is local or offered by its registry, without pulling it.
 
 ## 8. Credentials
 
@@ -1942,8 +1974,8 @@ git proxy.
   (`granule vm create <name>`, `granule vm exec`, `granule vm wait`,
   `granule vm delete`) on the local Docker, which is granule's model:
   "VMs in containers". It needs `/dev/kvm` (checked by `granule doctor`
-  in `--dry-run`), granule on `PATH` (or its Go packages, once its module
-  can be fetched), a guest image with git, and the git proxy reachable
+  in `--dry-run`), granule on `PATH` or named by `SILO_GRANULE` (or its Go
+  packages, once its module can be fetched), a guest image with git, and the git proxy reachable
   from inside the guest (the proxy listens where the VM's network can
   reach it; the clone URL carries a per-sandbox token, as in grain).
 - **Bridge to grain:** this is a grain run with silo underneath:
@@ -2138,7 +2170,7 @@ v2/
 ├── sandbox/               # the Backend interface
 │   ├── container/         # docker/podman, gvisor via runtime
 │   ├── folder/            # silo create's workspace
-│   └── granule/           # later
+│   └── granule/           # granule microVMs, via the granule CLI
 ├── localexec/             # script snapshot, checks, warnings, execve
 ├── credentials/           # sources, destinations, keyring store
 ├── gcp/                   # journey 2: account spec, setup, tokens,
@@ -2202,7 +2234,7 @@ Decisions the core model did not settle, made by the author, for review:
 8. silo never installs or logs in a CLI on a remote host. (§5.3)
 9. `remote_permissions` subsets use the CLI's own tool names. (§6.1)
 10. The `folder` sandbox kind is built-in only in v2.0. (§7.1)
-11. v2.0 ships `container` and `gvisor` sandboxes; `granule` is stage 8. (§7.1)
+11. v2.0 ships `container` and `gvisor` sandboxes; `granule` is stage 8 (`image:` in 8a, `granulefile:` in 8b). (§7.1)
 12. The `store:` credential source is the OS keyring. (§8.1)
 13. The shared git proxy lives in silo v2 and grain imports it. (§9.2)
 14. `silo create`'s reference material is served as MCP tools, not files. (§10.2)

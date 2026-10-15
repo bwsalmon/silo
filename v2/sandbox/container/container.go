@@ -293,12 +293,16 @@ func (b *Backend) Find(ctx context.Context, session string) ([]sandbox.Sandbox, 
 	}
 	var found []sandbox.Sandbox
 	for _, id := range strings.Fields(string(out)) {
-		name, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.NameLabel+`"}}`, id)
+		out, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.NameLabel+`"}}`+vmFormat, id)
 		if err != nil {
 			// Removed between the listing and now.
 			continue
 		}
-		found = append(found, &Container{backend: b, ID: id, Name: strings.TrimSpace(string(name)), Session: session})
+		name, ok := notVM(out)
+		if !ok {
+			continue
+		}
+		found = append(found, &Container{backend: b, ID: id, Name: name, Session: session})
 	}
 	return found, nil
 }
@@ -313,16 +317,29 @@ func (b *Backend) Sessions(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	var sessions []string
 	for _, id := range strings.Fields(string(out)) {
-		s, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.SessionLabel+`"}}`, id)
+		s, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.SessionLabel+`"}}`+vmFormat, id)
 		if err != nil {
 			continue
 		}
-		if name := strings.TrimSpace(string(s)); name != "" && !seen[name] {
+		if name, ok := notVM(s); ok && name != "" && !seen[name] {
 			seen[name] = true
 			sessions = append(sessions, name)
 		}
 	}
 	return sessions, nil
+}
+
+// vmFormat follows a label in an inspect format with the label granule
+// puts on a VM's container (granule.dev/vm). A granule sandbox's VM
+// runs in a container carrying silo's labels too, and is the granule
+// backend's to find and destroy, with granule's own delete.
+const vmFormat = `|{{index .Config.Labels "granule.dev/vm"}}`
+
+// notVM splits what an inspect with vmFormat printed, and reports
+// whether the container is not a granule VM's.
+func notVM(out []byte) (string, bool) {
+	label, vm, _ := strings.Cut(strings.TrimSpace(string(out)), "|")
+	return label, vm == ""
 }
 
 // Container is one container sandbox.

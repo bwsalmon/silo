@@ -1,0 +1,53 @@
+# Journey 7 (design §14): a local agent with remote_permissions none,
+# whose every command runs in a granule microVM with the repo checked
+# out through the session's git proxy -- grain's model, run by silo.
+#
+# Needs granule on PATH (go build ./cmd/granule in gke-labs/granule, or
+# SILO_GRANULE=/path/to/granule), Docker, and a /dev/kvm this user may
+# open. `silo run --dry-run ./granule-sandbox` checks all three
+# (`granule doctor`) and asks the registry for the image.
+#
+#   GH_TOKEN=... silo run ./granule-sandbox
+silo: v2
+name: widgets-in-a-vm
+
+agent:
+  cli: claude
+  auth: ambient
+  mode: headless
+  prompt: prompts/task.md
+
+location:
+  kind: local
+
+remote_permissions: none
+
+sandboxes:
+  - name: dev
+    kind: granule
+    # A granule VM image: the VMM and a bootable guest disk in one OCI
+    # image. grain's published guest is Debian 12 with git, which a
+    # sandbox with repos needs.
+    image: ghcr.io/bwsalmon/grain/guest:latest
+    cpus: 2
+    memory: 4Gi
+    disk: 20Gi               # the VM's own writable overlay
+    workdir: /work
+    repos: [widgets]         # cloned from inside the guest, through the proxy
+    env:
+      GIT_AUTHOR_NAME: Silo Agent
+      GIT_AUTHOR_EMAIL: agent@example.invalid
+      GIT_COMMITTER_NAME: Silo Agent
+      GIT_COMMITTER_EMAIL: agent@example.invalid
+
+git:
+  - name: widgets
+    repo: github.com/acme/widgets
+    access: push
+    push: [refs/heads/silo/*]
+    credential: gh
+
+credentials:
+  - name: gh
+    from: {env: GH_TOKEN}
+    to: [{proxy: git}]       # held by the proxy; never in the guest

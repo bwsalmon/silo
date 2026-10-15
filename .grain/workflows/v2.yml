@@ -8,7 +8,10 @@
 # or git a failure here rather than a skip; location/ssh's tests run a
 # real sshd in Docker, and location/k8s's a kind cluster in Docker, so
 # SILO_V2_REQUIRE_DOCKER covers them too, and makes a missing kind or
-# kubectl a failure).
+# kubectl a failure). The granule sandbox kind's tests boot real granule
+# microVMs (SILO_V2_REQUIRE_GRANULE): the job reads gke-labs/granule
+# through the git proxy (repo-read, below), builds its CLI at a pinned
+# commit, and pulls grain's published guest image.
 name: v2
 
 on:
@@ -37,6 +40,10 @@ jobs:
       cpus: 2
       # location/k8s's tests run a kind cluster beside everything else.
       memory-mb: 8192
+    # The granule CLI is built from source: grain's Go module proxy cannot
+    # fetch github.com/gke-labs/granule, and silo drives the binary rather
+    # than importing it (v2/sandbox/granule).
+    capabilities: ["repo-read:gke-labs/granule"]
     timeout-minutes: 30
     steps:
       # A pinned gVisor release, checked against its published sha512 (the
@@ -68,6 +75,25 @@ jobs:
           kind version
           kubectl version --client
 
+      # granule at a pinned commit, cloned through the git proxy the way
+      # this checkout's own origin is, and the guest image the granule
+      # tests boot (internal/granuletest.DefaultImage). /dev/kvm has to
+      # open for this user, which `granule doctor` checks.
+      - name: Install granule
+        infrastructure: true
+        run: |
+          set -e
+          origin="$(git remote get-url origin)"
+          base="${origin%/${GRAIN_CI_REPO}.git}"
+          base="${base%/${GRAIN_CI_REPO}}"
+          git init -q /tmp/granule
+          git -C /tmp/granule fetch -q --depth 1 "$base/gke-labs/granule.git" 4411ce45e5c04cea29a2fb343d7c44232bc3ac7e
+          git -C /tmp/granule checkout -q FETCH_HEAD
+          (cd /tmp/granule && go build -o /tmp/granule-bin/granule ./cmd/granule)
+          sudo install -m 0755 /tmp/granule-bin/granule /usr/local/bin/granule
+          granule doctor
+          docker pull -q ghcr.io/bwsalmon/grain/guest:latest
+
       - name: Format
         run: |
           cd v2
@@ -88,4 +114,5 @@ jobs:
           SILO_V2_REQUIRE_DOCKER: "1"
           SILO_V2_REQUIRE_RUNSC: "1"
           SILO_V2_REQUIRE_GIT: "1"
+          SILO_V2_REQUIRE_GRANULE: "1"
         run: cd v2 && go test -race -timeout 20m ./...
