@@ -19,12 +19,16 @@ func TestPush(t *testing.T) {
 	}
 	docker := func(args ...string) string {
 		t.Helper()
-		out, err := exec.Command("docker", args...).CombinedOutput()
+		var stderr strings.Builder
+		cmd := exec.Command("docker", args...)
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("docker %v: %v: %s", args, err, out)
+			t.Fatalf("docker %v: %v: %s", args, err, stderr.String())
 		}
 		return strings.TrimSpace(string(out))
 	}
+	docker("pull", "-q", "registry:2")
 	id := docker("run", "-d", "--rm", "-p", "127.0.0.1::5000", "registry:2")
 	t.Cleanup(func() { exec.Command("docker", "rm", "-f", id).Run() })
 	port := docker("port", id, "5000/tcp")
