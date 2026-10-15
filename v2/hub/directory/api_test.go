@@ -15,6 +15,7 @@ import (
 	"github.com/bwsalmon/silo/v2/hub/identity"
 	"github.com/bwsalmon/silo/v2/hub/registry"
 	"github.com/bwsalmon/silo/v2/hub/rendezvous"
+	"github.com/bwsalmon/silo/v2/internal/testlog"
 )
 
 // headerAuth is a test sign-on: X-User is the email, X-Groups a
@@ -52,7 +53,7 @@ func newTestHub(t *testing.T) *testHub {
 		Authenticate: s.Authenticate,
 		Admit:        s.Admit,
 		Heartbeat:    time.Second,
-		Logf:         t.Logf,
+		Logf:         testlog.Logf(t),
 	}
 	api := &API{Store: s, Auth: headerAuth{}, HubAdmins: []string{"hub-admins@example.com"}, Disconnect: rv.Disconnect}
 	rv.Visible = api.Visible
