@@ -2360,12 +2360,31 @@ Task 3420 built the split as far as silod's wiring allows:
   - gVisor 20261005's runsc needs its `gvisor-bin/gvisor_sentry`
     sidecar, which install now pins and fetches.
 
-  Still open: a container in the root's default network has no
-  `/etc/resolv.conf`, so names (`<id>.docker.silo.internal`) don't
-  resolve from it; probes for `Fence`; and the cases that need a real
+  Task 3802 made a container's names resolve.
+  `TestInstalledSandboxDNS` resolves the root's
+  `<id>.docker.silo.internal` from a sandbox container and reaches the
+  facade there on port 2375. That took two fixes:
+  - The container had no `/etc/resolv.conf` or `/etc/hosts`. The
+    gVisor driver now has silod's `runtime-remap` write them into the
+    container's own snapshot, with `/etc/hostname`, owned by the
+    container's root (`gvisor.EtcFiles`). `resolv.conf` names the
+    gateway's DNS (`--local-gateway`'s first address). Under
+    `--overlay2=root:self` the snapshot is the sandbox's lower layer.
+    So the container's own edits don't outlive it, and a commit
+    doesn't carry the files.
+  - Only the first container's port was ever pinned. A container's
+    create wrote nothing to the change log, so the fence never
+    reloaded `bridge silo`'s pins, and every later container's frames
+    were dropped. A create, a connect, a disconnect and a remove now
+    write a `docker.topology` entry. A start waits up to 30s for the
+    fence to apply the log as it stood at the start
+    (`docker.Options.Fence`), as [Anti-spoofing](#anti-spoofing)
+    says.
+
+  Still open: probes for `Fence`; and the cases that need a real
   install (revocation closing an open connection, exports, adoption
   after a restart, the `Host`-header and socket rules, published
-  ports, DNS and image records).
+  ports, and image records).
 
 ### As built in step 13
 
