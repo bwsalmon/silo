@@ -103,13 +103,14 @@ anything, one line per check, and exits 69 if any check fails. So far it
 checks MCP servers (a remote one on its own BatchMode connection to the
 agent host: its config read there, its binary found on its remote
 `PATH`), the ssh location, and for granule sandboxes the granule binary,
-`granule doctor` (KVM) and that each VM image can be pulled.
+`granule doctor` (KVM), that each VM image can be pulled, and whether
+each Granulefile is built already or will be built at run.
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
 cross-references, files, `remote_permissions` against the CLI, and
 credential destinations (§2.4). A value v2.0 reserves but does not ship
-yet (`granulefile:`, `lifetime: persistent`, ...) is refused with an
+yet (`lifetime: persistent`, `backend: {k8s: ...}`, ...) is refused with an
 error naming the stage that adds it. Errors name the file, line and YAML
 path, and exit 65; bad usage exits 64 (§3.3). Local scripts get the
 snapshot's refusals as errors (a symlink out of the folder, a file or
@@ -117,7 +118,11 @@ directory writable by group or others, a file another user owns) and
 best-effort warnings on the obvious holes of §12.4: `eval`, `sh -c`
 with a positional parameter, an unquoted `$@`/`$*`, `xargs`, a wrapper
 that hands its arguments to an interpreter, and a script that is
-itself one.
+itself one. A granule sandbox's `granulefile:` is checked with `granule
+granulefile check`, and refused if its target stage builds a container
+image; a container sandbox's `build:` file that uses granule's `VM`
+instruction is refused too (design §14, journey 10). Without granule
+installed the Granulefile is left unchecked, with a warning.
 
 The local executor (design §12) snapshots the scripts at session start
 (name, path, size, mode, SHA-256) and re-hashes each before every call,
@@ -174,6 +179,7 @@ changing a type, run `go generate ./silofile` and
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. A session's internal network, which sandboxes with `repos` join to reach the git proxy. |
+| `sandbox/granule` | `kind: granule` (design §7.3, journeys 7 and 10): microVMs driven through the `granule` binary (`vm create`, `wait`, `exec`, `delete`), never its Go packages. A `granulefile:` is checked with `granule granulefile check`, built with `granule granulefile build` into `silo-granulefile:<key>`, and booted from there while its content key (the Granulefile, its directory, target and args) is unchanged. |
 | `localexec` | The local executor (design §12): script snapshot, refusals, `silo validate`'s warnings, one tool per script run with no shell, and the approvers (terminal prompt, and the queue `silo approve` answers). |
 | `control` | The session's control socket: JSON-RPC 2.0 over a Unix socket, a method table later stages add to, and a client. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |

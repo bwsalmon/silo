@@ -140,7 +140,7 @@ my-silo/
 │   └── servers.json      # standard .mcp.json shape
 ├── sandboxes/            # sandbox definitions
 │   ├── tools.Dockerfile  # built into a container sandbox's image
-│   └── dev.Granulefile   # a granule sandbox (journey 10, later)
+│   └── dev.Granulefile   # built into a granule sandbox's VM image (journey 10)
 └── .silo/                # silo's own, not hand-edited; git-ignorable
     ├── lock.json         # resolved digests and script hashes of the last run
     └── backup/           # silo create's copies before an edit (§10)
@@ -218,8 +218,8 @@ sandboxes:
     lifetime: session         # session | persistent (later, grain.md §2.3)
     package_cache: {url: ..., ca: ...}   # later, grain.md §2.3
     model_access: [anthropic] # later: the model proxy, grain.md §2.5
-  # kind: granule takes image: <granule VM image>, or (stage 8b)
-  #   granulefile: sandboxes/dev.Granulefile, with target: and args:
+  # kind: granule takes image: <granule VM image>, or
+  #   granulefile: sandboxes/dev.Granulefile, with target:, args: and push_to:
   # kind: folder (built-in silos only) takes path: and rw:
 
 mcp:
@@ -1014,6 +1014,39 @@ Docker's default bridge with `network: open`, from which the git proxy
 on the host is reached as well. `--dry-run` checks that granule is
 found, that `granule doctor` passes (`/dev/kvm` above all), and that
 each image is local or offered by its registry, without pulling it.
+
+As built in stage 8b (`sandbox/granule`, journey 10): `granulefile:`
+names a Granulefile in the folder, built with its directory as the
+context (as `build:` is), with `target:` and `args:` passed as
+`-target` and `-build-arg`. It resolves into the same
+`SandboxSpec.Build` a container's `build:` does; the kind decides which
+builder reads it. `silo validate` runs `granule granulefile check -f
+<file> [-target <stage>] <dir>` and reads the stage kind from granule's
+own plan ("target: ..., which produces a granule VM image"), so silo
+carries no Granulefile parser; a target that produces a container image
+is refused for `kind: granule`. Without granule on the machine the file
+is left unchecked with a warning, since `silo validate` is also run
+where nothing will be booted. The reverse refusal is silo's own, in
+pure Go: a container sandbox's `build:` file with a `VM` instruction
+anywhere is refused, because `docker build` cannot read one, whichever
+stage is the target. At `silo run` the cache key is computed (below);
+if the daemon has `silo-granulefile:<key>` it is booted as it is, and
+otherwise the stage kind is checked again and `granule granulefile
+build -t silo-granulefile:<key>` builds it. The key is SHA-256 over the
+Granulefile, every path, executable bit, content and symlink target in
+its directory (skipping `.silo` and granule's `.granule-build-*`
+scratch, which change without changing what is built), the target and
+the args. It reads the whole directory, not what a `.dockerignore`
+would send, which costs at worst a rebuild. The tag is the cache, as it
+is for grain's `pkg/sandboximage`: a removed image is rebuilt, and an
+image whose tag is present is trusted. The image id and the key are
+recorded under `images` in `.silo/lock.json`. The build uses granule's
+own defaults for the VMM image (`granule:latest`) and the guest rootfs
+it wraps or packs onto; silo passes neither. `push_to:` is validated (a
+registry repository, no tag or digest, granule with `granulefile:` only)
+and draws a warning on the local backend, which pushes nothing; pushing
+is stage 11b's. `--dry-run` reports whether each Granulefile is built
+already.
 
 ## 8. Credentials
 
@@ -2076,14 +2109,20 @@ granule VM image, which is still an OCI image.
     sandbox entry (instead of `image:`), with `target:` and `args:` for
     the stage and build arguments. Because a Dockerfile is a Granule, a
     `container` sandbox's `build:` and a `granule` sandbox's
-    `granulefile:` are the same field read by two builders.
+    `granulefile:` are the same field read by two builders. (As built:
+    two Silofile keys, so that each kind's validation can say what it
+    takes, resolved into one `SandboxSpec.Build`; §7.3.)
   - **Build:** `granule granulefile check` in `silo validate`, and
     `granule granulefile build` at `silo run`. A Granulefile whose final
     stage is a container stage is refused for `kind: granule` (it would
-    build a container) and vice versa.
+    build a container) and vice versa. (As built: the stage checked is
+    the target, the last one unless `target:` names another; and the
+    reverse is any `VM` instruction in a container sandbox's `build:`,
+    which `docker build` cannot read.)
   - **Cache:** keyed by the SHA-256 of the Granulefile, its build
     context and its args, with the resulting image digest recorded in
-    `.silo/lock.json`, so a second run does not rebuild. For a remote
+    `.silo/lock.json`, so a second run does not rebuild (as built:
+    §7.3, stage 8b). For a remote
     backend (k8s), the image is pushed to a registry the Silofile names
     (`push_to:`) and referenced by digest.
 
@@ -2234,7 +2273,7 @@ Decisions the core model did not settle, made by the author, for review:
 8. silo never installs or logs in a CLI on a remote host. (§5.3)
 9. `remote_permissions` subsets use the CLI's own tool names. (§6.1)
 10. The `folder` sandbox kind is built-in only in v2.0. (§7.1)
-11. v2.0 ships `container` and `gvisor` sandboxes; `granule` is stage 8 (`image:` in 8a, `granulefile:` in 8b). (§7.1)
+11. v2.0 ships `container` and `gvisor` sandboxes; `granule` is stage 8 (`image:` in 8a, `granulefile:` in 8b, both built). (§7.1)
 12. The `store:` credential source is the OS keyring. (§8.1)
 13. The shared git proxy lives in silo v2 and grain imports it. (§9.2)
 14. `silo create`'s reference material is served as MCP tools, not files. (§10.2)
