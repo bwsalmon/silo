@@ -126,3 +126,19 @@ func (k *Kubectl) exec(ctx context.Context, pod, c, script string, stdin []byte)
 	}
 	return k.run(ctx, stdin, append(args, "--", "/bin/sh", "-c", script)...)
 }
+
+// Output runs kubectl args with stdin and returns its stdout; a
+// non-zero exit is an error naming what, with kubectl's message. It is
+// how other packages (sandbox/k8s) drive the same kubectl.
+func (k *Kubectl) Output(ctx context.Context, what string, stdin []byte, args ...string) (string, error) {
+	return k.must(ctx, what, stdin, args...)
+}
+
+// Command is an unstarted kubectl args, for a caller that streams its
+// output or kills it.
+func (k *Kubectl) Command(ctx context.Context, args ...string) *exec.Cmd {
+	argv := k.Argv(args...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	procgroup.DieWithParent(cmd)
+	return cmd
+}

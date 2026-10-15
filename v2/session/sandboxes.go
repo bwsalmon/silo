@@ -8,6 +8,7 @@ import (
 	"github.com/bwsalmon/silo/v2/credentials"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/sandbox"
+	"github.com/bwsalmon/silo/v2/silofile"
 )
 
 func init() { RegisterToolProvider("sandboxes", provideSandboxes) }
@@ -26,6 +27,17 @@ func provideSandboxes(ctx context.Context, s *Session) ([]gateway.Tool, Undo, er
 	// leaves silo gc a record to find the containers by.
 	if err := s.AddResource(Resource{Kind: KindContainers, Runtime: s.runtime()}); err != nil {
 		return nil, nil, err
+	}
+	// And each cluster's, whose pods carry the session's label as the
+	// k8s location's do, so that silo gc deletes them the same way.
+	seen := map[silofile.K8sBackend]bool{}
+	for _, sc := range s.File.Sandboxes {
+		if k := sc.Backend.K8s; k != nil && !seen[*k] {
+			seen[*k] = true
+			if err := s.AddResource(Resource{Kind: KindPod, Context: k.Context, Namespace: k.Namespace}); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 	made := map[string]sandbox.Sandbox{}
 	undo := func(ctx context.Context) error {
@@ -52,9 +64,17 @@ func provideSandboxes(ctx context.Context, s *Session) ([]gateway.Tool, Undo, er
 		}
 		d.Apply(&spec)
 		if len(sc.Repos) > 0 {
-			spec.PrivateNetwork = s.git.network
+			if sc.Backend.K8s != nil {
+				spec.GitProxy = s.git.addr
+			} else {
+				spec.PrivateNetwork = s.git.network
+			}
 		}
-		s.status("sandbox %s: starting (%s)", sc.Name, sc.Kind)
+		where := sc.Kind
+		if sc.Backend.K8s != nil {
+			where += " pod"
+		}
+		s.status("sandbox %s: starting (%s)", sc.Name, where)
 		sb, err := b.Create(ctx, spec)
 		if err != nil {
 			return nil, undo, err

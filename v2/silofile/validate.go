@@ -464,7 +464,7 @@ func (v *validator) sandboxes() {
 				case !pushRepository.MatchString(s.PushTo):
 					v.errorf(p+".push_to", "%q is not a registry repository (host/path, with no tag or digest)", s.PushTo)
 				case s.Backend.K8s == nil:
-					v.warnf(p+".push_to", "push_to is for a remote backend (stage 11b): the local backend runs the image where it is built and pushes nothing")
+					v.warnf(p+".push_to", "push_to is for a remote backend (backend: {k8s: ...}): the local backend runs the image where it is built and pushes nothing")
 				}
 			}
 			if len(s.Mounts) > 0 {
@@ -508,7 +508,16 @@ func (v *validator) sandboxes() {
 			v.errorf(p+".workdir", "repos are checked out into workdir, which needs to be an absolute path in the sandbox")
 		}
 		if s.Backend.K8s != nil {
-			v.later(p+".backend", "backend k8s", "stage 11b")
+			// Journey 9: a granule VM image as a pod (design §7.3).
+			if s.Kind != "granule" {
+				v.errorf(p+".backend", "backend k8s runs kind granule sandboxes only, not %s", s.Kind)
+			}
+			if s.Granulefile != "" && s.PushTo == "" {
+				v.errorf(p+".push_to", "a granulefile: sandbox with backend k8s needs push_to, a registry repository the cluster's nodes pull the built image from")
+			}
+			if s.Backend.K8s.KVMGroup < 0 {
+				v.errorf(p+".backend.k8s.kvm_group", "%d is not a group id", s.Backend.K8s.KVMGroup)
+			}
 		}
 		switch s.Lifetime {
 		case "", "session":

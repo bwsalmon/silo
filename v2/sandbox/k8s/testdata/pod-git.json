@@ -1,0 +1,176 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "silo.dev/origin": "debian@host",
+      "silo.dev/sandbox": "dev",
+      "silo.dev/workdir": "/work"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "silo",
+      "silo.dev/role": "sandbox",
+      "silo.dev/session": "s-abcdefghijkl"
+    },
+    "name": "silo-s-abcdefghijkl-bogpbrhv"
+  },
+  "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "args": [
+          "run"
+        ],
+        "env": [
+          {
+            "name": "CHV_NET_MODE",
+            "value": "none"
+          },
+          {
+            "name": "CHV_CPUS",
+            "value": "2"
+          },
+          {
+            "name": "CHV_MEMORY_MB",
+            "value": "2048"
+          },
+          {
+            "name": "CHV_DISK_SIZE_MB",
+            "value": "20480"
+          },
+          {
+            "name": "CHV_SHUTDOWN_TIMEOUT",
+            "value": "20s"
+          },
+          {
+            "name": "CHV_VSOCK_SOCKET",
+            "value": "/run/silo-vsock/vm.sock"
+          }
+        ],
+        "image": "ghcr.io/acme/dev-guest:2026-10",
+        "name": "vm",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "/usr/local/bin/granule",
+              "ready",
+              "-timeout",
+              "0"
+            ]
+          },
+          "periodSeconds": 2,
+          "timeoutSeconds": 5
+        },
+        "resources": {
+          "limits": {
+            "devic.es/kvm": "1",
+            "memory": "2684354560"
+          },
+          "requests": {
+            "cpu": "1.5",
+            "memory": "2684354560"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/run",
+            "name": "run"
+          },
+          {
+            "mountPath": "/tmp",
+            "name": "tmp"
+          },
+          {
+            "mountPath": "/var/lib/granule/overlay",
+            "name": "overlay"
+          },
+          {
+            "mountPath": "/run/silo-vsock",
+            "name": "vsock"
+          }
+        ]
+      },
+      {
+        "args": [
+          "-gateway",
+          "unix:/run/silo-vsock/vm.sock_7814",
+          "-control",
+          "127.0.0.1:7812"
+        ],
+        "image": "ghcr.io/bwsalmon/silo-tunnel:test",
+        "name": "tunnel",
+        "resources": {
+          "limits": {
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "10m",
+            "memory": "16Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "runAsNonRoot": true,
+          "runAsUser": 65534
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/run/silo-vsock",
+            "name": "vsock"
+          }
+        ]
+      }
+    ],
+    "enableServiceLinks": false,
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsGroup": 65534,
+      "runAsNonRoot": true,
+      "runAsUser": 65534,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      },
+      "supplementalGroups": [
+        994
+      ]
+    },
+    "terminationGracePeriodSeconds": 40,
+    "volumes": [
+      {
+        "emptyDir": {
+          "medium": "Memory"
+        },
+        "name": "run"
+      },
+      {
+        "emptyDir": {},
+        "name": "tmp"
+      },
+      {
+        "emptyDir": {},
+        "name": "overlay"
+      },
+      {
+        "emptyDir": {
+          "medium": "Memory"
+        },
+        "name": "vsock"
+      }
+    ]
+  }
+}

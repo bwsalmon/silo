@@ -1,0 +1,61 @@
+# Adapted from github.com/gke-labs/granule deploy/k8s/kvm-device-plugin.yaml at 4411ce45e5c04cea29a2fb343d7c44232bc3ac7e, Apache License 2.0.
+# The image is loaded into the kind cluster under PLUGIN_IMAGE rather than pulled.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: granule-device-plugin
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: granule-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: granule-device-plugin
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: granule-device-plugin
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+          effect: NoExecute
+        - operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: generic-device-plugin
+          image: PLUGIN_IMAGE
+          imagePullPolicy: Never
+          args:
+            - --domain=devic.es
+            - --device
+            - '{"name": "kvm", "groups": [{"count": 1000, "paths": [{"path": "/dev/kvm"}]}]}'
+            - --device
+            - '{"name": "tun", "groups": [{"count": 1000, "paths": [{"path": "/dev/net/tun"}]}]}'
+          terminationMessagePath: /tmp/termination-log
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+              readOnly: true
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
