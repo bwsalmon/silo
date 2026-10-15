@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwsalmon/silo/v2/agentcli"
 	"github.com/bwsalmon/silo/v2/events"
+	"github.com/bwsalmon/silo/v2/gcp"
 	k8sloc "github.com/bwsalmon/silo/v2/location/k8s"
 	sshloc "github.com/bwsalmon/silo/v2/location/ssh"
 	"github.com/bwsalmon/silo/v2/session"
@@ -152,10 +153,12 @@ func gc(args []string, stdout, stderr io.Writer) int {
 	kube := fs.Bool("k8s", false, "also remove this machine's stale silo pods and Secrets in a Kubernetes namespace")
 	kubeContext := fs.String("context", "", "with --k8s, the kubeconfig context (kubectl's current one by default)")
 	namespace := fs.String("namespace", "", "with --k8s, the namespace (the context's by default)")
+	project := fs.String("project", "", "also look for your silo accounts in this GCP project (design §11.5)")
+	account := fs.String("account", "", "with --project, delete this one account of yours, whatever its ttl")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: silo gc [--host <host>] [--k8s [--context <context>] [--namespace <namespace>]]")
+		fmt.Fprintln(stderr, "usage: silo gc [--host <host>] [--k8s [--context <context>] [--namespace <namespace>]] [--project <p> [--account <email>]]")
 	}
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || (*account != "" && *project == "") {
 		if err == nil {
 			fs.Usage()
 		}
@@ -196,7 +199,36 @@ func gc(args []string, stdout, stderr io.Writer) int {
 			code = 1
 		}
 	}
+	if err := gcAccounts(context.Background(), *project, *account, stdout); err != nil {
+		fmt.Fprintf(stderr, "silo gc: %v\n", err)
+		code = 1
+	}
 	return code
+}
+
+// gcAccounts is silo gc for journey 2's accounts (design §11.5), as the
+// user's own gcloud login: those past their ttl are deleted. GCP is only
+// contacted when local state lists an account or --project is given.
+func gcAccounts(ctx context.Context, project, account string, stdout io.Writer) error {
+	store := &gcp.Store{Path: gcp.StatePath(os.Getenv)}
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if len(st.Accounts) == 0 && project == "" {
+		return nil
+	}
+	api, user, err := gcp.Ambient(ctx)
+	if err != nil {
+		return err
+	}
+	c := &gcp.Client{API: api, Store: store, Out: stdout}
+	opts := gcp.GCOptions{User: user, Account: account}
+	if project != "" {
+		opts.Projects = []string{project}
+	}
+	_, err = c.GC(ctx, opts)
+	return err
 }
 
 // callerTokenPrefix names the environment variable a caller server's

@@ -36,9 +36,11 @@ commands:
   ls [--label key=value] [--json]
                             list the running sessions
   gc [--host <host>] [--k8s [--context <c>] [--namespace <ns>]]
+     [--project p [--account email]]
                             remove what crashed sessions left behind, with
                             --host their remote session directories there,
                             and with --k8s their pods in a namespace
+                            and your GCP accounts unused past their ttl
   approve <session> [--deny] [<call-id>]
                             answer a local script's call waiting for approval
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)

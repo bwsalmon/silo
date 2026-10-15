@@ -61,6 +61,7 @@ go run ./cmd/silo attach [--from seq] [--json] <session>          # replay and f
 go run ./cmd/silo ls [--label k=v ...] [--json]                   # the running sessions
 go run ./cmd/silo approve <session> [--deny] [<call-id>]   # design §12.3
 go run ./cmd/silo gc [--host <host>]        # what crashed sessions left (there)
+go run ./cmd/silo gc [--project p [--account email]]   # and GCP accounts past their ttl
 go run ./cmd/silo validate <Silofile|dir>   # design §2.4
 go run ./cmd/silo schema [section]          # the Silofile's JSON Schema
 ```
@@ -149,6 +150,16 @@ methods `inject`, `cancel`, `extend_deadline` and `approve`
 call waiting). `silo approve` names the session by its id or a unique
 prefix of it. The Go library's `Session` has the same four as methods.
 
+`silo gc` also deletes the invoking user's journey 2 service accounts
+that have gone unused past their `ttl` (design §11.5), as the user's own
+gcloud login: those listed in `$XDG_STATE_HOME/silo/accounts.json`, and
+with `--project p` any `silo-*` account in `p` whose description names
+the user. `--project p --account <email>` deletes one of the user's
+accounts whatever its ttl. Another user's account is never touched. GCP
+is not contacted when local state lists no account and `--project` is
+not given. Setting accounts up (`gcp.Client.Setup`) is in the `gcp`
+package; `silo run` uses it once stage 2b lands.
+
 `--caller-mcp name=url` (or `silo.Options.CallerMCP`) adds a
 caller-provided MCP server, on HTTP or a Unix socket, whose tools the
 gateway serves as `name__<tool>`; its token is read from
@@ -186,6 +197,8 @@ changing a type, run `go generate ./silofile` and
 | `localexec` | The local executor (design §12): script snapshot, refusals, `silo validate`'s warnings, one tool per script run with no shell, and the approvers (terminal prompt, and the queue `silo approve` answers). |
 | `control` | The session's control socket: JSON-RPC 2.0 over a Unix socket, a method table later stages add to, and a client. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
+| `gcp` | Journey 2's accounts (design §11): the spec and its `silo-` name, the description, local state (`accounts.json`), the setup checks (`Check`, which `silo run --dry-run` calls), create/verify/reuse and resume (`Ensure`), the propagation wait (`WaitReady`), and `GC`. The APIs are behind the `API` interface: `Google` (with `Ambient`, the user's ADC or gcloud login) is the real one. |
+| `internal/fakegcp` | An in-memory `gcp.API` for one project, answering with Google's error codes and etag conflicts. |
 | `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. `silo run` starts one per session whose sandboxes have `repos` (stage 7b, design §9.3): on the session's internal network, a token per sandbox, the repos cloned into each workdir through it. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
 | `internal/procgroup` | Process-group cancellation, copied from grain's `pkg/procgroup`. |
@@ -319,6 +332,16 @@ with silo's `remote_permissions: none` configuration against a stub
 Responses API, logs the tools codex advertises and checks that every
 native tool call is refused. It is the probe for reviewing a new Codex
 version.
+
+`gcp`'s tests run against `internal/fakegcp`. `gcp/live_test.go`
+sets up, reuses and garbage-collects a real account when
+`SILO_V2_LIVE_GCP=1`, as the ambient login, in `GOOGLE_CLOUD_PROJECT`
+(default `bsalmon-fun-sandbox`), granting `roles/logging.viewer`; the
+login needs `roles/iam.serviceAccountAdmin`,
+`roles/resourcemanager.projectIamAdmin` and `roles/logging.viewer` on
+the project. It is not part of the CI gate.
+[`deploy/terraform/gcp-agent-pool`](deploy/terraform/gcp-agent-pool/README.md)
+grants those roles to a grain `gcp-key` pool, or creates such a pool.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip
