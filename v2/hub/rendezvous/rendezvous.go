@@ -1,0 +1,107 @@
+// Package rendezvous is how a Grain node reaches the Silo hub
+// (docs/hub.md §4): the node dials out, over HTTPS, to a WebSocket at
+// ConnectPath, and that one connection becomes a reverse tunnel. The
+// hub never dials a node; a workstation behind NAT or a corporate
+// firewall needs nothing open inbound.
+//
+// The WebSocket carries a mux (internal/tunnel/mux, grain's pkg/tunnel
+// model). The node opens the first stream, the control stream, and
+// says Hello on it: its ID, repositories and slots. The hub
+// authenticates the node from the WebSocket handshake's credential,
+// registers it (package registry) under that identity and answers
+// Welcome; from then on the node heartbeats its free slots on the
+// control stream, and either side opens further streams: the hub to
+// hand a node work (Server.Open), the node to stream events back
+// (Server.NodeStream). When the connection drops, the node is offline.
+//
+// The control stream speaks JSON, one message per line.
+package rendezvous
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+
+	"github.com/bwsalmon/silo/v2/hub/registry"
+)
+
+// ConnectPath is the hub's WebSocket endpoint for nodes.
+const ConnectPath = "/v1/nodes/connect"
+
+// DirectoryPath is the hub's node directory, as JSON.
+const DirectoryPath = "/v1/nodes"
+
+// Protocol is the WebSocket subprotocol both sides name, so that a
+// version change is refused at the handshake rather than misread.
+const Protocol = "silo-node.v1"
+
+// Message types on the control stream.
+const (
+	TypeHello     = "hello"     // node → hub, first
+	TypeWelcome   = "welcome"   // hub → node, the answer to hello
+	TypeError     = "error"     // hub → node, a refusal; the hub then closes
+	TypeHeartbeat = "heartbeat" // node → hub
+)
+
+// Message is one line on the control stream.
+type Message struct {
+	Type string `json:"type"`
+	// Node is the node's registration, in hello.
+	Node *registry.Node `json:"node,omitempty"`
+	// Owner is the identity the hub registered the node under, in
+	// welcome: the one its credential proves, which the node may log
+	// to show whom it is serving as.
+	Owner string `json:"owner,omitempty"`
+	// HeartbeatSeconds is how often the hub wants heartbeats, in welcome.
+	HeartbeatSeconds int `json:"heartbeat_seconds,omitempty"`
+	// Free is the node's free slots, in heartbeat.
+	Free *int `json:"free,omitempty"`
+	// Error is the reason, in error.
+	Error string `json:"error,omitempty"`
+}
+
+// maxLine bounds one control message.
+const maxLine = 1 << 20
+
+// lines reads and writes control messages on one stream.
+type lines struct {
+	c net.Conn
+	r *bufio.Reader
+}
+
+func newLines(c net.Conn) *lines {
+	return &lines{c: c, r: bufio.NewReaderSize(c, 4096)}
+}
+
+func (l *lines) read() (Message, error) {
+	var line []byte
+	for {
+		chunk, isPrefix, err := l.r.ReadLine()
+		if err != nil {
+			return Message{}, err
+		}
+		line = append(line, chunk...)
+		if len(line) > maxLine {
+			return Message{}, errors.New("rendezvous: control message too long")
+		}
+		if !isPrefix {
+			break
+		}
+	}
+	var m Message
+	if err := json.Unmarshal(line, &m); err != nil {
+		return Message{}, fmt.Errorf("rendezvous: bad control message: %w", err)
+	}
+	return m, nil
+}
+
+func (l *lines) write(m Message) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	_, err = l.c.Write(append(b, '\n'))
+	return err
+}

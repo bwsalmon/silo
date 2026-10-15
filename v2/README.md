@@ -43,6 +43,10 @@ one; `silo run` carries it out once.
   onto the real `claude`, `codex` and `agy` flags.
 - [`docs/grain.md`](docs/grain.md): grain as silo's first client, and
   its migration path.
+- [`docs/hub.md`](docs/hub.md): the collection hub that links many
+  grain nodes (Track 2.1): its architecture, the node registry
+  (`hub/registry`) and the outbound rendezvous (`hub/rendezvous`), both
+  built, and the identity, dispatch and event stages after them.
 - [`docs/examples/`](docs/examples/): example silo folders.
 
 ## Module
