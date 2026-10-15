@@ -37,6 +37,16 @@ const DirectoryPath = "/v1/nodes"
 // version change is refused at the handshake rather than misread.
 const Protocol = "silo-node.v1"
 
+// Identity is what a node's credential proves (Server.Authenticate).
+type Identity struct {
+	// Owner is the principal the node is registered under.
+	Owner string
+	// Node, when set, is the one node ID the credential was minted for:
+	// a hello naming any other is refused. Empty is a credential not
+	// bound to a node.
+	Node string
+}
+
 // Message types on the control stream.
 const (
 	TypeHello     = "hello"     // node → hub, first

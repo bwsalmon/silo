@@ -18,14 +18,16 @@ import (
 	"github.com/bwsalmon/silo/v2/hub/registry"
 )
 
-// tokens is a static node credential table, token to owner.
-func tokens(table map[string]string) func(*http.Request) (string, error) {
-	return func(r *http.Request) (string, error) {
+// tokens is a static node credential table, token to owner. A token
+// ending "@node" is bound to that node.
+func tokens(table map[string]string) func(*http.Request) (Identity, error) {
+	return func(r *http.Request) (Identity, error) {
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if owner := table[tok]; ok && owner != "" {
-			return owner, nil
+			_, node, _ := strings.Cut(tok, "@")
+			return Identity{Owner: owner, Node: node}, nil
 		}
-		return "", errors.New("unknown token")
+		return Identity{}, errors.New("unknown token")
 	}
 }
 
@@ -33,7 +35,7 @@ func hub(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	s := &Server{
 		Registry:     registry.New(),
-		Authenticate: tokens(map[string]string{"alice-tok": "alice@example.com", "bob-tok": "bob@example.com"}),
+		Authenticate: tokens(map[string]string{"alice-tok": "alice@example.com", "bob-tok": "bob@example.com", "alice-tok@ws-9": "alice@example.com"}),
 		Heartbeat:    time.Second,
 		Logf:         t.Logf,
 	}
@@ -154,6 +156,64 @@ func TestRefusals(t *testing.T) {
 	}
 	if e, _ := s.Registry.Get("ws-1"); e.Owner != "alice@example.com" || e.Status != registry.Online {
 		t.Errorf("entry after the takeover attempt: %+v", e)
+	}
+}
+
+func TestNodeBoundCredential(t *testing.T) {
+	s, ts := hub(t)
+	_, err := client(ts.URL, "alice-tok@ws-9", registry.Node{ID: "ws-1", Slots: 1}).Connect(ctx(t))
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "ws-9") {
+		t.Errorf("another node's ID: %v, want ErrRefused naming the bound node", err)
+	}
+	c, err := client(ts.URL, "alice-tok@ws-9", registry.Node{ID: "ws-9", Slots: 1}).Connect(ctx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if e, ok := s.Registry.Get("ws-9"); !ok || e.Owner != "alice@example.com" {
+		t.Errorf("entry %+v", e)
+	}
+}
+
+func TestVisibleDirectory(t *testing.T) {
+	s, ts := hub(t)
+	for _, tok := range []string{"alice-tok", "bob-tok"} {
+		c, err := client(ts.URL, tok, registry.Node{ID: strings.TrimSuffix(tok, "-tok"), Slots: 1}).Connect(ctx(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+	}
+	s.Visible = func(r *http.Request) (func(registry.Entry) bool, error) {
+		who := r.Header.Get("X-Test-User")
+		if who == "" {
+			return nil, errors.New("no user")
+		}
+		return func(e registry.Entry) bool { return e.Owner == who }, nil
+	}
+	get := func(user string) (int, []string) {
+		req, _ := http.NewRequest("GET", ts.URL+DirectoryPath, nil)
+		if user != "" {
+			req.Header.Set("X-Test-User", user)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var d struct{ Nodes []registry.Entry }
+		json.NewDecoder(resp.Body).Decode(&d)
+		var ids []string
+		for _, e := range d.Nodes {
+			ids = append(ids, e.ID)
+		}
+		return resp.StatusCode, ids
+	}
+	if code, _ := get(""); code != http.StatusUnauthorized {
+		t.Errorf("anonymous directory: %d, want 401", code)
+	}
+	if code, ids := get("bob@example.com"); code != 200 || len(ids) != 1 || ids[0] != "bob" {
+		t.Errorf("bob's directory: %d %v, want only bob", code, ids)
 	}
 }
 

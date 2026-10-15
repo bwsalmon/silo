@@ -1,11 +1,11 @@
 # The Silo collection hub
 
-Part of the [v2 design](design.md). This is Track 2.1: the architecture
-of the **hub**, and its first two parts, the node registry and the
-rendezvous. Those two are built, in `v2/hub/registry` and
-`v2/hub/rendezvous`. Identity and teams (§5), task intake and dispatch
-(§6), and live events (§7) are designed here and built in later stages
-(§9).
+Part of the [v2 design](design.md). This is Track 2: the architecture
+of the **hub**. Its first parts are built: the node registry and the
+rendezvous (stage 2.1, `v2/hub/registry` and `v2/hub/rendezvous`), and
+identity and teams (stage 2.2, §5, `v2/hub/identity` and
+`v2/hub/directory`). Task intake and dispatch (§6) and live events (§7)
+are designed here and built in later stages (§9).
 
 ## 1. What the hub is
 
@@ -144,13 +144,21 @@ never a WebSocket. The owner a node is registered under is always the
 owner its credential proves. The hello message carries no owner field
 that the hub would trust.
 
-In 2.1, `Authenticate` is a function the caller supplies. The tests use
-a static token table. §5.2 says what production uses.
+`Authenticate` returns an `Identity{Owner, Node}`. `Node` is set when
+the credential was minted for one node ID, as a node token is (§5.2): a
+hello naming any other ID is refused, so one leaked token cannot
+register a different node. Production uses the team directory's
+`Store.Authenticate`.
 
 `Server.Admit(owner, node)` is the hook that the team directory fills
-(§5.3). It refuses a node whose owner may not serve one of the
-repositories it lists. With no `Admit` set, every authenticated node is
-admitted.
+(`Store.Admit`, §5.3). It refuses a node whose owner may not serve one
+of the repositories it lists. With no `Admit` set, every authenticated
+node is admitted.
+
+`Server.Visible`, when set, authenticates a request for the directory
+(`GET /v1/nodes`) and filters it to the nodes the caller may see
+(`directory.API.Visible`, §5.3). `Server.Disconnect(node)` ends a
+node's connection, which is what revoking its token does.
 
 ### 4.3 The control stream
 
@@ -190,57 +198,130 @@ with `Free()`. `Client.Run` keeps the node connected:
 Grain embeds this client. Grain's own change is a separate task in
 bwsalmon/grain (§9).
 
-## 5. Identity and access (stage 2.2)
+## 5. Identity and access (built: `hub/identity`, `hub/directory`)
 
 ### 5.1 Humans
 
-There are two ways to sign humans in:
+There are two ways to sign humans in (`hub/identity`). Each is an
+`identity.Authenticator`, and both produce the same
+`Principal{email, groups}`, with the email lower-cased:
 
-- **Behind Google Cloud IAP (the default):** the hub verifies the
-  `x-goog-iap-jwt-assertion` header on every request. It checks the
-  signature against IAP's keys, the audience against the hub's backend
-  service, and the expiry. The verified `email` is the principal. The
-  hub never trusts `x-goog-authenticated-user-email` on its own,
+- **Behind Google Cloud IAP (the default), `identity.IAP`:** the hub
+  verifies the `x-goog-iap-jwt-assertion` header on every request. It
+  checks the signature against IAP's published keys (ES256), the issuer
+  (`https://cloud.google.com/iap`), the audience against the hub's
+  backend service (`/projects/N/global/backendServices/ID`), and the
+  expiry, with a minute's leeway. The verified `email` is the
+  principal. The hub never reads `x-goog-authenticated-user-email`,
   because a request that bypasses the load balancer could forge it.
-- **Without IAP:** the hub is an OIDC relying party for the company's
-  SSO (authorization-code flow with PKCE). It keeps a signed session
-  cookie, and the principal is the ID token's verified email.
+- **Without IAP, `identity.OIDC`:** the hub is an OIDC relying party
+  for the company's SSO. `/auth/login` starts the authorization-code
+  flow with PKCE (S256), a state and a nonce, kept in a short-lived
+  signed cookie. The callback checks the state, exchanges the code with
+  the verifier, verifies the ID token (signature against the provider's
+  `jwks_uri`, issuer, audience = the client ID, expiry, nonce), and
+  requires `email_verified`. It then sets an HMAC-signed session cookie
+  (12 hours by default). An SDK or CLI that holds an ID token from the
+  same provider can present it as a bearer token instead.
 
-Both produce the same `Principal{email, groups}`. Group membership comes
-from the IdP's claims, or from the hub's own team directory.
+Keys are fetched from the issuer and cached for an hour. A token naming
+an unknown key ID refetches them, at most once a minute. Only ES256 and
+RS256 are accepted, and the algorithm must match the key's type, so
+neither `none` nor an HMAC algorithm keyed with a public key can be
+slipped in.
+
+Group membership comes from the IdP's `groups` claim (OIDC) or from the
+hub's own team directory, where a group address can be listed as a
+member (§5.3). IAP's assertion carries no groups.
 
 ### 5.2 Nodes
 
 A node cannot do an interactive sign-in for every connection. Instead:
 
 1. The owner runs `grain hub login` once, through the browser flow
-   above (or device flow).
-2. The hub mints a **node token** bound to that owner and node ID. Only
-   its hash is stored. The token can be revoked from the directory.
+   above (or device flow). It calls `POST /v1/node-tokens
+   {"node":"<id>"}`.
+2. The hub mints a **node token** bound to that owner and node ID
+   (`silo-node_<id>_<secret>`, 256 bits of secret). It is shown once.
+   The store keeps only its SHA-256, so a leaked database proves
+   nobody. Minting again for the same node revokes the owner's earlier
+   token. A node ID that another owner holds a live token for is
+   refused, so node IDs stay bound to their owner across hub restarts,
+   which the in-memory registry alone would forget.
 3. The node presents the token as a bearer token at the handshake.
+   `Store.Authenticate` returns its owner and node ID, and the
+   rendezvous refuses a hello for any other ID (§4.2).
+4. The token can be revoked from the directory (`DELETE
+   /v1/node-tokens/{id}`, by its owner or a hub admin). Revoking ends
+   the node's live connection at once (`Server.Disconnect`), and its
+   reconnect is refused.
 
 `ConnectPath` sits outside IAP's browser enforcement but still behind
-the HTTPS load balancer. As an alternative, a node on GCP can present a
-Google-signed ID token for its service account. The hub maps that
-token's email to an owner the team directory has registered.
+the HTTPS load balancer. As an alternative, a node on GCP could present
+a Google-signed ID token for its service account, and the hub would map
+that token's email to an owner the team directory has registered. That
+alternative is not built yet.
 
 ### 5.3 Teams
 
-The store holds:
+The store (`directory.Store`, SQLite for one replica, PostgreSQL for
+more) holds:
 
 - `teams(id, name)`.
-- `team_members(team, principal, role: member | admin)`.
-- `team_repos(team, repo)`. Every repository has exactly one owning
-  team.
+- `team_members(team, principal, role: member | admin)`. A principal
+  is an email or a group address.
+- `team_repos(repo, team)`, keyed by repository, so every repository
+  has at most one owning team. Assigning a repository that another team
+  owns is refused: it has to be released first, so one team's admin
+  cannot take another team's repository.
+- `node_tokens(id, hash, owner, node, created_at, revoked_at)`, with at
+  most one live token per node ID.
 
 These rules follow:
 
 - `Admit` lets a node serve a repository only if the node's owner is a
-  member of the team that owns it. A repository with no owning team is
-  refused, so nothing is served by accident.
-- A human sees the tasks, events and nodes of their own teams.
+  member (or admin) of the team that owns it. A repository with no
+  owning team is refused, so nothing is served by accident. Admission
+  is by the owner's email only: a node token proves a principal, not
+  the groups the IdP put it in when it signed in.
+- **A node that may serve only some of its repositories is refused
+  whole**, not registered for the admitted subset. The refusal names
+  every repository it may not serve, and why (no owning team, or a team
+  the owner is not in), so the owner can fix the node's list, or ask a
+  team admin, in one round. A node registered for less than it asked
+  for would sit in the directory looking healthy while the work it was
+  set up for went nowhere. (This settles the question §10 used to ask.)
+- A human sees the tasks, events and nodes of their own teams
+  (`Access`): `SeesTeam` for a team-targeted task, `SeesRepo` for a
+  repository's tasks and events, and `SeesNode` for the directory, where
+  a node is visible to its own owner and to the members of any team
+  that owns one of its repositories. The node directory and the teams
+  list are filtered this way. A team the caller is not in answers 404,
+  as one that does not exist would.
 - Team admins assign repositories to their team and manage its members.
-- A hub-wide admin role creates teams.
+- A hub-wide admin role creates and deletes teams and sees everything.
+  It is the hub's configuration (`API.HubAdmins`, emails or groups),
+  not a row a team admin could grant.
+
+Admission is checked when a node connects. A node that is already
+connected keeps its registration if its owner later leaves the team;
+the dispatcher (§6.2) is to check `Admit` again before it offers a task.
+
+The directory's HTTP API (`directory.API`):
+
+```
+GET    /v1/me                                          the caller, their teams and roles
+GET    /v1/teams                                       the caller's teams (all, for a hub admin)
+POST   /v1/teams {"id","name"}                         hub admin
+DELETE /v1/teams/{team}                                hub admin; its repositories are left unowned
+PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin
+DELETE /v1/teams/{team}/members/{principal}            team admin
+PUT    /v1/teams/{team}/repos/{owner}/{name}           team admin
+DELETE /v1/teams/{team}/repos/{owner}/{name}           team admin
+GET    /v1/node-tokens                                 the caller's (all, for a hub admin)
+POST   /v1/node-tokens {"node"}                        mint one for the caller
+DELETE /v1/node-tokens/{id}                            its owner, or a hub admin
+```
 
 ## 6. Task intake and federation (stage 2.3)
 
@@ -354,7 +435,7 @@ anything leaves it.
 | Stage | What | Where |
 | --- | --- | --- |
 | 2.1 | This design. The registry (`hub/registry`). The rendezvous: WebSocket, auth hook, admission hook, heartbeats, supersession, streams both ways, client with reconnect (`hub/rendezvous`). | here, built |
-| 2.2 | Human sign-on (IAP JWT verification and OIDC), node tokens, the team directory and `Admit`, in a store | silo |
+| 2.2 | Human sign-on (IAP JWT verification and OIDC, `hub/identity`). Node tokens, the team directory, `Admit` and per-team visibility, in a store (`hub/directory`). | here, built |
 | 2.3 | The backlog, the intake API, the dispatcher and the task-stream protocol | silo |
 | 2.4 | Event streaming up, the classification, fan-out to SSE and WebSocket, view-through | silo |
 | 2.5 | A `silo hub serve` command and its deployment (Cloud Run or GKE behind IAP) | silo |
@@ -362,10 +443,6 @@ anything leaves it.
 
 ## 10. Open questions
 
-- **Partial repository sets.** Should a node be refused when it is not
-  admitted for *some* of its repositories, as it is now with `Admit`, or
-  registered for the admitted subset? Refusing is the safe default, and
-  the refusal names the repository.
 - **Lost running tasks.** Should the hub requeue a `lost` running task
   automatically after a grace period? A second node would then redo
   work that the first may still be pushing.

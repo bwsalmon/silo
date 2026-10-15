@@ -32,13 +32,20 @@ type Server struct {
 	// Registry is the directory nodes are registered in.
 	Registry *registry.Registry
 	// Authenticate proves a node's identity from its handshake request
-	// (its bearer token), and returns the owner to register it under.
-	// A node is never registered under an identity it merely claims.
-	Authenticate func(r *http.Request) (owner string, err error)
+	// (its bearer token): the owner to register it under and, for a
+	// credential bound to one node (a node token, docs/hub.md §5.2),
+	// that node's ID. A node is never registered under an identity it
+	// merely claims, nor under an ID its credential was not minted for.
+	Authenticate func(r *http.Request) (Identity, error)
 	// Admit, when set, decides whether owner may register n: the team
 	// directory's check (docs/hub.md §5) that the owner may serve the
 	// repositories n lists. Nil admits every authenticated node.
 	Admit func(owner string, n registry.Node) error
+	// Visible, when set, authorizes a request for DirectoryPath and says
+	// which entries its caller may see (docs/hub.md §5.3: a human sees
+	// the nodes of their own teams). An error is answered 401. Nil
+	// serves every entry to every caller.
+	Visible func(r *http.Request) (func(registry.Entry) bool, error)
 	// NodeStream, when set, is handed each stream a node opens after its
 	// control stream, for the event streams of docs/hub.md §7. Nil
 	// resets them.
@@ -65,9 +72,9 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-// Handler serves ConnectPath and DirectoryPath. The directory is
-// served unauthenticated: the caller fronts it with the hub's human
-// sign-on (IAP), or serves only ConnectPath.
+// Handler serves ConnectPath and DirectoryPath. Without Visible the
+// directory is served unauthenticated: the caller fronts it with the
+// hub's human sign-on, or serves only ConnectPath.
 func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
 	m.Handle("GET "+ConnectPath, http.HandlerFunc(s.serveConnect))
@@ -76,10 +83,25 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
+	nodes := s.Registry.List()
+	if s.Visible != nil {
+		keep, err := s.Visible(r)
+		if err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		seen := nodes[:0]
+		for _, e := range nodes {
+			if keep(e) {
+				seen = append(seen, e)
+			}
+		}
+		nodes = seen
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
 		Nodes []registry.Entry `json:"nodes"`
-	}{s.Registry.List()})
+	}{nodes})
 }
 
 func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request) {
@@ -87,8 +109,11 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node authentication is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	owner, err := s.Authenticate(r)
-	if err != nil || owner == "" {
+	id, err := s.Authenticate(r)
+	if err == nil && id.Owner == "" {
+		err = errors.New("no owner")
+	}
+	if err != nil {
 		s.logf("rendezvous: refused a node from %s: %v", r.RemoteAddr, err)
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
@@ -105,14 +130,15 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request) {
 		},
 		Handler: func(c *websocket.Conn) {
 			c.PayloadType = websocket.BinaryFrame
-			s.serveNode(r.Context(), owner, c)
+			s.serveNode(r.Context(), id, c)
 		},
 	}
 	ws.ServeHTTP(w, r)
 }
 
 // serveNode runs one node's connection until it ends.
-func (s *Server) serveNode(ctx context.Context, owner string, c *websocket.Conn) {
+func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) {
+	owner := id.Owner
 	m := mux.NewMux(c, mux.Config{IsServer: true})
 	defer m.Close()
 
@@ -141,6 +167,9 @@ func (s *Server) serveNode(ctx context.Context, owner string, c *websocket.Conn)
 		}
 	}
 	node, err := registry.Validate(*hello.Node)
+	if err == nil && id.Node != "" && node.ID != id.Node {
+		err = fmt.Errorf("rendezvous: this credential is for node %q, not %q", id.Node, node.ID)
+	}
 	if err == nil && s.Admit != nil {
 		err = s.Admit(owner, node)
 	}
@@ -258,4 +287,18 @@ func (s *Server) Open(ctx context.Context, nodeID string) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
 	}
 	return nc.m.OpenStream(ctx)
+}
+
+// Disconnect ends nodeID's connection, if it has one, and says whether
+// it had: how a revoked credential stops serving at once rather than at
+// its next reconnect, which the revocation then refuses.
+func (s *Server) Disconnect(nodeID string) bool {
+	s.mu.Lock()
+	nc := s.conns[nodeID]
+	s.mu.Unlock()
+	if nc == nil {
+		return false
+	}
+	nc.m.Close()
+	return true
 }
