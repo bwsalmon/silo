@@ -52,6 +52,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local"
 	"github.com/bwsalmon/silo/pkg/backend/local/datadir"
 	"github.com/bwsalmon/silo/pkg/backend/local/gitstore"
+	"github.com/bwsalmon/silo/pkg/backend/local/hostcap"
 	"github.com/bwsalmon/silo/pkg/backend/local/nsd"
 	_ "github.com/bwsalmon/silo/pkg/backend/local/nsd/nsexec"
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
@@ -62,6 +63,7 @@ import (
 	localusage "github.com/bwsalmon/silo/pkg/backend/local/usage"
 	facade "github.com/bwsalmon/silo/pkg/facade/gcp/gce"
 	"github.com/bwsalmon/silo/pkg/facade/local/docker"
+	"github.com/bwsalmon/silo/pkg/facade/local/dockergw"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/frontdoor"
 	"github.com/bwsalmon/silo/pkg/gateway"
@@ -421,6 +423,7 @@ func serve(ctx context.Context, args []string) error {
 	imageStorage := fs.Int64("image-storage-gb", 0, "the root's image_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	snapshotStorage := fs.Int64("snapshot-storage-gb", 0, "the root's snapshot_storage_gb, which the hourly root capacity refresh sets (0 is unlimited)")
 	backendKind := fs.String("backend", "gcp", "the backend: gcp, or local (one machine; needs --data-dir, whose SQLite store is its production store, and silo-nsd)")
+	cpuOvercommit := fs.Float64("cpu-overcommit", hostcap.DefaultCPUOvercommit, fmt.Sprintf("with --backend=local: install's --cpu-overcommit, the root's vcpu_m per CPU over 1000, which the hourly root capacity refresh sets (1 to %g)", hostcap.MaxCPUOvercommit))
 	imageCacheSize := fs.Float64("image-cache-size", 0, "with --backend=local: the registry cache's budget in GiB, from install's --image-cache-size, set if the cache's configuration never was (0 leaves it)")
 	afterRestore := fs.Bool("after-restore", false, "with --backend=local: the data directory was restored, cache included, so start the reconcile report-only whatever the object sequence says")
 	nsdState := fs.String("nsd-state", "", "with --backend=local: the namespace holder's state file (default $XDG_RUNTIME_DIR/silo/nsd.state)")
@@ -435,6 +438,9 @@ func serve(ctx context.Context, args []string) error {
 	fs.Parse(args)
 	if *socket == "" && *listen == "" && *gatewaySocket == "" && *frontDoorAddr == "" && *gatewayTLS == "" {
 		return errors.New("give --socket, --listen, --gateway-socket, --gateway-tls-listen, --front-door-listen, or several")
+	}
+	if *cpuOvercommit < 1 || *cpuOvercommit > hostcap.MaxCPUOvercommit {
+		return fmt.Errorf("--cpu-overcommit %g: give 1 to %g", *cpuOvercommit, hostcap.MaxCPUOvercommit)
 	}
 	if *registryHostAddr != "" {
 		if *backendKind != local.Kind {
@@ -715,7 +721,7 @@ func serve(ctx context.Context, args []string) error {
 				runsc, _ := exec.LookPath("runsc")
 				sbx, err := sandboxDriver(sandboxConfig{Exe: exe, State: holderState(*nsdState), Containerd: csock,
 					Dir: filepath.Join(dd.Cache(), "containers"), Volumes: dd.Silos(), Runsc: runsc, Toolbox: *toolbox,
-					SiloPaths: localusage.StoreSilos(db)})
+					SiloPaths: localusage.StoreSilos(db), DNS: names.API.String()})
 				if err != nil {
 					log.Printf("no sandbox class: %v", err)
 				} else {
@@ -732,8 +738,15 @@ func serve(ctx context.Context, args []string) error {
 			defer dk.f.Close()
 			objects = dk.f.DeleteSilo
 		}
-		if be, err = localBackend(db, sd, *nsdState, *nftPath, names, leaderLed, objects); err != nil {
+		var capacity *hostcap.Config
+		if dd != nil {
+			capacity = &hostcap.Config{DataDir: dd.Path, CPUOvercommit: *cpuOvercommit}
+		}
+		if be, err = localBackend(db, sd, *nsdState, *nftPath, names, leaderLed, objects, capacity); err != nil {
 			return err
+		}
+		if dk != nil && be.Fence != nil {
+			dk.SetFence(be.Fence)
 		}
 		if why == "" && *imageCacheSize > 0 {
 			if err := fenceapi.SeedCacheBudget(ctx, db, *imageCacheSize); err != nil {
@@ -1023,8 +1036,16 @@ func serve(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		ssrv := srv
+		if *backendKind == local.Kind && !*callerHeader {
+			// The local backend's front door: the peer uid's member silo
+			// is the caller (local-backend.md §2).
+			pu := &dockergw.ByPeerUID{Store: db, Handler: handler}
+			ssrv = &http.Server{Handler: pu, ConnContext: pu.ConnContext, ReadHeaderTimeout: 10 * time.Second, ConnState: countSessions(&sessions)}
+			defer ssrv.Close()
+		}
 		log.Printf("serving on %s", *socket)
-		go func() { errc <- srv.Serve(l) }()
+		go func() { errc <- ssrv.Serve(l) }()
 	}
 	if *listen != "" {
 		l, err := net.Listen("tcp", *listen)
@@ -1088,8 +1109,10 @@ func replicaID() string {
 // facade objects after its containers. There are no runtime drivers
 // yet, so no container is listed, deleted or resolved. sd, if set,
 // puts the silos' subtrees and volumes in the inventory, and those
-// without rows are reported as orphans.
-func localBackend(db store.Store, sd storage.Driver, state, nft string, names docker.Names, leaderLed bool, objects func(context.Context, string) error) (backend.Backend, error) {
+// without rows are reported as orphans. capacity, if set, is the root
+// capacity refresh's, which the leader runs hourly.
+func localBackend(db store.Store, sd storage.Driver, state, nft string, names docker.Names, leaderLed bool, objects func(context.Context, string) error,
+	capacity *hostcap.Config) (backend.Backend, error) {
 	state = holderState(state)
 	if state == "" {
 		return backend.Backend{}, errors.New("--backend=local: give --nsd-state, or set XDG_RUNTIME_DIR")
@@ -1099,6 +1122,7 @@ func localBackend(db store.Store, sd storage.Driver, state, nft string, names do
 	if leaderLed {
 		o.Guard = leader.Guard
 		o.OnDrift = reconcile.AuditDriftNames(db, nil)
+		o.Capacity = capacity
 	}
 	return local.New(o), nil
 }

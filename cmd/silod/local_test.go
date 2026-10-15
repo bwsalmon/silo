@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/silo/pkg/backend/local/hostcap"
 	"github.com/bwsalmon/silo/pkg/store/sqlite"
 )
 
@@ -50,7 +51,7 @@ func TestLocalBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	be, err := localBackend(db, nil, "/nowhere/nsd.state", "nft", names, true, nil)
+	be, err := localBackend(db, nil, "/nowhere/nsd.state", "nft", names, true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,5 +62,34 @@ func TestLocalBackend(t *testing.T) {
 	// host's own tables.
 	if _, err := be.Fence.Repair(context.Background()); err == nil || !strings.Contains(err.Error(), "no holder") {
 		t.Errorf("Repair with no holder: %v", err)
+	}
+	if be.Capacity != nil {
+		t.Errorf("a capacity refresh with no config")
+	}
+
+	// With a config, the leader refreshes the root's capacity from the
+	// host hourly; before bootstrap there is no root, which isn't an
+	// error. A replica that isn't leader-led runs no refresh.
+	capacity := &hostcap.Config{DataDir: t.TempDir()}
+	if be, err = localBackend(db, nil, "/nowhere/nsd.state", "nft", names, true, nil, capacity); err != nil {
+		t.Fatal(err)
+	}
+	if be.Capacity == nil {
+		t.Fatal("no capacity refresh")
+	}
+	var found bool
+	for _, d := range leaderDuties(db, leaderConfig{backend: be}) {
+		if d.Name == "root capacity" {
+			found = true
+			if err := d.Run(context.Background()); err != nil {
+				t.Errorf("root capacity before bootstrap: %v", err)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no root capacity duty")
+	}
+	if be, err = localBackend(db, nil, "/nowhere/nsd.state", "nft", names, false, nil, capacity); err != nil || be.Capacity != nil {
+		t.Errorf("not leader-led: capacity %v, %v", be.Capacity, err)
 	}
 }

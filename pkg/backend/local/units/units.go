@@ -70,6 +70,10 @@ type Config struct {
 	// silod is given as --image-cache-size; 0 gives none, leaving
 	// silod's default.
 	ImageCacheSizeGB float64
+	// CPUOvercommit is install's --cpu-overcommit, which silod is given
+	// as its own for the root capacity refresh (call L20); 0 gives
+	// none, leaving silod's default.
+	CPUOvercommit float64
 	// RuntimePath are directories put ahead of the system's on the
 	// runtimes' and silod's PATH: install's pinned runsc and its shim,
 	// which `silod containerd` and containerd find there.
@@ -141,6 +145,9 @@ func (c Config) Validate() error {
 	}
 	if c.ImageCacheSizeGB < 0 {
 		errs = append(errs, fmt.Errorf("units: image cache size %v GiB: want 0 or more", c.ImageCacheSizeGB))
+	}
+	if c.CPUOvercommit < 0 {
+		errs = append(errs, fmt.Errorf("units: CPU overcommit %v: want 0 or more", c.CPUOvercommit))
 	}
 	if c.RegistryHostPort < 0 || c.RegistryHostPort > 65535 {
 		errs = append(errs, fmt.Errorf("units: registry host port %d: want 1 to 65535, or 0 for none", c.RegistryHostPort))
@@ -249,6 +256,9 @@ func Units(c Config) ([]Unit, error) {
 	}
 	if c.ImageCacheSizeGB > 0 {
 		serve += " --image-cache-size " + strconv.FormatFloat(c.ImageCacheSizeGB, 'f', -1, 64)
+	}
+	if c.CPUOvercommit > 0 {
+		serve += " --cpu-overcommit " + strconv.FormatFloat(c.CPUOvercommit, 'f', -1, 64)
 	}
 	add(Silod, "Silo's control plane (silod), local backend",
 		[]string{"Wants=" + deps, "After=" + deps},

@@ -161,3 +161,38 @@ func TestCallerMCPFlags(t *testing.T) {
 		t.Error("a server without a URL was accepted")
 	}
 }
+
+// TestValidateChecksGranulefile: silo validate runs granule granulefile
+// check (here a fake granule, as SILO_GRANULE) on a granule sandbox's
+// Granulefile, and refuses one whose target builds a container image.
+func TestValidateChecksGranulefile(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "silo", "sandboxes"), 0o755)
+	os.WriteFile(filepath.Join(dir, "silo", "sandboxes", "dev.Granulefile"), []byte("FROM busybox\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "silo", "Silofile"), []byte("silo: v2\nname: g\nagent: {cli: claude}\nsandboxes:\n  - {name: dev, kind: granule, granulefile: sandboxes/dev.Granulefile}\n"), 0o644)
+	fake := filepath.Join(dir, "granule")
+	for _, tc := range []struct {
+		name, plan string
+		code       int
+		err        string
+	}{
+		{name: "vm", plan: "target: stage 0, which produces a granule VM image", code: 0},
+		{name: "container", plan: "target: stage 0, which produces an OCI container image", code: exitInvalid, err: "sandboxes[0].granulefile: its target stage builds a container image"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			os.WriteFile(fake, []byte("#!/bin/sh\n[ \"$1 $2\" = \"granulefile check\" ] || exit 2\necho '"+tc.plan+"'\n"), 0o755)
+			t.Setenv("SILO_GRANULE", fake)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"validate", filepath.Join(dir, "silo")}, &stdout, &stderr); code != tc.code || !strings.Contains(stderr.String(), tc.err) {
+				t.Errorf("exit %d, stderr %q; want %d, %q", code, stderr.String(), tc.code, tc.err)
+			}
+		})
+	}
+	t.Run("no granule", func(t *testing.T) {
+		t.Setenv("SILO_GRANULE", filepath.Join(dir, "missing"))
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"validate", filepath.Join(dir, "silo")}, &stdout, &stderr); code != 0 || !strings.Contains(stderr.String(), "warning:") {
+			t.Errorf("exit %d, stderr %q; want valid with a warning", code, stderr.String())
+		}
+	})
+}

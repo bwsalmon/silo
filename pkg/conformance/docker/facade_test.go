@@ -17,7 +17,7 @@ import (
 // as not offered.
 
 func eachFence(t *testing.T, fn func(t *testing.T, f conformance.F, a, b string)) {
-	conformance.ForEachFence(t, targets.All(), func(t *testing.T, fe conformance.Fence) {
+	conformance.ForEachFence(t, targets.Pulling(), func(t *testing.T, fe conformance.Fence) {
 		f := conformance.F{Fence: fe, T: t}
 		fn(t, f, f.Mk("", "team-a", 20, nil), f.Mk("", "team-b", 20, nil))
 	})
@@ -72,6 +72,7 @@ func TestDockerRefused(t *testing.T) {
 			"sysctls":              hc("Sysctls", obj{"net.ipv4.ip_forward": "1"}),
 			"negative oom score":   hc("OomScoreAdj", -500),
 			"cpuset":               hc("CpusetCpus", "0"),
+			"memory swappiness":    hc("MemorySwappiness", 60),
 			"volume driver":        hc("VolumeDriver", "nfs"),
 			"raw host port":        {"ExposedPorts": obj{"80/tcp": obj{}}, "HostConfig": obj{"PortBindings": obj{"80/tcp": []obj{{"HostIp": "0.0.0.0", "HostPort": "8080"}}}}},
 			"logging driver":       hc("LogConfig", obj{"Type": "syslog"}),
@@ -105,6 +106,25 @@ func TestDockerRefused(t *testing.T) {
 		if len(list) != 1 {
 			t.Errorf("a refused create left %d containers, want only the seed: %v", len(list), list)
 		}
+	})
+}
+
+// A plain `docker run --rm alpine:3 sh` is created: the create body
+// Docker CLI 29.9.0 sends for it (testdata/cli-29.9.0-run.json,
+// captured from the CLI) sets nothing §4 refuses, MemorySwappiness -1,
+// the engine's "unset", among its defaults.
+func TestDockerCLIRun(t *testing.T) {
+	eachFence(t, func(t *testing.T, f conformance.F, a, _ string) {
+		b, err := os.ReadFile("testdata/cli-29.9.0-run.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body obj
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Fatal(err)
+		}
+		body["Image"] = "alpine:3"
+		create(f, a, "plain", body)
 	})
 }
 

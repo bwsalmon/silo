@@ -79,11 +79,17 @@ type SandboxSpec struct {
 	// Kind is container, gvisor or granule.
 	Kind string
 	// Image is an OCI image reference (for granule, a granule VM
-	// image); Build, when Image is empty, the
-	// absolute path of a Dockerfile, built with its directory as the
-	// context.
+	// image); Build, when Image is empty, the absolute path of the file
+	// the image is built from, with its directory as the context: a
+	// container sandbox's build: Dockerfile, or a granule sandbox's
+	// granulefile:, the same field read by two builders (design §14,
+	// journey 10).
 	Image string
 	Build string
+	// Target and BuildArgs are the Granulefile's stage and build
+	// arguments; only granule sandboxes take them.
+	Target    string
+	BuildArgs map[string]string
 	// Workdir is the working directory inside the sandbox, created if
 	// missing. Empty means the image's own.
 	Workdir string
@@ -177,12 +183,24 @@ func SpecFor(f *silofile.Silofile, name, session string) (SandboxSpec, error) {
 		if k := s.Backend.K8s; k != nil {
 			spec.K8s = &K8sTarget{Context: k.Context, Namespace: k.Namespace, KVMGroup: int64(k.KVMGroup)}
 		}
-		if s.Build != "" {
-			real, err := safepath.Within(f.Folder, s.Build)
+		for key, file := range map[string]string{"build": s.Build, "granulefile": s.Granulefile} {
+			if file == "" {
+				continue
+			}
+			real, err := safepath.Within(f.Folder, file)
 			if err != nil {
-				return SandboxSpec{}, fmt.Errorf("sandbox %q: build: %w", name, err)
+				return SandboxSpec{}, fmt.Errorf("sandbox %q: %s: %w", name, key, err)
 			}
 			spec.Build = real
+		}
+		if s.Granulefile != "" {
+			spec.Target = s.Target
+			if len(s.Args) > 0 {
+				spec.BuildArgs = map[string]string{}
+				for k, v := range s.Args {
+					spec.BuildArgs[k] = v
+				}
+			}
 		}
 		for _, m := range s.Mounts {
 			// Resolved through symlinks and confined to the folder again,

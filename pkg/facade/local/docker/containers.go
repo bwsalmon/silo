@@ -17,6 +17,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/control"
+	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/store"
 )
@@ -471,6 +472,9 @@ func (s *Server) containerCreate(q *request) error {
 		if err := put(ctx, tx, q.target.ID, kindContainer, c.ID, c.Name, c); err != nil {
 			return err
 		}
+		if err := topologyChanged(ctx, tx, q.target.ID, c.ID); err != nil {
+			return err
+		}
 		return s.auditTx(ctx, tx, q, "OK", map[string]any{"name": c.Name, "id": c.ID, "class": string(class), "image": c.ImageID}, charges)
 	})
 	s.mu.Unlock()
@@ -795,7 +799,10 @@ func (s *Server) undoCreate(q *request, c *Container, made []*Volume) {
 				return err
 			}
 		}
-		return remove(ctx, tx, q.target.ID, kindContainer, c.ID)
+		if err := remove(ctx, tx, q.target.ID, kindContainer, c.ID); err != nil {
+			return err
+		}
+		return topologyChanged(ctx, tx, q.target.ID, c.ID)
 	})
 	for _, v := range made {
 		s.deleteVolumeDir(ctx, q.target.ID, v.Name)
@@ -858,8 +865,12 @@ func (s *Server) containerStart(q *request) error {
 	return noContent(q)
 }
 
+// FenceWait is how long a start waits for the fence to apply.
+const FenceWait = 30 * time.Second
+
 // start starts the call's container: it charges its CPU and memory,
-// gives its published ports their numbers, and starts it.
+// gives its published ports their numbers, waits for the fence to pin
+// its ports, and starts it.
 func (s *Server) start(q *request) error {
 	c, err := s.get(q)
 	if err != nil {
@@ -882,6 +893,7 @@ func (s *Server) start(q *request) error {
 		}
 	}
 	var charges []fenceapi.ChargeLine
+	var seq uint64
 	s.mu.Lock()
 	err = s.st.Tx(q.ctx(), func(tx store.Tx) error {
 		if err := s.assignPorts(q.ctx(), tx, q.target.ID, c); err != nil {
@@ -892,11 +904,23 @@ func (s *Server) start(q *request) error {
 		if err != nil {
 			return err
 		}
+		if seq, err = fence.LastSeq(q.ctx(), tx); err != nil {
+			return err
+		}
 		return put(q.ctx(), tx, q.target.ID, kindContainer, c.ID, c.Name, c)
 	})
 	s.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if s.opts.Fence != nil {
+		ctx, cancel := context.WithTimeout(q.ctx(), FenceWait)
+		err := s.opts.Fence.WaitApplied(ctx, seq)
+		cancel()
+		if err != nil {
+			s.refundLater(q.ctx(), runObject(q.target.ID, c.ID))
+			return unavailable("the fence has not pinned container %s's ports: %v", c.ID, err)
+		}
 	}
 	if err := s.listen(q, c); err != nil {
 		s.refundLater(q.ctx(), runObject(q.target.ID, c.ID))
@@ -1272,6 +1296,9 @@ func (s *Server) removeContainer(ctx context.Context, silo string, c *Container,
 			charges = append(charges, ch...)
 		}
 		if err := remove(ctx, tx, silo, kindContainer, c.ID); err != nil {
+			return err
+		}
+		if err := topologyChanged(ctx, tx, silo, c.ID); err != nil {
 			return err
 		}
 		if volumes {

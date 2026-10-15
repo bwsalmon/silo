@@ -30,7 +30,7 @@ var gvisorGaps = []struct{ name, why string }{
 // names, is refused in both classes, and TestTestcontainersRyukRefused
 // checks that.
 func TestGVisorGaps(t *testing.T) {
-	conformance.ForEachFence(t, targets.All(), func(t *testing.T, fe conformance.Fence) {
+	conformance.ForEachFence(t, targets.Pulling(), func(t *testing.T, fe conformance.Fence) {
 		for _, g := range gvisorGaps {
 			t.Run("sandbox/"+g.name, func(t *testing.T) {
 				t.Skipf("expected skip: gVisor won't run it: %s (local-backend.md §5); such a workload uses the vm class", g.why)

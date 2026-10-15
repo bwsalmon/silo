@@ -34,7 +34,7 @@ type env struct {
 // eachClass runs fn per target and per class, in a fresh silo team-a
 // of the target's install.
 func eachClass(t *testing.T, fn func(t *testing.T, e env)) {
-	conformance.ForEachFence(t, targets.All(), func(t *testing.T, fe conformance.Fence) {
+	conformance.ForEachFence(t, targets.Pulling(), func(t *testing.T, fe conformance.Fence) {
 		for _, class := range classes {
 			t.Run(class, func(t *testing.T) {
 				f := conformance.F{Fence: fe, T: t}

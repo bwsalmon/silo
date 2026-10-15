@@ -25,9 +25,91 @@ import (
 // local-conformance installs it (`silo install --backend local`): the
 // root's /info offers the class, a docker load of a busybox image
 // survives until the create, and the container runs under runsc as its
-// namespace's root with eth0 at its endpoint's address. It skips with
+// namespace's root with eth0 at its endpoint's address, and a
+// container's memory limit is enforced by its cgroup. It skips with
 // no install, unless targets.RequireLocalEnv is set.
 func TestInstalledSandbox(t *testing.T) {
+	r := installedRoot(t)
+	var info struct{ Runtimes map[string]any }
+	r.call("GET", "/info", "", nil, &info)
+	if _, ok := info.Runtimes["silo-sandbox"]; !ok {
+		t.Fatalf("the root's /info offers no silo-sandbox: %v", info.Runtimes)
+	}
+
+	id, code, logs := r.run("echo hello from $(id -u); ip -4 -o addr show eth0")
+	if code != 0 || !strings.Contains(logs, "hello from 0") {
+		t.Fatalf("exit %d, logs %q", code, logs)
+	}
+	var inspect struct {
+		HostConfig      struct{ Runtime string }
+		NetworkSettings struct {
+			Networks map[string]struct{ IPAddress string }
+		}
+	}
+	r.call("GET", "/containers/"+id+"/json", "", nil, &inspect)
+	if inspect.HostConfig.Runtime != "silo-sandbox" {
+		t.Errorf("HostConfig.Runtime %q, want silo-sandbox", inspect.HostConfig.Runtime)
+	}
+	var addrs []string
+	for _, n := range inspect.NetworkSettings.Networks {
+		addrs = append(addrs, n.IPAddress)
+	}
+	if !slices.ContainsFunc(addrs, func(a string) bool { return a != "" && strings.Contains(logs, " "+a+"/") }) {
+		t.Errorf("the container's eth0 is none of its endpoints' %v: %q", addrs, logs)
+	}
+
+	// The kernel holds a container to its memory: under a 128 MiB limit,
+	// tail holding 16 MiB of a line runs, and holding 400 MiB is killed.
+	// local-conformance's runner delegates memory to the user's manager.
+	limit := map[string]any{"Memory": 128 << 20}
+	if _, code, logs := r.runWith(limit, "head -c 16m /dev/zero | tail | wc -c"); code != 0 || !strings.Contains(logs, "16777216") {
+		t.Errorf("16 MiB under a 128 MiB limit: exit %d, logs %q", code, logs)
+	}
+	if _, code, logs := r.runWith(limit, "head -c 400m /dev/zero | tail | wc -c"); code == 0 {
+		t.Errorf("400 MiB under a 128 MiB limit wasn't stopped: exit %d, logs %q", code, logs)
+	} else {
+		t.Logf("400 MiB under a 128 MiB limit: exit %d, logs %q", code, logs)
+	}
+}
+
+// TestInstalledSandboxDNS runs a sandbox-class container in the
+// installed root's default network and resolves the root's
+// <id>.docker.silo.internal from it, through the /etc/resolv.conf silod
+// writes, then reaches the root's Docker facade at that name. Its
+// /etc/hosts names the container itself.
+func TestInstalledSandboxDNS(t *testing.T) {
+	r := installedRoot(t)
+	host := r.in.Root + ".docker.silo.internal"
+	_, code, logs := r.run("cat /etc/resolv.conf; echo ---; cat /etc/hosts; echo ---; " +
+		"nslookup " + host + " && wget -q -O - http://" + host + ":2375/v1.47/version")
+	if code != 0 {
+		t.Fatalf("exit %d, logs %q", code, logs)
+	}
+	if !strings.Contains(logs, "nameserver ") {
+		t.Errorf("no nameserver in the container's /etc/resolv.conf: %q", logs)
+	}
+	if !strings.Contains(logs, "localhost") {
+		t.Errorf("no localhost in the container's /etc/hosts: %q", logs)
+	}
+	if !strings.Contains(logs, `"ApiVersion"`) {
+		t.Errorf("no facade version from %s: %q", host, logs)
+	}
+}
+
+// installed is the local install's root, through its Docker facade,
+// with a busybox image loaded for its containers.
+type installed struct {
+	t     *testing.T
+	ctx   context.Context
+	in    *targets.Install
+	dk    *http.Client
+	image string
+}
+
+// installedRoot finds the local install, or skips (fails, with
+// targets.RequireLocalEnv set) without one, and loads a busybox image
+// into its root, deleted when the test ends.
+func installedRoot(t *testing.T) *installed {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel) // after the cleanups that delete what was made
 	need := func(what string, err error) {
@@ -44,76 +126,71 @@ func TestInstalledSandbox(t *testing.T) {
 	need("no local install", err)
 	busybox, err := exec.LookPath("busybox")
 	need("no busybox to make an image of", err)
-	dk := targets.UnixClient(in.Docker)
+	r := &installed{t: t, ctx: ctx, in: in, dk: targets.UnixClient(in.Docker)}
 
-	call := func(method, path, ctype string, body []byte, out any) {
-		t.Helper()
-		req, _ := http.NewRequestWithContext(ctx, method, "http://docker/v1.47"+path, bytes.NewReader(body))
-		req.Header.Set("Content-Type", ctype)
-		resp, err := dk.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= 300 {
-			t.Fatalf("%s %s: %d %s", method, path, resp.StatusCode, b)
-		}
-		switch o := out.(type) {
-		case nil:
-		case *string:
-			*o = string(b)
-		default:
-			if err := json.Unmarshal(b, out); err != nil {
-				t.Fatalf("%s %s: %q: %v", method, path, b, err)
-			}
-		}
-	}
-	js := func(v any) []byte { b, _ := json.Marshal(v); return b }
-
-	var info struct{ Runtimes map[string]any }
-	call("GET", "/info", "", nil, &info)
-	if _, ok := info.Runtimes["silo-sandbox"]; !ok {
-		t.Fatalf("the root's /info offers no silo-sandbox: %v", info.Runtimes)
-	}
-
-	tag := fmt.Sprintf("silo-conformance-bb:%d", time.Now().UnixNano())
-	call("POST", "/images/load?quiet=1", "application/x-tar", busyboxArchive(t, busybox, tag), nil)
-	t.Cleanup(func() { call("DELETE", "/images/"+tag+"?force=1", "", nil, nil) })
+	r.image = fmt.Sprintf("silo-conformance-bb:%d", time.Now().UnixNano())
+	r.call("POST", "/images/load?quiet=1", "application/x-tar", busyboxArchive(t, busybox, r.image), nil)
+	t.Cleanup(func() { r.call("DELETE", "/images/"+r.image+"?force=1", "", nil, nil) })
 	// A load's blobs once lasted only as long as its request; the GC
 	// that took them runs soon after, not at once.
 	time.Sleep(2 * time.Second)
+	return r
+}
 
-	var made struct{ Id string }
-	call("POST", "/containers/create", "application/json", js(map[string]any{"Image": tag,
-		"HostConfig": map[string]any{"Runtime": "silo-sandbox"},
-		"Cmd":        []string{"sh", "-c", "echo hello from $(id -u); ip -4 -o addr show eth0"}}), &made)
-	t.Cleanup(func() { call("DELETE", "/containers/"+made.Id+"?force=1", "", nil, nil) })
-	call("POST", "/containers/"+made.Id+"/start", "", nil, nil)
-	var waited struct{ StatusCode int }
-	call("POST", "/containers/"+made.Id+"/wait", "", nil, &waited)
-	var logs string
-	call("GET", "/containers/"+made.Id+"/logs?stdout=1&stderr=1", "", nil, &logs)
-	if waited.StatusCode != 0 || !strings.Contains(logs, "hello from 0") {
-		t.Fatalf("exit %d, logs %q", waited.StatusCode, logs)
+// call makes one Engine API call, failing the test on an error status,
+// and decodes its body into out: a *string as it is, else as JSON.
+func (r *installed) call(method, path, ctype string, body []byte, out any) {
+	t := r.t
+	t.Helper()
+	req, _ := http.NewRequestWithContext(r.ctx, method, "http://docker/v1.47"+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", ctype)
+	resp, err := r.dk.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
-	var inspect struct {
-		HostConfig      struct{ Runtime string }
-		NetworkSettings struct {
-			Networks map[string]struct{ IPAddress string }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		t.Fatalf("%s %s: %d %s", method, path, resp.StatusCode, b)
+	}
+	switch o := out.(type) {
+	case nil:
+	case *string:
+		*o = string(b)
+	default:
+		if err := json.Unmarshal(b, out); err != nil {
+			t.Fatalf("%s %s: %q: %v", method, path, b, err)
 		}
 	}
-	call("GET", "/containers/"+made.Id+"/json", "", nil, &inspect)
-	if inspect.HostConfig.Runtime != "silo-sandbox" {
-		t.Errorf("HostConfig.Runtime %q, want silo-sandbox", inspect.HostConfig.Runtime)
+}
+
+// run runs script with sh -c in a sandbox-class container of the
+// image, deleted when the test ends, and returns its id, exit code
+// and logs.
+func (r *installed) run(script string) (id string, code int, logs string) {
+	r.t.Helper()
+	return r.runWith(nil, script)
+}
+
+// runWith is run with hostConfig's fields added to the container's
+// HostConfig.
+func (r *installed) runWith(hostConfig map[string]any, script string) (id string, code int, logs string) {
+	r.t.Helper()
+	js := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	hc := map[string]any{"Runtime": "silo-sandbox"}
+	for k, v := range hostConfig {
+		hc[k] = v
 	}
-	var addrs []string
-	for _, n := range inspect.NetworkSettings.Networks {
-		addrs = append(addrs, n.IPAddress)
-	}
-	if !slices.ContainsFunc(addrs, func(a string) bool { return a != "" && strings.Contains(logs, " "+a+"/") }) {
-		t.Errorf("the container's eth0 is none of its endpoints' %v: %q", addrs, logs)
-	}
+	var made struct{ Id string }
+	r.call("POST", "/containers/create", "application/json", js(map[string]any{"Image": r.image,
+		"HostConfig": hc,
+		"Cmd":        []string{"sh", "-c", script}}), &made)
+	r.t.Cleanup(func() { r.call("DELETE", "/containers/"+made.Id+"?force=1", "", nil, nil) })
+	r.call("POST", "/containers/"+made.Id+"/start", "", nil, nil)
+	var waited struct{ StatusCode int }
+	r.call("POST", "/containers/"+made.Id+"/wait", "", nil, &waited)
+	r.call("GET", "/containers/"+made.Id+"/logs?stdout=1&stderr=1", "", nil, &logs)
+	return made.Id, waited.StatusCode, logs
 }
 
 // busyboxArchive is a docker save archive of one image, tagged tag,
@@ -131,7 +208,7 @@ func busyboxArchive(t *testing.T, busybox, tag string) []byte {
 	}
 	tw.WriteHeader(&tar.Header{Name: "bin/busybox", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(bb))})
 	tw.Write(bb)
-	for _, a := range []string{"sh", "echo", "id", "ip", "cat", "sleep", "nc", "ping", "wget", "nslookup"} {
+	for _, a := range []string{"sh", "echo", "id", "ip", "cat", "sleep", "nc", "ping", "wget", "nslookup", "head", "tail", "wc"} {
 		tw.WriteHeader(&tar.Header{Name: "bin/" + a, Typeflag: tar.TypeSymlink, Linkname: "busybox"})
 	}
 	tw.Close()

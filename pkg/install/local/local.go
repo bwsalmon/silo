@@ -70,6 +70,10 @@ type Config struct {
 	// CPUOvercommit is the root's vcpu_m overcommit (call L20); 0 is
 	// DefaultCPUOvercommit.
 	CPUOvercommit float64
+	// EgressAllow is the root's egress allowlist (--egress-allow);
+	// empty is none, install's default: nothing in the tree reaches the
+	// outside world until an admin allows it.
+	EgressAllow []string
 	// Uninstall is set for silo uninstall, which needs no silod binary,
 	// and DeleteData is its --delete-data.
 	Uninstall  bool
@@ -360,7 +364,7 @@ func Steps(c Config, h Host) []install.Step {
 // is installed, and the pinned gVisor first on the runtimes' PATH.
 func unitsConfig(c Config, h Host, report rootless.Report) units.Config {
 	uc := units.Config{Mode: c.Mode, Silod: c.Silod, DataDir: c.DataDir, RegistryHostPort: c.RegistryHostPort,
-		ImageCacheSizeGB: imageCacheGB(c, h)}
+		ImageCacheSizeGB: imageCacheGB(c, h), CPUOvercommit: c.CPUOvercommit}
 	if _, ok := pinned(h); ok {
 		uc.RuntimePath = []string{RuntimesDir(c)}
 	}
@@ -956,6 +960,11 @@ func (s *unitsStep) remove(ctx context.Context, o *unitsObserved, del map[string
 		}
 		stop(n)
 	}
+	// Sandbox containers run in silod's scope, not the runtimes'
+	// cgroups (rootless.SandboxScope). There is none if no container
+	// ran, so its errors are not this step's.
+	systemctl(ctx, s.c, s.h, "kill", "--signal=SIGKILL", rootless.SandboxScope)
+	systemctl(ctx, s.c, s.h, "stop", rootless.SandboxScope)
 	if s.c.DeleteData && s.c.Mode == units.Rootless && o.Active[units.NSD] {
 		args := []string{"unshare", "--", "rm", "-rf"}
 		for _, d := range []string{"silos", "containerd", "cache"} {

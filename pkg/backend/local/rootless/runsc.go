@@ -26,9 +26,9 @@ var RunscFlags = map[string]string{
 // RunscOptionsTOML is the runsc shim's options file: runsc is reached
 // through wrapper, a script that execs `silod runsc`, so that every
 // runsc the shim runs starts inside its container's user namespace.
-// The shim's cgroup handling is the systemd driver, through the
-// spec's cgroupsPath, where RunscSystemdCgroups says so, and off
-// (ignore-cgroups) otherwise.
+// runsc ignores cgroups: `silod runsc create` starts it in the
+// container's cgroup in SandboxScope, with the limits written, when
+// the spec names one (AnnotationCgroup).
 func RunscOptionsTOML(p Paths, wrapper string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Written by silod; edits are overwritten at its next start.\n")
@@ -37,24 +37,9 @@ func RunscOptionsTOML(p Paths, wrapper string) string {
 	for _, k := range []string{"directfs", "network", "overlay2", "platform"} {
 		fmt.Fprintf(&b, "  %s = %s\n", k, quote(RunscFlags[k]))
 	}
-	if RunscSystemdCgroups {
-		fmt.Fprintf(&b, "  systemd-cgroup = \"true\"\n")
-	} else {
-		fmt.Fprintf(&b, "  ignore-cgroups = \"true\"\n")
-	}
+	fmt.Fprintf(&b, "  ignore-cgroups = \"true\"\n")
 	return b.String()
 }
-
-// RunscSystemdCgroups is whether the runsc shim uses the systemd cgroup
-// driver, each container a scope in its silo's slice. It doesn't yet:
-// runsc runs as the root of its container's user namespace, and its
-// systemd driver then dials the system manager's private socket, which
-// refuses it ("cannot set up cgroup for root: dial unix
-// /run/systemd/private: permission denied"), so on an installed host
-// every create failed. Until containers' cgroups are delegated another
-// way, the shim ignores cgroups, as on a host without delegation, and
-// CPU and memory are held by the ledger only.
-const RunscSystemdCgroups = false
 
 // RunscWrapperScript is the script the shim's binary_name names. The
 // shim takes a path, not a command line.

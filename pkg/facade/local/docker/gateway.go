@@ -59,6 +59,19 @@ func Topology(api, docker netip.Addr) netfence.TopologySource {
 	}
 }
 
+// TopologyChangeKind is the change-log entry the facade writes with a
+// change to Topology's ports, a container's endpoints made, moved or
+// removed: it wakes the fence's applier, which reloads the pins
+// (local-backend.md, "Anti-spoofing"), as a grant's change does.
+const TopologyChangeKind = "docker.topology"
+
+// topologyChanged writes a TopologyChangeKind entry for silo's
+// container id in tx.
+func topologyChanged(ctx context.Context, tx store.Tx, silo, id string) error {
+	_, err := tx.Append(ctx, TopologyChangeKind, silo, `{"container":"`+id+`"}`)
+	return err
+}
+
 // VethName is the host end of a container's veth on a network's
 // bridge: 15 bytes at most, as the kernel allows.
 func VethName(container, network string) string { return "sv" + container[:7] + network[:6] }

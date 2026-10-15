@@ -183,7 +183,7 @@ func ContainerName(vm string) string { return "granule-vm-" + vm }
 // holds it, pulling it when it is missing, and what it resolved to.
 func (b *Backend) ResolveImage(ctx context.Context, spec sandbox.SandboxSpec) (sandbox.Image, error) {
 	if spec.Image == "" {
-		return sandbox.Image{}, fmt.Errorf("sandbox %q: kind granule needs image: a granule VM image (granulefile: is stage 8b)", spec.Name)
+		return sandbox.Image{}, fmt.Errorf("sandbox %q: kind granule needs image (a granule VM image) or granulefile", spec.Name)
 	}
 	inspect := func() ([]byte, error) {
 		return run(ctx, b.docker(), nil, "image", "inspect", "--format", "{{.Id}}{{range .RepoDigests}} {{.}}{{end}}", spec.Image)
@@ -259,8 +259,8 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	if spec.Kind != "granule" {
 		return nil, fmt.Errorf("sandbox %q: kind %q is not granule", spec.Name, spec.Kind)
 	}
-	if spec.Build != "" {
-		return nil, fmt.Errorf("sandbox %q: a granule sandbox is booted from image:, not build:", spec.Name)
+	if spec.Image != "" && spec.Build != "" {
+		return nil, fmt.Errorf("sandbox %q: give image or granulefile, not both", spec.Name)
 	}
 	if len(spec.Mounts) > 0 {
 		return nil, fmt.Errorf("sandbox %q: kind granule takes no mounts: a host directory would have to cross into the guest over virtio-fs, which silo does not set up", spec.Name)
@@ -268,7 +268,14 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	if err := CheckEnv(spec.Env); err != nil {
 		return nil, fmt.Errorf("sandbox %q: %w", spec.Name, err)
 	}
-	img, err := b.ResolveImage(ctx, spec)
+	var img sandbox.Image
+	var err error
+	if spec.Build != "" {
+		// Booted by the tag it is kept under, which names its content.
+		img, spec.Image, err = b.BuildImage(ctx, spec)
+	} else {
+		img, err = b.ResolveImage(ctx, spec)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +394,13 @@ type VM struct {
 	Image sandbox.Image
 }
 
-var _ sandbox.Sandbox = (*VM)(nil)
+var (
+	_ sandbox.Sandbox = (*VM)(nil)
+	_ sandbox.Imaged  = (*VM)(nil)
+)
+
+// ResolvedImage implements sandbox.Imaged.
+func (v *VM) ResolvedImage() sandbox.Image { return v.Image }
 
 // killGrace is how long Exec waits, once its context is done and the
 // command has been killed, for granule to return what it has before
