@@ -1,0 +1,409 @@
+package tasks
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
+	_ "modernc.org/sqlite"             // "sqlite"
+)
+
+// Store is the backlog: SQLite for one hub replica, PostgreSQL for
+// several, as the team directory's store is.
+type Store struct {
+	db       *sql.DB
+	postgres bool
+	// Now, when set, is the clock tasks are stamped with.
+	Now func() time.Time
+}
+
+// Open opens the backlog at url: "postgres://..." (or "postgresql://...")
+// for PostgreSQL, "sqlite:PATH" or a bare path for SQLite (":memory:" for
+// a throwaway one). It creates its table if it is missing; it may share
+// a database with the team directory.
+func Open(ctx context.Context, url string) (*Store, error) {
+	var (
+		db       *sql.DB
+		err      error
+		postgres = strings.HasPrefix(url, "postgres://") || strings.HasPrefix(url, "postgresql://")
+	)
+	if postgres {
+		db, err = sql.Open("pgx", url)
+	} else {
+		path := strings.TrimPrefix(url, "sqlite:")
+		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+		// One connection: an in-memory database is per connection, and
+		// SQLite serialises writers anyway.
+		db.SetMaxOpenConns(1)
+	}
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{db: db, postgres: postgres}
+	if err := s.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close closes the store.
+func (s *Store) Close() error { return s.db.Close() }
+
+// version counts a task's updates: an update applies only to the version
+// it read, so the dispatcher and a human cancelling never both win.
+const schema = `
+CREATE TABLE IF NOT EXISTS tasks (
+	id TEXT PRIMARY KEY,
+	team TEXT NOT NULL,
+	repo TEXT NOT NULL,
+	title TEXT NOT NULL,
+	prompt TEXT NOT NULL,
+	submitter TEXT NOT NULL,
+	constraints TEXT NOT NULL,
+	state TEXT NOT NULL,
+	node TEXT NOT NULL,
+	node_task TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	excluded TEXT NOT NULL,
+	attempts INTEGER NOT NULL,
+	cancel_pending INTEGER NOT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	version BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tasks_state ON tasks (state, created_at);
+CREATE INDEX IF NOT EXISTS tasks_team ON tasks (team, created_at)
+`
+
+func (s *Store) migrate(ctx context.Context) error {
+	for _, stmt := range strings.Split(schema, ";") {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("tasks: creating tables: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+// q rewrites the ? placeholders of a query for PostgreSQL. No query
+// here has a ? anywhere else.
+func (s *Store) q(query string) string {
+	if !s.postgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, c := range query {
+		if c == '?' {
+			n++
+			b.WriteString("$" + strconv.Itoa(n))
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+const columns = `id, team, repo, title, prompt, submitter, constraints, state, node, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
+
+type scanner interface{ Scan(...any) error }
+
+func scanTask(r scanner) (Task, error) {
+	var (
+		t                Task
+		cons, excl       string
+		pending          int
+		created, updated int64
+		state            string
+	)
+	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &cons, &state, &t.Node, &t.NodeTask,
+		&t.Reason, &excl, &t.Attempts, &pending, &created, &updated, &t.version); err != nil {
+		return Task{}, err
+	}
+	t.State = State(state)
+	t.CancelPending = pending != 0
+	t.Created = time.UnixMilli(created).UTC()
+	t.Updated = time.UnixMilli(updated).UTC()
+	if err := json.Unmarshal([]byte(cons), &t.Constraints); err != nil {
+		return Task{}, fmt.Errorf("tasks: task %s's constraints: %w", t.ID, err)
+	}
+	if err := json.Unmarshal([]byte(excl), &t.Excluded); err != nil {
+		return Task{}, fmt.Errorf("tasks: task %s's exclusions: %w", t.ID, err)
+	}
+	return t, nil
+}
+
+func newID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return "t-" + hex.EncodeToString(b)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// Create adds a task to the backlog, queued. It is given its ID and
+// creation time; the caller has decided its team and submitter.
+func (s *Store) Create(ctx context.Context, spec Spec) (Task, error) {
+	spec, err := normalize(spec)
+	if err != nil {
+		return Task{}, err
+	}
+	now := s.now().UTC().Truncate(time.Millisecond)
+	spec.ID, spec.Created = newID(), now
+	t := Task{Spec: spec, State: Queued, Excluded: []string{}, Updated: now, version: 1}
+	cons, _ := json.Marshal(t.Constraints)
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, string(cons), string(t.State), "", "", "", "[]", 0, 0,
+		now.UnixMilli(), now.UnixMilli(), t.version)
+	if err != nil {
+		return Task{}, err
+	}
+	return t, nil
+}
+
+// Get returns one task.
+func (s *Store) Get(ctx context.Context, id string) (Task, error) {
+	t, err := scanTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+columns+` FROM tasks WHERE id = ?`), id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	return t, err
+}
+
+// Filter narrows List.
+type Filter struct {
+	// States, when set, are the states to list.
+	States []State
+	// Teams, when set, are the teams whose tasks to list.
+	Teams []string
+	// Limit caps the tasks returned; 0 is no cap.
+	Limit int
+}
+
+// List returns the tasks f selects, newest first.
+func (s *Store) List(ctx context.Context, f Filter) ([]Task, error) {
+	return s.list(ctx, f, false)
+}
+
+// Dispatchable returns, oldest first, the tasks the dispatcher has
+// something to do for: the queued ones, to place; the lost ones, to
+// resume when their node is back; and the cancelled ones whose node has
+// not been told.
+func (s *Store) Dispatchable(ctx context.Context) ([]Task, error) {
+	return s.query(ctx, `SELECT `+columns+` FROM tasks WHERE state IN (?, ?) OR cancel_pending = 1 ORDER BY created_at, id`,
+		[]any{string(Queued), string(Lost)})
+}
+
+func inList(where []string, args []any, col string, vals []string) ([]string, []any) {
+	for _, v := range vals {
+		args = append(args, v)
+	}
+	return append(where, col+` IN (?`+strings.Repeat(", ?", len(vals)-1)+`)`), args
+}
+
+func (s *Store) list(ctx context.Context, f Filter, oldest bool) ([]Task, error) {
+	var (
+		where []string
+		args  []any
+	)
+	if len(f.States) > 0 {
+		var states []string
+		for _, st := range f.States {
+			states = append(states, string(st))
+		}
+		where, args = inList(where, args, "state", states)
+	}
+	if f.Teams != nil {
+		if len(f.Teams) == 0 {
+			return []Task{}, nil
+		}
+		where, args = inList(where, args, "team", f.Teams)
+	}
+	q := `SELECT ` + columns + ` FROM tasks`
+	if len(where) > 0 {
+		q += ` WHERE ` + strings.Join(where, " AND ")
+	}
+	if oldest {
+		q += ` ORDER BY created_at, id`
+	} else {
+		q += ` ORDER BY created_at DESC, id DESC`
+	}
+	if f.Limit > 0 {
+		q += ` LIMIT ` + strconv.Itoa(f.Limit)
+	}
+	return s.query(ctx, q, args)
+}
+
+func (s *Store) query(ctx context.Context, q string, args []any) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(q), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Task{}
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// update applies f to task id if it is in one of the states from, and
+// writes it back. Its write applies only to the version it read; one
+// that lost a race to another update reads the task again and retries.
+func (s *Store) update(ctx context.Context, id string, from []State, f func(*Task)) (Task, error) {
+	for {
+		t, err := s.Get(ctx, id)
+		if err != nil {
+			return Task{}, err
+		}
+		if !slices.Contains(from, t.State) {
+			return t, fmt.Errorf("%w: task %s is %s", ErrState, id, t.State)
+		}
+		f(&t)
+		if !t.State.valid() {
+			return Task{}, fmt.Errorf("%w state %q", ErrInvalid, t.State)
+		}
+		t.Updated = s.now().UTC().Truncate(time.Millisecond)
+		if t.Excluded == nil {
+			t.Excluded = []string{}
+		}
+		excl, _ := json.Marshal(t.Excluded)
+		res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, node = ?, node_task = ?, reason = ?, excluded = ?,
+			attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
+			string(t.State), t.Node, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
+			t.Updated.UnixMilli(), t.version+1, id, t.version)
+		if err != nil {
+			return Task{}, err
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			t.version++
+			return t, nil
+		}
+	}
+}
+
+// Offer marks a queued task offered to node.
+func (s *Store) Offer(ctx context.Context, id, node string) (Task, error) {
+	return s.update(ctx, id, []State{Queued}, func(t *Task) {
+		t.State, t.Node, t.NodeTask, t.Reason = Offered, node, "", ""
+		t.Attempts++
+	})
+}
+
+// Accept marks a task its node has accepted running: an offered task,
+// or a lost one its node resumed.
+func (s *Store) Accept(ctx context.Context, id, nodeTask string) (Task, error) {
+	return s.update(ctx, id, []State{Offered, Lost}, func(t *Task) {
+		t.State, t.Reason = Running, ""
+		if nodeTask != "" {
+			t.NodeTask = nodeTask
+		}
+	})
+}
+
+// Requeue returns a task to the queue, from the node it was offered to
+// or lost on, saying why. A non-empty exclude is a node the task is not
+// to be offered again: the one that refused it.
+func (s *Store) Requeue(ctx context.Context, id, reason, exclude string) (Task, error) {
+	return s.update(ctx, id, []State{Offered, Lost}, func(t *Task) {
+		t.State, t.Node, t.NodeTask, t.Reason = Queued, "", "", reason
+		if exclude != "" && !slices.Contains(t.Excluded, exclude) {
+			t.Excluded = append(t.Excluded, exclude)
+		}
+	})
+}
+
+// Retry is a human requeueing a task: a lost one, which goes back to
+// the queue (its node, if it comes back, is not asked to resume it), or
+// a queued one. Either way the task's exclusions are cleared, so a node
+// that refused it is offered it again.
+func (s *Store) Retry(ctx context.Context, id string) (Task, error) {
+	return s.update(ctx, id, []State{Queued, Lost}, func(t *Task) {
+		t.State, t.Node, t.NodeTask, t.Reason = Queued, "", "", ""
+		t.Excluded = []string{}
+	})
+}
+
+// Lose marks a running task lost: its node went away.
+func (s *Store) Lose(ctx context.Context, id, reason string) (Task, error) {
+	return s.update(ctx, id, []State{Running}, func(t *Task) {
+		t.State, t.Reason = Lost, reason
+	})
+}
+
+// Finish records the result its node reported for a task: done or
+// failed.
+func (s *Store) Finish(ctx context.Context, id string, state State, reason string) (Task, error) {
+	if state != Done && state != Failed {
+		return Task{}, fmt.Errorf("%w result %q: want done or failed", ErrInvalid, state)
+	}
+	return s.update(ctx, id, []State{Offered, Running, Lost}, func(t *Task) {
+		t.State, t.Reason = state, reason
+	})
+}
+
+// Cancel cancels a task that has not finished. One that a node holds,
+// or may hold, is left CancelPending until the node is told
+// (CancelDelivered).
+func (s *Store) Cancel(ctx context.Context, id, reason string) (Task, error) {
+	return s.update(ctx, id, []State{Queued, Offered, Running, Lost}, func(t *Task) {
+		t.CancelPending = t.State != Queued
+		t.State, t.Reason = Cancelled, reason
+	})
+}
+
+// CancelDelivered records that a cancelled task's node has been told.
+func (s *Store) CancelDelivered(ctx context.Context, id string) error {
+	_, err := s.update(ctx, id, []State{Cancelled}, func(t *Task) { t.CancelPending = false })
+	return err
+}
+
+// Recover is the dispatcher starting, with no task stream open: a task
+// that was offered goes back to the queue, since no node can accept it
+// on a stream that has gone, and one that was running is lost until its
+// node comes back and resumes it.
+func (s *Store) Recover(ctx context.Context, reason string) error {
+	ts, err := s.list(ctx, Filter{States: []State{Offered, Running}}, true)
+	if err != nil {
+		return err
+	}
+	for _, t := range ts {
+		if t.State == Offered {
+			_, err = s.Requeue(ctx, t.ID, reason, "")
+		} else {
+			_, err = s.Lose(ctx, t.ID, reason)
+		}
+		if err != nil && !errors.Is(err, ErrState) {
+			return err
+		}
+	}
+	return nil
+}

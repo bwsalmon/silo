@@ -422,6 +422,28 @@ func (s *Store) RepoOwner(ctx context.Context, repo string) (string, error) {
 	return team, err
 }
 
+// TeamRepos are the repositories team owns, sorted: the ones a
+// team-targeted task may run in (docs/hub.md §6.2).
+func (s *Store) TeamRepos(ctx context.Context, team string) ([]string, error) {
+	if err := s.teamExists(ctx, s.db, team); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo FROM team_repos WHERE team = ? ORDER BY repo`), team)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	repos := []string{}
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		repos = append(repos, r)
+	}
+	return repos, rows.Err()
+}
+
 // memberships are the teams any of principals is in, with the highest
 // role any of them has there.
 func (s *Store) memberships(ctx context.Context, principals []string) (map[string]Role, error) {

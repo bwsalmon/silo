@@ -270,3 +270,22 @@ func TestAccess(t *testing.T) {
 		}
 	})
 }
+
+func TestTeamRepos(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seed(t, s)
+		check(t, s.AssignRepo(ctx, "infra", "bwsalmon/grain"))
+		repos, err := s.TeamRepos(ctx, "infra")
+		if err != nil || strings.Join(repos, " ") != "bwsalmon/grain bwsalmon/silo" {
+			t.Errorf("TeamRepos(infra) = %v, %v", repos, err)
+		}
+		check(t, s.CreateTeam(ctx, "empty", ""))
+		if repos, err := s.TeamRepos(ctx, "empty"); err != nil || len(repos) != 0 {
+			t.Errorf("TeamRepos(empty) = %v, %v", repos, err)
+		}
+		if _, err := s.TeamRepos(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("TeamRepos(nope) = %v, want ErrNotFound", err)
+		}
+	})
+}

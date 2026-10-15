@@ -17,7 +17,7 @@ the Policy Decision Point that signs task claims. It handles:
 - **Teams:** which team owns which repositories, and so which nodes may
   serve them and who may see their tasks.
 - **The backlog:** tasks not yet placed on a node, and dispatch to a
-  node that can run them.
+  node that can run them (`hub/tasks`).
 - **Routing and events:** reaching a node behind NAT or a firewall over
   the connection the node opened, and relaying its events to viewers.
 
@@ -35,6 +35,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `hub/rendezvous` | The node's outbound WebSocket to the hub and its reverse tunnel (hub.md §4): authentication bound to a node ID, admission, heartbeats, streams both ways, the per-caller filtered directory. |
 | `hub/identity` | Human sign-on (hub.md §5.1): IAP assertion and OIDC ID-token verification against the issuer's JWKS, and the OIDC relying party (code flow with PKCE, signed session cookie). |
 | `hub/directory` | The team directory in SQLite or PostgreSQL (hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
+| `hub/tasks` | The task backlog in SQLite or PostgreSQL, its intake API, and the dispatcher (hub.md §6). The dispatcher places tasks on nodes per team, offers each one over a task stream, requeues a refused task without the node that refused it, marks a task lost when its node goes away mid-run and resumes it when the node returns, and cancels tasks down the stream. |
 | `internal/tunnel/mux` | The stream multiplexer the rendezvous carries, copied from grain's `pkg/tunnel/mux`. |
 | `internal/pgtest` | Throwaway PostgreSQL servers for tests. |
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |

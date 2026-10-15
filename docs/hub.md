@@ -3,9 +3,10 @@
 This is the design of the Silo **hub**, which is all that this
 repository holds (Track 2). Its first parts are built: the node
 registry and the rendezvous (stage 2.1, `hub/registry` and
-`hub/rendezvous`), and identity and teams (stage 2.2, §5,
-`hub/identity` and `hub/directory`). Task intake and dispatch (§6) and
-live events (§7) are designed here and built in later stages (§9).
+`hub/rendezvous`), identity and teams (stage 2.2, §5, `hub/identity`
+and `hub/directory`), and task intake and dispatch (stage 2.3, §6,
+`hub/tasks`). Live events (§7) are designed here and built in a later
+stage (§9).
 
 ## 1. What the hub is
 
@@ -306,7 +307,7 @@ These rules follow:
 
 Admission is checked when a node connects. A node that is already
 connected keeps its registration if its owner later leaves the team;
-the dispatcher (§6.2) is to check `Admit` again before it offers a task.
+the dispatcher (§6.2) checks `Admit` again before it offers a task.
 
 The directory's HTTP API (`directory.API`):
 
@@ -324,16 +325,27 @@ POST   /v1/node-tokens {"node"}                        mint one for the caller
 DELETE /v1/node-tokens/{id}                            its owner, or a hub admin
 ```
 
-## 6. Task intake and federation (stage 2.3)
+## 6. Task intake and federation (built: `hub/tasks`)
 
 ### 6.1 The backlog
 
 `POST /v1/tasks` creates a task with these fields:
 
-- **target:** `{repo}` or `{team}`.
-- **prompt** and **title**.
-- **submitter:** the principal who submitted it.
-- Optional **constraints**: node labels, or a node ID.
+- **target:** `{repo}` or `{team}`. The caller must be in the team
+  that owns the repository, or in the team (a hub admin may submit
+  anywhere). A repository that no team owns is refused, because no node
+  could be admitted to serve it.
+- **prompt** and **title**. The title defaults to the prompt's first
+  line.
+- **submitter:** the principal who submitted it, from the caller's
+  sign-on (§5.1), never from the request body.
+- Optional **constraints**: node labels (`{"labels":{"zone":"eu"}}`,
+  each of which the node must carry with that value), or a node ID
+  (`{"node":"ws-1"}`).
+
+Every task also records its **team**: the team it targets, or the team
+that owned its repository when it was submitted. Dispatch is ordered
+per team, and the team's members see the task.
 
 Users and custom UIs submit tasks the same way, through the API or the
 SDK. The task states are:
@@ -341,36 +353,100 @@ SDK. The task states are:
 ```
 queued → offered → running → done | failed | cancelled
               ↘ queued (refused, or the node was lost before it accepted)
+                          ↘ lost (the node was lost while the task ran)
+                              → running (the node came back and resumed it)
+                              → queued (the node came back without it, or a human requeued it)
 ```
 
-The store keeps the task, its state, the node it was placed on and its
-lifecycle metadata. It never stores a checkout, a diff or a log.
+Any state that has not finished can be cancelled.
+
+The store (`tasks.Store`: SQLite for one replica, PostgreSQL for more,
+and possibly the same database as the directory) keeps the task, its
+state, the node it was placed on, the node's own ID for the task, the
+reason for its state, the nodes that refused it, and the number of
+offers made. It never stores a checkout, a diff or a log. Each update
+applies only to the version of the row it read, so a human's cancel
+and the dispatcher never both win.
+
+The intake API (`tasks.API`) uses the directory's sign-on and
+visibility (§5.3):
+
+```
+POST /v1/tasks {"repo" | "team", "title", "prompt", "constraints"}
+GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
+GET  /v1/tasks/{id}
+POST /v1/tasks/{id}/cancel {"reason"}                        its submitter, a team admin or a hub admin
+POST /v1/tasks/{id}/requeue                                  the same
+```
+
+A task the caller may not see answers 404, as one that does not exist
+would. `requeue` returns a `lost` task to the queue. On a queued task,
+it clears the nodes that refused it, so they are offered it again.
 
 ### 6.2 The dispatcher
 
-The dispatcher wakes on a new task and on registry `Changes()`. It
-takes queued tasks oldest first, per team:
+The dispatcher (`tasks.Dispatcher`) wakes on a new task, on registry
+`Changes()`, and every `Retry` (30s). It takes queued tasks oldest
+first, going round the teams: one task from each team in turn, in the
+order of each team's oldest task. A team with a long queue therefore
+does not hold back another team's first task. For each task:
 
-1. `Claim(repo)`, honouring constraints. If no node has a free slot,
-   the task waits.
-2. `Server.Open(node)` opens a task stream, and the dispatcher writes
-   `{"type":"offer","task":{...}}`.
-3. The node's grain answers on the stream:
+1. `ClaimFor(repos, ok)`: the task's repository, or every repository
+   its team owns. `ok` passes over nodes that do not meet the
+   constraints, and nodes that refused the task. If no node has a free
+   slot, the task waits.
+2. `Admit` is checked again for the node's owner, against the
+   repositories the task may run in, because the owner may have left
+   the team since the node connected (§5.3). A node that is no longer
+   admitted has its claim released and is passed over for `Retry`.
+3. The task is marked `offered`. `Server.Open(node)` opens a task
+   stream, and the dispatcher writes `{"type":"offer","task":{...}}`.
+4. The node's grain answers on the stream:
    - `accept` with its local task ID: the task is `running`, and the
      next heartbeat settles the claim.
    - `refuse` with a reason: the claim is released, and the task
-     returns to the queue with that node excluded for this attempt.
-4. If the node goes offline while the task is `offered`, the task is
-   requeued. If it goes offline while the task is `running`, the task
-   is marked `lost`. The node resumes it when it comes back (it still
-   owns the task), or a human requeues it.
+     returns to the queue with that node excluded. It is not offered
+     to that node again until a human requeues it. A task that every
+     eligible node has refused waits.
+   - No answer within `OfferTimeout` (a minute) counts as a refusal.
+5. If the node goes offline while the task is `offered`, the claim is
+   released and the task is requeued, with the node passed over for
+   `Retry` but not excluded. If it goes offline while the task is
+   `running`, the task is marked `lost` and stays with its node. A lost
+   task is never placed elsewhere automatically (§10). When the node is
+   next online, the dispatcher opens a stream and writes
+   `{"type":"resume","task":{...}}`. The node answers `accept` (the
+   task is `running` again, on a new stream), `result` (it ended while
+   the node was away), or `refuse` (the node does not have it, so
+   nobody is running it, and the task is requeued for any node).
 
 A team-targeted task goes to any node that serves one of the team's
 repositories. That node's grain chooses the repository, as it does for
 a task without one.
 
-A task stream stays open for the task's life. Cancelling the task is a
-`{"type":"cancel"}` written down the stream.
+A task stream stays open for the task's life. The node ends the task
+by writing `{"type":"result","state":"done"|"failed","reason":...}`,
+and the hub then closes the stream. Cancelling the task marks it
+`cancelled` at once and writes `{"type":"cancel"}` down the stream.
+A task whose node is away when it is cancelled stays `cancel_pending`.
+When the node is back, the cancel is written as the only message on a
+stream of its own, `{"type":"cancel","task":{"id":...}}`.
+
+The whole stream protocol, one JSON message per line:
+
+```
+hub → node  {"type":"offer","task":{...}}
+            {"type":"resume","task":{...}}
+            {"type":"cancel","task":{"id":...}}
+node → hub  {"type":"accept","node_task":"<local id>"}
+            {"type":"refuse","reason":"..."}
+            {"type":"result","state":"done"|"failed","reason":"..."}
+```
+
+When the dispatcher starts, it has no streams. A task that was
+`offered` is requeued, and a task that was `running` is `lost` until
+its node resumes it. The dispatcher assumes it is the only one (one
+hub replica, §10).
 
 ## 7. Live events and privacy (stage 2.4)
 
@@ -437,10 +513,10 @@ anything leaves it.
 | --- | --- | --- |
 | 2.1 | This design. The registry (`hub/registry`). The rendezvous: WebSocket, auth hook, admission hook, heartbeats, supersession, streams both ways, client with reconnect (`hub/rendezvous`). | here, built |
 | 2.2 | Human sign-on (IAP JWT verification and OIDC, `hub/identity`). Node tokens, the team directory, `Admit` and per-team visibility, in a store (`hub/directory`). | here, built |
-| 2.3 | The backlog, the intake API, the dispatcher and the task-stream protocol | silo |
+| 2.3 | The backlog and its store, the intake API, the dispatcher (per-team ordering, constraints, admission rechecked, refusal, lost nodes, resume, cancel) and the task-stream protocol (`hub/tasks`). `registry.ClaimFor`. | here, built |
 | 2.4 | Event streaming up, the classification, fan-out to SSE and WebSocket, view-through | silo |
 | 2.5 | A `silo hub serve` command and its deployment (Cloud Run or GKE behind IAP) | silo |
-| — | Grain embedding `rendezvous.Client`, accepting offers, streaming events | bwsalmon/grain |
+| — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 
 ## 10. Open questions
 
