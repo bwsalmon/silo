@@ -25,6 +25,11 @@ read its events, answer its tool calls.** Grain's task tools
 ...) stay grain's, served to the session as a caller-provided MCP server
 (§2.2).
 
+A Grain is single-tenant and manages one backlog, whatever machine it
+runs on. Linking many Grains through the Silo hub, which decides
+placement while each Grain enforces its own local policy, is
+[hub.md](hub.md).
+
 ## 2. Requirements, one by one
 
 ### 2.1 A programmatic interface
