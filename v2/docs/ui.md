@@ -32,12 +32,15 @@ from and recommends one.
 
 The two gaps are API work in `hub/tasks` and `hub/live`, and both
 options need them. With them in place, the hub decides who may approve
-(it is the PDP), and the node carries the decision out (it is the PEP).
+(it is the PDP, hub.md §1.2), and records the approver in the task's
+`approved_by` claim, which `tasks.Spec` does not carry yet. The node
+carries the decision out under its own local policy (it is the PEP).
 
 Grain's own approval of held changes (named approvers on sensitive
 paths, `pkg/ui/approvals.go`), PR state, CI and the merge queue are
-**not part of the task interface**. A customised Grain may have none of
-them. The hub sees them, if at all, as conversation text and links.
+**not part of the task interface** (hub.md §1.3,
+[hub-interface.md](hub-interface.md)). A customised Grain may have none
+of them. The hub sees them, if at all, as conversation text and links.
 
 ## 2. Option (a): a new UI in silo
 
