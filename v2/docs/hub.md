@@ -10,16 +10,23 @@ identity and teams (stage 2.2, §5, `v2/hub/identity` and
 
 ## 1. What the hub is
 
-**Grain** is the execution node. A grain runs on one workstation or
-Cloudtop, holds that machine's git checkouts and sandboxes, and runs
-agent sessions there. With v2, each of those sessions is one `silo
-run` ([grain.md](grain.md)). **The hub** links many grain nodes into
-one multi-tenant system. It is the coordination plane for:
+**Grain** is the execution node. A Grain is **single-tenant and manages
+one backlog**: its owner's (or one team's) tasks, queue, git checkouts,
+sandboxes and agent sessions. With v2, each of those sessions is one
+`silo run` ([grain.md](grain.md)). Where a Grain runs is a deployment
+detail: today a workstation, a Cloudtop or a VM, later possibly a GKE
+cluster. Wherever it runs, it stays one tenant with one backlog. In this
+document a **node** is one such Grain as the hub sees it: one connection,
+one registry entry, one backlog behind it.
+
+**The hub** links many Grains into one multi-tenant system. It is the
+coordination plane for:
 
 - **Identity:** who a human or a node is.
 - **Teams:** which team owns which repositories.
-- **Task federation:** one backlog, placed on whichever node can run it.
-- **Routing:** reaching a node that is behind NAT or a corporate
+- **Task federation:** tasks submitted to the hub, placed on a Grain
+  that may run them.
+- **Routing:** reaching a Grain that is behind NAT or a corporate
   firewall.
 
 The hub **holds no source code at rest, runs no sandboxes and makes no
@@ -32,22 +39,62 @@ conversation text and the directory, but no repository content.
 ### 1.1 Where this sits in the grain/silo division
 
 [grain.md](grain.md) §1 gives tasks, the queue and teams to grain, and
-one run to silo. The hub does not change that for a single node. Each
-grain still owns its own queue, runs, pull requests and CI. The hub
-adds a layer above the nodes:
+one run to silo. The hub does not change that for a single Grain. Each
+Grain still owns its own backlog, runs, pull requests, CI and merge
+queue. The hub adds a layer above the Grains:
 
 - Its backlog holds tasks that **have not been placed yet**. Once a
-  task is placed, the node's grain owns it as one of its own tasks, and
-  the hub only mirrors its lifecycle (§6, §7).
-- Its team directory decides **which nodes may serve which
-  repositories, and who may see their tasks**. A node still enforces
-  its own grants inside a run.
+  task is placed, the Grain owns it as one of its own tasks, and the
+  hub only mirrors its lifecycle (§6, §7).
+- Its team directory decides **which Grains may serve which
+  repositories, and who may see their tasks** (§5.3).
+- **Phase 1:** a repository's tasks go to the Grain of the team that
+  owns the repository, and that Grain's own merge queue lands them. The
+  hub has no merge queue.
 - Many hubs could federate in the same way. This design assumes one.
+
+### 1.2 Policy: the hub decides, each Grain enforces
+
+The hub is the **Policy Decision Point (PDP)**. It decides who may run
+what: who may submit a task for which repository or team (§6.1), which
+Grains are admitted to serve which repositories (§5.3), and where a task
+is placed (§6.2). It puts **claims** on each task it dispatches. As
+built, the offered task (`tasks.Spec`) carries the requester
+(`submitter`, from the caller's sign-on) and the `team`. The other
+claims of this model, `approved_by` and the `capabilities` the task is
+granted, are not in `tasks.Spec` yet.
+
+Each Grain is a **Policy Enforcement Point (PEP)**. It **takes the hub's
+identity claims on trust**: it does not independently verify who
+requested or approved a task. It holds every task to a **local policy
+that only the Grain's owner can edit**: the repositories it serves, the
+capabilities it grants, and the network it allows. A task the local
+policy does not allow is refused (§6.2), and anything the policy does
+not name is refused too: the Grain fails closed.
+
+**The trust limit.** A compromised hub could forge a task's claims, for
+example its requester or its approval. It could not get a task past a
+Grain's local policy, so what a forged task can do is bounded by what
+that Grain's owner has already allowed. Signed claims that a Grain
+could verify independently of the hub are possible future work; the
+status quo, trusted claims bounded by local policy, is the design for
+now.
+
+### 1.3 The task interface is the contract
+
+The hub depends on nothing in a Grain except the **task interface** it
+speaks over the rendezvous: register, accept or refuse a task with its
+claims, heartbeat with its capacity, stream events, and report the
+result. **Grains can differ.** A user may customise their own Grain, or
+run different code altogether, as long as it conforms to that
+interface. The interface is written down as a contract in one place,
+with its messages as built in `hub/rendezvous` and `hub/tasks`:
+[hub-interface.md](hub-interface.md).
 
 ## 2. Components
 
 ```
- humans, custom UIs, SDK                 grain nodes (workstations, Cloudtops)
+ humans, custom UIs, SDK                 Grains (one backlog each, on any machine)
         |  HTTPS (IAP / SSO)                    |  outbound HTTPS only: WebSocket
         v                                       v
  +--------------------------- hub ------------------------------------+
@@ -127,7 +174,7 @@ directory.
 
 The node dials out to `wss://<hub>/v1/nodes/connect`, a WebSocket with
 the subprotocol `silo-node.v1`. The hub never dials a node, so nothing
-has to be open inbound on a workstation. A WebSocket, rather than a raw
+has to be open inbound wherever the Grain runs. A WebSocket, rather than a raw
 HTTP Upgrade or gRPC, is what Google's HTTPS load balancer and IAP pass
 through unchanged.
 
@@ -403,8 +450,9 @@ does not hold back another team's first task. For each task:
 4. The node's grain answers on the stream:
    - `accept` with its local task ID: the task is `running`, and the
      next heartbeat settles the claim.
-   - `refuse` with a reason: the claim is released, and the task
-     returns to the queue with that node excluded. It is not offered
+   - `refuse` with a reason, for instance because the Grain's local
+     policy does not allow the task (§1.2): the claim is released,
+     and the task returns to the queue with that node excluded. It is not offered
      to that node again until a human requeues it. A task that every
      eligible node has refused waits.
    - No answer within `OfferTimeout` (a minute) counts as a refusal.
@@ -552,10 +600,18 @@ anything leaves it.
 - **Node identity comes from the credential.** The hello carries no
   trusted owner. Node IDs are bound to their first owner. Admission is
   checked against the team directory.
+- **The hub decides, each Grain enforces** (§1.2). The hub is the PDP
+  and puts claims on each task; the Grain is the PEP, takes those
+  claims on trust and holds every task to its owner's local policy,
+  failing closed.
 - **The hub can reach a node only through the streams the protocol
-  defines:** offer, cancel and view. A node serves only those, so a
+  defines:** offer, resume, cancel and view ([the
+  contract](hub-interface.md)). A node serves only those, so a
   compromised hub can ask a node to run a task but cannot read the
-  node's files beyond the artifacts that node has itself listed.
+  node's files beyond the artifacts that node has itself listed. It
+  could forge a task's claims (requester, approval), but it cannot get
+  a task past the Grain's local policy. Claims a Grain verifies
+  independently are future work, not built.
 - **No code at rest on the hub** (§7.2). The hub's store holds
   metadata and conversation text only.
 

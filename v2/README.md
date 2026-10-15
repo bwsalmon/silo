@@ -44,7 +44,11 @@ one; `silo run` carries it out once.
 - [`docs/grain.md`](docs/grain.md): grain as silo's first client, and
   its migration path.
 - [`docs/hub.md`](docs/hub.md): the collection hub that links many
-  grain nodes (Track 2): its architecture, the node registry
+  Grains, each one tenant with one backlog (Track 2). The hub is the
+  policy decision point and each Grain the enforcement point, and the
+  hub depends on a Grain only through the task interface
+  ([`docs/hub-interface.md`](docs/hub-interface.md)). It covers the
+  architecture, the node registry
   (`hub/registry`), the outbound rendezvous (`hub/rendezvous`), human
   sign-on (`hub/identity`), the team directory with node tokens
   (`hub/directory`), the task backlog and dispatcher (`hub/tasks`) and
