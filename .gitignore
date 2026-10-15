@@ -1,7 +1,1 @@
 /bin/
-# The binaries `go build ./cmd/silod` (and ./cmd/silo, ./cmd/silo-tools)
-# leave at the repository root: a 51 MB silod binary was committed this
-# way once.
-/silod
-/silo
-/silo-tools

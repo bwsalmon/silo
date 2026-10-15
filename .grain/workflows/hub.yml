@@ -1,0 +1,68 @@
+# The hub's CI, run by grain (.grain/workflows) on every push and pull
+# request: it formats, builds, vets and race-tests the root module,
+# github.com/bwsalmon/silo (README.md). The root module's ./... stops at
+# old/go.mod, so the retired runner in old/ is not built here
+# (.grain/workflows/old.yml tests it).
+name: hub
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Deliberately not -mod=mod: a sandbox that cannot reach the network
+  # should fail saying the module is missing rather than hanging on a
+  # proxy it will never reach.
+  GOFLAGS: -mod=readonly
+
+jobs:
+  hub:
+    name: hub
+    # The retired runner and the documentation, which no hub test reads.
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 20
+    steps:
+      # hub/directory runs its store tests against PostgreSQL as well as
+      # SQLite; internal/pgtest starts a throwaway server from these
+      # binaries.
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+          ls /usr/lib/postgresql/*/bin/initdb
+
+      # gofmt walks directories without regard to modules, so it is
+      # given only the hub module's own directories.
+      - name: Format
+        run: |
+          unformatted="$(gofmt -l hub internal events)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          SILO_REQUIRE_POSTGRES: "1"
+        run: go test -race -timeout 15m ./...
