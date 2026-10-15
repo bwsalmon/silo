@@ -420,7 +420,23 @@ func (v *validator) sandboxes() {
 				v.path(p+".build", s.Build, regularFile)
 			}
 		case "granule":
-			v.later(p+".kind", "kind granule", "stage 8")
+			switch {
+			case s.Build != "":
+				v.errorf(p+".build", "a granule sandbox is booted from a granule VM image: give image (or, later, granulefile)")
+			case s.Granulefile != "":
+				v.later(p+".granulefile", "granulefile", "stage 8b")
+			case s.Image == "":
+				v.errorf(p, "kind granule needs image: a granule VM image")
+			}
+			if s.Target != "" {
+				v.later(p+".target", "target", "stage 8b")
+			}
+			if s.Args != nil {
+				v.later(p+".args", "args", "stage 8b")
+			}
+			if len(s.Mounts) > 0 {
+				v.errorf(p+".mounts", "kind granule takes no mounts: a host directory would have to cross into the guest over virtio-fs, which silo does not set up (design §7.2)")
+			}
 		case "folder":
 			if !v.opts.Builtin {
 				v.errorf(p+".kind", "kind folder is for silo's built-in silos only in v2.0 (design §7.1)")

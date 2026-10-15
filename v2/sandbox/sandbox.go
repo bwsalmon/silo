@@ -76,9 +76,10 @@ type Sandbox interface {
 type SandboxSpec struct {
 	Session string
 	Name    string
-	// Kind is container or gvisor.
+	// Kind is container, gvisor or granule.
 	Kind string
-	// Image is an OCI image reference; Build, when Image is empty, the
+	// Image is an OCI image reference (for granule, a granule VM
+	// image); Build, when Image is empty, the
 	// absolute path of a Dockerfile, built with its directory as the
 	// context.
 	Image string
@@ -89,6 +90,9 @@ type SandboxSpec struct {
 	CPUs    float64
 	// Memory is in bytes; 0 is no limit.
 	Memory int64
+	// Disk is in bytes; 0 is the image's own size. Only granule
+	// sandboxes apply it.
+	Disk int64
 	// Network is "none" (the default) or "open".
 	Network string
 	// PrivateNetwork, when set, is a network made by Networker.
@@ -152,6 +156,9 @@ func SpecFor(f *silofile.Silofile, name, session string) (SandboxSpec, error) {
 		}
 		if s.Memory != nil {
 			spec.Memory = int64(*s.Memory)
+		}
+		if s.Disk != nil {
+			spec.Disk = int64(*s.Disk)
 		}
 		if s.Build != "" {
 			real, err := safepath.Within(f.Folder, s.Build)

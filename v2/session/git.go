@@ -19,6 +19,7 @@ import (
 	"github.com/bwsalmon/silo/v2/gitproxy"
 	"github.com/bwsalmon/silo/v2/sandbox"
 	"github.com/bwsalmon/silo/v2/sandbox/container"
+	"github.com/bwsalmon/silo/v2/sandbox/granule"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
 
@@ -303,7 +304,7 @@ func (s *Session) backend() (sandbox.Backend, error) {
 		s.sandboxes = s.opts.Backend
 		return s.sandboxes, nil
 	}
-	b, err := container.New()
+	b, err := newBackend(s.File)
 	if err != nil {
 		return nil, err
 	}
@@ -311,9 +312,39 @@ func (s *Session) backend() (sandbox.Backend, error) {
 	return b, nil
 }
 
+// newBackend is the backend for f's sandboxes: the container backend,
+// and with granule sandboxes the granule backend beside it, on the
+// Docker granule runs its VMs on, so that the two share the session's
+// network.
+func newBackend(f *silofile.Silofile) (sandbox.Backend, error) {
+	usesGranule := false
+	for _, sc := range f.Sandboxes {
+		usesGranule = usesGranule || sc.Kind == "granule"
+	}
+	if !usesGranule {
+		b, err := container.New()
+		if err != nil {
+			return nil, err
+		}
+		return b, nil
+	}
+	gb, err := granule.New()
+	if err != nil {
+		return nil, err
+	}
+	return &sandbox.Kinds{
+		Default: &container.Backend{Runtime: gb.Docker},
+		ByKind:  map[string]sandbox.Backend{"granule": gb},
+	}, nil
+}
+
 // runtime is the container runtime's name, for session.json.
 func (s *Session) runtime() string {
-	if cb, ok := s.sandboxes.(*container.Backend); ok {
+	b := s.sandboxes
+	if k, ok := b.(*sandbox.Kinds); ok {
+		b = k.Default
+	}
+	if cb, ok := b.(*container.Backend); ok {
 		return filepath.Base(cb.Runtime)
 	}
 	return ""

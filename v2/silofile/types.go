@@ -128,7 +128,7 @@ type SSH struct {
 // Sandbox is one sandboxes[] entry (design §7).
 type Sandbox struct {
 	Name    string            `yaml:"name" schema:"required"`
-	Kind    string            `yaml:"kind" schema:"required" doc:"container | gvisor | granule (later, stage 8) | folder (built-in silos only)"`
+	Kind    string            `yaml:"kind" schema:"required" doc:"container | gvisor | granule | folder (built-in silos only)"`
 	Image   string            `yaml:"image" doc:"An OCI image, or for granule a granule VM image."`
 	Build   string            `yaml:"build" doc:"A Dockerfile in the silo folder, built into the image."`
 	Workdir string            `yaml:"workdir"`
@@ -145,10 +145,10 @@ type Sandbox struct {
 	PackageCache *PackageCache `yaml:"package_cache" doc:"Later (grain.md §2.3)."`
 	ModelAccess  []string      `yaml:"model_access" doc:"Later: the model proxy (grain.md §2.5)."`
 
-	// kind: granule (stage 8).
-	Granulefile string            `yaml:"granulefile" doc:"Granule only (stage 8): a Granulefile in the silo folder."`
-	Target      string            `yaml:"target" doc:"Granule only (stage 8)."`
-	Args        map[string]string `yaml:"args" doc:"Granule only (stage 8)."`
+	// kind: granule; granulefile, target and args are stage 8b.
+	Granulefile string            `yaml:"granulefile" doc:"Granule only (later, stage 8b): a Granulefile in the silo folder."`
+	Target      string            `yaml:"target" doc:"Granule only (later, stage 8b)."`
+	Args        map[string]string `yaml:"args" doc:"Granule only (later, stage 8b)."`
 
 	// kind: folder (built-in silos only).
 	Path string `yaml:"path" doc:"Folder sandboxes only (built-in silos)."`

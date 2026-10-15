@@ -102,13 +102,14 @@ validates, then checks what the session needs without changing
 anything, one line per check, and exits 69 if any check fails. So far it
 checks MCP servers (a remote one on its own BatchMode connection to the
 agent host: its config read there, its binary found on its remote
-`PATH`) and the ssh location.
+`PATH`), the ssh location, and for granule sandboxes the granule binary,
+`granule doctor` (KVM) and that each VM image can be pulled.
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
 cross-references, files, `remote_permissions` against the CLI, and
 credential destinations (§2.4). A value v2.0 reserves but does not ship
-yet (`kind: granule`, `lifetime: persistent`, ...) is refused with an
+yet (`granulefile:`, `lifetime: persistent`, ...) is refused with an
 error naming the stage that adds it. Errors name the file, line and YAML
 path, and exit 65; bad usage exits 64 (§3.3). Local scripts get the
 snapshot's refusals as errors (a symlink out of the folder, a file or

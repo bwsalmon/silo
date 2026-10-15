@@ -156,8 +156,14 @@ projects:
 		{name: "folder kind", yaml: "sandboxes:\n  - {name: w, kind: folder, path: /tmp, rw: true}\n", wantErr: "kind folder is for silo's built-in silos only"},
 		{name: "builtin allowed", yaml: "builtin_tools: [silo_schema]\nsandboxes:\n  - {name: w, kind: folder, path: /tmp, rw: true}\n", opts: Options{Builtin: true}},
 
+		// Granule (stage 8a).
+		{name: "granule", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, cpus: 2, memory: 4Gi, disk: 20Gi}\n"},
+		{name: "granule no image", yaml: "sandboxes:\n  - {name: g, kind: granule}\n", wantErr: "kind granule needs image"},
+		{name: "granule build", yaml: "sandboxes:\n  - {name: g, kind: granule, build: Dockerfile}\n", wantErr: "booted from a granule VM image"},
+		{name: "granule mounts", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, mounts: [{from: ., to: /src}]}\n", wantErr: "kind granule takes no mounts"},
+
 		// Later values decode, and are refused naming what adds them.
-		{name: "granule", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x}\n", later: "stage 8"},
+		{name: "granulefile", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: dev.Granulefile}\n", later: "stage 8b"},
 		{name: "location vm", yaml: "location: {kind: vm}\n", later: "stage 10"},
 		{name: "k8s identity", yaml: "location: {kind: k8s, k8s: {image: x, identity: {gcp_account_for: p}}}\n", later: "design §5.4"},
 		{name: "location ax", yaml: "location: {kind: ax}\n", later: "stage 12"},

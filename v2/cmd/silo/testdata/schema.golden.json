@@ -616,7 +616,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Granule only (stage 8).",
+            "description": "Granule only (later, stage 8b).",
             "type": "object"
           },
           "backend": {
@@ -674,7 +674,7 @@
             "type": "object"
           },
           "granulefile": {
-            "description": "Granule only (stage 8): a Granulefile in the silo folder.",
+            "description": "Granule only (later, stage 8b): a Granulefile in the silo folder.",
             "type": "string"
           },
           "image": {
@@ -682,7 +682,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "container | gvisor | granule (later, stage 8) | folder (built-in silos only)",
+            "description": "container | gvisor | granule | folder (built-in silos only)",
             "type": "string"
           },
           "lifetime": {
@@ -788,7 +788,7 @@
             "type": "boolean"
           },
           "target": {
-            "description": "Granule only (stage 8).",
+            "description": "Granule only (later, stage 8b).",
             "type": "string"
           },
           "workdir": {
