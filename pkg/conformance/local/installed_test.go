@@ -96,6 +96,51 @@ func TestInstalledSandboxDNS(t *testing.T) {
 	}
 }
 
+// TestInstalledSandboxExec execs into a running sandbox-class container
+// through the installed root's Docker facade: runsc exec, run as the
+// container's root inside silo-nsd's namespaces, must reach the process
+// file the shim wrote, which a rootless install's 0700 $XDG_RUNTIME_DIR
+// once kept from it.
+func TestInstalledSandboxExec(t *testing.T) {
+	r := installedRoot(t)
+	js := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	var made struct{ Id string }
+	r.call("POST", "/containers/create", "application/json", js(map[string]any{"Image": r.image,
+		"HostConfig": map[string]any{"Runtime": "silo-sandbox"},
+		"Cmd":        []string{"sleep", "300"}}), &made)
+	t.Cleanup(func() { r.call("DELETE", "/containers/"+made.Id+"?force=1", "", nil, nil) })
+	r.call("POST", "/containers/"+made.Id+"/start", "", nil, nil)
+
+	exec := func(script string) (code int, out string) {
+		t.Helper()
+		var ex struct{ Id string }
+		r.call("POST", "/containers/"+made.Id+"/exec", "application/json", js(map[string]any{
+			"Cmd": []string{"sh", "-c", script}, "AttachStdout": true, "AttachStderr": true}), &ex)
+		// Not a TTY: out is multiplexed, its frames' headers included.
+		r.call("POST", "/exec/"+ex.Id+"/start", "application/json", js(map[string]any{"Detach": false, "Tty": false}), &out)
+		var in struct {
+			Running  bool
+			ExitCode int
+		}
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+			r.call("GET", "/exec/"+ex.Id+"/json", "", nil, &in)
+			if !in.Running || time.Now().After(deadline) {
+				break
+			}
+		}
+		if in.Running {
+			t.Fatalf("exec %q still running", script)
+		}
+		return in.ExitCode, out
+	}
+	if code, out := exec("echo exec as $(id -u)"); code != 0 || !strings.Contains(out, "exec as 0") {
+		t.Errorf("exec: exit %d, output %q", code, out)
+	}
+	if code, out := exec("exit 3"); code != 3 {
+		t.Errorf("exec of exit 3: exit %d, output %q", code, out)
+	}
+}
+
 // installed is the local install's root, through its Docker facade,
 // with a busybox image loaded for its containers.
 type installed struct {

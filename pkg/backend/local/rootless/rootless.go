@@ -155,6 +155,22 @@ func ContainerdArgs(p Paths, containerd string) []string {
 	return []string{containerd, "--config", p.ContainerdConfig()}
 }
 
+// ContainerdEnv is env, silo-containerd's environment, with
+// XDG_RUNTIME_DIR set to ContainerdState, which its shims inherit. The
+// runsc shim writes an exec's process file there, and runsc, running as
+// the container's root, must reach it: the holder's /run/containerd is
+// mode 0711, but the user's own $XDG_RUNTIME_DIR, which a rootless
+// install's units run with, is 0700.
+func ContainerdEnv(p Paths, env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, "XDG_RUNTIME_DIR=") {
+			out = append(out, e)
+		}
+	}
+	return append(out, "XDG_RUNTIME_DIR="+p.ContainerdState())
+}
+
 // BuildkitdArgs is buildkitd's command line: the containerd worker on
 // silo-containerd, in its own namespace, and no OCI worker, so that
 // every build container is one containerd knows about. Builds run in

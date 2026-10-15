@@ -1115,9 +1115,12 @@ Three things in gVisor's shim had to be worked around:
   workload writes to a closed pipe. That was the `EPIPE` step 16 saw
   under `ctr`. The driver sets it to `sandbox`: each container is a
   sandbox of its own.
-- **Exec's process file.** The shim writes it to its temporary
-  directory, mode `0600`, as the holder's root. runsc runs as the
-  container's root and can't read it, so `silod runsc` hands it over.
+- **Exec's process file.** The shim writes it to `$XDG_RUNTIME_DIR`,
+  mode `0600`, as the holder's root. runsc runs as the container's root
+  and can't read it, so `silod runsc` hands it over. Nor could it reach
+  a rootless install's `$XDG_RUNTIME_DIR`, `/run/user/<uid>`, mode
+  `0700`, so silo-containerd runs with `XDG_RUNTIME_DIR` set to the
+  holder's `/run/containerd`, mode `0711`, and its shims inherit that.
 - **Fast exits.** A sandbox exits with its root container's status, and
   only its parent can read that. A workload that exits before
   `runsc wait` connects comes back as "exit status is unavailable",
