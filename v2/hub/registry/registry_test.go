@@ -218,3 +218,35 @@ func TestChanges(t *testing.T) {
 	default:
 	}
 }
+
+func TestClaimFor(t *testing.T) {
+	r, _ := newRegistry()
+	for _, n := range []Node{
+		{ID: "a", Repos: []string{"o/one"}, Slots: 1},
+		{ID: "b", Repos: []string{"o/two"}, Slots: 3, Labels: map[string]string{"zone": "eu"}},
+		{ID: "c", Repos: []string{"o/three"}, Slots: 5},
+	} {
+		if _, err := r.Register(n, "alice@example.com"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Any node serving one of the repositories, the freest first.
+	c, err := r.ClaimFor([]string{"o/one", "O/Two"}, nil)
+	if err != nil || c.NodeID != "b" {
+		t.Fatalf("ClaimFor(one, two) = %v, %v; want b, the freest", c, err)
+	}
+	// ok passes over a node, and the next freest is claimed.
+	c, err = r.ClaimFor([]string{"o/one", "o/two"}, func(e Entry) bool { return e.ID != "b" })
+	if err != nil || c.NodeID != "a" {
+		t.Fatalf("ClaimFor without b = %v, %v; want a", c, err)
+	}
+	if _, err := r.ClaimFor([]string{"o/one"}, nil); !errors.Is(err, ErrNoNode) {
+		t.Errorf("a's only slot claimed twice: %v", err)
+	}
+	if _, err := r.ClaimFor([]string{"o/two"}, func(e Entry) bool { return e.Labels["zone"] == "us" }); !errors.Is(err, ErrNoNode) {
+		t.Errorf("no node matches: %v, want ErrNoNode", err)
+	}
+	if _, err := r.ClaimFor(nil, nil); !errors.Is(err, ErrNoNode) {
+		t.Errorf("no repositories: %v, want ErrNoNode", err)
+	}
+}
