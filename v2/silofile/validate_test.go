@@ -1,6 +1,8 @@
 package silofile
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,8 +164,16 @@ projects:
 		{name: "granule build", yaml: "sandboxes:\n  - {name: g, kind: granule, build: Dockerfile}\n", wantErr: "booted from a granule VM image"},
 		{name: "granule mounts", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, mounts: [{from: ., to: /src}]}\n", wantErr: "kind granule takes no mounts"},
 
+		// Granulefiles (stage 8b, journey 10).
+		{name: "granulefile", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: sandboxes/dev.Granulefile, target: guest, args: {V: '1'}}\n", files: map[string]string{"sandboxes/dev.Granulefile": "FROM x\nVM WRAP\n"}},
+		{name: "granulefile missing", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: sandboxes/dev.Granulefile}\n", wantErr: "sandboxes/dev.Granulefile"},
+		{name: "granulefile and image", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, granulefile: g}\n", files: map[string]string{"g": "FROM x\n"}, wantErr: "exactly one of image and granulefile"},
+		{name: "target without granulefile", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, target: t}\n", wantErr: "target is for a sandbox built from a granulefile"},
+		{name: "granulefile on container", yaml: "sandboxes:\n  - {name: g, kind: container, image: x, granulefile: g}\n", wantErr: "granulefile is only for kind granule"},
+		{name: "push_to bad", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: g, push_to: 'europe-docker.pkg.dev/acme/silo:v1'}\n", files: map[string]string{"g": "FROM x\nVM PACK\n"}, wantErr: "is not a registry repository"},
+		{name: "VM build on container", yaml: "sandboxes:\n  - {name: g, kind: container, build: sandboxes/dev.Dockerfile}\n", files: map[string]string{"sandboxes/dev.Dockerfile": "FROM x\nRUN a \\\n  vm b\n# VM no\nvm wrap\n"}, wantErr: "line 5 is granule's VM instruction"},
+
 		// Later values decode, and are refused naming what adds them.
-		{name: "granulefile", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: dev.Granulefile}\n", later: "stage 8b"},
 		{name: "location vm", yaml: "location: {kind: vm}\n", later: "stage 10"},
 		{name: "k8s identity", yaml: "location: {kind: k8s, k8s: {image: x, identity: {gcp_account_for: p}}}\n", later: "design §5.4"},
 		{name: "location ax", yaml: "location: {kind: ax}\n", later: "stage 12"},
@@ -273,5 +283,78 @@ func TestLoadBareFile(t *testing.T) {
 	}
 	if _, err := Load(t.TempDir()); err == nil || !strings.Contains(err.Error(), "has no Silofile") {
 		t.Errorf("Load(empty dir) = %v", err)
+	}
+}
+
+func TestValidatePushToWarnsLocal(t *testing.T) {
+	dir := folder(t, minimal+"sandboxes:\n  - {name: g, kind: granule, granulefile: g, push_to: europe-docker.pkg.dev/acme/silo}\n", map[string]string{"g": "FROM x\nVM PACK\n"})
+	res := validate(t, dir, Options{})
+	if res.Err() != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Msg, "pushes nothing") {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+// TestValidateGranulefileHook: the hook sees the Granulefile's real
+// path and target; a container-building target is refused for kind
+// granule, a hook that could not run is a warning, and its errors are
+// errors.
+func TestValidateGranulefileHook(t *testing.T) {
+	dir := folder(t, minimal+"sandboxes:\n  - {name: g, kind: granule, granulefile: sandboxes/dev.Granulefile, target: guest}\n", map[string]string{"sandboxes/dev.Granulefile": "FROM x\n"})
+	for _, tc := range []struct {
+		name     string
+		vm       bool
+		err      error
+		wantErr  string
+		wantWarn string
+	}{
+		{name: "vm", vm: true},
+		{name: "container", wantErr: "builds a container image, not a granule VM image"},
+		{name: "unchecked", err: fmt.Errorf("%w: no granule", ErrUnchecked), wantWarn: "no granule"},
+		{name: "invalid", err: errors.New("line 2: unknown instruction"), wantErr: "unknown instruction"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var file, target string
+			res := validate(t, dir, Options{CheckGranulefile: func(f, tg string) (bool, error) {
+				file, target = f, tg
+				return tc.vm, tc.err
+			}})
+			if filepath.Base(file) != "dev.Granulefile" || !filepath.IsAbs(file) || target != "guest" {
+				t.Errorf("hook saw %q, %q", file, target)
+			}
+			switch {
+			case tc.wantErr != "":
+				if !strings.Contains(res.Errors.Error(), tc.wantErr) || !strings.Contains(res.Errors.Error(), "sandboxes[0].granulefile") {
+					t.Errorf("errors = %v, want %q", res.Errors, tc.wantErr)
+				}
+			case tc.wantWarn != "":
+				if res.Err() != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Msg, tc.wantWarn) {
+					t.Errorf("result = %+v", res)
+				}
+			default:
+				if res.Err() != nil || len(res.Warnings) != 0 {
+					t.Errorf("result = %+v", res)
+				}
+			}
+		})
+	}
+}
+
+func TestVMInstruction(t *testing.T) {
+	for _, tc := range []struct {
+		file string
+		want int
+	}{
+		{"FROM alpine\nRUN echo vm\n", 0},
+		{"FROM alpine\nVM WRAP\n", 2},
+		{"FROM alpine\n  vm pack AS m\n", 2},
+		{"FROM alpine\nRUN echo \\\n  VM WRAP\n", 0},
+		{"FROM alpine\nRUN echo \\\n# a comment\n\n  VM\nVM PACK\n", 6},
+		{"# escape=`\nFROM alpine\nRUN echo `\nVM x\nVM PACK\n", 5},
+		{"# VM WRAP\nFROM alpine\n", 0},
+		{"VM FROM ghcr.io/x/vm:1\n", 1},
+	} {
+		if got := VMInstruction([]byte(tc.file)); got != tc.want {
+			t.Errorf("VMInstruction(%q) = %d, want %d", tc.file, got, tc.want)
+		}
 	}
 }

@@ -1,0 +1,17 @@
+# A Granulefile (granule docs/granulefile.md): a Dockerfile, plus
+# granule's VM instruction. Everything above VM PACK is an ordinary
+# container build, offline and without KVM; VM PACK turns the result into
+# a bootable guest disk, and the target stage, guest, is a granule VM
+# image.
+ARG PACKAGES="git ca-certificates"
+
+# granule's published guest root filesystem: an init and granule's
+# guest units, which VM PACK needs (an arbitrary image is not a machine).
+FROM ghcr.io/gke-labs/granule/debian.rootfs:latest
+ARG PACKAGES
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends $PACKAGES \
+ && rm -rf /var/lib/apt/lists/*
+COPY motd /etc/motd
+
+VM PACK AS guest

@@ -355,7 +355,13 @@ type Container struct {
 	Image sandbox.Image
 }
 
-var _ sandbox.Sandbox = (*Container)(nil)
+var (
+	_ sandbox.Sandbox = (*Container)(nil)
+	_ sandbox.Imaged  = (*Container)(nil)
+)
+
+// ResolvedImage implements sandbox.Imaged.
+func (c *Container) ResolvedImage() sandbox.Image { return c.Image }
 
 // killGrace is how long Exec waits, once its context is done and the
 // command has been killed, for the runtime CLI to return what it has

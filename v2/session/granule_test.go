@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,5 +123,91 @@ func TestGranuleGCFindsLeakedVM(t *testing.T) {
 	}
 	if _, err := os.Stat(gb.StateDir + "/" + vm); err == nil {
 		t.Logf("granule's saved state for %s is still in its state directory", vm)
+	}
+}
+
+// TestGranulefileBuildsOnceEndToEnd is journey 10: a granule sandbox
+// defined by a Granulefile that wraps a container in a VM is built at
+// the first run, booted, recorded in .silo/lock.json by digest and
+// content key, and booted again at the second run without a rebuild.
+func TestGranulefileBuildsOnceEndToEnd(t *testing.T) {
+	granuletest.Require(t)
+	kinds, gb := granuleBackends(t)
+	// granule, through a wrapper that logs each granulefile build.
+	real, err := exec.LookPath(gb.Granule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	builds := filepath.Join(dir, "builds")
+	gb.Granule = filepath.Join(dir, "granule")
+	wrapper := "#!/bin/sh\nif [ \"$1 $2\" = \"granulefile build\" ]; then echo build >> " + builds + "; fi\nexec " + real + " \"$@\"\n"
+	if err := os.WriteFile(gb.Granule, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newEnv(t)
+	e.timeout = 10 * time.Minute
+	// A nonce of the test's own, so that no earlier run's image is a
+	// cache hit.
+	nonce := session.NewID()
+	folder := filepath.Join(e.root, "silo")
+	for name, data := range map[string]string{
+		"sandboxes/dev.Granulefile": "FROM busybox:1.37\nARG NONCE\nCOPY hello.txt /hello.txt\nRUN echo \"$NONCE\" > /nonce\nCMD [\"sleep\", \"infinity\"]\nVM WRAP app\n",
+		"sandboxes/hello.txt":       "hello from the Granulefile's context\n",
+	} {
+		p := filepath.Join(folder, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := e.silofile(headless + `sandboxes:
+  - name: vm
+    kind: granule
+    granulefile: sandboxes/dev.Granulefile
+    args: {NONCE: ` + nonce + `}
+`)
+	if vm, err := granule.CheckGranulefile(filepath.Join(folder, "sandboxes", "dev.Granulefile"), ""); err != nil || !vm {
+		t.Fatalf("granule granulefile check: %v, %v; want a VM image", vm, err)
+	}
+	key, err := granule.CacheKey(filepath.Join(folder, "sandboxes", "dev.Granulefile"), "", map[string]string{"NONCE": nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rmi", "-f", granule.BuiltTag(key)).Run() })
+
+	// The wrapped container's filesystem is in the guest (granule
+	// docs/granulefile.md §5.2).
+	e.fake(fakeConfig{Call: "sandbox_exec", Args: map[string]any{"sandbox": "vm", "command": "cat /var/lib/granule/container/rootfs/hello.txt /var/lib/granule/container/rootfs/nonce"}})
+	var digest string
+	for run := 1; run <= 2; run++ {
+		res := e.run(f, func(o *session.Options) { o.Backend = kinds })
+		if res.code != 0 {
+			t.Fatalf("run %d: exit %d (%v)\n%s", run, res.code, res.err, res.stderr)
+		}
+		r := e.report()
+		if r.Error != "" || !strings.Contains(r.Result, "hello from the Granulefile's context") || !strings.Contains(r.Result, nonce) {
+			t.Fatalf("run %d: in the guest: %q (error %q)\n%s", run, r.Result, r.Error, res.stderr)
+		}
+		images, err := sandbox.ReadImages(folder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		img := images["vm"]
+		if img.Key != key || !strings.HasPrefix(img.Digest, "sha256:") || !strings.HasSuffix(img.Ref, "dev.Granulefile") {
+			t.Fatalf("run %d: lock.json records %+v, want key %s", run, img, key)
+		}
+		if run == 1 {
+			digest = img.Digest
+		} else if img.Digest != digest {
+			t.Errorf("run 2 booted %s, run 1 %s", img.Digest, digest)
+		}
+		data, _ := os.ReadFile(builds)
+		if n := strings.Count(string(data), "build"); n != 1 {
+			t.Fatalf("after run %d, granule granulefile build ran %d times, want once", run, n)
+		}
 	}
 }

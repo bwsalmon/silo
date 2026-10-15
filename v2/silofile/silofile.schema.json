@@ -616,7 +616,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Granule only (later, stage 8b).",
+            "description": "Granule only: the Granulefile's build arguments (--build-arg).",
             "type": "object"
           },
           "backend": {
@@ -674,7 +674,7 @@
             "type": "object"
           },
           "granulefile": {
-            "description": "Granule only (later, stage 8b): a Granulefile in the silo folder.",
+            "description": "Granule only, instead of image: a Granulefile in the silo folder whose target stage builds a granule VM image, built with its directory as the context.",
             "type": "string"
           },
           "image": {
@@ -776,6 +776,10 @@
             "description": "Folder sandboxes only (built-in silos).",
             "type": "string"
           },
+          "push_to": {
+            "description": "Granule only, with granulefile: a registry repository the built image is pushed to, for a remote backend (stage 11b); the local backend pushes nothing.",
+            "type": "string"
+          },
           "repos": {
             "description": "git[] entries checked out through the git proxy: one at workdir, several each at workdir/\u003cname\u003e. Needs an absolute workdir and git in the image.",
             "items": {
@@ -788,7 +792,7 @@
             "type": "boolean"
           },
           "target": {
-            "description": "Granule only (later, stage 8b).",
+            "description": "Granule only: the Granulefile stage to build, by name or index; the last stage when empty.",
             "type": "string"
           },
           "workdir": {
