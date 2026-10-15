@@ -64,7 +64,10 @@ func TestListeners(t *testing.T) {
 	// A child's ingress is none: no host listener.
 	e.create(e.a, "web", obj{"HostConfig": obj{"PortBindings": obj{"80/tcp": []obj{{"HostPort": "8080"}}}}})
 	e.ok(e.a, "POST", "/v1.47/containers/web/start", nil)
-	if got := l.take(); len(got) != 1 || !regexpMatch(`host=false$`, got[0]) {
+	// The stopped container's watch settles it in the background, and
+	// closes its listeners again whenever it gets there.
+	got = slices.DeleteFunc(l.take(), func(c string) bool { return c == "close "+id })
+	if len(got) != 1 || !regexpMatch(`host=false$`, got[0]) {
 		t.Errorf("child's start: %v", got)
 	}
 	l.refuse = true
