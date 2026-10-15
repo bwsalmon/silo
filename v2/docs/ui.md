@@ -138,12 +138,12 @@ low in fit.
 
 A client SDK on the hub's API, for custom UIs, **strengthens (a) and
 does not change the answer.** The hub UI should be the SDK's first
-client. A UI that uses only the SDK proves that the public API is
-enough to build a full UI, and keeps the hub from growing private endpoints for its own page. The SDK does not
-make (b) cheaper, because grain's UI is a client of grain's `/api`, not
-of the hub's. A team that wants its own page, or a customised Grain
-that wants to show hub context, builds on the SDK instead of forking
-either UI.
+client. A UI that uses only the SDK proves that the public API is enough
+to build a full UI, and keeps the hub from growing private endpoints for
+its own page. The SDK does not make (b) cheaper, because grain's UI is a
+client of grain's `/api`, not of the hub's. A team that wants its own
+page, or a customised Grain that wants to show hub context, builds on
+the SDK instead of forking either UI.
 
 ## 5. Recommendation
 
