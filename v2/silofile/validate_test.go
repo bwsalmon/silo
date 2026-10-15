@@ -70,15 +70,21 @@ func TestValidate(t *testing.T) {
 		{name: "unknown auth credential", yaml: "  auth: {credential: nope}\n", wantErr: `no credential is named "nope"`},
 		{name: "cross-references resolve", yaml: `  auth: {credential: key}
 sandboxes:
-  - {name: s, kind: container, image: x, repos: [r]}
+  - {name: s, kind: container, image: x, workdir: /w, repos: [r]}
 git:
-  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/x], credential: gh}
+  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/x, refs/heads/y (delete)], credential: gh}
 credentials:
   - {name: key, from: {env: K}}
   - {name: gh, from: {ambient: gh}, to: [{proxy: git}, {sandbox: s, file: /run/gh}]}
 projects:
   - {project: p, roles: [roles/logging.viewer], deliver_to: [s], ttl: 0}
 `},
+
+		{name: "repos need workdir", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, repos: [r]}\ngit:\n  - {name: r, repo: github.com/a/b}\n", wantErr: "repos are checked out into workdir"},
+		{name: "bad push pattern", yaml: "git:\n  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/*]}\n", wantErr: "would match every ref"},
+		{name: "bad push flag", yaml: "git:\n  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/x (merge)]}\n", wantErr: "is not a flag"},
+		{name: "git credential ambiguous", yaml: "git:\n  - {name: r, repo: github.com/a/b}\ncredentials:\n  - {name: a, from: {env: A}, to: [{proxy: git}]}\n  - {name: b, from: {env: B}, to: [{proxy: git}]}\n", wantErr: "name the one this repository uses"},
+		{name: "git credential implied", yaml: "git:\n  - {name: r, repo: github.com/a/b}\ncredentials:\n  - {name: a, from: {env: A}, to: [{proxy: git}]}\n"},
 
 		// Files and the folder.
 		{name: "prompt file missing", yaml: "  prompt: prompts/task.md\n", wantErr: `"prompts/task.md" does not exist in the silo folder`},

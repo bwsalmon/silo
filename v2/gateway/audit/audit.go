@@ -48,8 +48,8 @@ type Record struct {
 	Event   string    `json:"event"` // "start" or "end"
 	Session string    `json:"session"`
 	Caller  Caller    `json:"caller"`
-	Call    int64     `json:"call"` // pairs a call's start and end
-	Tool    string    `json:"tool"`
+	Call    int64     `json:"call,omitempty"` // pairs a call's start and end
+	Tool    string    `json:"tool,omitempty"`
 	// As is the name the agent called Tool by, when the session's rename
 	// map gives it another (grain.md §2.2).
 	As   string `json:"as,omitempty"`
@@ -60,6 +60,29 @@ type Record struct {
 	Size       *int   `json:"size,omitempty"`    // the result's length in bytes
 	Head       string `json:"head,omitempty"`    // the result's first HeadBytes
 	DurationMS *int64 `json:"duration_ms,omitempty"`
+
+	// Git is a git proxy request, on an EventGit line: the proxy's own
+	// audit entry (gitproxy.AuditEntry), one per request (design §9.1).
+	Git any `json:"git,omitempty"`
+}
+
+// EventGit is the event of a line the session's git proxy wrote.
+const EventGit = "git"
+
+// Git writes one git proxy request's audit entry, its strings redacted
+// like every other line's.
+func (l *Log) Git(entry any) error {
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.write(Record{Time: time.Now().UTC(), Event: EventGit, Git: l.redactValue(v)})
 }
 
 // Log is an open audit log. Its methods are safe for concurrent use.

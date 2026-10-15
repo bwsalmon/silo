@@ -24,6 +24,20 @@ import (
 // for a token for.
 const DefaultHost = "github.com"
 
+// Forget drops a cached ambient token for credential c on host, after
+// the upstream refused it, so the next request asks its source again.
+func (r *Resolver) Forget(c silofile.Credential, host string) {
+	if c.From.Ambient == "" {
+		return
+	}
+	if host == "" {
+		host = r.host()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cache, c.From.Ambient+"\x00"+host)
+}
+
 // AmbientTTL is how long an ambient token is reused before its source
 // is asked again (grain's ambient.go).
 const AmbientTTL = 5 * time.Minute
@@ -117,8 +131,20 @@ func (r *Resolver) ResolveAll(ctx context.Context, creds []silofile.Credential, 
 	return out, nil
 }
 
-// Resolve resolves one credential.
+// Resolve resolves one credential, asking an ambient source about
+// Host.
 func (r *Resolver) Resolve(ctx context.Context, c silofile.Credential) (Value, error) {
+	return r.ResolveHost(ctx, c, "")
+}
+
+// ResolveHost resolves one credential for a git host: an ambient source
+// asks for a login to host (Host when empty), and the other sources do
+// not depend on it. The git proxy asks once per request, for the host
+// of the repository it is for (design §9.1).
+func (r *Resolver) ResolveHost(ctx context.Context, c silofile.Credential, host string) (Value, error) {
+	if host == "" {
+		host = r.host()
+	}
 	v := Value{Name: c.Name}
 	var err error
 	switch s := c.From; {
@@ -137,7 +163,7 @@ func (r *Resolver) Resolve(ctx context.Context, c silofile.Credential) (Value, e
 	case s.Ambient != "":
 		v.Source = "ambient " + s.Ambient
 		v.SilosOwn = s.Ambient == "gcloud"
-		v.Secret, err = r.ambient(ctx, s.Ambient)
+		v.Secret, err = r.ambient(ctx, s.Ambient, host)
 	default:
 		err = errors.New("it has no source")
 	}

@@ -176,3 +176,32 @@ func (s RefRules) Check(u RefUpdate, fastForward FastForward) (kind, matchedBy, 
 		"or the repository already has%s, and no pattern naming it allows a force-push (`force: true`)",
 		u.Ref, shortCommit(u.New), shortCommit(u.Old), why)
 }
+
+// ParseRefRule reads a rule as RefRule.String writes it, which is how a
+// Silofile's `push:` entries spell one: a pattern alone, or a pattern
+// followed by its flags in parentheses, as in
+// "refs/heads/scratch (delete)" or "refs/tags/v* (force, delete)".
+func ParseRefRule(s string) (RefRule, error) {
+	pattern, flags, hasFlags := strings.Cut(strings.TrimSpace(s), " ")
+	r := RefRule{Pattern: pattern}
+	if hasFlags {
+		flags = strings.TrimSpace(flags)
+		if !strings.HasPrefix(flags, "(") || !strings.HasSuffix(flags, ")") {
+			return RefRule{}, fmt.Errorf("%q: flags follow the pattern in parentheses, as in %q", s, pattern+" (delete)")
+		}
+		for _, f := range strings.Split(flags[1:len(flags)-1], ",") {
+			switch strings.TrimSpace(f) {
+			case "force":
+				r.Force = true
+			case "delete":
+				r.Delete = true
+			default:
+				return RefRule{}, fmt.Errorf("%q: %q is not a flag: force or delete", s, strings.TrimSpace(f))
+			}
+		}
+	}
+	if err := ValidateRefPattern(r.Pattern); err != nil {
+		return RefRule{}, err
+	}
+	return r, nil
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/bwsalmon/silo/v2/events"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/gateway/audit"
+	"github.com/bwsalmon/silo/v2/gitproxy"
 	"github.com/bwsalmon/silo/v2/location"
 	"github.com/bwsalmon/silo/v2/location/local"
 	"github.com/bwsalmon/silo/v2/mcp"
@@ -101,6 +102,13 @@ type Options struct {
 	// Detached records in session.json that the session runs under its
 	// own supervisor, silo run --detach.
 	Detached bool
+	// GitHosts is where the git proxy sends each git host's requests,
+	// when that is not https://<host> (gitproxy.GitProxy.Hosts): a git
+	// host on another port.
+	GitHosts map[string]gitproxy.Host
+	// GitForwarderFor, when set, replaces the git proxy's upstream for a
+	// host (gitproxy.GitProxy.ForwarderFor), for tests.
+	GitForwarderFor func(host string) (gitproxy.Forwarder, error)
 	// Started, when set, is called with the session once it has an id
 	// and a directory, before setup: the library's handle on it.
 	Started func(*Session)
@@ -154,6 +162,13 @@ type Session struct {
 	Command location.Command
 
 	opts Options
+	// resolver resolves credentials, at start and for the git proxy.
+	resolver *credentials.Resolver
+	// git is the session's git proxy, when a sandbox has repos.
+	git *gitSession
+	// sandboxes is the sandbox backend (backend()).
+	backendMu sync.Mutex
+	sandboxes sandbox.Backend
 	// inj delivers injected messages; cancel and extend carry Cancel
 	// and ExtendDeadline, from Options and from the control socket.
 	inj    *injector

@@ -60,3 +60,28 @@ func TestSessionTokenAuthenticatesOnlyItsOwnToken(t *testing.T) {
 		t.Error("a nil SessionToken authenticated")
 	}
 }
+
+func TestTokenSetNamesEachCaller(t *testing.T) {
+	var s TokenSet
+	if _, ok := s.Authenticate(""); ok {
+		t.Fatal("an empty set authenticated the empty token")
+	}
+	a, err := s.Mint(Caller{ID: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := s.Mint(Caller{ID: "b"})
+	if a == b {
+		t.Fatal("two callers were given one token")
+	}
+	for token, want := range map[string]string{a: "a", b: "b"} {
+		if c, ok := s.Authenticate(token); !ok || c.ID != want {
+			t.Errorf("Authenticate = %+v, %v; want %s", c, ok, want)
+		}
+	}
+	for _, bad := range []string{"", a[:len(a)-1], a + "0"} {
+		if _, ok := s.Authenticate(bad); ok {
+			t.Errorf("Authenticate(%q) succeeded", bad)
+		}
+	}
+}
