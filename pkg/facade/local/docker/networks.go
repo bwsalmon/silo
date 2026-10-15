@@ -435,6 +435,9 @@ func (s *Server) networkConnect(q *request) error {
 		if err := put(q.ctx(), tx, q.target.ID, kindContainer, c.ID, c.Name, c); err != nil {
 			return err
 		}
+		if err := topologyChanged(q.ctx(), tx, q.target.ID, c.ID); err != nil {
+			return err
+		}
 		return s.auditTx(q.ctx(), tx, q, "OK", map[string]any{"container": c.ID, "address": c.Networks[n.Name].Addr.String()}, nil)
 	})
 	if err != nil {
@@ -464,6 +467,9 @@ func (s *Server) networkDisconnect(q *request) error {
 		}
 		delete(c.Networks, n.Name)
 		if err := put(q.ctx(), tx, q.target.ID, kindContainer, c.ID, c.Name, c); err != nil {
+			return err
+		}
+		if err := topologyChanged(q.ctx(), tx, q.target.ID, c.ID); err != nil {
 			return err
 		}
 		return s.auditTx(q.ctx(), tx, q, "OK", map[string]any{"container": c.ID}, nil)

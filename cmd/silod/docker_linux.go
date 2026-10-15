@@ -86,6 +86,7 @@ func (c sandboxConfig) gvisor() gvisor.Config {
 		},
 		RunscRoot: p.RunscRoot(),
 		Toolbox:   c.Toolbox,
+		DNS:       c.DNS,
 	}
 	if c.Runsc != "" {
 		cfg.Runsc = []string{"runsc", "--runsc", c.Runsc}
