@@ -502,6 +502,24 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
+// The create body Docker CLI 29.9.0 sends for `docker run --rm bb:1
+// sh`, byte for byte (testdata/cli-29.9.0-run.json, captured from the
+// CLI), is accepted: every field it sets is allowed or its default,
+// MemorySwappiness -1 among them.
+func TestCLICreateBody(t *testing.T) {
+	e := newEnv(t)
+	e.pull(e.a, "alpine")
+	b, err := os.ReadFile("testdata/cli-29.9.0-run.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = bytes.Replace(b, []byte(`"Image":"bb:1"`), []byte(`"Image":"alpine"`), 1)
+	out := e.ok(e.a, "POST", "/v1.47/containers/create", json.RawMessage(b))
+	if out["Id"] == nil {
+		t.Errorf("create: %v", out)
+	}
+}
+
 func TestTargetsAndControl(t *testing.T) {
 	e := newEnv(t)
 	e.create(e.ci, "job", nil)
