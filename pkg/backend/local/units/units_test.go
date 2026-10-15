@@ -151,6 +151,7 @@ func TestValidate(t *testing.T) {
 		{Mode: System, Silod: "/s", DataDir: "/d", User: "a%b"},
 		{Mode: Rootless, Silod: "/s", DataDir: "/d", RegistryHostPort: 65536},
 		{Mode: Rootless, Silod: "/s", DataDir: "/d", RuntimePath: []string{"rel"}},
+		{Mode: Rootless, Silod: "/s", DataDir: "/d", CPUOvercommit: -1},
 	} {
 		if _, err := Units(c); err == nil {
 			t.Errorf("Units(%+v) succeeded", c)
@@ -164,6 +165,16 @@ func TestImageCacheSize(t *testing.T) {
 		m := unitMap(t, Config{Mode: Rootless, Silod: "/s", DataDir: "/d", ImageCacheSizeGB: gb})
 		if !slices.Contains(lines(m[Silod]), want) {
 			t.Errorf("%v GiB: silod.service has no line %q:\n%s", gb, want, m[Silod])
+		}
+	}
+}
+
+func TestCPUOvercommit(t *testing.T) {
+	base := "ExecStart=/s serve --backend=local --data-dir /d --migrate --socket %t/silo/silo.sock"
+	for oc, want := range map[float64]string{0: base, 4: base + " --cpu-overcommit 4", 1.5: base + " --cpu-overcommit 1.5"} {
+		m := unitMap(t, Config{Mode: Rootless, Silod: "/s", DataDir: "/d", CPUOvercommit: oc})
+		if !slices.Contains(lines(m[Silod]), want) {
+			t.Errorf("overcommit %v: silod.service has no line %q:\n%s", oc, want, m[Silod])
 		}
 	}
 }

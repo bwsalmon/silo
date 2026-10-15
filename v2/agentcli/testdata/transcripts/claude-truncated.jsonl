@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"abc","model":"claude-opus-5-5"}
+{"type":"assistant","session_id":"abc","message":{"id":"msg_01","content":[{"type":"text","text":"hi"}]}}
+{"type":"assistant","sess

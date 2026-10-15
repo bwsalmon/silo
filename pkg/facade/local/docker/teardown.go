@@ -34,6 +34,9 @@ func (s *Server) DeleteSilo(ctx context.Context, silo string) error {
 			if err := remove(ctx, tx, silo, kindContainer, c.ID); err != nil {
 				return err
 			}
+			if err := topologyChanged(ctx, tx, silo, c.ID); err != nil {
+				return err
+			}
 		}
 		ns, err := s.networks(ctx, tx, silo)
 		if err != nil {

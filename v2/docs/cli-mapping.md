@@ -8,8 +8,8 @@ Part of the [v2 design](design.md) (§6 there is the summary).
 
 | CLI | Version | How it was checked |
 | --- | --- | --- |
-| `claude` | Claude Code 2.1.197 | Installed from npm (`@anthropic-ai/claude-code`) in task 3800's sandbox. `claude --help` and `claude auth --help` read. Not run against a model. |
-| `codex` | codex-cli 0.162.1 | Installed from npm (`@openai/codex`) in the same sandbox. `codex --help`, `codex exec --help`, `codex mcp --help` and `codex login --help` read. Not run against a model. |
+| `claude` | Claude Code 2.1.197 | Installed from npm (`@anthropic-ai/claude-code`) in task 3800's sandbox. `claude --help` and `claude auth --help` read. Run against a model through `silo run` in stage 1d (task 3822): `cmd/silo`'s live tests. |
+| `codex` | codex-cli 0.162.1 | Installed from npm (`@openai/codex`) in the same sandbox. `codex --help`, `codex exec --help`, `codex mcp --help` and `codex login --help` read. Run against a model through `silo run` in stage 1d (task 3822), and against a stub model with silo's `none` configuration (`agentcli/codex`'s live probe), beside 0.153.0 for comparison. |
 | `agy` | 1.2.2 | **Not installed here.** Read from grain's `docs/agy-surface.md`, which grain's `.grain/workflows/agy-surface.yml` captures from the pinned binary, and from grain's `pkg/agent/antigravity`. |
 
 Grain's own drivers (`pkg/agent/claude`, `pkg/agent/codex`,
@@ -20,6 +20,8 @@ pinned version. Each row below says which source backs it:
 - **V**: the flag appears in the help of the version above.
 - **G**: grain passes it today (works in production at grain's pinned
   version).
+- **L**: run against the real CLI in stage 1d, by the live tests
+  (`SILO_V2_LIVE_CLI=1`, see the README), and behaved as described.
 - **A**: an assumption, not checked. Listed again in §4.
 
 ## 2. Remote permissions
@@ -28,18 +30,20 @@ pinned version. Each row below says which source backs it:
 
 | Setting | Arguments | Source |
 | --- | --- | --- |
-| every setting | `--mcp-config <file> --strict-mcp-config` (the gateway only), `--allowedTools mcp__silo` (pre-approve every gateway tool), `--disable-slash-commands` | V, G |
-| `none` | `--tools ""` | V, G ("Use `""` to disable all tools") |
+| every setting | `--mcp-config <file> --strict-mcp-config` (the gateway only), `--allowedTools mcp__silo` (pre-approve every gateway tool), `--disable-slash-commands` | V, G, L (every gateway tool is called with no prompt, under `default` and `dontAsk`) |
+| `none` | `--tools ""` | V, G ("Use `""` to disable all tools"), L (the init event lists only `mcp__silo__*`; the model calls nothing else and cannot read a host file) |
 | subset `[Read, Grep, Edit]` | `--tools Read,Grep,Edit` | V ("or specify tool names") |
 | `all` | no `--tools` (the default roster) | V |
-| headless + `all` or subset | `--permission-mode dontAsk` plus `--allowedTools` for the listed tools, or `--dangerously-skip-permissions` when the Silofile says `all` | V (modes listed: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`); semantics of `dontAsk` A |
+| headless + `all` or subset | `--permission-mode dontAsk` plus `--allowedTools` for the listed tools, or `--dangerously-skip-permissions` when the Silofile says `all` | V (modes listed: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`); L: in print mode `dontAsk` refuses a tool not in `--allowedTools` (it is in the result's `permission_denials`) and the run goes on to its result |
 | interactive + `all` or subset | `--permission-mode default`: the user approves in the terminal as usual | V |
 
 Hardening for `none` and subsets: the CLI starts in an empty private
 working directory, so no project `CLAUDE.md`, `.claude/settings.json` or
 `.mcp.json` is read; `--setting-sources user` so project and local
-settings (and their hooks) are not loaded (V, flag; A, that it excludes
-project hooks); `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, which grain sets
+settings (and their hooks) are not loaded (V, flag; L: `SessionStart`
+and `UserPromptSubmit` hooks in the workdir's `.claude/settings.json`
+and `.claude/settings.local.json` do not run, and do run for the same
+directory without the flag); `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, which grain sets
 (G). Hooks in the user's own `~/.claude/settings.json` still run, as the
 user. With `auth` set to a credential, `--bare` turns hooks, plugins and
 `CLAUDE.md` discovery off as well (V), but it reads only API-key auth
@@ -47,10 +51,24 @@ user. With `auth` set to a credential, `--bare` turns hooks, plugins and
 `auth: ambient`. See design open question 4.
 
 Subset names are checked against the built-in roster. Claude Code does
-not print its roster in `--help`. silo keeps a table per reviewed
-version (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebFetch`,
-`WebSearch`, `Task`, `TodoWrite`, `NotebookEdit`, ...) and refuses a name
-not in it (A: the exact roster of 2.1.197).
+not print its roster in `--help`, and `--tools` drops a name it does not
+know without a word, so silo keeps a table per reviewed version and
+refuses a name not in it. The 2.1.197 table (L) is every name for which
+the binary, given it in `--tools`, lists a tool in its print-mode init
+event:
+
+| | Tools |
+| --- | --- |
+| roster | `Bash`, `CronCreate`, `CronDelete`, `CronList`, `DesignSync`, `Edit`, `EnterWorktree`, `ExitWorktree`, `Glob`, `Grep`, `Monitor`, `NotebookEdit`, `PushNotification`, `Read`, `ReportFindings`, `ScheduleWakeup`, `SendMessage`, `Task`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `TaskUpdate`, `WebFetch`, `WebSearch`, `Workflow`, `Write` |
+| aliases, also accepted | `Agent` (loads `Task`), `BashOutput` (`TaskOutput`), `KillShell` (`TaskStop`) |
+| refused | `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`, `LSP`, `MultiEdit`, `TodoWrite`, `SlashCommand`, `LS`: in the binary or earlier tables, but no tool loads for them in print mode. `Skill`: loads, except under `--disable-slash-commands`, which silo always passes |
+
+The default roster (no `--tools`) leaves out `Glob` and `Grep`, which
+load only when named. `Monitor` and `PushNotification` were missing
+from one default-roster run and present in the next, so the default
+roster may vary with server-side settings; a named subset was the same
+on every run. Stage 1c's table was a guess, and named seven tools that
+do not load.
 
 MCP config file (G):
 
@@ -67,8 +85,9 @@ As built in stage 1c: `--setting-sources user` and
 for `all`. Headless `none` adds no permission flag (nothing is left to
 approve but `mcp__silo`). `agent.system_prompt` is staged as a file and
 passed with `--append-system-prompt-file`. The headless prompt is one
-stream-json user message on stdin, which is then closed (injection is
-stage 6a), never argv. The interactive prompt follows `--`. A Claude
+stream-json user message on stdin, never argv. Since stage 6b, stdin
+stays open until the turn's `result` so that a message can be injected
+(§3.2); before that it was closed after the prompt. The interactive prompt follows `--`. A Claude
 version with no roster table is checked against the newest table, with a
 warning. `--bare` is not used (design open question 4).
 
@@ -82,7 +101,7 @@ do not apply. For `auth: ambient`, that home links the user's
 | Setting | Configuration | Source |
 | --- | --- | --- |
 | every setting | `config.toml`: `[mcp_servers.silo]` with `url`, `http_headers = { Authorization = "Bearer ..." }`, `required = true` | G |
-| `none` | `environments.toml` with `default = "none"`, `include_local = false`; `CODEX_EXEC_SERVER_URL=none`; `approval_policy = "never"`, `sandbox_mode = "read-only"`, `web_search = "disabled"`, `include_environment_context = false`; `[features]` `apps`, `plugins`, `multi_agent` off; skills off | G, reviewed by grain for **0.153.0 only** (grain `docs/codex-isolation.md`) |
+| `none` | `environments.toml` with `default = "none"`, `include_local = false`; `CODEX_EXEC_SERVER_URL=none`; `approval_policy = "never"`, `sandbox_mode = "read-only"`, `web_search = "disabled"`, `include_environment_context = false`; `[features]` `apps`, `plugins`, `multi_agent` off; skills off | G, reviewed by grain for **0.153.0** (grain `docs/codex-isolation.md`); L, 0.162.1 by stage 1d's probe (below) |
 | subset | **refused**: Codex has no per-tool allowlist for its built-ins | V (no such flag in 0.162.1's help); G (grain's doc says the same) |
 | `all` | no environment manifest; `-s`/`--sandbox` (`read-only`, `workspace-write`, `danger-full-access`) left at Codex's built-in default; interactive keeps Codex's approval prompts, headless adds `-c approval_policy="never"` so a run never blocks on an approval nobody can give (`codex exec` has no `-a`) | V |
 
@@ -93,16 +112,43 @@ tools, and `approval_mode = "approve"` for each of them;
 `auth.json` is `$CODEX_HOME/auth.json` or `~/.codex/auth.json` of the
 invoking user (missing: exit 69, "run `codex login`");
 `model_reasoning_effort` from `agent.effort`; and
-`developer_instructions` from `agent.system_prompt` (A). With
-`auth: {credential: x}`, `OPENAI_API_KEY` is set.
+`developer_instructions` from `agent.system_prompt` (A).
+
+With `auth: {credential: x}`, `OPENAI_API_KEY` is set, and since stage 1d
+the key is also written to the private home's `auth.json` as
+`{"auth_mode": "apikey", "OPENAI_API_KEY": ...}`, the file
+`codex login --with-api-key` writes, with
+`cli_auth_credentials_store = "file"`. L: `codex exec` 0.162.1 sends no
+credential when the key is only in `OPENAI_API_KEY` (every request
+failed 401); it does read `CODEX_API_KEY`, but only in `exec`, so the
+file serves both modes. An `OPENAI_BASE_URL` in the agent's environment
+(a credential delivered `{agent: env, name: OPENAI_BASE_URL}`, say)
+becomes `openai_base_url` in `config.toml`: Codex's built-in provider
+ignores the variable (L), and the private home hides the user's own
+`openai_base_url`.
 
 **Version pinning for `none`.** Grain found that read-only mode alone
 did not stop controller reads, and that only the no-environment manifest
 removes the shell and file tools. It is a reviewed configuration, not a
 documented contract, so grain refuses any other Codex version, and silo
 does the same: `none` on an unreviewed version exits 76 naming the
-reviewed versions. 0.162.1, current when this was written, has not been
-reviewed.
+reviewed versions: 0.153.0 (grain's review) and 0.162.1 (stage 1d,
+below).
+
+Stage 1d ran `agentcli/codex`'s `TestLiveCodexNoneIsolation` on 0.162.1
+and on 0.153.0. It runs the real binary with silo's `none`
+configuration against a stub Responses API, which calls every native
+tool whether advertised or not. Both versions advertised the same tools
+(`create_goal`, `get_goal`, `update_goal`, `list_mcp_resources`,
+`list_mcp_resource_templates`, `read_mcp_resource`,
+`request_user_input`, `tool_search`, with the gateway's tools behind
+`tool_search`), refused `exec_command`, `shell`, `shell_command`,
+`apply_patch`, `view_image`, `write_stdin` and `request_permissions` as
+"unsupported call", and wrote nothing on the host. On that evidence the
+owner added 0.162.1 to the reviewed versions (task 3822). It is a
+behavioural check with one model profile, not a source-level review
+like grain's of 0.153.0; the probe is what to rerun for the next
+version.
 
 ### 2.3 `agy`
 
@@ -175,6 +221,24 @@ On `ssh`, headless runs use `ssh -T` with the same argv.
 As built in stage 1c, `silo run` without `--json` passes the CLI's
 stdout through to its own; parsing it into events is stage 6a.
 
+Injection is as built in stage 6b. Claude's stdin stays open until the
+turn's `result`, and each injected message is written as one stream-json
+user line. A message that arrives later resumes the session as
+`claude -p ... --resume <id>`, with the message on stdin. Codex's
+messages always wait for the turn to end, then go through
+`codex exec resume --json --skip-git-repo-check [-c ...] [-m m] <thread> -`,
+with the messages on stdin. That argv carries the same flags as the
+first turn (A: that `exec resume` takes `-c`). `codex queue` is not
+used.
+
+`codex queue` (L, 0.162.1, for stage 6b): `codex queue --thread <id>
+--message <text>`, with the same `CODEX_HOME`, accepts a message for a
+thread a `codex exec` is running ("Queued message ... for thread ...",
+exit 0), but that `exec` never delivers it: the turn ended without it,
+and a later `codex exec resume` of the thread did not deliver it either.
+It is not a mid-run injection path for `codex exec`; it presumably
+feeds the TUI or the app server. Stage 6b's `exec resume` stays.
+
 ### 3.3 `attached` (reserved)
 
 | CLI | Flag or command | Source |
@@ -195,15 +259,29 @@ front, V), `codex exec resume <id>` (V, G), `agy --conversation <id>`
 
 ## 4. Assumptions to check in stage 1
 
+Stage 1d (task 3822) ran the live tests against claude 2.1.197 and
+codex-cli 0.162.1.
+
 1. Claude Code's exact built-in tool roster at the pinned version, for
-   validating subsets.
+   validating subsets. **Corrected**: the table in §2.1, checked by
+   `TestLiveClaudeRoster`; seven names in stage 1c's table loaded
+   nothing, and are now refused.
 2. That `--setting-sources user` excludes project and local hooks.
+   **V** (`TestLiveClaudeNone`, with a control).
 3. That `--permission-mode dontAsk` refuses, rather than prompts for,
-   tools not in `--allowedTools`, in print mode.
+   tools not in `--allowedTools`, in print mode. **V**
+   (`TestLiveClaudeDontAsk`).
 4. That `claude --allowedTools mcp__silo` pre-approves every tool of the
-   `silo` server (grain lists each tool by name instead).
+   `silo` server (grain lists each tool by name instead). **V**
+   (`TestLiveClaudeNone`, `TestLiveClaudeSubset`); silo keeps the server
+   name.
 5. Whether Codex 0.162.1's tool registry still matches grain's 0.153.0
-   review. Until reviewed, `none` is refused on it.
-6. agy's JSON field names for an HTTP MCP server with a header.
-7. The behaviour of every `attached` command.
-8. `codex queue` as a mid-run injection path.
+   review. **Same surface** in the stage 1d probe (§2.2); 0.162.1 is
+   now a reviewed version, and `none` runs on it. The live run also found `auth: {credential: x}`
+   broken on 0.162.1, now fixed (§2.2).
+6. agy's JSON field names for an HTTP MCP server with a header. Still
+   unchecked: agy is not installed where stage 1d ran.
+7. The behaviour of every `attached` command. Still unchecked:
+   `attached` is reserved (design open question 5).
+8. `codex queue` as a mid-run injection path. **Not one** for
+   `codex exec` (§3.2); stage 6b's `codex exec resume` stays.

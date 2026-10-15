@@ -1,0 +1,14 @@
+model = "gpt-5"
+
+[mcp_servers.postgres]
+command = "pg-mcp"
+args = ["--readonly"]
+env = { DATABASE_URL = "postgres://ro:hunter2@db/widgets", PGAPPNAME = "silo" }
+
+[mcp_servers.remote]
+url = "https://mcp.example.com/mcp"
+bearer_token_env_var = "REMOTE_TOKEN"
+http_headers = { "X-Team" = "widgets" }
+
+[mcp_servers.remote.tools.search]
+approval_mode = "approve"

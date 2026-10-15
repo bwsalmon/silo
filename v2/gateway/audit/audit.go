@@ -48,15 +48,41 @@ type Record struct {
 	Event   string    `json:"event"` // "start" or "end"
 	Session string    `json:"session"`
 	Caller  Caller    `json:"caller"`
-	Call    int64     `json:"call"` // pairs a call's start and end
-	Tool    string    `json:"tool"`
-	Args    any       `json:"args,omitempty"` // start only
+	Call    int64     `json:"call,omitempty"` // pairs a call's start and end
+	Tool    string    `json:"tool,omitempty"`
+	// As is the name the agent called Tool by, when the session's rename
+	// map gives it another (grain.md §2.2).
+	As   string `json:"as,omitempty"`
+	Args any    `json:"args,omitempty"` // start only
 
 	Outcome    string `json:"outcome,omitempty"` // end only
 	Reason     string `json:"reason,omitempty"`  // why it was refused or failed
 	Size       *int   `json:"size,omitempty"`    // the result's length in bytes
 	Head       string `json:"head,omitempty"`    // the result's first HeadBytes
 	DurationMS *int64 `json:"duration_ms,omitempty"`
+
+	// Git is a git proxy request, on an EventGit line: the proxy's own
+	// audit entry (gitproxy.AuditEntry), one per request (design §9.1).
+	Git any `json:"git,omitempty"`
+}
+
+// EventGit is the event of a line the session's git proxy wrote.
+const EventGit = "git"
+
+// Git writes one git proxy request's audit entry, its strings redacted
+// like every other line's.
+func (l *Log) Git(entry any) error {
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.write(Record{Time: time.Now().UTC(), Event: EventGit, Git: l.redactValue(v)})
 }
 
 // Log is an open audit log. Its methods are safe for concurrent use.
@@ -68,6 +94,7 @@ type Log struct {
 	f       *os.File
 	secrets []secret // longest first
 	nextID  atomic.Int64
+	observe func(Record)
 }
 
 type secret struct{ name, value string }
@@ -86,6 +113,16 @@ func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.f.Close()
+}
+
+// Observe has fn called with every record once it is written,
+// credentials already redacted: the session's tool_call events. fn is
+// called with the log's lock held, in the order the lines were written,
+// and must not call back into the log.
+func (l *Log) Observe(fn func(Record)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.observe = fn
 }
 
 // Register records a credential value, so that every later line has
@@ -156,6 +193,9 @@ func (l *Log) write(r Record) error {
 	if _, err := l.f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("audit: %w", err)
 	}
+	if l.observe != nil {
+		l.observe(r)
+	}
 	return nil
 }
 
@@ -164,6 +204,7 @@ type Call struct {
 	log   *Log
 	id    int64
 	tool  string
+	as    string
 	start time.Time
 }
 
@@ -171,7 +212,16 @@ type Call struct {
 // writes its end line. The start line is on disk (in the kernel's page
 // cache, which survives the process) before Start returns.
 func (l *Log) Start(tool string, args map[string]any) (*Call, error) {
-	c := &Call{log: l, id: l.nextID.Add(1), tool: tool, start: time.Now()}
+	return l.StartAs(tool, "", args)
+}
+
+// StartAs is Start for a tool the agent called by another name, as: the
+// gateway's rename map. Both lines of the call record both names.
+func (l *Log) StartAs(tool, as string, args map[string]any) (*Call, error) {
+	if as == tool {
+		as = ""
+	}
+	c := &Call{log: l, id: l.nextID.Add(1), tool: tool, as: as, start: time.Now()}
 	var a any
 	if args != nil {
 		// Round-trip through JSON so redactValue sees plain JSON values
@@ -182,7 +232,7 @@ func (l *Log) Start(tool string, args map[string]any) (*Call, error) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return c, l.write(Record{Time: c.start.UTC(), Event: "start", Call: c.id, Tool: tool, Args: a})
+	return c, l.write(Record{Time: c.start.UTC(), Event: "start", Call: c.id, Tool: tool, As: as, Args: a})
 }
 
 // End writes the call's end line: its outcome, the reason when it did
@@ -200,7 +250,7 @@ func (c *Call) End(outcome, reason, result string) error {
 		head = head[:HeadBytes]
 	}
 	return l.write(Record{
-		Time: time.Now().UTC(), Event: "end", Call: c.id, Tool: c.tool,
+		Time: time.Now().UTC(), Event: "end", Call: c.id, Tool: c.tool, As: c.as,
 		Outcome: outcome, Reason: reason, Size: &size, Head: head, DurationMS: &d,
 	})
 }

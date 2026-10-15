@@ -5,7 +5,14 @@
 # including the gateway's tests against real container and gVisor
 # sandboxes and gitproxy's against real git clients (SILO_V2_REQUIRE_DOCKER,
 # SILO_V2_REQUIRE_RUNSC and SILO_V2_REQUIRE_GIT make a missing Docker, runsc
-# or git a failure here rather than a skip).
+# or git a failure here rather than a skip; location/ssh's tests run a
+# real sshd in Docker, and location/k8s's a kind cluster in Docker, so
+# SILO_V2_REQUIRE_DOCKER covers them too, and makes a missing kind or
+# kubectl a failure). The granule sandbox kind's tests boot real granule
+# microVMs (SILO_V2_REQUIRE_GRANULE): the job reads gke-labs/granule
+# through the git proxy (repo-read, below), builds its CLI at a pinned
+# commit, and pulls grain's published guest image and the images
+# granule builds Granulefiles with.
 name: v2
 
 on:
@@ -32,8 +39,13 @@ jobs:
       - "*.md"
     sandbox:
       cpus: 2
-      memory-mb: 4096
-    timeout-minutes: 20
+      # location/k8s's tests run a kind cluster beside everything else.
+      memory-mb: 8192
+    # The granule CLI is built from source: grain's Go module proxy cannot
+    # fetch github.com/gke-labs/granule, and silo drives the binary rather
+    # than importing it (v2/sandbox/granule).
+    capabilities: ["repo-read:gke-labs/granule"]
+    timeout-minutes: 30
     steps:
       # A pinned gVisor release, checked against its published sha512 (the
       # same one tests.yml's nsd job installs), registered with Docker as
@@ -55,6 +67,45 @@ jobs:
           for i in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
           docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' | grep -w runsc
 
+      # location/k8s's tests make a kind cluster; the sandbox image
+      # carries kind and kubectl, and this says so before the tests do.
+      - name: Check kind
+        infrastructure: true
+        run: |
+          set -e
+          kind version
+          kubectl version --client
+
+      # granule at a pinned commit, cloned through the git proxy the way
+      # this checkout's own origin is, and the guest image the granule
+      # tests boot (internal/granuletest.DefaultImage). /dev/kvm has to
+      # open for this user, which `granule doctor` checks.
+      - name: Install granule
+        infrastructure: true
+        run: |
+          set -e
+          origin="$(git remote get-url origin)"
+          base="${origin%/${GRAIN_CI_REPO}.git}"
+          base="${base%/${GRAIN_CI_REPO}}"
+          git init -q /tmp/granule
+          git -C /tmp/granule fetch -q --depth 1 "$base/gke-labs/granule.git" 4411ce45e5c04cea29a2fb343d7c44232bc3ac7e
+          git -C /tmp/granule checkout -q FETCH_HEAD
+          (cd /tmp/granule && go build -o /tmp/granule-bin/granule ./cmd/granule)
+          sudo install -m 0755 /tmp/granule-bin/granule /usr/local/bin/granule
+          granule doctor
+          docker pull -q ghcr.io/bwsalmon/grain/guest:latest
+          # What `granule granulefile build` builds VM images with, by
+          # granule's own default names (journey 10's tests): its VMM
+          # image, granule:latest, and its guest rootfs. The VMM half
+          # has to be the pinned CLI's own, which granule's published
+          # VM image for that commit carries; the rootfs is pinned by
+          # digest (published from that commit) and tagged as the name
+          # granule writes FROM, so a later publish does not move it.
+          docker pull -q ghcr.io/gke-labs/granule/debian:4411ce45e5c04cea29a2fb343d7c44232bc3ac7e
+          docker tag ghcr.io/gke-labs/granule/debian:4411ce45e5c04cea29a2fb343d7c44232bc3ac7e granule:latest
+          docker pull -q ghcr.io/gke-labs/granule/debian.rootfs@sha256:5f8de1ecfb8057064198f09325102d61b277136b2186ffab8258ab1029681f4c
+          docker tag ghcr.io/gke-labs/granule/debian.rootfs@sha256:5f8de1ecfb8057064198f09325102d61b277136b2186ffab8258ab1029681f4c ghcr.io/gke-labs/granule/debian.rootfs:latest
+
       - name: Format
         run: |
           cd v2
@@ -75,4 +126,5 @@ jobs:
           SILO_V2_REQUIRE_DOCKER: "1"
           SILO_V2_REQUIRE_RUNSC: "1"
           SILO_V2_REQUIRE_GIT: "1"
-        run: cd v2 && go test -race -timeout 15m ./...
+          SILO_V2_REQUIRE_GRANULE: "1"
+        run: cd v2 && go test -race -timeout 20m ./...

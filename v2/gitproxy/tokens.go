@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // SessionToken is an Authenticator with one token, for one caller.
@@ -70,4 +71,43 @@ func ExtractBasicAuthToken(header string) (string, bool) {
 		return "", false
 	}
 	return token, true
+}
+
+// TokenSet is an Authenticator with a token per caller: silo mints one
+// for each sandbox of a session, so that every audit entry names the
+// sandbox whose git sent it (design §9.1).
+type TokenSet struct {
+	mu     sync.RWMutex
+	tokens map[string]Caller
+}
+
+// Mint makes a new random token for caller and returns it.
+func (s *TokenSet) Mint(caller Caller) (string, error) {
+	token, err := randomHex(32)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tokens == nil {
+		s.tokens = map[string]Caller{}
+	}
+	s.tokens[token] = caller
+	return token, nil
+}
+
+// Authenticate implements Authenticator, comparing in constant time
+// against every token, so that the time taken says nothing about which
+// one came close.
+func (s *TokenSet) Authenticate(token string) (Caller, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var found Caller
+	ok := false
+	for t, c := range s.tokens {
+		if token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(t)) == 1 {
+			found, ok = c, true
+		}
+	}
+	return found, ok
 }

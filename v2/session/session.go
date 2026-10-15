@@ -19,9 +19,12 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/v2/agentcli"
+	"github.com/bwsalmon/silo/v2/control"
 	"github.com/bwsalmon/silo/v2/credentials"
+	"github.com/bwsalmon/silo/v2/events"
 	"github.com/bwsalmon/silo/v2/gateway"
 	"github.com/bwsalmon/silo/v2/gateway/audit"
+	"github.com/bwsalmon/silo/v2/gitproxy"
 	"github.com/bwsalmon/silo/v2/location"
 	"github.com/bwsalmon/silo/v2/location/local"
 	"github.com/bwsalmon/silo/v2/mcp"
@@ -68,40 +71,47 @@ type Options struct {
 	Backend sandbox.Backend
 	// Resolver resolves credentials; one reading Environ when nil.
 	Resolver *credentials.Resolver
+	// Credentials are values the caller already holds, by credential
+	// name: a credential named here takes this value, and its from: is
+	// not read (the library's way to pass credentials, grain.md §2.1).
+	Credentials map[string]string
 	// Signals delivers SIGINT and SIGTERM; signal.Notify's when nil.
 	Signals <-chan os.Signal
 	// Grace replaces DefaultGrace.
 	Grace time.Duration
-	// Sink receives the session's events; progress lines on Stderr when
-	// nil. Stage 6a's --json attaches its event stream here.
+	// Sink receives the session's events (docs/events.md); TextSink on
+	// Stderr when nil.
 	Sink Sink
+	// Cancel ends the session, as cancelled, with the reason sent.
+	Cancel <-chan string
+	// ExtendDeadline moves the session's deadline to the time sent.
+	ExtendDeadline <-chan time.Time
 	// NoGC skips the local silo gc at start.
 	NoGC bool
-}
-
-// Event is one thing that happened in a session.
-type Event struct {
-	Time time.Time
-	// Type is status, warning, step or exit.
-	Type    string
-	Message string
-	// Code is the exit code, for exit.
-	Code int
-}
-
-// Sink receives events.
-type Sink interface{ Event(Event) }
-
-type textSink struct{ w io.Writer }
-
-func (t textSink) Event(e Event) {
-	switch e.Type {
-	case "warning":
-		fmt.Fprintf(t.w, "silo: warning: %s\n", e.Message)
-	case "step":
-	default:
-		fmt.Fprintf(t.w, "silo: %s\n", e.Message)
-	}
+	// CallerMCP are MCP servers the caller serves, which the gateway
+	// connects to and fronts as <name>__<tool> (grain.md §2.2).
+	CallerMCP []CallerMCP
+	// Rename lists gateway tools under other names: the key is silo's
+	// name (sandbox_exec, local_<script>, <server>__<tool>), the value
+	// the name the agent sees (grain.md §2.2, design open question 19).
+	// Silo chooses no names of its own.
+	Rename map[string]string
+	// Labels are the caller's, kept in session.json so that it can find
+	// its sessions again with silo ls (grain.md §2.7): grain's run ids.
+	Labels map[string]string
+	// Detached records in session.json that the session runs under its
+	// own supervisor, silo run --detach.
+	Detached bool
+	// GitHosts is where the git proxy sends each git host's requests,
+	// when that is not https://<host> (gitproxy.GitProxy.Hosts): a git
+	// host on another port.
+	GitHosts map[string]gitproxy.Host
+	// GitForwarderFor, when set, replaces the git proxy's upstream for a
+	// host (gitproxy.GitProxy.ForwarderFor), for tests.
+	GitForwarderFor func(host string) (gitproxy.Forwarder, error)
+	// Started, when set, is called with the session once it has an id
+	// and a directory, before setup: the library's handle on it.
+	Started func(*Session)
 }
 
 type syncWriter struct {
@@ -145,23 +155,59 @@ type Session struct {
 	Gateway    *gateway.Gateway
 	Server     *mcp.Server
 	GatewayURL string
+	// Control is the session's control socket.
+	Control *control.Server
 
 	// Command is the CLI's command, once staged.
 	Command location.Command
 
 	opts Options
-	rec  *recorder
-	sink Sink
+	// resolver resolves credentials, at start and for the git proxy.
+	resolver *credentials.Resolver
+	// git is the session's git proxy, when a sandbox has repos.
+	git *gitSession
+	// sandboxes is the sandbox backend (backend()).
+	backendMu sync.Mutex
+	sandboxes sandbox.Backend
+	// inj delivers injected messages; cancel and extend carry Cancel
+	// and ExtendDeadline, from Options and from the control socket.
+	inj    *injector
+	cancel chan string
+	extend chan time.Time
+	// resume and stageDir build a resumed turn's command.
+	resume   func(dir, id string) location.Command
+	stageDir string
+	rec      *recorder
+	em       *emitter
+	// parser reads the CLI's headless output; transcript is the tee
+	// that feeds it.
+	parser     agentcli.Parser
+	transcript *transcript
+	result     *events.Result
+
+	hookMu       sync.Mutex
+	gatewayHooks []func(*gateway.Gateway)
 }
 
 func (s *Session) getenv(k string) string { return agentcli.Getenv(s.opts.Environ, k) }
 
 func (s *Session) status(format string, args ...any) {
-	s.sink.Event(Event{Time: time.Now(), Type: "status", Message: fmt.Sprintf(format, args...)})
+	s.emitStatus("", events.StateInfo, fmt.Sprintf(format, args...))
 }
 
 func (s *Session) warnf(format string, args ...any) {
-	s.sink.Event(Event{Time: time.Now(), Type: "warning", Message: fmt.Sprintf(format, args...)})
+	s.emitStatus("", events.StateWarning, fmt.Sprintf(format, args...))
+}
+
+func (s *Session) emitStatus(step, state, msg string) {
+	s.em.emit(events.Event{Type: events.TypeStatus, Status: &events.Status{Step: step, State: state, Message: msg}})
+}
+
+// RequestApproval emits an approval_request event: a gateway call with
+// approve: true waiting for its answer, which arrives over the control
+// socket's approve method (design §12.3).
+func (s *Session) RequestApproval(r events.ApprovalRequest) {
+	s.em.emit(events.Event{Type: events.TypeApprovalRequest, ApprovalRequest: &r})
 }
 
 // AddResource records something set up outside the session directory
@@ -203,9 +249,13 @@ func exitCode(err error) int {
 // Run runs one session and returns silo run's exit code, and the error
 // that ended it, if one did.
 func Run(ctx context.Context, opts Options) (int, error) {
-	if opts.File == nil {
-		return ExitUsage, errors.New("session: no Silofile")
-	}
+	res, err := Execute(ctx, opts)
+	return res.Exit.Code, err
+}
+
+// Execute runs one session and returns its result, which it has also
+// emitted as the session's last event.
+func Execute(ctx context.Context, opts Options) (events.Result, error) {
 	if opts.Environ == nil {
 		opts.Environ = os.Environ()
 	}
@@ -228,9 +278,44 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	if _, ok := opts.Stdout.(*os.File); !ok {
 		opts.Stdout = &syncWriter{w: opts.Stdout}
 	}
-	s := &Session{File: opts.File, opts: opts, sink: opts.Sink, AgentEnv: map[string]string{}}
-	if s.sink == nil {
-		s.sink = textSink{opts.Stderr}
+	sink := opts.Sink
+	if sink == nil {
+		sink = TextSink{opts.Stderr}
+	}
+	s := &Session{File: opts.File, opts: opts, em: &emitter{sink: sink, phase: events.PhaseSetup}, AgentEnv: map[string]string{},
+		cancel: make(chan string, 1), extend: make(chan time.Time, 1)}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case r := <-opts.Cancel:
+				s.requestCancel(r)
+			case t := <-opts.ExtendDeadline:
+				s.requestExtend(t)
+			case <-done:
+				return
+			}
+		}
+	}()
+	code, err := s.start(ctx)
+	defer s.em.closeLog()
+	if s.result == nil {
+		// It ended before there was a session to tear down.
+		r := events.Result{Exit: events.Exit{Code: code, Reason: events.ReasonSetupFailed}}
+		if err != nil {
+			r.Exit.Detail = err.Error()
+		}
+		s.em.emit(events.Event{Type: events.TypeResult, Result: &r})
+		s.result = &r
+	}
+	return *s.result, err
+}
+
+func (s *Session) start(ctx context.Context) (int, error) {
+	opts := s.opts
+	if opts.File == nil {
+		return ExitUsage, errors.New("session: no Silofile")
 	}
 	getenv := s.getenv
 
@@ -258,6 +343,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return ExitRefused, err
 	}
 	s.Mapping = m
+	s.inj = newInjector(s.Mode, f.Agent.CLI, m)
 	if f.Agent.Limits != nil && f.Agent.Limits.Deadline != nil {
 		s.Deadline = time.Duration(*f.Agent.Limits.Deadline)
 	}
@@ -278,12 +364,19 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		switch f.Location.Kind {
 		case "", "local":
 			s.Location = local.New()
+		case "ssh":
+			s.Location = SSHLocation(f.Location.SSH, getenv, opts.Stderr)
+		case "k8s":
+			s.Location = K8sLocation(f.Location.K8s, getenv, opts.Stderr)
 		default:
 			return ExitRefused, fmt.Errorf("location kind %s is not supported by silo run yet", f.Location.Kind)
 		}
 	}
 
 	s.ID = NewID()
+	s.em.mu.Lock()
+	s.em.session = s.ID
+	s.em.mu.Unlock()
 	root := RuntimeRoot(getenv)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return ExitPrerequisite, err
@@ -297,6 +390,10 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		os.RemoveAll(s.Dir)
 		return ExitPrerequisite, err
 	}
+	if err := s.em.openLog(filepath.Join(s.StateDir, EventsFile)); err != nil {
+		os.RemoveAll(s.Dir)
+		return ExitPrerequisite, err
+	}
 	kind := f.Location.Kind
 	if kind == "" {
 		kind = "local"
@@ -304,13 +401,17 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	s.rec = &recorder{path: filepath.Join(s.Dir, RecordFile), rec: Record{
 		ID: s.ID, PID: os.Getpid(), Started: time.Now().UTC(), Silofile: f.File, Name: f.Name,
 		CLI: f.Agent.CLI, Location: kind, Mode: s.Mode, Permissions: permString(f.RemotePermissions),
-		StateDir: s.StateDir, Resources: []Resource{},
+		StateDir: s.StateDir, Events: filepath.Join(s.StateDir, EventsFile), Labels: opts.Labels, Detached: opts.Detached,
+		Resources: []Resource{},
 	}}
 	if err := s.rec.update(func(*Record) {}); err != nil {
 		os.RemoveAll(s.Dir)
 		return ExitPrerequisite, err
 	}
 	s.status("session %s (audit: %s)", s.ID, filepath.Join(s.StateDir, "audit.jsonl"))
+	if opts.Started != nil {
+		opts.Started(s)
+	}
 	return s.run(ctx)
 }
 
@@ -331,9 +432,31 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 	}
 
 	var undos []namedUndo
-	reason := ""
+	// reason is the human account session.json keeps; why is the
+	// result's exit reason, decided here for every end but the CLI's
+	// own, which the deferred function reads from its output.
+	reason, why := "", ""
+	cliExited := false
 	defer func() {
+		s.inj.end()
+		s.em.setPhase(events.PhaseTeardown)
 		errs := s.teardown(undos)
+		s.transcript.close()
+		out := s.transcript.outcome()
+		var cliErr *events.CLIError
+		if cliExited {
+			why = events.ReasonCompleted
+			switch {
+			case out.Failure != nil:
+				why, cliErr = events.ReasonCLIError, out.Failure
+			case code != 0:
+				why = events.ReasonCLIError
+				cliErr = &events.CLIError{Kind: events.CLIErrorOther, Message: fmt.Sprintf("the agent CLI exited %d", code)}
+				if code == ExitConnLost {
+					why, cliErr = events.ReasonConnectionLost, nil
+				}
+			}
+		}
 		res := &Result{Ended: time.Now().UTC(), ExitCode: code, Reason: reason}
 		if runErr != nil {
 			res.Errors = append(res.Errors, runErr.Error())
@@ -349,24 +472,54 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 		if err := os.RemoveAll(s.Dir); err != nil {
 			s.warnf("teardown: %v", err)
 		}
-		s.sink.Event(Event{Time: time.Now(), Type: "exit", Code: code, Message: fmt.Sprintf("session %s ended: %s (exit %d)", s.ID, reason, code)})
+		r := &events.Result{
+			Exit:        events.Exit{Code: code, Reason: why, Detail: reason, CLI: cliErr},
+			FinalText:   out.FinalText,
+			CLISession:  out.CLISession,
+			UsageTotals: s.em.totals(),
+			AuditPath:   filepath.Join(s.StateDir, audit.FileName),
+			Errors:      res.Errors,
+		}
+		if s.transcript != nil {
+			r.TranscriptPath = filepath.Join(s.StateDir, RawTranscriptFile)
+			if s.parser != nil {
+				r.NormalizedTranscriptPath = filepath.Join(s.StateDir, TranscriptFile)
+			}
+		}
+		e := s.em.emit(events.Event{Type: events.TypeResult, Result: r})
+		s.result = e.Result
 	}()
 
-	// Setup, ended early by SIGINT or SIGTERM.
+	// Setup, ended early by SIGINT, SIGTERM or Cancel.
 	setupCtx, cancelSetup := context.WithCancel(ctx)
 	defer cancelSetup()
-	interrupted := make(chan os.Signal, 1)
+	interrupted := make(chan string, 1)
 	stopWatch := make(chan struct{})
 	go func() {
 		select {
 		case sig := <-sigs:
-			interrupted <- sig
+			interrupted <- sig.String()
+			cancelSetup()
+		case r := <-s.cancel:
+			interrupted <- "cancelled: " + r
 			cancelSetup()
 		case <-stopWatch:
 		}
 	}()
+	setupEnd := func() (int, string, bool) {
+		select {
+		case what := <-interrupted:
+			c := ExitInterrupted
+			if strings.HasPrefix(what, "cancelled") || what == syscall.SIGTERM.String() {
+				c = ExitTerminated
+			}
+			return c, what, true
+		default:
+		}
+		return 0, "", false
+	}
 	for _, st := range Steps() {
-		s.sink.Event(Event{Time: time.Now(), Type: "step", Message: st.Name})
+		s.emitStatus(st.Name, events.StateStarted, "")
 		undo, err := st.Run(setupCtx, s)
 		if undo != nil {
 			undos = append(undos, namedUndo{st.Name, undo})
@@ -375,55 +528,86 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			err = setupCtx.Err()
 		}
 		if err != nil {
+			s.emitStatus(st.Name, events.StateFailed, err.Error())
 			close(stopWatch)
-			select {
-			case sig := <-interrupted:
-				reason = "interrupted during setup"
-				return signalCode(sig), fmt.Errorf("%s: %w", st.Name, err)
-			default:
+			if c, what, ok := setupEnd(); ok {
+				reason, why = "interrupted during setup ("+what+")", events.ReasonCancelled
+				return c, fmt.Errorf("%s: %w", st.Name, err)
 			}
-			reason = "setup failed: " + st.Name
+			reason, why = "setup failed: "+st.Name, events.ReasonSetupFailed
 			return exitCode(err), fmt.Errorf("%s: %w", st.Name, err)
 		}
+		s.emitStatus(st.Name, events.StateDone, "")
 	}
 	close(stopWatch)
-	select {
-	case sig := <-interrupted:
-		reason = "interrupted during setup"
-		return signalCode(sig), errors.New("interrupted during setup")
-	default:
+	if c, what, ok := setupEnd(); ok {
+		reason, why = "interrupted during setup ("+what+")", events.ReasonCancelled
+		return c, errors.New("interrupted during setup")
 	}
 
-	// Step 7: start the CLI.
-	io := location.IO{Stdin: s.opts.Stdin, Stdout: s.opts.Stdout, Stderr: s.opts.Stderr}
-	agent, err := s.Location.Start(ctx, s.Command, io)
+	// Step 7: start the CLI. In headless mode its output is also kept
+	// and parsed into transcript events.
+	stdout := s.opts.Stdout
+	if s.Mode == agentcli.Headless {
+		t, err := newTranscript(s.em, s.parser, filepath.Join(s.StateDir, RawTranscriptFile), filepath.Join(s.StateDir, TranscriptFile))
+		if err != nil {
+			reason, why = "the transcript could not be written", events.ReasonSetupFailed
+			return ExitPrerequisite, err
+		}
+		t.onTurn = s.inj.turnEnded
+		s.transcript = t
+		stdout = io.MultiWriter(stdout, t)
+	}
+	io := location.IO{Stdin: s.opts.Stdin, Stdout: stdout, Stderr: s.opts.Stderr}
+	// start starts one CLI process: the first, or a resumed turn
+	// carrying injected messages.
+	start := func(cmd location.Command, msgs []string) (location.Agent, error) {
+		started, err := s.inj.begin(&cmd, msgs)
+		if err != nil {
+			return nil, err
+		}
+		a, err := s.Location.Start(ctx, cmd, io)
+		started()
+		if err != nil {
+			return nil, err
+		}
+		if lp, ok := a.(interface{ PGID() int }); ok && lp.PGID() > 0 {
+			_ = s.AddResource(Resource{Kind: KindProcessGroup, PGID: lp.PGID()})
+		}
+		return a, nil
+	}
+	agent, err := start(s.Command, nil)
 	if err != nil {
-		reason = "the agent CLI did not start"
+		reason, why = "the agent CLI did not start", events.ReasonSetupFailed
 		return ExitPrerequisite, err
 	}
-	if lp, ok := agent.(interface{ PGID() int }); ok && lp.PGID() > 0 {
-		_ = s.AddResource(Resource{Kind: KindProcessGroup, PGID: lp.PGID()})
-	}
 	undos = append(undos, namedUndo{"agent", func(context.Context) error { return s.stop(agent) }})
-	s.status("started %s in %s mode", s.File.Agent.CLI, s.Mode)
+	s.em.setPhase(events.PhaseRunning)
+	s.emitStatus("agent", events.StateStarted, fmt.Sprintf("started %s in %s mode", s.File.Agent.CLI, s.Mode))
 
 	// Step 8: serve until the CLI exits, the deadline passes, or a
-	// signal ends the session.
+	// signal or Cancel ends the session.
 	type exit struct {
 		st  location.ExitStatus
 		err error
 	}
 	exited := make(chan exit, 1)
-	go func() {
-		st, err := agent.Wait()
+	wait := func(a location.Agent) {
+		st, err := a.Wait()
 		exited <- exit{st, err}
-	}()
-	var deadline <-chan time.Time
-	if s.Deadline > 0 {
-		t := time.NewTimer(s.Deadline)
-		defer t.Stop()
-		deadline = t.C
 	}
+	go wait(agent)
+	var deadline <-chan time.Time
+	var timer *time.Timer
+	if s.Deadline > 0 {
+		timer = time.NewTimer(s.Deadline)
+		deadline = timer.C
+	}
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	var grace <-chan time.Time
 	silo := 0 // silo's own code once silo has ended the session
 	interrupts := 0
@@ -433,15 +617,54 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			if silo != 0 {
 				return silo, nil
 			}
+			if e.st.ConnLost {
+				s.inj.end()
+				reason = "the connection to the agent host dropped"
+				return ExitConnLost, e.err
+			}
+			// A message injected for the next turn resumes the CLI's
+			// session with it, once this turn has ended well.
+			out := s.transcript.outcome()
+			clean := e.err == nil && e.st.Code == 0 && out.Failure == nil
+			msgs, dropped := s.inj.next(out, clean)
+			if dropped != "" {
+				s.warnf("%s", dropped)
+			}
+			if len(msgs) > 0 && s.resume != nil {
+				cmd := s.resume(s.stageDir, out.CLISession)
+				cmd.Workdir = s.Command.Workdir
+				a, err := start(cmd, msgs)
+				if err == nil {
+					agent = a
+					s.status("resumed %s session %s with %d injected message(s)", s.File.Agent.CLI, out.CLISession, len(msgs))
+					go wait(agent)
+					continue
+				}
+				s.warnf("resuming the agent CLI with %d injected message(s): %v", len(msgs), err)
+			}
+			cliExited = true
 			reason = "the agent CLI exited"
 			if e.st.Signaled != "" {
 				reason += " on " + e.st.Signaled
 			}
 			return e.st.Code, e.err
 		case <-deadline:
-			s.warnf("the session deadline (%s) passed; stopping the agent", s.Deadline)
-			reason = "deadline"
+			s.warnf("the session deadline passed; stopping the agent")
+			reason, why = "deadline", events.ReasonDeadline
 			return ExitDeadline, nil
+		case t := <-s.extend:
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.NewTimer(time.Until(t))
+			deadline = timer.C
+			s.status("deadline moved to %s", t.UTC().Format(time.RFC3339))
+		case r := <-s.cancel:
+			reason, why = "cancelled: "+r, events.ReasonCancelled
+			return ExitTerminated, nil
+		case <-ctx.Done():
+			reason, why = "cancelled: "+ctx.Err().Error(), events.ReasonCancelled
+			return ExitTerminated, nil
 		case <-grace:
 			s.warnf("the agent did not stop within %s of the interrupt; stopping it", s.opts.Grace)
 			return ExitInterrupted, nil
@@ -449,10 +672,10 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			interrupts++
 			switch {
 			case sig == syscall.SIGTERM:
-				reason = "terminated"
+				reason, why = "terminated", events.ReasonCancelled
 				return ExitTerminated, nil
 			case interrupts > 1:
-				reason = "interrupted twice"
+				reason, why = "interrupted twice", events.ReasonCancelled
 				return ExitInterrupted, nil
 			case s.Command.TTY:
 				// The CLI shares the terminal, which has delivered the
@@ -466,7 +689,7 @@ func (s *Session) run(ctx context.Context) (code int, runErr error) {
 			default:
 				_ = agent.Signal(location.Interrupt)
 				s.status("interrupted; giving the agent %s to stop (Ctrl-C again to end now)", s.opts.Grace)
-				reason = "interrupted"
+				reason, why = "interrupted", events.ReasonCancelled
 				silo = ExitInterrupted
 				t := time.NewTimer(s.opts.Grace)
 				defer t.Stop()
@@ -542,6 +765,9 @@ func (s *Session) teardown(undos []namedUndo) []error {
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", undos[i].name, err))
+			s.emitStatus(undos[i].name, events.StateFailed, err.Error())
+		} else {
+			s.emitStatus(undos[i].name, events.StateDone, "")
 		}
 	}
 	return errs

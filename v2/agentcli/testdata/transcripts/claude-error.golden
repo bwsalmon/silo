@@ -1,0 +1,10 @@
+{"v":0,"seq":0,"time":"0001-01-01T00:00:00Z","type":"resumable","resumable":{"cli":"claude","cli_session":"abc"}}
+outcome: {
+  "FinalText": "",
+  "CLISession": "abc",
+  "Finished": true,
+  "Failure": {
+    "kind": "error",
+    "message": "boom"
+  }
+}

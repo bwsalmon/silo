@@ -28,8 +28,12 @@ func init() { agentcli.Register("codex", Mapping{}) }
 // (grain pkg/agent/codex/runtime.go), deliberately exact, not a minimum:
 // an older CLI may ignore the configuration, and a newer one may add
 // tools that are not environment-backed. Adding a version is a reviewed
-// change (design open question 3), never automatic.
-var ReviewedVersions = []string{"0.153.0"}
+// change (design open question 3), never automatic. 0.162.1 was added
+// on the stage 1d probe (agentcli/codex's TestLiveCodexNoneIsolation:
+// the same advertised tools as 0.153.0, every native call refused), on
+// the owner's decision (task 3822), not on a source-level review like
+// grain's of 0.153.0.
+var ReviewedVersions = []string{"0.153.0", "0.162.1"}
 
 // Staged names, relative to the staging directory.
 const (
@@ -40,7 +44,16 @@ const (
 )
 
 // APIKeyVar is set from agent.auth: {credential: x} (design §8.2).
+// codex-cli 0.162.1 no longer reads it (stage 1d found its requests
+// went out with no credential), so Build also writes the key into the
+// private CODEX_HOME's auth.json, as `codex login --with-api-key` would.
 const APIKeyVar = "OPENAI_API_KEY"
+
+// BaseURLVar in the agent's environment is written into config.toml as
+// openai_base_url: Codex's built-in provider ignores the variable, and
+// the private CODEX_HOME hides any openai_base_url the user's own
+// config.toml sets.
+const BaseURLVar = "OPENAI_BASE_URL"
 
 // Mapping is Codex.
 type Mapping struct{}
@@ -71,6 +84,9 @@ func Config(req agentcli.Request) []byte {
 	none := req.Permissions.Effective() == silofile.PermNone
 	var b strings.Builder
 	b.WriteString("# Written by silo for one session; see cli-mapping.md §2.2.\n")
+	if u := agentcli.Getenv(agentcli.MergeEnv(req.Host.Env, req.Env), BaseURLVar); u != "" {
+		fmt.Fprintf(&b, "openai_base_url = %s\n", tomlString(u))
+	}
 	if none {
 		b.WriteString("approval_policy = \"never\"\nsandbox_mode = \"read-only\"\n")
 		b.WriteString("web_search = \"disabled\"\ninclude_environment_context = false\n")
@@ -78,9 +94,8 @@ func Config(req agentcli.Request) []byte {
 	if req.Agent.Effort != "" {
 		fmt.Fprintf(&b, "model_reasoning_effort = %s\n", tomlString(req.Agent.Effort))
 	}
-	if req.Agent.Auth.Ambient() {
-		b.WriteString("cli_auth_credentials_store = \"file\"\n")
-	}
+	// Ambient or not, the login is the private home's auth.json.
+	b.WriteString("cli_auth_credentials_store = \"file\"\n")
 	if req.SystemPrompt != "" {
 		fmt.Fprintf(&b, "developer_instructions = %s\n", tomlString(req.SystemPrompt))
 	}
@@ -92,7 +107,7 @@ func Config(req agentcli.Request) []byte {
 	fmt.Fprintf(&b, "[mcp_servers.%s]\n", agentcli.ServerName)
 	fmt.Fprintf(&b, "url = %s\nhttp_headers = { Authorization = %s }\nrequired = true\n",
 		tomlString(req.GatewayURL), tomlString("Bearer "+req.GatewayToken))
-	fmt.Fprintf(&b, "tool_timeout_sec = %d\n", int(agentcli.ToolTimeout.Seconds()))
+	fmt.Fprintf(&b, "tool_timeout_sec = %d\n", int(req.ToolTimeout().Seconds()))
 	// Only the gateway's own tools are enabled and preapproved.
 	tools, _ := json.Marshal(append([]string{}, req.GatewayTools...))
 	fmt.Fprintf(&b, "enabled_tools = %s\n", tools)
@@ -114,6 +129,12 @@ func AmbientAuthFile(env []string, home string) string {
 		return filepath.Join(h, authFile)
 	}
 	return filepath.Join(home, ".codex", authFile)
+}
+
+// APIKeyAuth is the auth.json `codex login --with-api-key` writes.
+func APIKeyAuth(key string) []byte {
+	b, _ := json.MarshalIndent(map[string]string{"auth_mode": "apikey", "OPENAI_API_KEY": key}, "", "  ")
+	return append(b, '\n')
 }
 
 func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
@@ -144,9 +165,11 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 			}
 		}
 		plan.Files = append(plan.Files, location.StagedFile{Name: filepath.Join(Home, authFile), Link: auth})
+	} else {
+		plan.Files = append(plan.Files, location.StagedFile{Name: filepath.Join(Home, authFile), Data: APIKeyAuth(req.Env[APIKeyVar])})
 	}
 
-	plan.Command = func(dir string) location.Command {
+	command := func(dir, resume string) location.Command {
 		env := map[string]string{"CODEX_HOME": filepath.Join(dir, Home)}
 		if perm == silofile.PermNone {
 			env["CODEX_EXEC_SERVER_URL"] = "none"
@@ -157,7 +180,12 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		argv := []string{req.Host.Binary}
 		cmd := location.Command{Env: agentcli.MergeEnv(req.Host.Env, env)}
 		if req.Mode == agentcli.Headless {
-			argv = append(argv, "exec", "--json", "--skip-git-repo-check")
+			argv = append(argv, "exec")
+			if resume != "" {
+				// The subcommand follows exec; it takes exec's flags.
+				argv = append(argv, "resume")
+			}
+			argv = append(argv, "--json", "--skip-git-repo-check")
 			if perm == silofile.PermAll {
 				// A run must never block on an approval nobody can give.
 				argv = append(argv, "-c", `approval_policy="never"`)
@@ -169,7 +197,10 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		switch {
 		case req.Mode == agentcli.Headless:
 			// "-" reads the prompt from stdin, never argv, where ps
-			// would show it.
+			// would show it. On a resume it follows the thread id.
+			if resume != "" {
+				argv = append(argv, resume)
+			}
 			argv = append(argv, "-")
 			cmd.Stdin = []byte(req.Prompt)
 		case req.Prompt != "":
@@ -179,5 +210,22 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		cmd.TTY = req.Mode == agentcli.Interactive
 		return cmd
 	}
+	plan.Command = func(dir string) location.Command { return command(dir, "") }
+	if req.Mode == agentcli.Headless {
+		plan.Resume = func(dir, id string) location.Command {
+			cmd := command(dir, id)
+			cmd.Stdin = nil
+			return cmd
+		}
+	}
 	return plan, nil
+}
+
+// Injection: codex exec takes no input once started, so a message waits
+// for the turn to end and is the next turn, through codex exec resume
+// (cli-mapping.md §3.2; codex queue does not reach a running exec).
+func (Mapping) Injection() agentcli.Injection {
+	return agentcli.Injection{Message: func(texts ...string) []byte {
+		return []byte(strings.Join(texts, "\n\n"))
+	}}
 }

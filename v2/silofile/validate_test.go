@@ -1,6 +1,8 @@
 package silofile
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,15 +72,21 @@ func TestValidate(t *testing.T) {
 		{name: "unknown auth credential", yaml: "  auth: {credential: nope}\n", wantErr: `no credential is named "nope"`},
 		{name: "cross-references resolve", yaml: `  auth: {credential: key}
 sandboxes:
-  - {name: s, kind: container, image: x, repos: [r]}
+  - {name: s, kind: container, image: x, workdir: /w, repos: [r]}
 git:
-  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/x], credential: gh}
+  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/x, refs/heads/y (delete)], credential: gh}
 credentials:
   - {name: key, from: {env: K}}
   - {name: gh, from: {ambient: gh}, to: [{proxy: git}, {sandbox: s, file: /run/gh}]}
 projects:
   - {project: p, roles: [roles/logging.viewer], deliver_to: [s], ttl: 0}
 `},
+
+		{name: "repos need workdir", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, repos: [r]}\ngit:\n  - {name: r, repo: github.com/a/b}\n", wantErr: "repos are checked out into workdir"},
+		{name: "bad push pattern", yaml: "git:\n  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/*]}\n", wantErr: "would match every ref"},
+		{name: "bad push flag", yaml: "git:\n  - {name: r, repo: github.com/a/b, access: push, push: [refs/heads/x (merge)]}\n", wantErr: "is not a flag"},
+		{name: "git credential ambiguous", yaml: "git:\n  - {name: r, repo: github.com/a/b}\ncredentials:\n  - {name: a, from: {env: A}, to: [{proxy: git}]}\n  - {name: b, from: {env: B}, to: [{proxy: git}]}\n", wantErr: "name the one this repository uses"},
+		{name: "git credential implied", yaml: "git:\n  - {name: r, repo: github.com/a/b}\ncredentials:\n  - {name: a, from: {env: A}, to: [{proxy: git}]}\n"},
 
 		// Files and the folder.
 		{name: "prompt file missing", yaml: "  prompt: prompts/task.md\n", wantErr: `"prompts/task.md" does not exist in the silo folder`},
@@ -134,6 +142,13 @@ projects:
 		{name: "empty destination", yaml: "credentials:\n  - {name: c, from: {env: A}, to: [{env: X}]}\n", wantErr: "name a destination"},
 		{name: "credential file outside", yaml: "credentials:\n  - {name: c, from: {file: ~/.config/token}, to: [{proxy: git}]}\n"},
 
+		// location.k8s (design §5.4).
+		{name: "k8s", yaml: "location: {kind: k8s, k8s: {context: kind-a, namespace: silo, image: x, resources: {cpu: 500m, memory: 1Gi}}}\n"},
+		{name: "k8s missing", yaml: "location: {kind: k8s}\n", wantErr: "kind k8s needs k8s"},
+		{name: "k8s bad namespace", yaml: "location: {kind: k8s, k8s: {image: x, namespace: Silo_1}}\n", wantErr: "is not a namespace name"},
+		{name: "k8s bad cpu", yaml: "location: {kind: k8s, k8s: {image: x, resources: {cpu: two}}}\n", wantErr: "is not a CPU quantity"},
+		{name: "k8s on local", yaml: "location: {k8s: {image: x}}\n", wantErr: "k8s is only for kind: k8s"},
+
 		// Projects.
 		{name: "basic role", yaml: "projects:\n  - {project: p, roles: [roles/viewer]}\n", wantErr: "roles/viewer is a basic role"},
 		{name: "basic role allowed", yaml: "projects:\n  - {project: p, roles: [roles/viewer], allow_basic_roles: true}\n"},
@@ -143,15 +158,29 @@ projects:
 		{name: "folder kind", yaml: "sandboxes:\n  - {name: w, kind: folder, path: /tmp, rw: true}\n", wantErr: "kind folder is for silo's built-in silos only"},
 		{name: "builtin allowed", yaml: "builtin_tools: [silo_schema]\nsandboxes:\n  - {name: w, kind: folder, path: /tmp, rw: true}\n", opts: Options{Builtin: true}},
 
+		// Granule (stage 8a).
+		{name: "granule", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, cpus: 2, memory: 4Gi, disk: 20Gi}\n"},
+		{name: "granule no image", yaml: "sandboxes:\n  - {name: g, kind: granule}\n", wantErr: "kind granule needs image"},
+		{name: "granule build", yaml: "sandboxes:\n  - {name: g, kind: granule, build: Dockerfile}\n", wantErr: "booted from a granule VM image"},
+		{name: "granule mounts", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, mounts: [{from: ., to: /src}]}\n", wantErr: "kind granule takes no mounts"},
+
+		// Granulefiles (stage 8b, journey 10).
+		{name: "granulefile", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: sandboxes/dev.Granulefile, target: guest, args: {V: '1'}}\n", files: map[string]string{"sandboxes/dev.Granulefile": "FROM x\nVM WRAP\n"}},
+		{name: "granulefile missing", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: sandboxes/dev.Granulefile}\n", wantErr: "sandboxes/dev.Granulefile"},
+		{name: "granulefile and image", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, granulefile: g}\n", files: map[string]string{"g": "FROM x\n"}, wantErr: "exactly one of image and granulefile"},
+		{name: "target without granulefile", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x, target: t}\n", wantErr: "target is for a sandbox built from a granulefile"},
+		{name: "granulefile on container", yaml: "sandboxes:\n  - {name: g, kind: container, image: x, granulefile: g}\n", wantErr: "granulefile is only for kind granule"},
+		{name: "push_to bad", yaml: "sandboxes:\n  - {name: g, kind: granule, granulefile: g, push_to: 'europe-docker.pkg.dev/acme/silo:v1'}\n", files: map[string]string{"g": "FROM x\nVM PACK\n"}, wantErr: "is not a registry repository"},
+		{name: "VM build on container", yaml: "sandboxes:\n  - {name: g, kind: container, build: sandboxes/dev.Dockerfile}\n", files: map[string]string{"sandboxes/dev.Dockerfile": "FROM x\nRUN a \\\n  vm b\n# VM no\nvm wrap\n"}, wantErr: "line 5 is granule's VM instruction"},
+
 		// Later values decode, and are refused naming what adds them.
-		{name: "granule", yaml: "sandboxes:\n  - {name: g, kind: granule, image: x}\n", later: "stage 8"},
 		{name: "location vm", yaml: "location: {kind: vm}\n", later: "stage 10"},
-		{name: "location k8s", yaml: "location: {kind: k8s}\n", later: "stage 11"},
+		{name: "k8s identity", yaml: "location: {kind: k8s, k8s: {image: x, identity: {gcp_account_for: p}}}\n", later: "design §5.4"},
 		{name: "location ax", yaml: "location: {kind: ax}\n", later: "stage 12"},
 		{name: "attached", yaml: "  mode: attached\n", later: "design §6.2"},
 		{name: "unix transport", yaml: "location: {kind: ssh, ssh: {host: h, gateway_transport: unix}}\n", later: "design §5.3"},
 		{name: "network allow", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, network: {allow: [a.example]}}\n", later: "grain.md §2.3"},
-		{name: "k8s backend", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, backend: {k8s: {context: c}}}\n", later: "stage 11"},
+		{name: "k8s backend", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, backend: {k8s: {context: c}}}\n", later: "stage 11b"},
 		{name: "persistent", yaml: "sandboxes:\n  - {name: s, kind: container, image: x, lifetime: persistent}\n", later: "grain.md §2.3"},
 		{name: "model proxy", yaml: "credentials:\n  - {name: c, from: {env: A}, to: [{proxy: model}]}\n", later: "grain.md §2.5"},
 		{name: "account", yaml: "projects:\n  - {project: p, account: a@p.iam.gserviceaccount.com}\n", later: "grain.md §2.6"},
@@ -254,5 +283,78 @@ func TestLoadBareFile(t *testing.T) {
 	}
 	if _, err := Load(t.TempDir()); err == nil || !strings.Contains(err.Error(), "has no Silofile") {
 		t.Errorf("Load(empty dir) = %v", err)
+	}
+}
+
+func TestValidatePushToWarnsLocal(t *testing.T) {
+	dir := folder(t, minimal+"sandboxes:\n  - {name: g, kind: granule, granulefile: g, push_to: europe-docker.pkg.dev/acme/silo}\n", map[string]string{"g": "FROM x\nVM PACK\n"})
+	res := validate(t, dir, Options{})
+	if res.Err() != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Msg, "pushes nothing") {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+// TestValidateGranulefileHook: the hook sees the Granulefile's real
+// path and target; a container-building target is refused for kind
+// granule, a hook that could not run is a warning, and its errors are
+// errors.
+func TestValidateGranulefileHook(t *testing.T) {
+	dir := folder(t, minimal+"sandboxes:\n  - {name: g, kind: granule, granulefile: sandboxes/dev.Granulefile, target: guest}\n", map[string]string{"sandboxes/dev.Granulefile": "FROM x\n"})
+	for _, tc := range []struct {
+		name     string
+		vm       bool
+		err      error
+		wantErr  string
+		wantWarn string
+	}{
+		{name: "vm", vm: true},
+		{name: "container", wantErr: "builds a container image, not a granule VM image"},
+		{name: "unchecked", err: fmt.Errorf("%w: no granule", ErrUnchecked), wantWarn: "no granule"},
+		{name: "invalid", err: errors.New("line 2: unknown instruction"), wantErr: "unknown instruction"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var file, target string
+			res := validate(t, dir, Options{CheckGranulefile: func(f, tg string) (bool, error) {
+				file, target = f, tg
+				return tc.vm, tc.err
+			}})
+			if filepath.Base(file) != "dev.Granulefile" || !filepath.IsAbs(file) || target != "guest" {
+				t.Errorf("hook saw %q, %q", file, target)
+			}
+			switch {
+			case tc.wantErr != "":
+				if !strings.Contains(res.Errors.Error(), tc.wantErr) || !strings.Contains(res.Errors.Error(), "sandboxes[0].granulefile") {
+					t.Errorf("errors = %v, want %q", res.Errors, tc.wantErr)
+				}
+			case tc.wantWarn != "":
+				if res.Err() != nil || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Msg, tc.wantWarn) {
+					t.Errorf("result = %+v", res)
+				}
+			default:
+				if res.Err() != nil || len(res.Warnings) != 0 {
+					t.Errorf("result = %+v", res)
+				}
+			}
+		})
+	}
+}
+
+func TestVMInstruction(t *testing.T) {
+	for _, tc := range []struct {
+		file string
+		want int
+	}{
+		{"FROM alpine\nRUN echo vm\n", 0},
+		{"FROM alpine\nVM WRAP\n", 2},
+		{"FROM alpine\n  vm pack AS m\n", 2},
+		{"FROM alpine\nRUN echo \\\n  VM WRAP\n", 0},
+		{"FROM alpine\nRUN echo \\\n# a comment\n\n  VM\nVM PACK\n", 6},
+		{"# escape=`\nFROM alpine\nRUN echo `\nVM x\nVM PACK\n", 5},
+		{"# VM WRAP\nFROM alpine\n", 0},
+		{"VM FROM ghcr.io/x/vm:1\n", 1},
+	} {
+		if got := VMInstruction([]byte(tc.file)); got != tc.want {
+			t.Errorf("VMInstruction(%q) = %d, want %d", tc.file, got, tc.want)
+		}
 	}
 }

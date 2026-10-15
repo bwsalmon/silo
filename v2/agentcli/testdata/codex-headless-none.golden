@@ -14,14 +14,17 @@ env:
   CODEX_HOME=/STAGE/codex-home
   DELIVERED=to-agent
   OPENAI_API_KEY=sk-test
+  OPENAI_BASE_URL=http://127.0.0.1:9745/v1
 stdin: "do the thing"
 --- codex-home/config.toml
 # Written by silo for one session; see cli-mapping.md §2.2.
+openai_base_url = "http://127.0.0.1:9745/v1"
 approval_policy = "never"
 sandbox_mode = "read-only"
 web_search = "disabled"
 include_environment_context = false
 model_reasoning_effort = "high"
+cli_auth_credentials_store = "file"
 developer_instructions = "be careful"
 [features]
 apps = false
@@ -45,3 +48,8 @@ approval_mode = "approve"
 --- codex-home/environments.toml
 default = "none"
 include_local = false
+--- codex-home/auth.json
+{
+  "OPENAI_API_KEY": "sk-test",
+  "auth_mode": "apikey"
+}

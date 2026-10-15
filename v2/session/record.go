@@ -80,6 +80,13 @@ type Record struct {
 	Permissions string `json:"remote_permissions"`
 	// StateDir holds the audit log, which outlives the session.
 	StateDir string `json:"state_dir"`
+	// Events is the session's events.jsonl, in StateDir.
+	Events string `json:"events,omitempty"`
+	// Labels are the caller's (silo run --label), for silo ls.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Detached: the session runs under its own supervisor, whose PID is
+	// PID (silo run --detach).
+	Detached bool `json:"detached,omitempty"`
 	// Resources is everything set up outside the session directory, in
 	// the order it was set up.
 	Resources []Resource `json:"resources"`
@@ -95,6 +102,12 @@ const (
 	KindProcessGroup = "process-group"
 	// KindDir: a directory, Path, removed by teardown.
 	KindDir = "dir"
+	// KindPod: the k8s location's pod and Secret, labelled with the
+	// session, in Context and Namespace.
+	KindPod = "k8s-pod"
+	// KindNetwork: the session's private network, Network, made by
+	// the container Runtime for the git proxy.
+	KindNetwork = "network"
 )
 
 // Resource is one thing set up that teardown, or silo gc after a crash,
@@ -104,6 +117,12 @@ type Resource struct {
 	Runtime string `json:"runtime,omitempty"`
 	PGID    int    `json:"pgid,omitempty"`
 	Path    string `json:"path,omitempty"`
+	// Context and Namespace are KindPod's kubeconfig context and
+	// namespace, empty for kubectl's defaults.
+	Context   string `json:"context,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	// Network is KindNetwork's network name.
+	Network string `json:"network,omitempty"`
 }
 
 // Result is how the session ended.

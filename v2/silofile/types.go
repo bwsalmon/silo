@@ -90,8 +90,30 @@ type CustomPermissions struct {
 
 // Location is the location: section.
 type Location struct {
-	Kind string `yaml:"kind" doc:"local (default) | ssh | vm (later) | k8s (later) | ax (later) | capsule (later)"`
+	Kind string `yaml:"kind" doc:"local (default) | ssh | k8s | vm (later) | ax (later) | capsule (later)"`
 	SSH  *SSH   `yaml:"ssh" doc:"Only for kind: ssh."`
+	K8s  *K8s   `yaml:"k8s" doc:"Only for kind: k8s."`
+}
+
+// K8s is location.k8s (design §5.4, journey 8).
+type K8s struct {
+	Context     string        `yaml:"context" doc:"A context in the kubeconfig; kubectl's current context when empty."`
+	Namespace   string        `yaml:"namespace" doc:"The namespace the session's pod and Secret go in; the context's namespace when empty."`
+	Image       string        `yaml:"image" schema:"required" doc:"The image the agent CLI runs in; it needs /bin/sh and the CLI on its PATH."`
+	TunnelImage string        `yaml:"tunnel_image" doc:"The gateway tunnel sidecar's image (design §5.4); silo's published one when empty."`
+	Resources   *K8sResources `yaml:"resources" doc:"The agent container's requests and limits."`
+	Identity    *K8sIdentity  `yaml:"identity" doc:"Later: workload identity (design §5.4)."`
+}
+
+// K8sResources is location.k8s.resources.
+type K8sResources struct {
+	CPU    string `yaml:"cpu" doc:"A Kubernetes CPU quantity, such as 2 or 500m."`
+	Memory *Size  `yaml:"memory" doc:"A size, such as 4Gi."`
+}
+
+// K8sIdentity is location.k8s.identity (later).
+type K8sIdentity struct {
+	GCPAccountFor string `yaml:"gcp_account_for" doc:"The projects[] entry whose per-user account the pod's service account is bound to."`
 }
 
 // SSH is location.ssh (design §5.3).
@@ -106,7 +128,7 @@ type SSH struct {
 // Sandbox is one sandboxes[] entry (design §7).
 type Sandbox struct {
 	Name    string            `yaml:"name" schema:"required"`
-	Kind    string            `yaml:"kind" schema:"required" doc:"container | gvisor | granule (later, stage 8) | folder (built-in silos only)"`
+	Kind    string            `yaml:"kind" schema:"required" doc:"container | gvisor | granule | folder (built-in silos only)"`
 	Image   string            `yaml:"image" doc:"An OCI image, or for granule a granule VM image."`
 	Build   string            `yaml:"build" doc:"A Dockerfile in the silo folder, built into the image."`
 	Workdir string            `yaml:"workdir"`
@@ -115,18 +137,20 @@ type Sandbox struct {
 	Disk    *Size             `yaml:"disk" doc:"A size, such as 20Gi."`
 	Network Network           `yaml:"network" doc:"none (default) | open | {allow: [host, ...]} (later)"`
 	Mounts  []Mount           `yaml:"mounts" doc:"Read-only unless rw: true."`
-	Repos   []string          `yaml:"repos" doc:"git[] entries checked out into workdir through the git proxy."`
+	Repos   []string          `yaml:"repos" doc:"git[] entries checked out through the git proxy: one at workdir, several each at workdir/<name>. Needs an absolute workdir and git in the image."`
 	Env     map[string]string `yaml:"env"`
 
-	Backend      Backend       `yaml:"backend" doc:"local (default) | {k8s: {...}} (later, stage 11)"`
+	Backend      Backend       `yaml:"backend" doc:"local (default) | {k8s: {...}} (later, stage 11b)"`
 	Lifetime     string        `yaml:"lifetime" doc:"session (default) | persistent (later)"`
 	PackageCache *PackageCache `yaml:"package_cache" doc:"Later (grain.md §2.3)."`
 	ModelAccess  []string      `yaml:"model_access" doc:"Later: the model proxy (grain.md §2.5)."`
 
-	// kind: granule (stage 8).
-	Granulefile string            `yaml:"granulefile" doc:"Granule only (stage 8): a Granulefile in the silo folder."`
-	Target      string            `yaml:"target" doc:"Granule only (stage 8)."`
-	Args        map[string]string `yaml:"args" doc:"Granule only (stage 8)."`
+	// kind: granule, in place of image (journey 10): the granule
+	// counterpart of build.
+	Granulefile string            `yaml:"granulefile" doc:"Granule only, instead of image: a Granulefile in the silo folder whose target stage builds a granule VM image, built with its directory as the context."`
+	Target      string            `yaml:"target" doc:"Granule only: the Granulefile stage to build, by name or index; the last stage when empty."`
+	Args        map[string]string `yaml:"args" doc:"Granule only: the Granulefile's build arguments (--build-arg)."`
+	PushTo      string            `yaml:"push_to" doc:"Granule only, with granulefile: a registry repository the built image is pushed to, for a remote backend (stage 11b); the local backend pushes nothing."`
 
 	// kind: folder (built-in silos only).
 	Path string `yaml:"path" doc:"Folder sandboxes only (built-in silos)."`
@@ -207,7 +231,7 @@ type GitRepo struct {
 	Name       string   `yaml:"name" schema:"required"`
 	Repo       string   `yaml:"repo" schema:"required" doc:"host/owner/name, such as github.com/acme/widgets."`
 	Access     string   `yaml:"access" doc:"read (default) | push"`
-	Push       []string `yaml:"push" doc:"Ref patterns a push may update."`
+	Push       []string `yaml:"push" doc:"Ref patterns a push may update: refs/heads/... or refs/tags/..., globbing with * and ?, each optionally followed by (force), (delete) or (force, delete)."`
 	Force      bool     `yaml:"force" doc:"false (default): non-fast-forward pushes are refused."`
 	Credential string   `yaml:"credential" doc:"A credentials[] entry delivered to {proxy: git}."`
 }

@@ -41,6 +41,9 @@ func (r *CallResult) Text() string {
 type Client struct {
 	URL   string
 	Token string
+	// Headers are sent with every request: a url: server's headers
+	// (design §13.1).
+	Headers map[string]string
 	// HTTP is the client used; http.DefaultClient when nil.
 	HTTP *http.Client
 
@@ -65,6 +68,9 @@ func (c *Client) newRequest(ctx context.Context, method string, body []byte) (*h
 	req, err := http.NewRequestWithContext(ctx, method, c.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
+	}
+	for k, v := range c.Headers {
+		req.Header.Set(k, v)
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -198,7 +204,24 @@ func (c *Client) Notify(ctx context.Context, method string) error {
 
 // Initialize performs the initialize handshake and sends
 // notifications/initialized, returning the server's protocol version.
-func (c *Client) Initialize(ctx context.Context) (string, error) {
+func (c *Client) Initialize(ctx context.Context) (string, error) { return initialize(ctx, c) }
+
+// ListTools issues tools/list.
+func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, error) { return listTools(ctx, c) }
+
+// CallTool issues tools/call. A refused call is an *Error; a tool that
+// ran and failed is a result with IsError set.
+func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (*CallResult, error) {
+	return callTool(ctx, c, name, args)
+}
+
+// rpc is a client transport: Client, or a message connection.
+type rpc interface {
+	Call(ctx context.Context, method string, params any) (json.RawMessage, error)
+	Notify(ctx context.Context, method string) error
+}
+
+func initialize(ctx context.Context, c rpc) (string, error) {
 	raw, err := c.Call(ctx, "initialize", map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{},
@@ -216,8 +239,7 @@ func (c *Client) Initialize(ctx context.Context) (string, error) {
 	return out.ProtocolVersion, c.Notify(ctx, "notifications/initialized")
 }
 
-// ListTools issues tools/list.
-func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, error) {
+func listTools(ctx context.Context, c rpc) ([]ToolInfo, error) {
 	raw, err := c.Call(ctx, "tools/list", nil)
 	if err != nil {
 		return nil, err
@@ -231,9 +253,7 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, error) {
 	return out.Tools, nil
 }
 
-// CallTool issues tools/call. A refused call is an *Error; a tool that
-// ran and failed is a result with IsError set.
-func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (*CallResult, error) {
+func callTool(ctx context.Context, c rpc, name string, args map[string]any) (*CallResult, error) {
 	raw, err := c.Call(ctx, "tools/call", map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return nil, err

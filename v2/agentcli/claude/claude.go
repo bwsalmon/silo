@@ -30,18 +30,28 @@ const APIKeyVar = "ANTHROPIC_API_KEY"
 
 // Rosters is Claude Code's built-in tool roster per reviewed version,
 // which remote_permissions subsets are checked against (cli-mapping.md
-// §2.1). Claude Code does not print its roster, so each table is an
-// assumption until stage 1d checks it against the real binary
-// (cli-mapping.md §4, assumption 1).
+// §2.1). Claude Code does not print its roster, and silently drops a
+// --tools name it does not know, so each table is what the real binary
+// put in its stream-json init event when named in --tools, in print
+// mode (stage 1d; cmd/silo's TestLiveClaudeRoster checks it again).
+// Names that resolve to another tool are in Aliases. Skill is left
+// out: it is built in, but --disable-slash-commands, which silo always
+// passes, removes it.
 var Rosters = map[string][]string{
 	"2.1.197": {
-		"Agent", "AskUserQuestion", "Bash", "BashOutput", "Edit",
-		"EnterPlanMode", "ExitPlanMode", "Glob", "Grep", "KillShell",
-		"LSP", "MultiEdit", "NotebookEdit", "Read", "Skill",
-		"SlashCommand", "Task", "TaskOutput", "TaskStop", "TodoWrite",
-		"WebFetch", "WebSearch", "Write",
+		"Agent", "Bash", "BashOutput", "CronCreate", "CronDelete",
+		"CronList", "DesignSync", "Edit", "EnterWorktree", "ExitWorktree",
+		"Glob", "Grep", "KillShell", "Monitor", "NotebookEdit",
+		"PushNotification", "Read", "ReportFindings", "ScheduleWakeup",
+		"SendMessage", "Task", "TaskCreate", "TaskGet", "TaskList",
+		"TaskOutput", "TaskStop", "TaskUpdate", "WebFetch", "WebSearch",
+		"Workflow", "Write",
 	},
 }
+
+// Aliases are roster names Claude Code accepts in --tools for a tool
+// it reports under another name.
+var Aliases = map[string]string{"Agent": "Task", "BashOutput": "TaskOutput", "KillShell": "TaskStop"}
 
 // Roster returns the roster for version and the version it belongs to:
 // the version's own table, or else the newest one, which a caller should
@@ -121,7 +131,7 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 	}
 
 	env := map[string]string{
-		"MCP_TOOL_TIMEOUT": strconv.FormatInt(agentcli.ToolTimeout.Milliseconds(), 10),
+		"MCP_TOOL_TIMEOUT": strconv.FormatInt(req.ToolTimeout().Milliseconds(), 10),
 	}
 	if perm != silofile.PermAll {
 		env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
@@ -130,10 +140,13 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		env[k] = v
 	}
 
-	plan.Command = func(dir string) location.Command {
+	command := func(dir, resume string) location.Command {
 		argv := []string{req.Host.Binary}
 		if req.Mode == agentcli.Headless {
 			argv = append(argv, "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json")
+		}
+		if resume != "" {
+			argv = append(argv, "--resume", resume)
 		}
 		if req.Agent.Model != "" {
 			argv = append(argv, "--model", req.Agent.Model)
@@ -175,7 +188,27 @@ func (Mapping) Build(req agentcli.Request) (agentcli.Plan, error) {
 		}
 		return cmd
 	}
+	plan.Command = func(dir string) location.Command { return command(dir, "") }
+	if req.Mode == agentcli.Headless {
+		plan.Resume = func(dir, id string) location.Command {
+			cmd := command(dir, id)
+			cmd.Stdin = nil
+			return cmd
+		}
+	}
 	return plan, nil
+}
+
+// Injection: claude reads further stream-json user messages on stdin
+// mid-run (grain.md §2.1).
+func (Mapping) Injection() agentcli.Injection {
+	return agentcli.Injection{Live: true, Message: func(texts ...string) []byte {
+		var b []byte
+		for _, t := range texts {
+			b = append(b, UserMessage(t)...)
+		}
+		return b
+	}}
 }
 
 // UserMessage is one stream-json input line carrying a user message.

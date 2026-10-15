@@ -32,6 +32,10 @@ type Tool struct {
 	// Timeout bounds every call; DefaultTimeout when zero. A tool with a
 	// timeout argument of its own bounds itself within it.
 	Timeout time.Duration
+	// Blocking lifts the timeout: a caller's tool that waits on a person
+	// or a long job (grain.md §2.2's wait_for_checks, ask_question) runs
+	// until it answers or the session ends.
+	Blocking bool
 	// Handler runs a call. A *Refusal error refuses the call with an MCP
 	// error; any other error is the tool failing, answered as a result
 	// with isError set.
@@ -56,6 +60,10 @@ type Gateway struct {
 	tools  map[string]Tool
 	order  []string
 	server *mcp.Server
+	// rename maps a tool's name to the name it is listed by; byAlias
+	// the reverse (grain.md §2.2's per-session rename map).
+	rename  map[string]string
+	byAlias map[string]string
 }
 
 var _ mcp.Handler = (*Gateway)(nil)
@@ -68,8 +76,29 @@ func New(log *audit.Log) *Gateway {
 
 // Register adds tools, or replaces ones of the same name in place, and
 // tells connected clients the list changed.
-func (g *Gateway) Register(tools ...Tool) {
+func (g *Gateway) Register(tools ...Tool) { g.Update(nil, tools) }
+
+// Update removes the named tools and adds or replaces tools, then tells
+// connected clients the list changed: a proxied server's tool set
+// changing (design §13.4).
+func (g *Gateway) Update(remove []string, tools []Tool) {
 	g.mu.Lock()
+	if len(remove) > 0 {
+		gone := map[string]bool{}
+		for _, n := range remove {
+			if _, ok := g.tools[n]; ok {
+				gone[n] = true
+				delete(g.tools, n)
+			}
+		}
+		kept := g.order[:0]
+		for _, n := range g.order {
+			if !gone[n] {
+				kept = append(kept, n)
+			}
+		}
+		g.order = kept
+	}
 	for _, t := range tools {
 		if _, ok := g.tools[t.Name]; !ok {
 			g.order = append(g.order, t.Name)
@@ -83,25 +112,91 @@ func (g *Gateway) Register(tools ...Tool) {
 	}
 }
 
-// ListTools answers tools/list, in registration order.
+// SetRename makes the gateway list each tool named in m under the name
+// m gives it, and answer calls by that name only (grain.md §2.2): a
+// mechanism for a caller that wants its own names for silo's tools.
+// The audit log records both names. Two tools may not end up listed
+// under one name, and a renamed tool is no longer callable by its own.
+func (g *Gateway) SetRename(m map[string]string) error {
+	byAlias := map[string]string{}
+	for from, to := range m {
+		if to == "" {
+			return fmt.Errorf("rename: %s is renamed to the empty name", from)
+		}
+		if other, ok := byAlias[to]; ok {
+			return fmt.Errorf("rename: %s and %s are both renamed to %s", other, from, to)
+		}
+		byAlias[to] = from
+	}
+	g.mu.Lock()
+	for to, from := range byAlias {
+		if _, served := g.tools[to]; served && to != from {
+			if _, renamed := m[to]; !renamed {
+				g.mu.Unlock()
+				return fmt.Errorf("rename: %s is renamed to %s, which another tool is already called", from, to)
+			}
+		}
+	}
+	g.rename, g.byAlias = m, byAlias
+	s := g.server
+	g.mu.Unlock()
+	if s != nil {
+		s.NotifyToolsChanged()
+	}
+	return nil
+}
+
+// listedName is the name tool name is listed by. g.mu is held.
+func (g *Gateway) listedName(name string) string {
+	if to, ok := g.rename[name]; ok {
+		return to
+	}
+	return name
+}
+
+// lookup finds the tool a call names by its listed name. g.mu is held.
+func (g *Gateway) lookup(listed string) (Tool, bool) {
+	name := listed
+	if from, ok := g.byAlias[listed]; ok {
+		name = from
+	} else if _, renamed := g.rename[listed]; renamed {
+		return Tool{}, false
+	}
+	t, ok := g.tools[name]
+	return t, ok
+}
+
+// ListTools answers tools/list, in registration order, under the names
+// the rename map gives.
 func (g *Gateway) ListTools() []mcp.ToolInfo {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	out := make([]mcp.ToolInfo, 0, len(g.order))
 	for _, name := range g.order {
 		t := g.tools[name]
-		out = append(out, mcp.ToolInfo{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+		out = append(out, mcp.ToolInfo{Name: g.listedName(t.Name), Description: t.Description, InputSchema: t.InputSchema})
 	}
 	return out
 }
 
 // CallTool answers tools/call.
 func (g *Gateway) CallTool(ctx context.Context, name string, args map[string]any) (mcp.Result, error) {
+	g.mu.RLock()
+	t, ok := g.lookup(name)
+	names := make([]string, 0, len(g.order))
+	for _, n := range g.order {
+		names = append(names, g.listedName(n))
+	}
+	g.mu.RUnlock()
+	tool := name
+	if ok {
+		tool = t.Name
+	}
 	var call *audit.Call
 	if g.audit != nil {
 		var err error
 		// Nothing runs that is not on record.
-		if call, err = g.audit.Start(name, args); err != nil {
+		if call, err = g.audit.StartAs(tool, name, args); err != nil {
 			return mcp.Result{}, &mcp.Error{Code: mcp.CodeInternalError, Message: "the call was not run: " + err.Error()}
 		}
 	}
@@ -115,10 +210,6 @@ func (g *Gateway) CallTool(ctx context.Context, name string, args map[string]any
 		return mcp.Result{}, &mcp.Error{Code: mcp.CodeInvalidParams, Message: reason}
 	}
 
-	g.mu.RLock()
-	t, ok := g.tools[name]
-	names := append([]string(nil), g.order...)
-	g.mu.RUnlock()
 	if !ok {
 		sort.Strings(names)
 		return refuse(fmt.Sprintf("refused: tool %q is not served by this session's gateway, which serves only the tools its Silofile declares (%s)",
@@ -128,7 +219,10 @@ func (g *Gateway) CallTool(ctx context.Context, name string, args map[string]any
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	cancel := context.CancelFunc(func() {})
+	if !t.Blocking {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel()
 	res, err := t.Handler(ctx, args)
 	var refusal *Refusal

@@ -202,7 +202,7 @@ func setup(t *testing.T) *env {
 	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	opts := strings.Replace(rootless.RunscOptionsTOML(p, wrapper), `systemd-cgroup = "true"`, `ignore-cgroups = "true"`+os.Getenv("_RUNSC_DEBUG"), 1)
+	opts := strings.Replace(rootless.RunscOptionsTOML(p, wrapper), `ignore-cgroups = "true"`, `ignore-cgroups = "true"`+os.Getenv("_RUNSC_DEBUG"), 1)
 	if err := os.WriteFile(p.RunscOptions(), []byte(opts), 0o600); err != nil {
 		t.Fatal(err)
 	}

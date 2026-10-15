@@ -1,12 +1,15 @@
 package silofile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/bwsalmon/silo/v2/gitproxy"
 )
 
 // Options changes what Validate accepts.
@@ -20,7 +23,21 @@ type Options struct {
 	// errors and warnings. Stage 4a supplies it; until then it is nil and
 	// the scripts are only resolved.
 	CheckScripts func(f *Silofile, scripts []LocalScript) (errs, warnings Errors)
+
+	// CheckGranulefile, when set, checks a granule sandbox's Granulefile
+	// (design §14, journey 10) -- file is its absolute path, target the
+	// stage to build -- and reports whether that stage builds a granule
+	// VM image (true) or a container image (false). An error wrapping
+	// ErrUnchecked is a warning: the check could not run here. Stage 8b
+	// supplies granule.CheckGranulefile; when nil, Granulefiles are only
+	// resolved.
+	CheckGranulefile func(file, target string) (vm bool, err error)
 }
+
+// ErrUnchecked is what a check returns when it could not run on this
+// machine (granule is not installed), which validation reports as a
+// warning rather than an error.
+var ErrUnchecked = errors.New("not checked")
 
 // Result is what Validate found.
 type Result struct {
@@ -277,15 +294,19 @@ func (v *validator) credentialNamed(name string) bool {
 func (v *validator) location() {
 	l := v.f.Location
 	switch l.Kind {
-	case "", "local", "ssh":
+	case "", "local", "ssh", "k8s":
 	case "vm":
 		v.later("location.kind", "kind vm", "stage 10")
-	case "k8s":
-		v.later("location.kind", "kind k8s", "stage 11")
 	case "ax", "capsule":
 		v.later("location.kind", "kind "+l.Kind, "stage 12")
 	default:
 		v.oneOf("location.kind", l.Kind, "local", "ssh", "vm", "k8s", "ax", "capsule")
+	}
+	if l.Kind != "k8s" && l.K8s != nil {
+		v.errorf("location.k8s", "k8s is only for kind: k8s")
+	}
+	if l.Kind == "k8s" {
+		v.k8s()
 	}
 	if l.Kind != "ssh" {
 		if l.SSH != nil {
@@ -313,6 +334,38 @@ func (v *validator) location() {
 		v.later("location.ssh.gateway_transport", "gateway_transport unix", "design §5.3")
 	default:
 		v.oneOf("location.ssh.gateway_transport", s.GatewayTransport, "tcp", "unix")
+	}
+}
+
+// k8sQuantity is a plain Kubernetes quantity: digits with an optional
+// fraction and suffix (2, 0.5, 500m, 4Gi).
+var k8sQuantity = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$`)
+
+// k8sName is a DNS-1123 label, which namespaces are.
+var k8sName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+func (v *validator) k8s() {
+	k := v.f.Location.K8s
+	if k == nil {
+		v.errorf("location", "kind k8s needs k8s: {image: ...}")
+		return
+	}
+	if k.Image == "" {
+		v.errorf("location.k8s.image", "empty image")
+	}
+	if k.Namespace != "" && !k8sName.MatchString(k.Namespace) {
+		v.errorf("location.k8s.namespace", "%q is not a namespace name", k.Namespace)
+	}
+	if r := k.Resources; r != nil {
+		if r.CPU != "" && !k8sQuantity.MatchString(r.CPU) {
+			v.errorf("location.k8s.resources.cpu", "%q is not a CPU quantity (2, 500m)", r.CPU)
+		}
+		if r.Memory != nil && *r.Memory <= 0 {
+			v.errorf("location.k8s.resources.memory", "memory must be more than 0")
+		}
+	}
+	if k.Identity != nil {
+		v.later("location.k8s.identity", "workload identity", "design §5.4")
 	}
 }
 
@@ -379,10 +432,44 @@ func (v *validator) sandboxes() {
 				v.errorf(p, "give exactly one of image and build")
 			}
 			if s.Build != "" {
-				v.path(p+".build", s.Build, regularFile)
+				if real := v.path(p+".build", s.Build, regularFile); real != "" {
+					v.dockerfile(p+".build", real, s.Kind)
+				}
 			}
 		case "granule":
-			v.later(p+".kind", "kind granule", "stage 8")
+			switch {
+			case s.Build != "":
+				v.errorf(p+".build", "a granule sandbox is booted from a granule VM image: give image, or granulefile for a Granulefile that builds one")
+			case s.Image != "" && s.Granulefile != "":
+				v.errorf(p, "give exactly one of image and granulefile")
+			case s.Granulefile != "":
+				if real := v.path(p+".granulefile", s.Granulefile, regularFile); real != "" {
+					v.granulefile(p, real, s.Target)
+				}
+			case s.Image == "":
+				v.errorf(p, "kind granule needs image (a granule VM image) or granulefile (a Granulefile that builds one)")
+			}
+			if s.Granulefile == "" {
+				for _, k := range []struct {
+					set bool
+					key string
+				}{{s.Target != "", "target"}, {s.Args != nil, "args"}, {s.PushTo != "", "push_to"}} {
+					if k.set {
+						v.errorf(p+"."+k.key, "%s is for a sandbox built from a granulefile", k.key)
+					}
+				}
+			}
+			if s.PushTo != "" && s.Granulefile != "" {
+				switch {
+				case !pushRepository.MatchString(s.PushTo):
+					v.errorf(p+".push_to", "%q is not a registry repository (host/path, with no tag or digest)", s.PushTo)
+				case s.Backend.K8s == nil:
+					v.warnf(p+".push_to", "push_to is for a remote backend (stage 11b): the local backend runs the image where it is built and pushes nothing")
+				}
+			}
+			if len(s.Mounts) > 0 {
+				v.errorf(p+".mounts", "kind granule takes no mounts: a host directory would have to cross into the guest over virtio-fs, which silo does not set up (design §7.2)")
+			}
 		case "folder":
 			if !v.opts.Builtin {
 				v.errorf(p+".kind", "kind folder is for silo's built-in silos only in v2.0 (design §7.1)")
@@ -396,6 +483,7 @@ func (v *validator) sandboxes() {
 			only("granule", s.Granulefile != "", "granulefile")
 			only("granule", s.Target != "", "target")
 			only("granule", s.Args != nil, "args")
+			only("granule", s.PushTo != "", "push_to")
 		}
 		if s.Kind != "folder" {
 			only("folder", s.Path != "", "path")
@@ -416,8 +504,11 @@ func (v *validator) sandboxes() {
 				v.errorf(fmt.Sprintf("%s.repos[%d]", p, j), "no git entry is named %q", r)
 			}
 		}
+		if len(s.Repos) > 0 && !strings.HasPrefix(s.Workdir, "/") {
+			v.errorf(p+".workdir", "repos are checked out into workdir, which needs to be an absolute path in the sandbox")
+		}
 		if s.Backend.K8s != nil {
-			v.later(p+".backend", "backend k8s", "stage 11")
+			v.later(p+".backend", "backend k8s", "stage 11b")
 		}
 		switch s.Lifetime {
 		case "", "session":
@@ -529,6 +620,17 @@ func (v *validator) mcpFrom(p string, m MCPServer) {
 
 func (v *validator) git() {
 	v.names("git", len(v.f.Git), func(i int) string { return v.f.Git[i].Name })
+	// A git entry with no credential: uses the one credential delivered
+	// to {proxy: git}, if there is exactly one.
+	var proxied []string
+	for _, c := range v.f.Credentials {
+		for _, d := range c.To {
+			if d.Proxy == "git" {
+				proxied = append(proxied, c.Name)
+				break
+			}
+		}
+	}
 	for i, g := range v.f.Git {
 		p := fmt.Sprintf("git[%d]", i)
 		if strings.Count(g.Repo, "/") < 2 {
@@ -541,6 +643,11 @@ func (v *validator) git() {
 			if len(g.Push) == 0 {
 				v.errorf(p, "access push needs push: the ref patterns a push may update")
 			}
+			for j, pat := range g.Push {
+				if _, err := gitproxy.ParseRefRule(pat); err != nil {
+					v.errorf(fmt.Sprintf("%s.push[%d]", p, j), "%v", err)
+				}
+			}
 		} else {
 			if g.Push != nil {
 				v.errorf(p+".push", "push is only for access: push")
@@ -550,6 +657,9 @@ func (v *validator) git() {
 			}
 		}
 		if g.Credential == "" {
+			if len(proxied) > 1 {
+				v.errorf(p+".credential", "credentials %s are all delivered to {proxy: git}: name the one this repository uses", strings.Join(proxied, ", "))
+			}
 			continue
 		}
 		var cred *Credential

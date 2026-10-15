@@ -227,10 +227,17 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	args = append(args, runtimeArgs...)
 	switch spec.Network {
 	case "none", "":
-		args = append(args, "--network", "none")
+		if spec.PrivateNetwork != "" {
+			// The session's internal network, which reaches the
+			// invoking machine's git proxy and nothing else.
+			args = append(args, "--network", spec.PrivateNetwork)
+		} else {
+			args = append(args, "--network", "none")
+		}
 	case "open":
 		// The runtime's default network: a bridge, or Podman's rootless
-		// user-mode network. Never the host's.
+		// user-mode network. Never the host's. A PrivateNetwork is
+		// connected once the container exists.
 	default:
 		return nil, fmt.Errorf("sandbox %q: network %q is not supported yet", spec.Name, spec.Network)
 	}
@@ -269,6 +276,12 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 	if i := strings.LastIndexByte(id, '\n'); i >= 0 {
 		id = id[i+1:]
 	}
+	if spec.Network == "open" && spec.PrivateNetwork != "" {
+		if _, err := b.cli(ctx, nil, nil, "network", "connect", spec.PrivateNetwork, id); err != nil {
+			_, _ = b.cli(context.WithoutCancel(ctx), nil, nil, "rm", "-f", id)
+			return nil, fmt.Errorf("sandbox %q: joining the session's network: %w", spec.Name, err)
+		}
+	}
 	return &Container{backend: b, ID: id, Name: spec.Name, Session: spec.Session, Image: img}, nil
 }
 
@@ -280,12 +293,16 @@ func (b *Backend) Find(ctx context.Context, session string) ([]sandbox.Sandbox, 
 	}
 	var found []sandbox.Sandbox
 	for _, id := range strings.Fields(string(out)) {
-		name, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.NameLabel+`"}}`, id)
+		out, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.NameLabel+`"}}`+vmFormat, id)
 		if err != nil {
 			// Removed between the listing and now.
 			continue
 		}
-		found = append(found, &Container{backend: b, ID: id, Name: strings.TrimSpace(string(name)), Session: session})
+		name, ok := notVM(out)
+		if !ok {
+			continue
+		}
+		found = append(found, &Container{backend: b, ID: id, Name: name, Session: session})
 	}
 	return found, nil
 }
@@ -300,16 +317,29 @@ func (b *Backend) Sessions(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	var sessions []string
 	for _, id := range strings.Fields(string(out)) {
-		s, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.SessionLabel+`"}}`, id)
+		s, err := b.cli(ctx, nil, nil, "inspect", "--format", `{{index .Config.Labels "`+sandbox.SessionLabel+`"}}`+vmFormat, id)
 		if err != nil {
 			continue
 		}
-		if name := strings.TrimSpace(string(s)); name != "" && !seen[name] {
+		if name, ok := notVM(s); ok && name != "" && !seen[name] {
 			seen[name] = true
 			sessions = append(sessions, name)
 		}
 	}
 	return sessions, nil
+}
+
+// vmFormat follows a label in an inspect format with the label granule
+// puts on a VM's container (granule.dev/vm). A granule sandbox's VM
+// runs in a container carrying silo's labels too, and is the granule
+// backend's to find and destroy, with granule's own delete.
+const vmFormat = `|{{index .Config.Labels "granule.dev/vm"}}`
+
+// notVM splits what an inspect with vmFormat printed, and reports
+// whether the container is not a granule VM's.
+func notVM(out []byte) (string, bool) {
+	label, vm, _ := strings.Cut(strings.TrimSpace(string(out)), "|")
+	return label, vm == ""
 }
 
 // Container is one container sandbox.
@@ -325,7 +355,13 @@ type Container struct {
 	Image sandbox.Image
 }
 
-var _ sandbox.Sandbox = (*Container)(nil)
+var (
+	_ sandbox.Sandbox = (*Container)(nil)
+	_ sandbox.Imaged  = (*Container)(nil)
+)
+
+// ResolvedImage implements sandbox.Imaged.
+func (c *Container) ResolvedImage() sandbox.Image { return c.Image }
 
 // killGrace is how long Exec waits, once its context is done and the
 // command has been killed, for the runtime CLI to return what it has

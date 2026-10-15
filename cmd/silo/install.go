@@ -141,6 +141,14 @@ func (c *cli) installLocal(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.AddressSpace, "address-space", "", "the root silo's address block (default 10.0.0.0/8)")
 	fs.Float64Var(&cfg.CPUOvercommit, "cpu-overcommit", localinstall.DefaultCPUOvercommit,
 		fmt.Sprintf("the root's vcpu_m as a multiple of the host's CPUs less one, up to %g; memory and disk are not overcommitted", localinstall.MaxCPUOvercommit))
+	fs.Func("egress-allow", "the root's egress allowlist, names or patterns such as *.example.com (repeatable or comma-separated; default none)", func(v string) error {
+		for _, e := range strings.Split(v, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				cfg.EgressAllow = append(cfg.EgressAllow, e)
+			}
+		}
+		return nil
+	})
 	fs.BoolVar(&dryRun, "dry-run", false, "print the plan and change nothing")
 	fs.BoolVar(&yes, "yes", false, "don't ask for confirmation")
 	fs.StringVar(&output, "output", "table", "the plan's format: table or json")

@@ -86,13 +86,20 @@ func (c sandboxConfig) gvisor() gvisor.Config {
 		},
 		RunscRoot: p.RunscRoot(),
 		Toolbox:   c.Toolbox,
+		DNS:       c.DNS,
 	}
 	if c.Runsc != "" {
 		cfg.Runsc = []string{"runsc", "--runsc", c.Runsc}
 	}
-	// Where the shim's options use the systemd cgroup driver, every
-	// container is a scope in its silo's slice.
-	if c.SiloPaths != nil && rootless.RunscSystemdCgroups {
+	// Each container is a cgroup in its silo's, in the scope silod
+	// keeps in the user's manager. Where that can't be made (no user
+	// manager, or no delegation), containers get none, and CPU and
+	// memory are the ledger's alone.
+	if c.SiloPaths != nil {
+		tree := c.Cgroups
+		if tree == nil {
+			tree = &rootless.SandboxTree{}
+		}
 		cfg.CgroupsPath = func(spec runtime.Spec) string {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -102,10 +109,15 @@ func (c sandboxConfig) gvisor() gvisor.Config {
 				if err == nil {
 					err = errors.New("no such silo")
 				}
-				log.Printf("the sandbox driver: the silo path of %s: %v; using a slice of its own", spec.Silo, err)
+				log.Printf("the sandbox driver: the silo path of %s: %v; using a cgroup of its own", spec.Silo, err)
 				path = []string{spec.Silo}
 			}
-			return rootless.CgroupsPath(spec.ID, path...)
+			cg, err := tree.Path(ctx, spec.ID, path...)
+			if err != nil {
+				log.Printf("the sandbox driver: %s's cgroup: %v; its limits are the ledger's alone", spec.ID, err)
+				return ""
+			}
+			return cg
 		}
 	}
 	return cfg

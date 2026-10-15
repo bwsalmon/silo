@@ -273,7 +273,7 @@
             "type": "string"
           },
           "push": {
-            "description": "Ref patterns a push may update.",
+            "description": "Ref patterns a push may update: refs/heads/... or refs/tags/..., globbing with * and ?, each optionally followed by (force), (delete) or (force, delete).",
             "items": {
               "type": "string"
             },
@@ -363,8 +363,64 @@
       "additionalProperties": false,
       "description": "Where the agent CLI runs (design §5). Default: local.",
       "properties": {
+        "k8s": {
+          "additionalProperties": false,
+          "description": "Only for kind: k8s.",
+          "properties": {
+            "context": {
+              "description": "A context in the kubeconfig; kubectl's current context when empty.",
+              "type": "string"
+            },
+            "identity": {
+              "additionalProperties": false,
+              "description": "Later: workload identity (design §5.4).",
+              "properties": {
+                "gcp_account_for": {
+                  "description": "The projects[] entry whose per-user account the pod's service account is bound to.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "image": {
+              "description": "The image the agent CLI runs in; it needs /bin/sh and the CLI on its PATH.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The namespace the session's pod and Secret go in; the context's namespace when empty.",
+              "type": "string"
+            },
+            "resources": {
+              "additionalProperties": false,
+              "description": "The agent container's requests and limits.",
+              "properties": {
+                "cpu": {
+                  "description": "A Kubernetes CPU quantity, such as 2 or 500m.",
+                  "type": "string"
+                },
+                "memory": {
+                  "description": "A size, such as 4Gi. A size in bytes, with an optional unit: 1MiB, 4Gi, 10GB.",
+                  "pattern": "^[0-9]+(B|[KMGT]i?B?)?$",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "tunnel_image": {
+              "description": "The gateway tunnel sidecar's image (design §5.4); silo's published one when empty.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "type": "object"
+        },
         "kind": {
-          "description": "local (default) | ssh | vm (later) | k8s (later) | ax (later) | capsule (later)",
+          "description": "local (default) | ssh | k8s | vm (later) | ax (later) | capsule (later)",
           "type": "string"
         },
         "ssh": {
@@ -560,11 +616,11 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Granule only (stage 8).",
+            "description": "Granule only: the Granulefile's build arguments (--build-arg).",
             "type": "object"
           },
           "backend": {
-            "description": "local (default) | {k8s: {...}} (later, stage 11)",
+            "description": "local (default) | {k8s: {...}} (later, stage 11b)",
             "oneOf": [
               {
                 "enum": [
@@ -618,7 +674,7 @@
             "type": "object"
           },
           "granulefile": {
-            "description": "Granule only (stage 8): a Granulefile in the silo folder.",
+            "description": "Granule only, instead of image: a Granulefile in the silo folder whose target stage builds a granule VM image, built with its directory as the context.",
             "type": "string"
           },
           "image": {
@@ -626,7 +682,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "container | gvisor | granule (later, stage 8) | folder (built-in silos only)",
+            "description": "container | gvisor | granule | folder (built-in silos only)",
             "type": "string"
           },
           "lifetime": {
@@ -720,8 +776,12 @@
             "description": "Folder sandboxes only (built-in silos).",
             "type": "string"
           },
+          "push_to": {
+            "description": "Granule only, with granulefile: a registry repository the built image is pushed to, for a remote backend (stage 11b); the local backend pushes nothing.",
+            "type": "string"
+          },
           "repos": {
-            "description": "git[] entries checked out into workdir through the git proxy.",
+            "description": "git[] entries checked out through the git proxy: one at workdir, several each at workdir/\u003cname\u003e. Needs an absolute workdir and git in the image.",
             "items": {
               "type": "string"
             },
@@ -732,7 +792,7 @@
             "type": "boolean"
           },
           "target": {
-            "description": "Granule only (stage 8).",
+            "description": "Granule only: the Granulefile stage to build, by name or index; the last stage when empty.",
             "type": "string"
           },
           "workdir": {

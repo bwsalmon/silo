@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "search": {"command": "search-mcp", "timeoutSeconds": 600, "tools": {}},
+    "web": {"serverUrl": "https://web.example.com/mcp"}
+  }
+}

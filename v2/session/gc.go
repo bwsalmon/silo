@@ -4,21 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	k8sloc "github.com/bwsalmon/silo/v2/location/k8s"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/bwsalmon/silo/v2/sandbox"
 	"github.com/bwsalmon/silo/v2/sandbox/container"
+	"github.com/bwsalmon/silo/v2/sandbox/granule"
 )
 
 // GCOptions configure GC.
 type GCOptions struct {
 	// Getenv reads XDG_RUNTIME_DIR and friends; os.Getenv when nil.
 	Getenv func(string) string
-	// Backend finds labelled containers; the container backend when nil
-	// and one is installed.
+	// Backend finds labelled containers; when nil, the container
+	// backend if one is installed, and the granule backend's VMs if
+	// Docker is.
 	Backend sandbox.Backend
 	// MinAge is how old a session directory without a session.json must
 	// be before it counts as stale; a minute when zero, so a session
@@ -34,7 +38,7 @@ type GCReport struct {
 // GC is the cheap local part of silo gc (design §3.1, call 2): it
 // removes stale session directories, whose silo run process is gone,
 // with what their session.json lists, and containers labelled with a
-// session that is gone.
+// session that is gone, and granule VMs labelled with one.
 func GC(ctx context.Context, opts GCOptions) (GCReport, error) {
 	var rep GCReport
 	getenv := opts.Getenv
@@ -46,9 +50,7 @@ func GC(ctx context.Context, opts GCOptions) (GCReport, error) {
 	}
 	b := opts.Backend
 	if b == nil {
-		if cb, err := container.New(); err == nil {
-			b = cb
-		}
+		b = gcBackend()
 	}
 	root := RuntimeRoot(getenv)
 	entries, err := os.ReadDir(root)
@@ -98,7 +100,7 @@ func GC(ctx context.Context, opts GCOptions) (GCReport, error) {
 				errs = append(errs, err)
 			}
 			if n > 0 {
-				rep.Removed = append(rep.Removed, fmt.Sprintf("removed %d container(s) of ended session %s", n, id))
+				rep.Removed = append(rep.Removed, fmt.Sprintf("removed %d sandbox(es) of ended session %s", n, id))
 			}
 		}
 	}
@@ -118,8 +120,14 @@ func undoResource(ctx context.Context, b sandbox.Backend, id string, r Resource)
 			_, err := destroySession(ctx, b, id)
 			return err
 		}
+	case KindNetwork:
+		if nw, ok := b.(sandbox.Networker); ok && r.Network != "" {
+			return nw.RemoveNetwork(ctx, r.Network)
+		}
 	case KindDir:
 		return os.RemoveAll(r.Path)
+	case KindPod:
+		return k8sloc.DeleteSession(ctx, &k8sloc.Kubectl{Context: r.Context, Namespace: r.Namespace}, id)
 	}
 	return nil
 }
@@ -137,4 +145,26 @@ func destroySession(ctx context.Context, b sandbox.Backend, id string) (int, err
 		errs = append(errs, sb.Destroy(ctx))
 	}
 	return len(found), errors.Join(errs...)
+}
+
+// gcBackend is what GC finds labelled sandboxes with when the caller
+// names no backend: containers, and granule VMs on the local Docker.
+// granule itself may be gone; Destroy then removes a VM's container
+// directly.
+func gcBackend() sandbox.Backend {
+	k := &sandbox.Kinds{ByKind: map[string]sandbox.Backend{}}
+	if cb, err := container.New(); err == nil {
+		k.Default = cb
+	}
+	if _, err := exec.LookPath("docker"); err == nil {
+		gb := &granule.Backend{Granule: os.Getenv(granule.BinaryEnv)}
+		k.ByKind["granule"] = gb
+	}
+	if len(k.ByKind) == 0 {
+		if k.Default == nil {
+			return nil
+		}
+		return k.Default
+	}
+	return k
 }

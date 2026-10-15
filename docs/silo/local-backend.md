@@ -823,9 +823,9 @@ open, or leaves something for later:
   - runsc from silod's `PATH` for reading a writable layer, and
     `--toolbox`, a static busybox for `docker cp`;
   - containers' FIFOs and logs in `cache/containers`;
-  - each container's `cgroupsPath` a scope in its silo's slice
-    (`silo-<root>-…-<silo>.slice:silo:<id>`), as the shim's systemd
-    cgroup driver needs.
+  - each container a cgroup in its silo's, in silod's delegated scope
+    (`silo.slice/silo-sandboxes.scope/<root>/…/<silo>/<id>`, see
+    "Enforcement beside the ledger").
 
   The driver is passed in even when its probe fails, so a create says
   why the class can't run (409). The vm class still has no
@@ -859,9 +859,6 @@ open, or leaves something for later:
     reached from a real container yet. The test above calls the
     facade directly. Reaching them needs an install that starts silod
     with the holder (steps 8 and 17).
-  - The root's capacity of the local classes is still open: the
-    local backend has no `Capacity` refresh, so the root's capacity
-    is what bootstrap set.
   - On a real host, an upstream pull answers 503 until silod has a
     `registry.Egress` (local-registry.md step 31's "Left"). `docker
     load` and pulls of `registry.silo.internal` names work.
@@ -1093,10 +1090,11 @@ user, against containerd 2.4 and gVisor 20261005 inside `silo-nsd`
   read-only at `/.silo/busybox` when the driver is given one, and from
   the image otherwise.
 - **Stats** are the shim's metrics (cgroup v1 or v2), with the pids
-  count as a fallback. A container gets a `cgroupsPath` only when the
-  driver is configured with one. Without delegated cgroups (CI), the
-  shim's options say `ignore-cgroups`, and CPU and memory are what
-  runsc reports for its own cgroup, not the container's.
+  count as a fallback. The shim's options say `ignore-cgroups`; a
+  container's cgroup, when the driver is configured with one, is
+  silod's (`dev.silo.cgroup`, "Enforcement beside the ledger"), so CPU
+  and memory are what runsc reports for its own cgroup, which is the
+  container's when it has one.
 - **Adoption.** `List` reads containerd, so it reports what an earlier
   silod made. `Adopt` restarts the log copier of any container whose
   sandbox is still alive but whose copier died. The test kills silod's
@@ -1636,7 +1634,9 @@ text above in these places:
 - **`gw0`** is still the holder's bridge from step 15, not a dummy.
 - **What `local.New` builds.** It builds the `Fence`, and `Inventory`,
   `Contents` and `Targets` over the runtime drivers (fake only, so
-  far). It builds no `Capacity`, `Classes` or `ToolVMs`.
+  far), and, given `Options.Capacity`, the `Capacity` refresh of
+  [§11](#root-capacity-and-overcommit-call-l20) (task 3792). It builds
+  no `Classes` or `ToolVMs`.
 
 ## 10. Agents on the local backend
 
@@ -1842,6 +1842,38 @@ root capacity = (host total − reserve) × overcommit
 - **`describe` on the root shows all three numbers,** so the operator
   can see what was promised.
 
+*As built* (task 3792), `pkg/backend/local/hostcap` computes the
+formula, for install's root step and for silod, and refreshes it:
+
+- **`Capacity(Totals, Reserve)`** gives `vcpu_m`, `memory_mb` and
+  `disk_gb` from the host's online CPUs, `MemTotal` and the data
+  filesystem's size. The reserve is the fixed one above, the CPU
+  overcommit, and the registry cache's budget, which `disk_gb` leaves
+  out ([local-registry.md](local-registry.md) call L74). install's root
+  step uses it for bootstrap. The count classes (`containers` 1000,
+  `networks` 256, `volumes` 1000) are `hostcap.Counts`, which only
+  bootstrap sets: the host's totals don't bound them.
+- **The refresh** is `local.Options.Capacity` (a `hostcap.Config`),
+  which `local.New` makes the backend's `Capacity`. silod gives it on
+  a leader-led replica with a data directory, so the leader duty "root
+  capacity" (`cmd/silod/leader.go`) runs it hourly, as `rootcap` on
+  GCP. Each run reads the host again. It takes the overcommit from
+  silod's `--cpu-overcommit`, which install's units pass from install's
+  own (`units.Config.CPUOvercommit`; default 2, 1 to 8). It takes the
+  cache's budget from the store's registry cache settings
+  (`size_limit_gb`), so a budget the operator changes moves `disk_gb`
+  too. It sets the three classes with `ledger.SetCapacity`, under the
+  leader's guard, and logs `quota.root_resync` (the host's totals, the
+  overcommit, the budget, what changed and what was refused) whenever
+  it changes or refuses anything. A read that fails changes nothing.
+  Before bootstrap there is no root, and the duty does nothing.
+- **A host that shrank** can't take back what the tree holds. Unlike a
+  GCE quota cut, which over-commits the root, a class whose new
+  capacity would fall below the root's delegated plus used keeps the
+  capacity it had. The other classes are still set, the audit record
+  lists it under `refused`, and the duty fails with `hostcap.ErrHeld`,
+  which the leader logs every hour until the grants fit.
+
 ### Enforcement beside the ledger
 
 The ledger decides what may start, and the kernel enforces what is
@@ -1856,7 +1888,33 @@ running, as a second layer:
 - **For `vm`,** the cgroup holds cloud-hypervisor, so the guest's
   vCPUs and memory are inside it.
 - **For `sandbox`,** gVisor documents that the host cgroup is what
-  limits a sandbox.
+  limits a sandbox. runsc can't make it: it runs as its container's
+  namespace root, a subordinate id, whose systemd driver dials the
+  system manager and whose cgroupfs driver owns no cgroup. A cgroup
+  under `silo-containerd.service` won't do either: enabling
+  controllers there for children leaves systemd unable to start the
+  unit's next main process in it (EBUSY), and containers outlive
+  containerd's restarts. So silod asks the user's manager for a
+  transient scope, `silo.slice/silo-sandboxes.scope`, with
+  `Delegate=yes` (`rootless.SandboxTree`). Its one process, a sleep,
+  sits in the leaf `keep`, so the scope lives while no container runs,
+  and the scope's cgroup is silod's to manage as cgroupfs:
+  - silod makes `<root>/…/<silo>` under it, with the controllers
+    enabled, and names `<…>/<silo>/<container>` in the spec's
+    `dev.silo.cgroup` annotation;
+  - `silod runsc create` makes that cgroup, writes the spec's
+    `memory.max` (with `memory.swap.max` 0), `cpu.max` and
+    `pids.max`, and starts runsc in it (`CLONE_INTO_CGROUP`), so the
+    sandbox and gofer it forks are inside; the shim's options still
+    say `ignore-cgroups`. The reaper, outside it, removes it when the
+    sandbox is gone;
+  - where the scope can't be made (no user manager, nothing
+    delegated, or the system install, whose `silo` user has no
+    manager), containers get no cgroup, and CPU and memory are the
+    ledger's alone. `silo uninstall` kills and stops the scope.
+
+  Silos' own cgroups don't yet carry their grants' limits; only
+  containers' do.
 - **Disk:** writable layers are capped by gVisor's overlay size, or by
   granule's overlay size (`-disk-size-mb`). Volumes are capped by
   project quotas. Images are charged and garbage-collected when no
@@ -2054,11 +2112,13 @@ order: `account` (system install only), `prerequisites`, `lingering`
   - the installing user as admin, by `uid:<n>`: the user who ran
     `sudo` for the system install.
 
-  The capacity is call L20's: `vcpu_m` is (CPUs − 1) × 1000 ×
-  `--cpu-overcommit` (default 2, at most 8). `memory_mb` is MemTotal
-  less the larger of 2 GiB and 10%. `disk_gb` is 90% of the data
-  filesystem. The count classes, which the host's totals don't bound,
-  get 1000 containers, 256 networks and 1000 volumes. `/silod/health`
+  The capacity is call L20's, as `hostcap.Capacity` computes it and
+  silod's leader refreshes it hourly after (see
+  [§11](#root-capacity-and-overcommit-call-l20)): `vcpu_m` is (CPUs −
+  1) × 1000 × `--cpu-overcommit` (default 2, at most 8). `memory_mb`
+  is MemTotal less the larger of 2 GiB and 10%. `disk_gb` is 90% of the
+  data filesystem, less the cache's budget. The count classes, which
+  the host's totals don't bound, get 1000 containers, 256 networks and 1000 volumes. `/silod/health`
   now also answers `root_id`, because a later run has no other way to
   learn the root's id without being a member.
 - **`docker context`** writes the context `silo-root` into the
@@ -2321,18 +2381,38 @@ Task 3420 built the split as far as silod's wiring allows:
     and runs it from there;
   - runsc's systemd cgroup driver, inside the container's user
     namespace, dials the system manager and is refused; the shim's
-    options say `ignore-cgroups` (`rootless.RunscSystemdCgroups`) and
-    CPU and memory are the ledger's until cgroups are delegated
-    another way;
+    options say `ignore-cgroups`, and containers' cgroups are silod's
+    own (task 3805, "Enforcement beside the ledger"), which
+    `TestInstalledSandbox` checks by running a container past its
+    memory limit;
   - gVisor 20261005's runsc needs its `gvisor-bin/gvisor_sentry`
     sidecar, which install now pins and fetches.
 
-  Still open: a container in the root's default network has no
-  `/etc/resolv.conf`, so names (`<id>.docker.silo.internal`) don't
-  resolve from it; probes for `Fence`; and the cases that need a real
+  Task 3802 made a container's names resolve.
+  `TestInstalledSandboxDNS` resolves the root's
+  `<id>.docker.silo.internal` from a sandbox container and reaches the
+  facade there on port 2375. That took two fixes:
+  - The container had no `/etc/resolv.conf` or `/etc/hosts`. The
+    gVisor driver now has silod's `runtime-remap` write them into the
+    container's own snapshot, with `/etc/hostname`, owned by the
+    container's root (`gvisor.EtcFiles`). `resolv.conf` names the
+    gateway's DNS (`--local-gateway`'s first address). Under
+    `--overlay2=root:self` the snapshot is the sandbox's lower layer.
+    So the container's own edits don't outlive it, and a commit
+    doesn't carry the files.
+  - Only the first container's port was ever pinned. A container's
+    create wrote nothing to the change log, so the fence never
+    reloaded `bridge silo`'s pins, and every later container's frames
+    were dropped. A create, a connect, a disconnect and a remove now
+    write a `docker.topology` entry. A start waits up to 30s for the
+    fence to apply the log as it stood at the start
+    (`docker.Options.Fence`), as [Anti-spoofing](#anti-spoofing)
+    says.
+
+  Still open: probes for `Fence`; and the cases that need a real
   install (revocation closing an open connection, exports, adoption
   after a restart, the `Host`-header and socket rules, published
-  ports, DNS and image records).
+  ports, and image records).
 
 ### As built in step 13
 

@@ -16,8 +16,8 @@ import (
 
 // ambient returns a token from the invoking user's own login, asking the
 // source again once AmbientTTL has passed. A failure is not cached.
-func (r *Resolver) ambient(ctx context.Context, source string) (string, error) {
-	key := source + "\x00" + r.host()
+func (r *Resolver) ambient(ctx context.Context, source, host string) (string, error) {
+	key := source + "\x00" + host
 	r.mu.Lock()
 	if c, ok := r.cache[key]; ok && r.now().Before(c.expires) {
 		r.mu.Unlock()
@@ -28,9 +28,9 @@ func (r *Resolver) ambient(ctx context.Context, source string) (string, error) {
 	var err error
 	switch source {
 	case "gh":
-		token, err = r.ghToken(ctx)
+		token, err = r.ghToken(ctx, host)
 	case "git-credential":
-		token, err = r.gitCredentialToken(ctx)
+		token, err = r.gitCredentialToken(ctx, host)
 	case "gcloud":
 		token, err = r.gcloudToken(ctx)
 	default:
@@ -77,8 +77,7 @@ func runCommand(ctx context.Context, stdin, name string, args ...string) (string
 	return stdout.String(), stderr.String(), err
 }
 
-func (r *Resolver) ghToken(ctx context.Context) (string, error) {
-	host := r.host()
+func (r *Resolver) ghToken(ctx context.Context, host string) (string, error) {
 	stdout, stderr, err := r.command(ctx, "", "gh", "auth", "token", "--hostname", host)
 	if err != nil {
 		return "", fmt.Errorf("{ambient: gh}: gh is not logged in to %s (%s): run `gh auth login --hostname %s` as %s",
@@ -91,8 +90,7 @@ func (r *Resolver) ghToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func (r *Resolver) gitCredentialToken(ctx context.Context) (string, error) {
-	host := r.host()
+func (r *Resolver) gitCredentialToken(ctx context.Context, host string) (string, error) {
 	stdout, _, err := r.command(ctx, "protocol=https\nhost="+host+"\n\n", "git", "credential", "fill")
 	password := ""
 	for _, line := range strings.Split(stdout, "\n") {

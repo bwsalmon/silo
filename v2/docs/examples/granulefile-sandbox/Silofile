@@ -1,0 +1,42 @@
+# Journey 10 (design §14): a granule sandbox defined by a Granulefile in
+# the silo folder rather than by a published image.
+#
+# `silo validate ./granulefile-sandbox` runs `granule granulefile check`
+# on it, and refuses it if its target stage would build a container
+# image. `silo run` builds it with `granule granulefile build` into
+# silo-granulefile:<key>, where the key is the SHA-256 of the
+# Granulefile, its directory (the build context: sandboxes/, so the
+# Silofile and prompts are not part of it), the target and the args; the
+# image's digest and key go in .silo/lock.json. A second run whose key
+# is unchanged boots the image already built.
+#
+# Needs granule on PATH (or SILO_GRANULE), Docker, a /dev/kvm this user
+# may open, and the images granule builds with: its VMM image
+# (granule:latest, granule's own default) and the guest rootfs above.
+# `silo run --dry-run ./granulefile-sandbox` says whether it is built.
+#
+#   silo run ./granulefile-sandbox
+silo: v2
+name: built-vm
+
+agent:
+  cli: claude
+  auth: ambient
+  mode: headless
+  prompt: prompts/task.md
+
+location:
+  kind: local
+
+remote_permissions: none
+
+sandboxes:
+  - name: dev
+    kind: granule
+    granulefile: sandboxes/dev.Granulefile   # instead of image:
+    target: guest                            # the VM PACK stage
+    args: {PACKAGES: "git ca-certificates procps"}
+    # push_to: europe-docker.pkg.dev/acme/silo   # for a remote backend (stage 11b)
+    cpus: 2
+    memory: 2Gi
+    workdir: /work

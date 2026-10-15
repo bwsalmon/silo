@@ -2,7 +2,8 @@
 
 // Package location is where one session's agent CLI runs (design §5):
 // the Location interface every kind implements, and the Agent handle on
-// a running CLI. Kinds live in subpackages (local; ssh in stage 4b).
+// a running CLI. Kinds live in subpackages (local; ssh in stage 4b;
+// k8s in stage 11a).
 package location
 
 import (
@@ -27,8 +28,16 @@ type Session struct {
 	// VersionArgs asks the binary for its version (["--version"]); nil
 	// skips the check.
 	VersionArgs []string
+	// AmbientAuth is set when the CLI uses its own login on the agent
+	// host (agent.auth: ambient), which a remote location checks.
+	AmbientAuth bool
 	// Mode is interactive or headless.
 	Mode string
+	// Secrets are the variables of the CLI's environment that carry
+	// credentials (agent.auth, and credentials delivered to: {agent:
+	// ...}), by name. A location that can deliver them out of band does
+	// so: k8s puts them in a Secret mounted into the pod.
+	Secrets map[string]string
 	// Environ is the invoking environment, from which a local location
 	// keeps only its allowlist (design §5.2).
 	Environ []string
@@ -76,6 +85,11 @@ type Command struct {
 	// Stdin, for headless mode, is written to the CLI's stdin, which is
 	// then closed.
 	Stdin []byte
+	// Input, when set, replaces Stdin: the CLI's stdin is read from it
+	// until it ends, so that silo can write to the CLI while it runs
+	// (an injected message, grain.md §2.1). Silo passes the read end of
+	// an os.Pipe and closes it once Start returns.
+	Input io.Reader
 }
 
 // IO is where the CLI's streams go: silo's terminal in interactive mode,
@@ -104,6 +118,9 @@ type ExitStatus struct {
 	Code int
 	// Signaled names the signal that killed it, if one did.
 	Signaled string
+	// ConnLost is set when the connection to the agent host dropped
+	// before the CLI's own exit status came back (ssh: exit 75).
+	ConnLost bool
 }
 
 // Location is where one session's agent CLI runs (design §5.1).

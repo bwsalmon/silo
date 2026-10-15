@@ -29,6 +29,25 @@ type SessionLister interface {
 	Sessions(ctx context.Context) ([]string, error)
 }
 
+// Networker is a Backend that can make a session a private network:
+// its sandboxes reach the invoking machine on HostIP through it, and
+// nothing else (design §9.3).
+type Networker interface {
+	CreateNetwork(ctx context.Context, session string) (Network, error)
+	// RemoveNetwork removes a network CreateNetwork made, once no
+	// sandbox is attached to it. A network already gone is not an
+	// error.
+	RemoveNetwork(ctx context.Context, name string) error
+}
+
+// Network is a private network a Networker made.
+type Network struct {
+	Name string
+	// HostIP is the invoking machine's address on the network: where
+	// a service the session's sandboxes reach listens.
+	HostIP string
+}
+
 // NameLabel carries the sandbox's name in the Silofile.
 const NameLabel = "silo.sandbox"
 
@@ -57,22 +76,37 @@ type Sandbox interface {
 type SandboxSpec struct {
 	Session string
 	Name    string
-	// Kind is container or gvisor.
+	// Kind is container, gvisor or granule.
 	Kind string
-	// Image is an OCI image reference; Build, when Image is empty, the
-	// absolute path of a Dockerfile, built with its directory as the
-	// context.
+	// Image is an OCI image reference (for granule, a granule VM
+	// image); Build, when Image is empty, the absolute path of the file
+	// the image is built from, with its directory as the context: a
+	// container sandbox's build: Dockerfile, or a granule sandbox's
+	// granulefile:, the same field read by two builders (design §14,
+	// journey 10).
 	Image string
 	Build string
+	// Target and BuildArgs are the Granulefile's stage and build
+	// arguments; only granule sandboxes take them.
+	Target    string
+	BuildArgs map[string]string
 	// Workdir is the working directory inside the sandbox, created if
 	// missing. Empty means the image's own.
 	Workdir string
 	CPUs    float64
 	// Memory is in bytes; 0 is no limit.
 	Memory int64
+	// Disk is in bytes; 0 is the image's own size. Only granule
+	// sandboxes apply it.
+	Disk int64
 	// Network is "none" (the default) or "open".
 	Network string
-	Mounts  []Mount
+	// PrivateNetwork, when set, is a network made by Networker.
+	// CreateNetwork that the sandbox joins: in place of no network for
+	// "none", beside the runtime's default for "open". It is how a
+	// sandbox reaches the session's git proxy (design §9.3).
+	PrivateNetwork string
+	Mounts         []Mount
 	// Env is the sandbox's environment on top of the image's: the
 	// Silofile's env, and credentials delivered as {sandbox, env}.
 	Env map[string]string
@@ -129,12 +163,27 @@ func SpecFor(f *silofile.Silofile, name, session string) (SandboxSpec, error) {
 		if s.Memory != nil {
 			spec.Memory = int64(*s.Memory)
 		}
-		if s.Build != "" {
-			real, err := safepath.Within(f.Folder, s.Build)
+		if s.Disk != nil {
+			spec.Disk = int64(*s.Disk)
+		}
+		for key, file := range map[string]string{"build": s.Build, "granulefile": s.Granulefile} {
+			if file == "" {
+				continue
+			}
+			real, err := safepath.Within(f.Folder, file)
 			if err != nil {
-				return SandboxSpec{}, fmt.Errorf("sandbox %q: build: %w", name, err)
+				return SandboxSpec{}, fmt.Errorf("sandbox %q: %s: %w", name, key, err)
 			}
 			spec.Build = real
+		}
+		if s.Granulefile != "" {
+			spec.Target = s.Target
+			if len(s.Args) > 0 {
+				spec.BuildArgs = map[string]string{}
+				for k, v := range s.Args {
+					spec.BuildArgs[k] = v
+				}
+			}
 		}
 		for _, m := range s.Mounts {
 			// Resolved through symlinks and confined to the folder again,

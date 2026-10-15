@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime"
 	"github.com/bwsalmon/silo/pkg/backend/local/runtime/fake"
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
+	"github.com/bwsalmon/silo/pkg/fence"
 	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/ledger"
 	"github.com/bwsalmon/silo/pkg/registry"
@@ -441,6 +443,82 @@ func TestStartOverQuota(t *testing.T) {
 	e.fail(409, "quota exceeded", e.ci, "POST", "/v1.47/containers/create?name=two", obj{"Image": "alpine"})
 }
 
+// waitFence is a fence applier that records the sequence numbers
+// starts wait for, and fails their waits with err.
+type waitFence struct {
+	seqs []uint64
+	err  error
+}
+
+func (f *waitFence) WaitApplied(_ context.Context, seq uint64) error {
+	f.seqs = append(f.seqs, seq)
+	return f.err
+}
+
+// topologyChanges are the change log's TopologyChangeKind entries, by
+// sequence number.
+func (e *env) topologyChanges() []store.Change {
+	e.t.Helper()
+	var last uint64
+	if err := e.db.Tx(ctx, func(tx store.Tx) error {
+		var err error
+		last, err = fence.LastSeq(ctx, tx)
+		return err
+	}); err != nil {
+		e.t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch, err := e.db.Changes(cctx, 0)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var out []store.Change
+	for c := range ch {
+		if c.Kind == TopologyChangeKind {
+			out = append(out, c)
+		}
+		if c.Seq >= last {
+			break
+		}
+	}
+	return out
+}
+
+// TestStartWaitsForTheFence: a create, a connect and a remove each
+// write a TopologyChangeKind entry, which wakes the fence to pin (or
+// unpin) the container's ports, and a start waits for the fence to
+// have applied the change log up to its own create; a start the fence
+// doesn't catch up with is refused, and its charge given back.
+func TestStartWaitsForTheFence(t *testing.T) {
+	e := newEnv(t)
+	f := &waitFence{}
+	e.facade.opts.Fence = f
+	e.create(e.a, "web", nil)
+	made := e.topologyChanges()
+	if len(made) != 1 || made[0].Key != e.a {
+		t.Fatalf("topology changes after a create: %+v", made)
+	}
+	e.ok(e.a, "POST", "/v1.47/containers/web/start", nil)
+	if len(f.seqs) != 1 || f.seqs[0] < made[0].Seq {
+		t.Errorf("the start waited for %v, not for the create's change %d", f.seqs, made[0].Seq)
+	}
+
+	e.ok(e.a, "POST", "/v1.47/networks/create", obj{"Name": "back"})
+	e.ok(e.a, "POST", "/v1.47/networks/back/connect", obj{"Container": "web"})
+	e.ok(e.a, "DELETE", "/v1.47/containers/web?force=1", nil)
+	if got := e.topologyChanges(); len(got) != 3 {
+		t.Errorf("topology changes after a create, a connect and a remove: %+v", got)
+	}
+
+	f.err = errors.New("the fence is down")
+	e.create(e.a, "late", nil)
+	e.fail(503, "the fence has not pinned", e.a, "POST", "/v1.47/containers/late/start", nil)
+	if got := e.used(e.a, ClassMemoryMB); got != 0 {
+		t.Errorf("memory_mb after a start the fence didn't catch up with: %d", got)
+	}
+}
+
 func TestRefusals(t *testing.T) {
 	e := newEnv(t)
 	e.pull(e.a, "alpine")
@@ -499,6 +577,24 @@ func TestRefusals(t *testing.T) {
 	}
 	if n < 20 {
 		t.Errorf("%d refusals audited", n)
+	}
+}
+
+// The create body Docker CLI 29.9.0 sends for `docker run --rm bb:1
+// sh`, byte for byte (testdata/cli-29.9.0-run.json, captured from the
+// CLI), is accepted: every field it sets is allowed or its default,
+// MemorySwappiness -1 among them.
+func TestCLICreateBody(t *testing.T) {
+	e := newEnv(t)
+	e.pull(e.a, "alpine")
+	b, err := os.ReadFile("testdata/cli-29.9.0-run.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = bytes.Replace(b, []byte(`"Image":"bb:1"`), []byte(`"Image":"alpine"`), 1)
+	out := e.ok(e.a, "POST", "/v1.47/containers/create", json.RawMessage(b))
+	if out["Id"] == nil {
+		t.Errorf("create: %v", out)
 	}
 }
 

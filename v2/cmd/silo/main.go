@@ -1,5 +1,5 @@
 // Command silo is Silo v2's command line (design §3, §16). So far it has
-// run, gc, validate and schema.
+// run, attach, ls, approve, gc, validate and schema.
 package main
 
 import (
@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/bwsalmon/silo/v2/localexec"
+	"github.com/bwsalmon/silo/v2/sandbox/granule"
 	"github.com/bwsalmon/silo/v2/session"
 	"github.com/bwsalmon/silo/v2/silofile"
 )
@@ -24,11 +26,23 @@ const (
 const usage = `usage: silo <command> [arguments]
 
 commands:
-  run [--prompt text] <Silofile|dir>
-                            run one session (design §3)
-  gc [--project p [--account email]]
-                            remove what crashed sessions left behind, and
-                            your project accounts gone unused past their ttl
+  run [--dry-run] [--json | --detach] [--label k=v] [--prompt text] <Silofile|dir>
+                            run one session (design §3), or with --dry-run
+                            check what it needs and change nothing
+                            with --detach, start it under a supervisor of its
+                            own and print its id
+  attach [--from seq] [--json] <session>
+                            replay a session's events after seq and follow them
+  ls [--label key=value] [--json]
+                            list the running sessions
+  gc [--host <host>] [--k8s [--context <c>] [--namespace <ns>]]
+     [--project p [--account email]]
+                            remove what crashed sessions left behind, with
+                            --host their remote session directories there,
+                            and with --k8s their pods in a namespace
+                            and your GCP accounts unused past their ttl
+  approve <session> [--deny] [<call-id>]
+                            answer a local script's call waiting for approval
   validate <Silofile|dir>   check a Silofile or silo folder (design §2.4)
   schema [section]          print the Silofile's JSON Schema, or one section's
 `
@@ -45,8 +59,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "run":
 		return runSession(args[1:], os.Stdin, stdout, stderr, session.Options{})
+	case superviseCmd:
+		return supervise(args[1:])
+	case "attach":
+		return attach(args[1:], os.Getenv, stdout, stderr)
+	case "ls":
+		return ls(args[1:], os.Getenv, stdout, stderr)
 	case "gc":
 		return gc(args[1:], stdout, stderr)
+	case "approve":
+		return approve(args[1:], os.Getenv, stdout, stderr)
 	case "validate":
 		return validate(args[1:], stdout, stderr)
 	case "schema":
@@ -75,6 +97,12 @@ func flags(name, argsUsage string, args []string, stderr io.Writer, min, max int
 	return fs.Args(), true
 }
 
+// validateOptions are silo validate's and silo run's: with the local
+// executor's script checks and warnings (design §2.4, §12.4), and
+// granule granulefile check on each granule sandbox's Granulefile
+// (design §14, journey 10).
+var validateOptions = silofile.Options{CheckScripts: localexec.Check, CheckGranulefile: granule.CheckGranulefile}
+
 func validate(args []string, stdout, stderr io.Writer) int {
 	args, ok := flags("validate", "<Silofile|dir>", args, stderr, 1, 1)
 	if !ok {
@@ -90,7 +118,7 @@ func validate(args []string, stdout, stderr io.Writer) int {
 		}
 		return exitInvalid
 	}
-	res := f.Validate(silofile.Options{})
+	res := f.Validate(validateOptions)
 	for _, w := range res.Warnings {
 		fmt.Fprintf(stderr, "warning: %v\n", w)
 	}

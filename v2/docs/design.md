@@ -62,7 +62,7 @@ one agent session, and the only thing the agent is told about.
 | **invoking machine** | Where `silo run` was typed. silo, the gateway, credentials and the local executor always live here in v2.0. |
 | **agent host** | Where the agent CLI process runs: the invoking machine for `local`, another machine for `ssh`. |
 | **gateway** | silo's one MCP server per session. The CLI's MCP config names it and nothing else. |
-| **sandbox** | A named place where commands run on the agent's behalf (a container, a gVisor container, later a granule VM). Reached only through gateway tools. |
+| **sandbox** | A named place where commands run on the agent's behalf (a container, a gVisor container, a granule VM). Reached only through gateway tools. |
 | **remote permissions** | What the CLI's *own* built-in tools may do on the agent host. |
 | **local executor** | The gateway's tools that run declared scripts on the invoking machine (journey 3). |
 
@@ -140,7 +140,7 @@ my-silo/
 │   └── servers.json      # standard .mcp.json shape
 ├── sandboxes/            # sandbox definitions
 │   ├── tools.Dockerfile  # built into a container sandbox's image
-│   └── dev.Granulefile   # a granule sandbox (journey 10, later)
+│   └── dev.Granulefile   # built into a granule sandbox's VM image (journey 10)
 └── .silo/                # silo's own, not hand-edited; git-ignorable
     ├── lock.json         # resolved digests and script hashes of the last run
     └── backup/           # silo create's copies before an edit (§10)
@@ -185,19 +185,26 @@ agent:
     permissions: {none: [...], all: []}
 
 location:
-  kind: local                 # local | ssh | vm (later) | k8s (later) | ax (later) | capsule (later)
+  kind: local                 # local | ssh | k8s | vm (later) | ax (later) | capsule (later)
   ssh:                        # only for kind: ssh
     host: devbox              # a Host alias in ~/.ssh/config, or a hostname
     user: alice               # optional; ~/.ssh/config otherwise
     port: 22                  # optional
     identity: ~/.ssh/id_ed25519   # optional
     gateway_transport: tcp    # tcp (default) | unix (later); see §5.3
+  k8s:                        # only for kind: k8s; see §5.4
+    context: kind-dev         # optional; kubectl's current context otherwise
+    namespace: silo           # optional; the context's namespace otherwise
+    image: ghcr.io/acme/agent:claude-2.1   # needs /bin/sh and the CLI
+    tunnel_image: ...         # optional; silo's published sidecar otherwise
+    resources: {cpu: "2", memory: 4Gi}
+    identity: {gcp_account_for: acme-staging}   # later
 
 remote_permissions: none      # none (default) | all | [Read, Grep, Glob, Edit]
 
 sandboxes:
   - name: build
-    kind: container           # container | gvisor | granule (later)
+    kind: container           # container | gvisor | granule
     image: golang:1.25        # or build: sandboxes/tools.Dockerfile
     workdir: /work
     cpus: 2
@@ -211,8 +218,8 @@ sandboxes:
     lifetime: session         # session | persistent (later, grain.md §2.3)
     package_cache: {url: ..., ca: ...}   # later, grain.md §2.3
     model_access: [anthropic] # later: the model proxy, grain.md §2.5
-  # kind: granule (later) takes image: <granule VM image> or
-  #   granulefile: sandboxes/dev.Granulefile, with target: and args:
+  # kind: granule takes image: <granule VM image>, or
+  #   granulefile: sandboxes/dev.Granulefile, with target:, args: and push_to:
   # kind: folder (built-in silos only) takes path: and rw:
 
 mcp:
@@ -278,7 +285,10 @@ the folder:
   exists;
 - names are unique within their section, and every cross-reference
   resolves (`to: {sandbox: x}`, `sandboxes[].repos`, `git[].credential`,
-  `projects[].deliver_to`);
+  `projects[].deliver_to`); a sandbox with `repos` has an absolute
+  `workdir`, `git[].push` patterns parse (§9.1), and a `git[]` entry
+  without `credential` is not left to choose between several
+  credentials delivered to `{proxy: git}` (§9.3);
 - the agent's `remote_permissions` can be expressed by its `cli`, by the
   table in [`cli-mapping.md`](cli-mapping.md); `agy` with `none` fails
   here, not at run time;
@@ -360,12 +370,28 @@ one-shot: there is no daemon in v2.0.
 
 `silo run --json` writes a JSON-lines event stream on stdout (transcript
 items, tool calls, usage, status changes, the exit reason) and a final
-`result` event. A control socket in the session directory accepts
+`result` event. The schema, versioned, is [`events.md`](events.md). It is
+shared with the Go library (`silo.Start`, `v2/silo.go`), whose
+`Session.Events()` delivers the same values. As built in stage 6a,
+`--json` needs `agent.mode: headless`, and the CLI's own output is kept
+in the session's raw transcript rather than written to stdout. A control socket in the session directory accepts
 `inject`, `cancel` and `extend_deadline`. Both exist for grain and are
 designed in [`grain.md`](grain.md) §2.1; journeys 1–4 do not need them
 (apart from answering a script's `approve: true` under `--json`, §12.3).
 `--caller-mcp <name>=<url>` adds a caller-provided MCP server
-([`grain.md`](grain.md) §2.2).
+([`grain.md`](grain.md) §2.2). `--detach` runs the session under a
+supervisor of its own and prints its id; `silo attach <id> --from <seq>`
+replays and follows its numbered `events.jsonl`, and `silo ls` lists the
+running sessions by label ([`grain.md`](grain.md) §2.7, as built in
+stage 9).
+
+As built in stage 6b, the socket's methods (`inject`, `cancel`,
+`extend_deadline`, `approve`) and their params are documented in
+[`events.md`](events.md). The library's `Session` methods share the same
+implementation. A caller server's token is read from
+`$SILO_CALLER_MCP_TOKEN_<NAME>` rather than the command line, so it
+never shows in `ps`. `--caller-mcp-tools` and `--caller-mcp-blocking`
+qualify a `--caller-mcp` server.
 
 ### 3.3 Exit codes
 
@@ -392,7 +418,8 @@ CLI obeyed still exits 130, since silo sent the signal. The session
 directory holds `session.json` and the staged CLI files (`agent/`) and
 the private workdir (`work/`); the audit log is written straight to
 `$XDG_STATE_HOME/silo/sessions/<id>/audit.jsonl`, so a crash keeps it,
-and the final `session.json` is copied beside it. Where
+and the final `session.json` is copied beside it. As built in stage 9,
+the event stream is kept there too, as `events.jsonl`. Where
 `XDG_RUNTIME_DIR` is unset, session directories go in
 `$TMPDIR/silo-<uid>/`. Containers also carry `silo.uid=<uid>`, so
 `silo gc` on a shared Docker daemon removes only the invoking user's.
@@ -470,6 +497,13 @@ it can so the CLI does not give up first (Claude Code: the
 `MCP_TOOL_TIMEOUT` environment variable, which grain already sets for
 the same reason).
 
+As built in stage 6b, a caller's tool marked blocking ([`grain.md`](grain.md)
+§2.2) has no gateway timeout at all. In a session with one, the CLI's
+own timeout is raised from 32 minutes to 7 days: `MCP_TOOL_TIMEOUT` for
+claude, `tool_timeout_sec` for codex. Raising it means the CLI never
+abandons a call that waits on a person (§6.2). The session's deadline
+still bounds such a call.
+
 As built in stage 1b: `sandbox_exec`'s `timeout` is in seconds, default
 5 minutes. The Silofile has no field to cap it yet, so the cap is a
 fixed 30 minutes until one is added. The file tools are bounded at 2
@@ -531,11 +565,11 @@ whose CLI cannot be given a TTY refuses `interactive` in `Prepare`.
 | `local` | yes | look up binary | loopback URL | `exec` with the terminal or pipes |
 | `ssh` | yes | ssh master; remote checks | `ssh -R` | `ssh -t` (interactive) or `ssh -T` |
 | `vm` | later (journey 5) | create or reuse VM, then as `ssh` (or IAP) | as `ssh` | as `ssh` |
-| `k8s` | later (journey 8) | create the pod, wait ready | port-forward or sidecar | `exec`/attach into the pod |
+| `k8s` | yes (stage 11a, journey 8) | create the pod and Secret, wait ready, probe | tunnel sidecar, reached by `kubectl port-forward` | `kubectl exec -i -t` (interactive) or `kubectl exec -i` |
 | `ax`, `capsule` | later (journey 6) | submit or attach a hosted session | outbound tunnel from the runtime | runtime-started; handle only |
 
 Sandboxes are not part of the location in v2.0: they run on the
-invoking machine for both `local` and `ssh` (§7.3).
+invoking machine for `local`, `ssh` and `k8s` (§7.3).
 
 ### 5.2 `local`
 
@@ -599,9 +633,13 @@ ssh -S $SESSION/ssh.ctl -O forward -R 127.0.0.1:0:127.0.0.1:<gateway-port> <host
 ```
 
 With port 0, OpenSSH has the server allocate a free port and prints it
-on stdout. The forward binds the remote host's **loopback** only (and
-`GatewayPorts` on the server cannot widen an explicit `127.0.0.1` bind
-address). No port is opened to the network on either side. Other users
+on stdout. The forward binds the remote host's **loopback** only. A
+server with `GatewayPorts yes` overrides the client's bind address and
+binds the wildcard instead (measured against OpenSSH 9.2's sshd; `no`,
+the default, and `clientspecified` keep `127.0.0.1`), so silo checks
+the listening address after asking for the forward and refuses the
+session, with the `sshd_config` fix, if it is not loopback. No port is
+opened to the network on either side. Other users
 on the remote host can connect to the loopback port. The bearer token
 (§4.3) is what turns them away.
 
@@ -648,8 +686,148 @@ session, and the CLI loses its gateway at the same moment because the
 reverse forward lived on the master connection. A CLI that survives
 SIGHUP finds every gateway call failing and has nothing left to do. silo
 cannot do better than that without an agent on the remote host, and v2.0
-deliberately has none. There is no reconnect in v2.0: a reconnecting
-session is the detach/re-attach work of [`grain.md`](grain.md) §2.7.
+deliberately has none. There is no reconnect in v2.0. The detach and
+re-attach of [`grain.md`](grain.md) §2.7 (stage 9) covers silo's
+caller, not this link: a detached session whose ssh connection drops
+still ends with exit 75.
+
+**As built in stage 4b** (`location/ssh`):
+
+- The master is started without `-f`: silo keeps it as its own child,
+  under `Pdeathsig`, and waits for `ssh -O check` to succeed. With `-f`
+  the backgrounded master would outlive a killed silo, and its exit
+  would not be an event silo can watch. A passphrase prompt still
+  reaches the user through `/dev/tty`. Every later step is
+  `ssh -S <ctl> -o ControlMaster=no -o BatchMode=yes ...`, and the
+  control socket moves to a short temporary directory when
+  `$SESSION/ssh.ctl` would not fit in a socket address.
+- The remote session directory holds `session`
+  (`id=<session> origin=<hostname>:<uid>`), the staged files under
+  `agent/`, the private workdir `work/`, the env file while it lives,
+  and `pid`. `silo gc --host` (and `silo run` to the host, at startup)
+  removes only directories whose origin is this machine and user and
+  whose session is not live here, so it never removes a live session
+  that another machine is running against the same remote account.
+- The command is `exec /bin/sh -c '<preamble>; exec <argv>'`, so the
+  CLI keeps the pid of the session `sshd` made, which leads its process
+  group. **Headless signals** are sent as real signals to that group
+  over the master (`kill -s INT -- -<pid>`). Closing stdin is not
+  enough, because stdin is already closed once the prompt is written.
+  Tearing down a channel without a pty does not make `sshd` send SIGHUP.
+  A kill also ends the local `ssh`, which closes the channel, and so
+  does any signal once the master is gone.
+- The gateway also answers to the forward's own `Host`
+  (`127.0.0.1:<remote port>`), still loopback, so its DNS-rebinding
+  check stands.
+- `--dry-run` adds four checks for `kind: ssh`: reachable
+  (`ssh -o BatchMode=yes <host> true`), host key accepted, the CLI
+  binary and its version, and the CLI's login when `auth` is ambient.
+  The login checks are `claude auth status`, `codex login status`, and
+  for agy the presence of `~/.gemini/oauth_creds.json`.
+- `gateway_transport: unix` is refused, by `silo validate` and again by
+  the location.
+
+### 5.4 `k8s`
+
+Journey 8. As for `ssh`, silo, the gateway, credentials, sandboxes and
+the local executor stay on the invoking machine; only the CLI runs in
+the cluster, in one pod per session made from `location.k8s.image`.
+
+**Configuration.** silo drives the cluster with the system `kubectl`
+(`--context` and `--namespace` from the Silofile, both optional), for
+the reason it uses OpenSSH **(call 7)**: the user's kubeconfig, exec
+credential plugins such as `gke-gcloud-auth-plugin`, and proxies behave
+exactly as at their own prompt, and silo takes on no client library.
+The image needs `/bin/sh` and the CLI on its `PATH` (or at
+`agent.binary`); silo never installs a CLI.
+
+**The pod** is `silo-<session id>`, labelled
+`app.kubernetes.io/managed-by: silo` and `silo.dev/session: <id>`, and
+annotated `silo.dev/origin: <hostname>:<uid>` (an annotation, because a
+label value cannot hold the colon). It has `restartPolicy: Never`, no
+service account token (`automountServiceAccountToken: false`, so the
+agent has no credentials for the cluster), a 5 s termination grace, an
+`emptyDir` at `/silo` (staged files under `agent/`, the private workdir
+`work/`, the env file while it lives, and `pid`), and two containers:
+
+- `agent`, the image, whose command holds
+  (`while :; do sleep 3600 & wait; done`, ending at once on SIGTERM)
+  until silo execs the CLI into it, with `resources` as both requests
+  and limits;
+- `tunnel`, the gateway sidecar (below), non-root, with a read-only
+  root filesystem and no capabilities.
+
+`Prepare` removes this origin's stale pods in the namespace (as
+`silo gc --k8s` does), creates the pod, then the Secret, waits for the
+pod to be ready (failing at once on `ErrImagePull`,
+`ImagePullBackOff` and the like, naming the image), and runs §5.3's
+probe in it with `kubectl exec -i ... sh -s`. `Teardown` deletes the
+pod and Secret by label, so that a pod whose create call failed half
+way goes too, without waiting for the pod to finish terminating.
+`session.json` records the context and namespace before the pod is
+made, so `silo gc` deletes the pod of a session that crashed.
+
+**The CLI is started with `kubectl exec` in both modes**: `-i -t` for
+interactive (kubectl puts the terminal in raw mode and carries window
+size changes) and `-i` for headless, with the same
+`cd; . env; rm env; echo $$ > pid; exec <argv>` preamble as `ssh`. This
+differs from journey 8's sketch, which ran a headless CLI as the
+container's command and read its logs: the pod has to exist for
+`Prepare` to probe the CLI and for `Stage` to write its files, before
+the command is known, and `exec` gives headless mode the same stdin
+(the prompt, injected messages), exit code and signals as `ssh`, with
+no second code path. kubectl passes the CLI's exit code on; a failure
+with the pod no longer running is exit 75. Signals go as real signals
+to the pid file's process group with another `exec`; a kill also ends
+the local `kubectl`.
+
+**The gateway** is a tunnel, because Kubernetes has no reverse
+port-forward. The sidecar (`cmd/silo-tunnel`) listens twice on the
+pod's loopback: on `127.0.0.1:7811`, the URL the CLI's MCP config names
+(`http://127.0.0.1:7811/mcp`), and on `127.0.0.1:7812` for silo, which
+reaches it with `kubectl port-forward pod/<pod> :7812`. Silo's
+connection opens with a hello line and then carries a stream mux
+(`internal/tunnel/mux`, copied from grain's `pkg/tunnel/mux`); each
+connection the CLI makes to 7811 becomes a stream, which silo splices
+to the gateway on the invoking machine. If the port-forward or the
+connection drops, silo opens them again, and a newer connection
+replaces the old one at the sidecar. Nothing in the cluster can reach
+either port, since both are bound to the pod's loopback, and the
+gateway's bearer token still guards every call.
+
+**The sidecar's image** is built from `cmd/silo-tunnel/Dockerfile`
+(from `v2/`) and published as `ghcr.io/bwsalmon/silo-tunnel:v2` by a
+maintainer with `docker buildx build --push`, as the v2 README says;
+`location.k8s.tunnel_image` names another (a mirror, or a private
+registry the cluster can pull from), and `--dry-run` checks that it can
+be pulled.
+
+**Credentials.** Every variable of the CLI's environment that carries
+a credential (`agent.auth: {credential: ...}`, and credentials
+delivered `to: {agent: ...}`) goes into a Secret, `silo-<session id>`,
+labelled as the pod is and owned by it (so the cluster deletes it with
+the pod even when silo cannot). It is mounted read-only into the
+`agent` container only, at `/run/silo/secret`, one file per variable,
+and the preamble reads each into the CLI's environment, so no value is
+in the pod's spec or any argv. The other variables go in the env file,
+written over `exec`'s stdin with `umask 077`. **Workload identity**
+(`identity: {gcp_account_for: ...}`, the pod's Kubernetes service
+account bound to journey 2's per-user GCP account) is later:
+`silo validate` refuses `identity:` naming this section.
+
+**`--dry-run`** adds, for `kind: k8s`: the context is reachable
+(`kubectl version`), the namespace exists, silo may create and delete
+pods and Secrets and use `pods/exec` and `pods/portforward` there
+(`kubectl auth can-i`), and both images can be pulled and the CLI is in
+the agent's. Only the cluster's nodes can say whether they can pull an
+image, so this last check runs a short-lived pod (labelled
+`silo.dev/check`, deleted at once, and removed by `silo gc --k8s` if it
+is left behind) in which the agent image runs the probe and the tunnel
+image its `-check`. It is the one thing `--dry-run` makes.
+
+**`silo gc --k8s [--context c] [--namespace ns]`** deletes the pods
+and Secrets in the namespace whose origin is this machine and user and
+whose session is not live here, and check pods older than ten minutes.
 
 ## 6. Remote permissions and CLI modes
 
@@ -688,8 +866,9 @@ Two things follow and are said here, not left for a user to discover:
   no-environment configuration against `codex-cli 0.153.0` and refuses
   other versions. silo keeps the same rule: a table of reviewed Codex
   versions for `none`, a refusal for any other, and a reviewed-version
-  bump as a deliberate change. The Codex installed while writing this
-  was 0.162.1, which would need that review first.
+  bump as a deliberate change. 0.162.1, current while writing this,
+  was added in stage 1d on a behavioural probe ([`cli-mapping.md`](cli-mapping.md)
+  §2.2).
 
 Every mapping also takes the CLI's *other* ways of reaching the host off
 the table for `none` and subsets: MCP servers from the user's own config
@@ -714,6 +893,12 @@ their semantics were exercised for this document (see
 `interactive` and `headless`, except a hosted runtime that cannot give a
 TTY, which refuses `interactive`.
 
+As built in stage 6b, a headless claude's stdin stays open until its
+turn's `result`, so that an injected message can be written to it. Codex
+takes an injected message as a further turn, `codex exec resume <thread>
+-`, and so does claude after its turn has ended (`claude -p --resume`).
+Both are described in [`events.md`](events.md).
+
 ## 7. Sandboxes
 
 A sandbox is a named place where commands run. The agent picks one per
@@ -725,14 +910,15 @@ call (`sandbox_exec {sandbox: build, command: ...}`).
 | --- | --- | --- |
 | `container` | yes | An OCI container run by the local Docker or Podman, rootless where available. `image:`, or `build:` a Dockerfile in the folder. |
 | `gvisor` | yes | A `container` run with the `runsc` runtime. Refused at `--dry-run` if the runtime is not installed. Same fields. |
-| `granule` | later (stage 8) | A granule microVM: `image:` (a granule VM image) or `granulefile:` (journeys 7, 10). |
+| `granule` | stage 8 (`image:` in 8a, `granulefile:` in 8b) | A granule microVM: `image:` (a granule VM image) or `granulefile:` (journeys 7, 10). |
 | `folder` | yes, built-in only | A directory on the invoking machine served by file tools only, path-confined, with no exec. `silo create` uses it (§10). Not offered in user Silofiles in v2.0 **(call 10)**. |
 
 v2.0 ships `container` and `gvisor` **(call 11)**. They need nothing
 silo does not already need for journey 2 (a container runtime), and
 `gvisor` is one flag more. Granule waits for stage 8 because it needs
 granule's own driver, and the deployment notes say granule's Go module
-cannot yet be fetched by CI.
+cannot yet be fetched by CI. Stage 8a therefore drives the `granule`
+binary rather than importing granule's packages (§7.3).
 
 ### 7.2 Fields
 
@@ -741,7 +927,7 @@ the kind supports them); `network`: `none` (the default) or `open`,
 with an `allow:` list reserved for the egress proxy grain needs
 ([`grain.md`](grain.md) §2.3); `mounts` from the folder (read-only by
 default); `repos`, the `git[]` entries checked out into `workdir`
-through the git proxy; `env`; and `lifetime: session` (the default) or
+through the git proxy (one at `workdir`, several each at `workdir/<name>`, §9.3); `env`; and `lifetime: session` (the default) or
 `persistent`, reserved for grain's persistent workspaces.
 
 A sandbox starts with no host files: nothing of `$HOME`, no Docker
@@ -798,6 +984,70 @@ not only the runtime CLI. Each sandbox's image is resolved to a digest
 under `images` in `.silo/lock.json`; stage 3a adds the grants summary
 beside it.
 
+As built in stage 8a (`sandbox/granule`, journey 7): a `granule`
+sandbox is a VM made by `granule vm create <vm> -kontur-image <image>`,
+waited for with `granule vm wait`, reached with `granule vm exec` and
+removed with `granule vm delete`, all on the local Docker. The binary is
+`SILO_GRANULE` if set, else `granule` on `PATH`; silo never imports
+granule's Go packages. The VM's name is a digest of the session and
+the sandbox (granule names a tap device after it, which leaves room for
+eleven characters), and silo's session, sandbox and user labels go on
+the VM's container through `-docker-run-opt --label=...`, so `Find`,
+`silo gc` and the container backend's own listing (which skips
+containers carrying granule's `granule.dev/vm` label) see it as a
+sandbox of its session. `cpus` and `memory` become `-cpus` and
+`-memory-mb`, and `disk` becomes `-disk-size-mb`, the VM's writable
+overlay; left out, the image's own are used. `mounts` are refused for
+`granule`: a host directory would have to cross into the guest over
+virtio-fs, which silo does not set up. `env` is written to
+`/run/silo/env` in the guest (mode 0600) and loaded by every `Exec`,
+rather than passed as `vm exec -e`, which would put credential values on
+the invoking machine's command lines. The file tools and `DeliverFile`
+run through `exec` as the container kinds' do, so the guest needs `sh`
+and coreutils, and git for `repos`. A guest has exactly one network
+interface, which takes over its container's address (granule's flat
+networking), so a VM is on one network only: the session's private
+network when it has `repos` (where the git proxy listens, §9.3), a
+private `--internal` network of its own when it has neither `repos` nor
+`network: open` (a VM container on `--network none` cannot boot), and
+Docker's default bridge with `network: open`, from which the git proxy
+on the host is reached as well. `--dry-run` checks that granule is
+found, that `granule doctor` passes (`/dev/kvm` above all), and that
+each image is local or offered by its registry, without pulling it.
+
+As built in stage 8b (`sandbox/granule`, journey 10): `granulefile:`
+names a Granulefile in the folder, built with its directory as the
+context (as `build:` is), with `target:` and `args:` passed as
+`-target` and `-build-arg`. It resolves into the same
+`SandboxSpec.Build` a container's `build:` does; the kind decides which
+builder reads it. `silo validate` runs `granule granulefile check -f
+<file> [-target <stage>] <dir>` and reads the stage kind from granule's
+own plan ("target: ..., which produces a granule VM image"), so silo
+carries no Granulefile parser; a target that produces a container image
+is refused for `kind: granule`. Without granule on the machine the file
+is left unchecked with a warning, since `silo validate` is also run
+where nothing will be booted. The reverse refusal is silo's own, in
+pure Go: a container sandbox's `build:` file with a `VM` instruction
+anywhere is refused, because `docker build` cannot read one, whichever
+stage is the target. At `silo run` the cache key is computed (below);
+if the daemon has `silo-granulefile:<key>` it is booted as it is, and
+otherwise the stage kind is checked again and `granule granulefile
+build -t silo-granulefile:<key>` builds it. The key is SHA-256 over the
+Granulefile, every path, executable bit, content and symlink target in
+its directory (skipping `.silo` and granule's `.granule-build-*`
+scratch, which change without changing what is built), the target and
+the args. It reads the whole directory, not what a `.dockerignore`
+would send, which costs at worst a rebuild. The tag is the cache, as it
+is for grain's `pkg/sandboximage`: a removed image is rebuilt, and an
+image whose tag is present is trusted. The image id and the key are
+recorded under `images` in `.silo/lock.json`. The build uses granule's
+own defaults for the VMM image (`granule:latest`) and the guest rootfs
+it wraps or packs onto; silo passes neither. `push_to:` is validated (a
+registry repository, no tag or digest, granule with `granulefile:` only)
+and draws a warning on the local backend, which pushes nothing; pushing
+is stage 11b's. `--dry-run` reports whether each Granulefile is built
+already.
+
 ## 8. Credentials
 
 ### 8.1 Sources
@@ -851,8 +1101,9 @@ transformed by a command (base64, split across lines) is not caught.
 As built in stage 1b: values shorter than 4 bytes are not redacted
 (they would rewrite ordinary text all over the log while hiding nothing
 a guess would not find). The ambient `gh` and `git-credential` sources
-ask for `github.com` until the git proxy (stage 7) chooses the host per
-`git[]` entry. A `{file:}` source drops one trailing newline.
+ask for `github.com`, except that a credential delivered only to
+`{proxy: git}` is asked for the host of each `git[]` entry that uses it
+(stage 7b, §9.3). A `{file:}` source drops one trailing newline.
 `{store:}` is refused as not yet supported.
 
 ## 9. The git proxy
@@ -877,8 +1128,10 @@ one.
   is a `RefRule` (grain's `model.RefPush`): `refs/heads/...` or
   `refs/tags/...`, so only a `refs/tags/` pattern names a tag, with
   `force` and `delete` flags, so only a rule with `delete` names a
-  deletion. How a Silofile's `push:` strings ask for `delete` is
-  stage 7b's to settle.
+  deletion. A Silofile's `push:` string is a rule as `RefRule.String`
+  writes it: the pattern, optionally followed by its flags in
+  parentheses, `refs/heads/scratch (delete)` or
+  `refs/tags/v* (force, delete)` (stage 7b, §9.3).
 - **Fast-forward proof**, optional per entry (`force: false`, the
   default): a non-fast-forward update is refused, proved from the pushed
   pack's commit graph and the upstream's history, as grain does.
@@ -888,6 +1141,66 @@ one.
 - **Audit:** one record per request (repository, action, refs, outcome,
   credential name), written to the session's audit log, so the caller
   reads it from the same place.
+
+### 9.3 As built in stage 7b
+
+- **When it runs.** The proxy is a setup step of its own (order 35,
+  after the location and before the tools), started only when some
+  sandbox has `repos`; a `git[]` entry no sandbox names gets a warning
+  and nothing else. The sandboxes provider clones once its sandbox
+  exists. The audit log now opens in a step of its own (25), before the
+  location, so that the proxy and the gateway write the same
+  `audit.jsonl`.
+- **Reachability.** The container backend makes the session an
+  internal network (`docker network create --internal silo-<id>`,
+  labelled like the session's containers and recorded in `session.json`
+  as a `network` resource for `silo gc`). The proxy listens on that
+  network's gateway address, which is the invoking machine's own
+  address on the bridge, on a free port. A sandbox with `repos` and
+  `network: none` joins that network instead of none, so the proxy is
+  the only thing it can reach; one with `network: open` joins it beside
+  the runtime's default. The address is reachable from the host itself
+  too (any process on the invoking machine can connect to a local
+  address), so the per-sandbox token, not the listener, is what keeps
+  other callers out. A rootless Podman network's gateway is inside
+  Podman's network namespace, not on the host, so there the proxy
+  cannot listen and the session fails at start saying so: sandboxes with
+  `repos` need Docker or rootful Podman in v2.0.
+- **Tokens.** One per sandbox with `repos` (`gitproxy.TokenSet`), in
+  memory, so each audit line's `caller` names the session and the
+  sandbox. They die with the proxy at teardown.
+- **Checkout.** Each repo is cloned with the sandbox's own `git`
+  (`git clone` run in the sandbox, so the image needs git) with origin
+  `http://silo:<token>@<address>:<port>/<host>/<owner>/<name>.git`. A
+  sandbox with one repo has it at `workdir` itself; one with several has
+  each at `workdir/<git entry name>`. `repos` therefore needs an
+  absolute `workdir`, which validation checks. The origin is an ordinary
+  remote URL, so a later session re-attaching a persistent checkout
+  rewrites it with `git remote set-url` (grain.md §2.3). The git
+  identity is the sandbox's `env`: git reads `GIT_AUTHOR_NAME`,
+  `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`
+  itself, so silo sets nothing.
+- **Credentials.** An entry's `credential:`, or else the Silofile's one
+  credential delivered to `{proxy: git}`; with several, an entry must
+  name one (a validation error), and with none it goes anonymously. The
+  proxy asks for the secret on every request (`{ambient:}` sources cache
+  it for five minutes, per host), and an upstream 401 drops the cached
+  token. A value the caller passes in `Options.Credentials` is used as
+  it is.
+- **Audit lines** are `{"event": "git", "git": <gitproxy.AuditEntry>}`
+  beside the gateway's `start` and `end` lines, redacted the same way.
+  They are not tool calls, so the event stream does not repeat them.
+- **`--dry-run`** checks each `git[]` entry, changing nothing: its
+  credential resolves (for the entry's host), and an in-process proxy
+  holding it gets the repository's `info/refs` for `git-upload-pack`,
+  and for `access: push` also for `git-receive-pack`, which is the
+  host's own answer to whether the credential may push.
+- **Tests** run the proxy against grain's GitHub simulator
+  (`githubsim.GitUpstream`, copied into `v2/internal/githubsim`) over
+  HTTPS, which answers who may fetch and push with GitHub's own
+  statuses, in front of `git http-backend`. An opt-in test
+  (`SILO_V2_LIVE_GITHUB=1`) runs the same flow against real GitHub with
+  the repository and token grain's `github-sandbox` capability places.
 
 ### 9.2 What to copy, adapt and drop from grain's `pkg/gitproxy`
 
@@ -1344,6 +1657,31 @@ parameter, an unquoted `$@` or `$*`, or `xargs`, and on a script that
 is itself an interpreter or shell (a symlink to `/bin/sh`, `python3`)
 **(call 23)**. A warning is not a refusal. The user wrote the script.
 
+As built in stage 4a (§12.2–§12.4):
+
+- The result also carries `signal` and `timed_out` when they apply, and
+  `stdout_bytes`/`stderr_bytes`, how much the script wrote; past
+  `output_cap` silo keeps the first and last halves of the cap and
+  marks the cut, so the difference is what was dropped. `exit_code`
+  comes first, so the audit log's head of the result always holds it.
+- An approval waits up to the script's timeout, and the run then has
+  its own timeout. A script that changed while its call waited for
+  approval is refused then too.
+- In `headless` mode without a terminal, approvals go through
+  `silo approve` as in `interactive` mode, with the request printed on
+  silo's stderr instead of a desktop notification. `silo approve` takes
+  the session id or a unique prefix of it, and the call id may be left
+  out when only one call is waiting.
+- The control socket exists in every session from the start of setup:
+  JSON-RPC 2.0, one message per line. `approve` takes
+  `{"id"?: string, "deny"?: bool}` and answers with the call it
+  answered. Under `--json` (stage 6) the same queue answers, announced
+  by an `approval_request` event.
+- A symlink to an interpreter outside the folder is already refused at
+  snapshot, so the interpreter warning covers a file in the folder that
+  is not a `#!` script and is named like a shell or interpreter, and a
+  wrapper that hands `"$@"` straight to one (`exec python3 "$@"`).
+
 ### 12.5 On the remote host
 
 `remote_permissions` governs what the agent does there: `none`, `all`,
@@ -1488,6 +1826,108 @@ every launched server: "runs as <user> with access to their files".
   through the allowlist and sends `notifications/tools/list_changed` to
   the CLI.
 
+As built in stage 5a (`where: local`; stage 5b's `where: remote`
+follows):
+
+- **Transports.** A `url:` server is tried as Streamable HTTP first. If
+  the POST of `initialize` is answered 400, 404 or 405, silo falls back
+  to the older HTTP+SSE transport (the MCP spec's
+  backwards-compatibility rule), so the entry needs no transport field.
+  Proxied results are passed on as text: content blocks other than text
+  are dropped, as the gateway serves text only.
+- **Reading configs.** Besides `url`, the JSON sources accept Gemini
+  CLI's `httpUrl` and agy's `serverUrl`. claude-project's `<dir>` and
+  mcp-json's `<path>` may be absolute, `~/...`, or relative to the silo
+  folder, and claude-project looks the cleaned absolute path up exactly.
+  Settings silo does not apply are printed as notes by `--dry-run`: a
+  config's `cwd` (servers run in the silo folder), codex's `env_vars`
+  (list them in `inherit_env` instead) and a `disabled` or
+  `enabled = false` flag (naming the server in the Silofile runs it).
+- **Secrets in configs (call 25).** One rule covers env variables and
+  headers: a credential delivered `to: {mcp: <name>, env: KEY}` replaces
+  the config's value for `KEY`, whether `KEY` is an env variable of a
+  launched server or a header of a `url:` one. A value with no such
+  credential that looks like a secret (its name says token, key,
+  password, secret, credential or auth; or it starts like a known token,
+  `Bearer ...`, or is a URL with a password) is refused. A `${VAR}`
+  reference, as Claude Code expands it (codex's `bearer_token_env_var`
+  and `env_http_headers` are read as the same references), is filled
+  from a credential delivered with `env: VAR`, or for a launched server
+  from silo's environment when `VAR` is in `inherit_env`; otherwise it
+  is refused. So the Silofile names every secret a server gets.
+- **Environment.** The minimal environment takes `PATH`, `HOME`, `USER`,
+  `LANG` and `TMPDIR` from silo's own, where set. Then, each overriding
+  the one before: `inherit_env`, the config's `env`, the entry's `env:`,
+  and delivered credentials.
+- **Lifecycle details.** A launched server's stderr goes to
+  `mcp-<name>.stderr` beside the audit log. Its process group is
+  recorded in `session.json` before it is connected to, so `silo gc`
+  kills it after a crash. A dead server is noticed when its stdout
+  closes or it exits, and its group is killed then too. `restart:
+  on-failure` retries at the same rate, once per 60 s at most, until it
+  starts or the session ends. After a restart or a `list_changed`, an
+  allowlisted tool the server no longer offers is a warning rather than
+  an error: the session is running, and the tool is simply absent.
+- **`--dry-run`.** Stage 5a adds a minimal `silo run --dry-run`, a
+  check registry in `session` that stage 3a extends. It resolves every
+  `from:`, applies the secret rule with credentials by name, finds a
+  launched server's binary on the `PATH` it will have, and prints one
+  line per server, with "runs as <user> with access to their files"
+  for launched ones. It does not contact `url:` servers. `silo run`
+  records the resolved entries (names of variables and headers, never
+  values) under `mcp` in `.silo/lock.json`; `--dry-run` writes nothing.
+
+As built in stage 5b (`where: remote`):
+
+- **Launch.** A `command:` server runs as
+  `ssh -S <ctl> -T <host> -- exec /bin/sh -c '<preamble>'`, a channel of
+  the master that is the proxy's process for that server, so its
+  allowlist, restart and dead-server handling are a local server's. The
+  preamble records its pid (sshd makes it the leader of its own session
+  and process group) beside the env file, then runs
+  `env -i /bin/sh -c '. <env file>; rm -f <env file>; exec "$@"'`, so the
+  server has exactly the filtered environment, and the file is gone
+  before the server starts. Before each launch, the env file is written
+  with `umask 077` and `cat >` over the master. A remote server runs in
+  the remote home directory (the silo folder is not on the agent host).
+- **Environment.** The remote login environment is what `env` prints
+  over the master, read once per session; the minimal names,
+  `inherit_env` and `${VAR}` references are filled from it as from
+  silo's own for a local server.
+- **`url:`.** The local end of the `-L` forward is a Unix socket beside
+  the master's control socket (in the 0700 session directory), not a
+  loopback port, so no other local user can reach the server through
+  it. silo dials the socket but keeps the entry's URL, so the `Host`
+  header and TLS name the server as the agent host sees it. A forward
+  that fails is the server not answering: `required:` decides.
+- **Reading configs.** A `from:` file is read with `cat` over the
+  master (on its own connection, for `--dry-run`), with `HOME` and
+  `CODEX_HOME` from the remote login environment. A relative
+  `mcp-json` path is the remote home directory's, and `mcp-json:<name>`
+  with no `@<path>` is refused for `where: remote`: its defaults are in
+  the silo folder, which is not there. `where: remote` with
+  `location.kind: local` is refused when the session starts (and by
+  `--dry-run`): there is no agent host but this machine.
+- **Teardown.** Closing a remote server is SIGTERM to its local ssh,
+  which closes the channel; sshd hangs the server's stdin and stdout
+  up. Then, over the master, silo waits up to 5 s for the server's
+  process group to go, sends it SIGKILL, and removes its pid and env
+  files. After a crash, `silo gc` kills the local ssh (its process group
+  is in `session.json`), which closes the channel the same way; the
+  remote session directory is removed by the next `silo run` to that
+  host or `silo gc --host`, which does not kill by recorded pid, since a
+  pid on another host may have been reused since.
+- **A dropped connection.** Once the master has exited, every remote
+  server's tools answer "MCP server <name> is unreachable: the
+  connection to <host> is gone", a server whose channel ended with it is
+  not restarted whatever `restart:` says, and the session exits 75 as
+  in §12.
+- **`--dry-run`** reaches the agent host on its own BatchMode
+  connection, reads the login environment and the `from:` file there,
+  finds a launched server's binary with `command -v` on the `PATH` it
+  will have, and prints "runs as <remote user> on <host> with access to
+  their files". It does not contact a remote `url:` server.
+
 ### 13.5 Security
 
 - **Reach:** the allowed tools of the declared servers, and through
@@ -1589,8 +2029,8 @@ git proxy.
   (`granule vm create <name>`, `granule vm exec`, `granule vm wait`,
   `granule vm delete`) on the local Docker, which is granule's model:
   "VMs in containers". It needs `/dev/kvm` (checked by `granule doctor`
-  in `--dry-run`), granule on `PATH` (or its Go packages, once its module
-  can be fetched), a guest image with git, and the git proxy reachable
+  in `--dry-run`), granule on `PATH` or named by `SILO_GRANULE` (or its Go
+  packages, once its module can be fetched), a guest image with git, and the git proxy reachable
   from inside the guest (the proxy listens where the VM's network can
   reach it; the clone URL carries a per-sandbox token, as in grain).
 - **Bridge to grain:** this is a grain run with silo underneath:
@@ -1628,10 +2068,13 @@ git:
     silo opens (a port-forward run in reverse is not offered by the
     Kubernetes API, so the sidecar dials out or silo uses
     `kubectl port-forward` to the sidecar, which then relays). Grain's
-    `pkg/tunnel` is the model.
+    `pkg/tunnel` is the model. Stage 11a built this with
+    `kubectl port-forward` (§5.4), and starts the CLI with `exec` in
+    headless mode too, not as the container's command (§5.4 says why).
   - **Credentials:** delivered as a Secret mounted into the pod (deleted
     at teardown), or as workload identity: the pod's Kubernetes service
-    account bound to journey 2's per-user GCP account.
+    account bound to journey 2's per-user GCP account. Stage 11a
+    delivers the Secret; workload identity is later.
 
 ```yaml
 location:
@@ -1688,14 +2131,20 @@ granule VM image, which is still an OCI image.
     sandbox entry (instead of `image:`), with `target:` and `args:` for
     the stage and build arguments. Because a Dockerfile is a Granule, a
     `container` sandbox's `build:` and a `granule` sandbox's
-    `granulefile:` are the same field read by two builders.
+    `granulefile:` are the same field read by two builders. (As built:
+    two Silofile keys, so that each kind's validation can say what it
+    takes, resolved into one `SandboxSpec.Build`; §7.3.)
   - **Build:** `granule granulefile check` in `silo validate`, and
     `granule granulefile build` at `silo run`. A Granulefile whose final
     stage is a container stage is refused for `kind: granule` (it would
-    build a container) and vice versa.
+    build a container) and vice versa. (As built: the stage checked is
+    the target, the last one unless `target:` names another; and the
+    reverse is any `VM` instruction in a container sandbox's `build:`,
+    which `docker build` cannot read.)
   - **Cache:** keyed by the SHA-256 of the Granulefile, its build
     context and its args, with the resulting image digest recorded in
-    `.silo/lock.json`, so a second run does not rebuild. For a remote
+    `.silo/lock.json`, so a second run does not rebuild (as built:
+    §7.3, stage 8b). For a remote
     backend (k8s), the image is pushed to a registry the Silofile names
     (`push_to:`) and referenced by digest.
 
@@ -1760,6 +2209,8 @@ v2/
 │                          #   validation, JSON Schema generation
 ├── session/               # one session: setup order, teardown, session.json,
 │                          #   signals, exit codes, event stream, control socket
+├── events/                # the event schema shared by --json and the
+│                          #   library (events.md)
 ├── gateway/               # the MCP server: tool registry, routing, refusal,
 │                          #   audit, redaction
 │   └── audit/
@@ -1770,7 +2221,7 @@ v2/
 │   ├── local/
 │   ├── ssh/               # master connection, probe, forwards, staging
 │   ├── vm/                # later
-│   ├── k8s/               # later
+│   ├── k8s/               # pod, Secret, tunnel, exec, gc (stage 11a)
 │   └── hosted/            # later: ax, capsule
 ├── agentcli/              # per-CLI mapping: modes, remote_permissions,
 │   ├── claude/            #   MCP config format, auth, version checks,
@@ -1780,7 +2231,7 @@ v2/
 ├── sandbox/               # the Backend interface
 │   ├── container/         # docker/podman, gvisor via runtime
 │   ├── folder/            # silo create's workspace
-│   └── granule/           # later
+│   └── granule/           # granule microVMs, via the granule CLI
 ├── localexec/             # script snapshot, checks, warnings, execve
 ├── credentials/           # sources, destinations, keyring store
 ├── gcp/                   # journey 2: account spec, setup, tokens,
@@ -1808,14 +2259,14 @@ change argued below.
 | 1 | **Core** | `silofile` (types, strict decoding, folder, validation, schema), `silo validate`, `silo schema`, `session` (setup/teardown, signals, session dir, exit codes), `gateway` (registry, refusal, audit), `location/local`, `agentcli/claude` and `agentcli/codex` for `interactive`/`headless` with `none`/`all`/subset, `sandbox/container` (+gvisor), `credentials` (env, file, ambient). A silo with a container sandbox runs end to end. | — |
 | 2 | **Journey 2** | `gcp`: account spec and naming, setup checks, create/verify/reuse, propagation wait, token minting and refresh, delivery, metadata emulator, `silo gc` for accounts. | 1 |
 | 3 | **Journey 1** | `create`: the built-in Silofile, `sandbox/folder`, the `silo_*` tools, embedded docs and examples, `silo run --dry-run`, `silo edit`, the first-run summary. | 1, 2 (for `silo_check`'s IAM checks) |
-| 4 | **Journey 3** | `location/ssh`, `localexec`, approvals, `silo gc --host`. | 1 |
+| 4 | **Journey 3** | `location/ssh`, `localexec`, approvals, `silo gc --host`. Built as 4a (`localexec`, approvals) and 4b (`location/ssh`, `silo gc --host`). | 1 |
 | 5 | **Journey 4** | `mcp/sources`, launched and URL servers, local and remote, allowlists, lifecycle. | 1, 4 (remote servers) |
 | 6 | **Programmatic interface** | `--json` events, control socket, the Go library API, caller-provided MCP servers. | 1 |
 | 7 | **Git proxy** | `gitproxy` copied and adapted from grain, `git:` and `sandboxes[].repos`. | 1 |
 | 8 | **Granule** | `sandbox/granule`, Granulefiles (journeys 7, 10). | 1, 7 |
 | 9 | **Detach and re-attach** | per-session supervisor, resumable event stream. | 6 |
 | 10 | **`vm`** (journey 5) | | 2, 4 |
-| 11 | **`k8s`** (journeys 8, 9) | | 6, 8 |
+| 11 | **`k8s`** (journeys 8, 9) | 11a: `location/k8s`, the tunnel sidecar, Secrets, `silo gc --k8s` (journey 8). 11b: granule sandboxes on Kubernetes (journey 9). | 6, 8 (11a also waits on 9) |
 | 12 | **`ax`/`capsule`** (journey 6) | | 6, open questions 13–17 |
 
 **One change to the suggested order:** stages 6 and 7 could come before
@@ -1844,7 +2295,7 @@ Decisions the core model did not settle, made by the author, for review:
 8. silo never installs or logs in a CLI on a remote host. (§5.3)
 9. `remote_permissions` subsets use the CLI's own tool names. (§6.1)
 10. The `folder` sandbox kind is built-in only in v2.0. (§7.1)
-11. v2.0 ships `container` and `gvisor` sandboxes; `granule` is stage 8. (§7.1)
+11. v2.0 ships `container` and `gvisor` sandboxes; `granule` is stage 8 (`image:` in 8a, `granulefile:` in 8b, both built). (§7.1)
 12. The `store:` credential source is the OS keyring. (§8.1)
 13. The shared git proxy lives in silo v2 and grain imports it. (§9.2)
 14. `silo create`'s reference material is served as MCP tools, not files. (§10.2)
@@ -1931,4 +2382,5 @@ list of unverified assumptions)
 18. Does grain want silo as a library (in-process) or as a subprocess
     per run? This draft offers both, from the same `session` package.
 19. Which of grain's MCP tools move to the gateway (sandbox tools) and
-    which stay grain's (task tools)?
+    which stay grain's (task tools)? Stage 6b built the mechanism, a
+    per-session rename map (`silo.Options.Rename`), and chose no names.

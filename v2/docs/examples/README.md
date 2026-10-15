@@ -15,6 +15,8 @@ error per later value, each naming what adds it.
 | [`google-project/`](google-project/) | 2: a local agent with `gcloud`, `gsutil` and `bq` on one project. |
 | [`remote-scripts/`](remote-scripts/) | 3: an agent on a remote host over ssh, with two local scripts. |
 | [`mcp-servers/`](mcp-servers/) | 4: existing MCP servers, local and remote. |
+| [`granule-sandbox/`](granule-sandbox/) | 7: a local agent whose commands run in a granule microVM, with the repo cloned through the git proxy. |
+| [`granulefile-sandbox/`](granulefile-sandbox/) | 10: a granule microVM built from a Granulefile in the folder, and not rebuilt while its content is unchanged. |
 | [`grain-run/`](grain-run/) | A grain task run, headless, as grain would generate it. |
 
-Sketches for journeys 5–10 are in design §14.
+Sketches for journeys 5, 6, 8 and 9 are in design §14.
