@@ -31,6 +31,8 @@ type env struct {
 	applier *netfence.Applier
 	srv     *httptest.Server
 	root    string
+	// stop ends the applier's Run loop and waits for it to return.
+	stop func()
 
 	mu   sync.Mutex
 	topo netfence.Topology
@@ -66,9 +68,11 @@ func newEnv(t *testing.T, cfg netfence.Config) *env {
 	})
 	e.srv = httptest.NewServer(api)
 	t.Cleanup(func() { e.srv.Close(); api.Close() })
+	runCtx, stopRun := context.WithCancel(ctx)
 	done := make(chan struct{})
-	go func() { defer close(done); a.Run(ctx, 10*time.Millisecond) }()
-	t.Cleanup(func() { cancel(); <-done })
+	go func() { defer close(done); a.Run(runCtx, 10*time.Millisecond) }()
+	e.stop = func() { stopRun(); <-done }
+	t.Cleanup(e.stop)
 	root := e.ok("", "POST", "/silod/bootstrap", obj{
 		"regions":       []string{"us-central1"},
 		"address_space": "10.0.0.0/16", "gateway_range": "10.0.255.0/24", "control_range": "10.0.254.0/24",
@@ -185,7 +189,10 @@ func TestApplyFollowsTheAPI(t *testing.T) {
 	}
 
 	// Drift: someone changed the tables. Repair reports it and loads
-	// the fence again.
+	// the fence again. Run is stopped first: a change it has not yet
+	// drained (the PATCH's, say) would have it apply between Tamper and
+	// Repair, find the drift itself and leave Repair none to report.
+	e.stop()
 	var drifted []string
 	e.applier.OnDrift = func(_ context.Context, d []string, repaired bool) {
 		if repaired {
