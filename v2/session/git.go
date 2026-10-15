@@ -344,7 +344,8 @@ func checkGit(ctx context.Context, f *silofile.Silofile, environ []string) []Che
 		return []CheckResult{{Name: "git", Detail: err.Error()}}
 	}
 	proxy := &gitproxy.GitProxy{Policy: policy, Tokens: tokens, ForwarderFor: gitCheckForwarder}
-	auth := map[string]string{"Authorization": "Basic " + basic("silo", tok)}
+	// A git client's request, as the proxy only answers those.
+	auth := map[string]string{"Authorization": "Basic " + basic("silo", tok), "User-Agent": "git/silo-dry-run"}
 	var out []CheckResult
 	for _, g := range f.Git {
 		res := CheckResult{Name: "git " + g.Name}
