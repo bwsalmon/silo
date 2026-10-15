@@ -64,7 +64,11 @@ func provideSandboxes(ctx context.Context, s *Session) ([]gateway.Tool, Undo, er
 		}
 		d.Apply(&spec)
 		if len(sc.Repos) > 0 {
-			spec.PrivateNetwork = s.git.network
+			if sc.Backend.K8s != nil {
+				spec.GitProxy = s.git.addr
+			} else {
+				spec.PrivateNetwork = s.git.network
+			}
 		}
 		where := sc.Kind
 		if sc.Backend.K8s != nil {

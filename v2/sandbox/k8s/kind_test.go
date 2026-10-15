@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/v2/gitproxy"
 	"github.com/bwsalmon/silo/v2/internal/granuletest"
 	k8sloc "github.com/bwsalmon/silo/v2/location/k8s"
 	"github.com/bwsalmon/silo/v2/sandbox"
@@ -30,6 +31,7 @@ const RequireEnv = "SILO_V2_REQUIRE_K8S_KVM"
 // The images as the kind node holds them, loaded rather than pulled.
 const (
 	guestImage  = "silo-test/granule-guest:k8s"
+	tunnelImage = "silo-test/silo-tunnel:k8s"
 	pluginImage = "silo-test/generic-device-plugin:k8s"
 	// pluginSource is the device plugin granule's manifest pins.
 	pluginSource = "ghcr.io/squat/generic-device-plugin@sha256:dc192e164c69b03f156765793a1be62ca437709ae477b27ca7d8f3dcf5021576"
@@ -153,13 +155,16 @@ nodes:
 		}
 	}
 	os.Setenv("KUBECONFIG", c.kubeconfig)
+	if err := buildTunnel(dir); err != nil {
+		return c, err
+	}
 	// The node's udev gives /dev/kvm the node's kvm group, which, the
 	// device being the host's, takes it from this machine's kvm group
 	// (and the granule tests that run after this one). Give it back.
 	if _, err := run(nil, "docker", "exec", c.name+"-control-plane", "chgrp", fmt.Sprint(c.kvmGroup), "/dev/kvm"); err != nil {
 		return c, err
 	}
-	for _, img := range []string{pluginImage, guestImage} {
+	for _, img := range []string{pluginImage, tunnelImage, guestImage} {
 		if _, err := run(nil, "kind", "load", "docker-image", "--name", c.name, img); err != nil {
 			return c, err
 		}
@@ -193,13 +198,70 @@ nodes:
 	}
 }
 
+// buildTunnel builds cmd/silo-tunnel into tunnelImage, as its own
+// Dockerfile does, from the binary built here.
+func buildTunnel(dir string) error {
+	ctx := filepath.Join(dir, "tunnel-image")
+	os.MkdirAll(ctx, 0o755)
+	cmd := exec.Command("go", "build", "-o", filepath.Join(ctx, "silo-tunnel"), "../../cmd/silo-tunnel")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("building silo-tunnel: %v: %s", err, out)
+	}
+	os.WriteFile(filepath.Join(ctx, "Dockerfile"), []byte("FROM scratch\nCOPY silo-tunnel /silo-tunnel\nUSER 65532:65532\nENTRYPOINT [\"/silo-tunnel\"]\n"), 0o644)
+	cmd = exec.Command("docker", "build", "-q", "-t", tunnelImage, ".")
+	cmd.Dir = ctx
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("building %s: %v: %s", tunnelImage, err, out)
+	}
+	return nil
+}
+
+// gitProxy serves a git proxy on this machine's loopback in front of
+// one repository, github.com/acme/widgets, and returns its address and
+// a token that may fetch it.
+func gitProxy(t *testing.T) (addr, token string) {
+	t.Helper()
+	root := t.TempDir()
+	bare := filepath.Join(root, "acme", "widgets.git")
+	seed := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "--bare", "-b", "main", bare},
+		{"init", "-q", "-b", "main", seed},
+		{"-C", seed, "-c", "user.name=silo", "-c", "user.email=silo@example.invalid", "commit", "-q", "--allow-empty", "-m", "Initial widgets"},
+		{"-C", seed, "push", "-q", bare, "main"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	policy, err := gitproxy.NewStaticPolicy(gitproxy.StaticConfig{Repos: []gitproxy.StaticRepo{{Repo: "github.com/acme/widgets", Access: gitproxy.AccessRead}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := &gitproxy.TokenSet{}
+	token, err = tokens.Mint(gitproxy.Caller{ID: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := &gitproxy.LocalForwarder{Root: root}
+	srv, err := gitproxy.Serve(&gitproxy.GitProxy{Policy: policy, Tokens: tokens,
+		ForwarderFor: func(string) (gitproxy.Forwarder, error) { return local, nil }}, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close(context.Background()) })
+	return strings.TrimPrefix(srv.URL, "http://"), token
+}
+
 func (c *cluster) target() sandbox.K8sTarget {
-	return sandbox.K8sTarget{Context: "kind-" + c.name, Namespace: namespace, KVMGroup: c.kvmGroup}
+	return sandbox.K8sTarget{Context: "kind-" + c.name, Namespace: namespace, KVMGroup: c.kvmGroup, TunnelImage: tunnelImage}
 }
 
 // TestGranulePod runs a granule sandbox as a pod in a namespace that
-// enforces the restricted Pod Security Standard, execs into its guest,
-// uses the file tools, and destroys it.
+// enforces the restricted Pod Security Standard, clones through a git
+// proxy on this machine's loopback into its guest, which has no
+// network, execs into it, uses the file tools, and destroys it.
 func TestGranulePod(t *testing.T) {
 	c := kindKVM(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -213,11 +275,13 @@ func TestGranulePod(t *testing.T) {
 		t.Errorf("CheckDevices = %q", detail)
 	}
 
+	proxy, token := gitProxy(t)
 	session := fmt.Sprintf("s-kindkvm%04d", os.Getpid()%10000)
 	spec := sandbox.SandboxSpec{
 		Session: session, Name: "dev", Kind: "granule", Image: guestImage,
 		Workdir: "/work", CPUs: 1, Memory: 1 << 30, Network: "none",
 		Env: map[string]string{"GREETING": "it's here"}, K8s: &target,
+		GitProxy: proxy,
 	}
 	sb, err := b.Create(ctx, spec)
 	if err != nil {
@@ -229,7 +293,19 @@ func TestGranulePod(t *testing.T) {
 		t.Errorf("no image digest recorded")
 	}
 
-	res, err := sb.Exec(ctx, sandbox.ExecRequest{Argv: []string{"/bin/sh", "-c", `echo "$GREETING"; pwd; uname -s; cat; exit 3`}, Stdin: []byte("in\n")})
+	// The clone goes over vsock to the sidecar, and through the tunnel
+	// to the proxy here.
+	remote := pod.GitProxyURL() + "/github.com/acme/widgets.git"
+	remote = strings.Replace(remote, "http://", "http://silo:"+token+"@", 1)
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Argv: []string{"/bin/sh", "-c", `git clone --quiet -- "$1" /work/widgets && git -C /work/widgets log --format=%s`, "sh", remote}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(res.Stdout)); got != "Initial widgets" || res.ExitCode != 0 {
+		t.Fatalf("clone through the proxy: exit %d, %q, %q", res.ExitCode, res.Stdout, res.Stderr)
+	}
+
+	res, err = sb.Exec(ctx, sandbox.ExecRequest{Argv: []string{"/bin/sh", "-c", `echo "$GREETING"; pwd; uname -s; cat; exit 3`}, Stdin: []byte("in\n")})
 	if err != nil {
 		t.Fatal(err)
 	}

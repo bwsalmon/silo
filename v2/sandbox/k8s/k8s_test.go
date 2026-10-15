@@ -24,6 +24,14 @@ func spec(network string) sandbox.SandboxSpec {
 	}
 }
 
+// gitSpec is spec("none") with repos: the git proxy's tunnel.
+func gitSpec() sandbox.SandboxSpec {
+	s := spec("none")
+	s.GitProxy = "127.0.0.1:41234"
+	s.K8s.TunnelImage = "ghcr.io/bwsalmon/silo-tunnel:test"
+	return s
+}
+
 func TestPodSpecGolden(t *testing.T) {
 	for _, tc := range []struct {
 		golden string
@@ -32,6 +40,7 @@ func TestPodSpecGolden(t *testing.T) {
 	}{
 		{"pod-none.json", spec("none"), nil},
 		{"pod-open.json", spec("open"), map[string]string{"cloud.google.com/gke-nodepool": "kvm"}},
+		{"pod-git.json", gitSpec(), nil},
 		{"pod-defaults.json", sandbox.SandboxSpec{Session: "s-abcdefghijkl", Name: "bare", Kind: "granule", Image: "guest:1", Network: "none"}, nil},
 	} {
 		t.Run(tc.golden, func(t *testing.T) {
@@ -163,6 +172,27 @@ func TestNoNetworkPassesRestricted(t *testing.T) {
 	}
 	if p.Metadata.Labels[RoleLabel] != Role || p.Metadata.Labels["silo.dev/session"] != "s-abcdefghijkl" {
 		t.Errorf("labels = %v", p.Metadata.Labels)
+	}
+}
+
+// The tunnel sidecar keeps the pod restricted, shares only the vsock
+// directory, and points the VM's vsock socket into it.
+func TestGitTunnelPassesRestricted(t *testing.T) {
+	p := decode(t, gitSpec())
+	if bad := restricted(p); len(bad) > 0 {
+		t.Errorf("a no-network guest with repos breaks restricted: %v", bad)
+	}
+	if n := len(p.Spec.Containers); n != 2 {
+		t.Fatalf("%d containers, want the VM and the tunnel", n)
+	}
+	b, _ := PodSpec(gitSpec(), "o", nil)
+	for _, want := range []string{`"CHV_VSOCK_SOCKET"`, `"unix:/run/silo-vsock/vm.sock_7814"`, `"127.0.0.1:7812"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("pod spec lacks %s", want)
+		}
+	}
+	if strings.Contains(string(b), "41234") {
+		t.Errorf("the proxy's address on this machine is in the pod spec")
 	}
 }
 

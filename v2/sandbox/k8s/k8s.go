@@ -70,8 +70,29 @@ const (
 	TunResource = "devic.es/tun"
 )
 
-// Container is the pod's one container, which runs the VM.
+// Container is the pod's container that runs the VM.
 const Container = "vm"
+
+// The git proxy's path into a sandbox with repos (design §9.3): a
+// tunnel sidecar beside the VM listens on the Unix socket
+// cloud-hypervisor connects a guest's vsock connection to host port
+// GitVsockPort to, and carries each connection over silo's kubectl
+// port-forward to its ControlPort, back to the proxy on the invoking
+// machine. In the guest, the sidecar's own binary listens on loopback
+// port GitGuestPort for git and forwards over vsock.
+const (
+	TunnelContainer = "tunnel"
+	// VsockDir is an emptyDir both containers mount, holding the VM's
+	// vsock socket (CHV_VSOCK_SOCKET) and the sidecar's beside it.
+	VsockDir     = "/run/silo-vsock"
+	VsockSocket  = VsockDir + "/vm.sock"
+	GitVsockPort = 7814
+	GitGuestPort = 7814
+	ControlPort  = k8sloc.ControlPort
+	// GuestTunnel is where the forwarder is copied in the guest: not
+	// under /run, which a guest may mount noexec.
+	GuestTunnel = "/var/lib/silo/silo-tunnel"
+)
 
 // Granule is granule's binary in a granule VM image.
 const Granule = "/usr/local/bin/granule"
@@ -106,6 +127,10 @@ type Backend struct {
 	// NodeSelector, when set, pins sandbox pods to nodes that carry
 	// these labels (a node pool with nested virtualisation).
 	NodeSelector map[string]string
+	// Builder builds a granulefile: sandbox's image on this machine,
+	// which Create pushes to its push_to: (journey 10). Nil refuses
+	// granulefile:.
+	Builder *granule.Backend
 }
 
 var (
@@ -202,6 +227,12 @@ func PodSpec(spec sandbox.SandboxSpec, origin string, nodeSelector map[string]st
 		add("CHV_DISK_SIZE_MB", strconv.FormatInt((spec.Disk+1<<20-1)>>20, 10))
 	}
 	add("CHV_SHUTDOWN_TIMEOUT", "20s")
+	tunnel := spec.GitProxy != ""
+	if tunnel {
+		// Beside the sidecar's socket, which only works when the two are
+		// in one directory; granule exec and granule ready read it too.
+		add("CHV_VSOCK_SOCKET", VsockSocket)
+	}
 	resources := obj{"limits": limits}
 	if len(requests) > 0 {
 		resources["requests"] = requests
@@ -224,6 +255,61 @@ func PodSpec(spec sandbox.SandboxSpec, origin string, nodeSelector map[string]st
 			podSC["supplementalGroups"] = []int64{spec.K8s.KVMGroup}
 		}
 	}
+	mounts := []obj{
+		{"name": "run", "mountPath": "/run"},
+		{"name": "tmp", "mountPath": "/tmp"},
+		{"name": "overlay", "mountPath": "/var/lib/granule/overlay"},
+	}
+	volumes := []obj{
+		{"name": "run", "emptyDir": obj{"medium": "Memory"}},
+		{"name": "tmp", "emptyDir": obj{}},
+		{"name": "overlay", "emptyDir": obj{}},
+	}
+	containers := []obj{{
+		"name":  Container,
+		"image": spec.Image,
+		// args, not command: the image's entrypoint is granule's
+		// shim, and "run" boots the VM.
+		"args": []string{"run"},
+		"env":  env,
+		"readinessProbe": obj{
+			"exec":           obj{"command": []string{Granule, "ready", "-timeout", "0"}},
+			"periodSeconds":  2,
+			"timeoutSeconds": 5,
+		},
+		"resources":       resources,
+		"securityContext": csc,
+		"volumeMounts":    mounts,
+	}}
+	if tunnel {
+		vsock := obj{"name": "vsock", "mountPath": VsockDir}
+		containers[0]["volumeMounts"] = append(mounts, vsock)
+		volumes = append(volumes, obj{"name": "vsock", "emptyDir": obj{"medium": "Memory"}})
+		image := spec.K8s.TunnelImage
+		if image == "" {
+			image = k8sloc.DefaultTunnelImage
+		}
+		containers = append(containers, obj{
+			"name":  TunnelContainer,
+			"image": image,
+			"args": []string{
+				"-gateway", fmt.Sprintf("unix:%s_%d", VsockSocket, GitVsockPort),
+				"-control", fmt.Sprintf("127.0.0.1:%d", ControlPort),
+			},
+			"resources": obj{
+				"requests": obj{"cpu": "10m", "memory": "16Mi"},
+				"limits":   obj{"memory": "64Mi"},
+			},
+			"securityContext": obj{
+				"runAsNonRoot":             true,
+				"runAsUser":                NobodyUID,
+				"allowPrivilegeEscalation": false,
+				"readOnlyRootFilesystem":   true,
+				"capabilities":             obj{"drop": []string{"ALL"}},
+			},
+			"volumeMounts": []obj{vsock},
+		})
+	}
 	pod := obj{
 		"apiVersion": "v1",
 		"kind":       "Pod",
@@ -240,31 +326,8 @@ func PodSpec(spec sandbox.SandboxSpec, origin string, nodeSelector map[string]st
 			// finishes before the kubelet kills the container.
 			"terminationGracePeriodSeconds": 40,
 			"securityContext":               podSC,
-			"containers": []obj{{
-				"name":  Container,
-				"image": spec.Image,
-				// args, not command: the image's entrypoint is granule's
-				// shim, and "run" boots the VM.
-				"args": []string{"run"},
-				"env":  env,
-				"readinessProbe": obj{
-					"exec":           obj{"command": []string{Granule, "ready", "-timeout", "0"}},
-					"periodSeconds":  2,
-					"timeoutSeconds": 5,
-				},
-				"resources":       resources,
-				"securityContext": csc,
-				"volumeMounts": []obj{
-					{"name": "run", "mountPath": "/run"},
-					{"name": "tmp", "mountPath": "/tmp"},
-					{"name": "overlay", "mountPath": "/var/lib/granule/overlay"},
-				},
-			}},
-			"volumes": []obj{
-				{"name": "run", "emptyDir": obj{"medium": "Memory"}},
-				{"name": "tmp", "emptyDir": obj{}},
-				{"name": "overlay", "emptyDir": obj{}},
-			},
+			"containers":                    containers,
+			"volumes":                       volumes,
 		},
 	}
 	if len(nodeSelector) > 0 {
@@ -282,15 +345,31 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 		return nil, fmt.Errorf("sandbox %q: no k8s backend", spec.Name)
 	case spec.Kind != "granule":
 		return nil, fmt.Errorf("sandbox %q: backend k8s runs kind granule only, not %q", spec.Name, spec.Kind)
-	case spec.Image == "":
-		return nil, fmt.Errorf("sandbox %q: kind granule needs image: a granule VM image", spec.Name)
-	case spec.Build != "":
-		return nil, fmt.Errorf("sandbox %q: a granule sandbox is booted from image:, not build:", spec.Name)
+	case spec.Image == "" && spec.Build == "":
+		return nil, fmt.Errorf("sandbox %q: kind granule needs image (a granule VM image) or granulefile", spec.Name)
+	case spec.Build != "" && spec.PushTo == "":
+		return nil, fmt.Errorf("sandbox %q: a granulefile: sandbox on a cluster needs push_to:, a registry its nodes pull from", spec.Name)
+	case spec.Build != "" && b.Builder == nil:
+		return nil, fmt.Errorf("sandbox %q: no granule on this machine to build its granulefile with", spec.Name)
 	case len(spec.Mounts) > 0:
 		return nil, fmt.Errorf("sandbox %q: kind granule takes no mounts", spec.Name)
 	}
 	if err := granule.CheckEnv(spec.Env); err != nil {
 		return nil, fmt.Errorf("sandbox %q: %w", spec.Name, err)
+	}
+	var built sandbox.Image
+	if spec.Build != "" {
+		// Built here, as on the local backend, and booted by digest
+		// from where it was pushed.
+		img, tag, err := b.Builder.BuildImage(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		ref, err := b.Builder.Push(ctx, tag, spec.PushTo)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox %q: %w", spec.Name, err)
+		}
+		spec.Image, spec.Build, built = ref, "", img
 	}
 	manifest, err := PodSpec(spec, b.origin(), b.NodeSelector)
 	if err != nil {
@@ -312,12 +391,62 @@ func (b *Backend) Create(ctx context.Context, spec sandbox.SandboxSpec) (sandbox
 		return nil, fmt.Errorf("sandbox %q: %w", spec.Name, err)
 	}
 	p.Image = sandbox.Image{Ref: spec.Image, Digest: digest}
+	if built.Ref != "" {
+		// The Granulefile and its key, as the local backend records it,
+		// with the digest the node pulled.
+		p.Image = built
+		p.Image.Digest = digest
+	}
 	if err := p.guest().Setup(ctx, spec.Workdir, spec.Env); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("sandbox %q: setting up the guest: %w", spec.Name, err)
 	}
+	if spec.GitProxy != "" {
+		if err := p.startGit(ctx, spec.GitProxy); err != nil {
+			cleanup()
+			return nil, fmt.Errorf("sandbox %q: the git proxy's tunnel: %w", spec.Name, err)
+		}
+	}
 	return p, nil
 }
+
+// forwardScript installs the forwarder it reads on stdin in the guest
+// and starts it in a session of its own, its output in a log, and
+// waits for it to listen.
+const forwardScript = `set -e; umask 022; mkdir -p -- "$(dirname -- "$1")"
+cat > "$1.new"; chmod 755 "$1.new"; mv -f -- "$1.new" "$1"
+log="$1.log"; rm -f -- "$log"
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$1" -guest-forward "127.0.0.1:$2" -vsock-port "$3" >"$log" 2>&1 </dev/null &
+else
+  nohup "$1" -guest-forward "127.0.0.1:$2" -vsock-port "$3" >"$log" 2>&1 </dev/null &
+fi
+i=0; while ! grep -q forwarding "$log" 2>/dev/null; do
+  i=$((i+1)); if [ $i -gt 100 ]; then cat "$log" >&2; exit 1; fi; sleep 0.1
+done`
+
+// startGit carries the session's git proxy, at proxy on the invoking
+// machine, into the guest: the tunnel to the sidecar, and the
+// sidecar's own binary copied into the guest to forward its loopback
+// over vsock.
+func (p *Pod) startGit(ctx context.Context, proxy string) error {
+	t, err := k8sloc.StartTunnel(ctx, p.k, p.Pod, ControlPort, proxy, nil)
+	if err != nil {
+		return err
+	}
+	p.tun = t
+	bin, err := p.k.Output(ctx, "reading the forwarder from the tunnel sidecar", nil, "exec", "--quiet", p.Pod, "-c", TunnelContainer, "--", "/silo-tunnel", "-self")
+	if err != nil {
+		return err
+	}
+	if _, err := p.guest().Run(ctx, []byte(bin), forwardScript, GuestTunnel, strconv.Itoa(GitGuestPort), strconv.Itoa(GitVsockPort)); err != nil {
+		return fmt.Errorf("starting the forwarder in the guest: %w", err)
+	}
+	return nil
+}
+
+// GitProxyURL is where the guest reaches the session's git proxy.
+func (p *Pod) GitProxyURL() string { return fmt.Sprintf("http://127.0.0.1:%d", GitGuestPort) }
 
 // podStatus is the part of a pod's status Create reads.
 type podStatus struct {
@@ -499,9 +628,14 @@ type Pod struct {
 	// Image is what the image resolved to, for .silo/lock.json. Empty
 	// for a sandbox found rather than created.
 	Image sandbox.Image
+	// tun carries the git proxy, for a sandbox with repos.
+	tun *k8sloc.Tunnel
 }
 
-var _ sandbox.Sandbox = (*Pod)(nil)
+var (
+	_ sandbox.Sandbox       = (*Pod)(nil)
+	_ sandbox.GitProxyURLer = (*Pod)(nil)
+)
 
 // OutputLimit bounds each of a command's output streams.
 const OutputLimit = granule.OutputLimit
@@ -614,8 +748,13 @@ func (p *Pod) DeliverFile(ctx context.Context, path string, data []byte) error {
 	return p.guest().DeliverFile(ctx, path, data)
 }
 
-// Destroy deletes the pod; one already gone is not an error.
+// Destroy closes the git proxy's tunnel and deletes the pod; one
+// already gone is not an error.
 func (p *Pod) Destroy(ctx context.Context) error {
+	if p.tun != nil {
+		p.tun.Close()
+		p.tun = nil
+	}
 	_, err := p.k.Output(ctx, "deleting pod "+p.Pod+" in "+p.k.Where(), nil, "delete", "pod", p.Pod, "--ignore-not-found", "--wait=false")
 	return err
 }

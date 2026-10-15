@@ -646,6 +646,10 @@
                       "namespace": {
                         "description": "The namespace the sandbox's pod goes in; the context's namespace when empty.",
                         "type": "string"
+                      },
+                      "tunnel_image": {
+                        "description": "The tunnel sidecar's image, which carries the git proxy to a sandbox with repos (design §9.3); silo's published one when empty.",
+                        "type": "string"
                       }
                     },
                     "type": "object"

@@ -90,6 +90,9 @@ type SandboxSpec struct {
 	// arguments; only granule sandboxes take them.
 	Target    string
 	BuildArgs map[string]string
+	// PushTo is the registry repository a Granulefile's image is pushed
+	// to for a remote backend, which boots it by digest.
+	PushTo string
 	// Workdir is the working directory inside the sandbox, created if
 	// missing. Empty means the image's own.
 	Workdir string
@@ -113,12 +116,27 @@ type SandboxSpec struct {
 	// K8s, when set, is the cluster the sandbox runs in (backend: {k8s:
 	// ...}, journey 9) rather than the invoking machine.
 	K8s *K8sTarget
+	// GitProxy, for a sandbox with repos on a backend that carries the
+	// session's git proxy to it itself (k8s), is the proxy's address on
+	// the invoking machine, host:port. The sandbox then implements
+	// GitProxyURLer.
+	GitProxy string
+}
+
+// GitProxyURLer is a Sandbox that reaches the session's git proxy at a
+// URL of its own, rather than at the proxy's address on the session's
+// network: a k8s sandbox's guest reaches it on its own loopback.
+type GitProxyURLer interface {
+	GitProxyURL() string
 }
 
 // K8sTarget is a kubeconfig context and namespace; either empty means
 // kubectl's current one.
 type K8sTarget struct {
 	Context, Namespace string
+	// TunnelImage is the tunnel sidecar's image, for a sandbox with
+	// repos; location/k8s.DefaultTunnelImage when empty.
+	TunnelImage string
 	// KVMGroup, when not zero, is the group that may open /dev/kvm on
 	// the cluster's nodes, which a guest with no network (whose VMM is
 	// not root) is given: GKE's nested-virtualisation nodes make
@@ -181,7 +199,7 @@ func SpecFor(f *silofile.Silofile, name, session string) (SandboxSpec, error) {
 			spec.Disk = int64(*s.Disk)
 		}
 		if k := s.Backend.K8s; k != nil {
-			spec.K8s = &K8sTarget{Context: k.Context, Namespace: k.Namespace, KVMGroup: int64(k.KVMGroup)}
+			spec.K8s = &K8sTarget{Context: k.Context, Namespace: k.Namespace, KVMGroup: int64(k.KVMGroup), TunnelImage: k.TunnelImage}
 		}
 		for key, file := range map[string]string{"build": s.Build, "granulefile": s.Granulefile} {
 			if file == "" {
@@ -194,7 +212,7 @@ func SpecFor(f *silofile.Silofile, name, session string) (SandboxSpec, error) {
 			spec.Build = real
 		}
 		if s.Granulefile != "" {
-			spec.Target = s.Target
+			spec.Target, spec.PushTo = s.Target, s.PushTo
 			if len(s.Args) > 0 {
 				spec.BuildArgs = map[string]string{}
 				for k, v := range s.Args {

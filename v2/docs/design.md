@@ -1045,7 +1045,7 @@ own defaults for the VMM image (`granule:latest`) and the guest rootfs
 it wraps or packs onto; silo passes neither. `push_to:` is validated (a
 registry repository, no tag or digest, granule with `granulefile:` only)
 and draws a warning on the local backend, which pushes nothing; pushing
-is stage 11b's. `--dry-run` reports whether each Granulefile is built
+is stage 11b's (below). `--dry-run` reports whether each Granulefile is built
 already.
 
 As built in stage 11b (`sandbox/k8s`, journey 9): a `granule` sandbox
@@ -1090,8 +1090,40 @@ gc --k8s`, delete sandbox pods as they delete the location's.
 `devic.es/kvm`, and `devic.es/tun` too when a sandbox there has
 `network: open`. It creates no pod, so whether a node can pull the guest
 image is left to `silo run`. `backend: k8s` is for `kind: granule`
-only. `repos` are refused there until the git proxy has a path into a
-cluster (§9.3).
+only.
+
+A k8s sandbox with `repos` reaches the session's git proxy through its
+pod (§9.3). The pod gets a second container, `tunnel`, with silo's
+tunnel sidecar image (`cmd/silo-tunnel`, the k8s location's; `tunnel_image`
+in `backend.k8s` names another). It runs as nobody, with what
+`restricted` asks for. The VM container's `CHV_VSOCK_SOCKET` points into
+an `emptyDir` the two share (`/run/silo-vsock/vm.sock`). The sidecar
+listens on the Unix socket `vm.sock_7814` beside it, which is where
+cloud-hypervisor's hybrid vsock connects a guest's connection to host
+port 7814. Silo dials the sidecar's control port with `kubectl
+port-forward`, as the k8s location does (`location/k8s.StartTunnel`,
+reconnected if it drops), and splices each connection to the proxy.
+After the guest boots, silo copies the sidecar's own binary into the
+guest (`silo-tunnel -self`, read with `kubectl exec` in the sidecar and
+written with `granule exec` in the guest, at `/var/lib/silo/silo-tunnel`,
+since a guest's `/run` may be `noexec`). It starts it there as
+`-guest-forward 127.0.0.1:7814 -vsock-port 7814`, in a session of its
+own. The clone's origin is then `http://silo:<token>@127.0.0.1:7814/...`
+on the guest's loopback. The guest still has no network device, and
+the pod still passes `restricted`. No listener is opened beyond
+loopback except the Unix socket in the pod's own `emptyDir`. A session
+whose only sandboxes with `repos` are on a cluster makes no network,
+and its proxy listens on 127.0.0.1.
+
+A k8s sandbox may be built from a `granulefile:` (journey 10), and then
+needs `push_to:`. Silo builds the image on the invoking machine as the
+local backend does, with the same cache key and tag. It pushes the
+image to `<push_to>:<key>` and boots the pod from
+`<push_to>@<digest>`, the digest `docker push` reports. A later push to
+the tag cannot change what a sandbox was made from. `.silo/lock.json`
+records the Granulefile, its key and the digest the node pulled. The
+invoking machine needs granule, Docker and a login to the registry;
+the nodes need to be able to pull from it.
 
 **Where this departs from grain's `docs/k8s-granule-design.md`.** Grain
 settled on privileged pods with a `/dev/kvm` hostPath, in a namespace
@@ -1226,11 +1258,11 @@ one.
   Podman's network namespace, not on the host, so there the proxy
   cannot listen and the session fails at start saying so: sandboxes with
   `repos` need Docker or rootful Podman in v2.0. A sandbox with `backend: k8s`
-  (journey 9) is on no network of the invoking machine's, so the
-  stage 7b proxy cannot reach it, and `repos` are refused for it until a
-  later stage gives the proxy a path into the cluster. That path should
-  be a tunnel like the k8s location's gateway tunnel (§5.4) rather than
-  a listener beyond loopback.
+  (journey 9) is on no network of the invoking machine's. Its pod
+  carries the proxy to it instead: a tunnel sidecar on the VM's vsock
+  socket, `kubectl port-forward` to it, and a forwarder on the guest's
+  loopback (§7.3). The proxy then listens on loopback when no local
+  sandbox has `repos`.
 - **Tokens.** One per sandbox with `repos` (`gitproxy.TokenSet`), in
   memory, so each audit line's `caller` names the session and the
   sandbox. They die with the proxy at teardown.

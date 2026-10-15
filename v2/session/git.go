@@ -41,6 +41,9 @@ type gitSession struct {
 	// http://<network host IP>:<port>.
 	base    string
 	network string
+	// addr is the proxy's address on this machine, host:port, which a
+	// backend that carries the proxy itself (k8s) dials.
+	addr string
 	// tokens is each sandbox's token, by sandbox name.
 	tokens map[string]string
 }
@@ -49,8 +52,12 @@ type gitSession struct {
 // the origin a checkout is made with. A later session rewrites it with
 // its own (git remote set-url), which is how a persistent workspace
 // would be re-attached (grain.md §2.3).
-func (g *gitSession) remoteURL(sandboxName, repo string) string {
-	u, _ := url.Parse(g.base + "/" + repo + ".git")
+func (g *gitSession) remoteURL(sb sandbox.Sandbox, sandboxName, repo string) string {
+	base := g.base
+	if p, ok := sb.(sandbox.GitProxyURLer); ok {
+		base = p.GitProxyURL()
+	}
+	u, _ := url.Parse(base + "/" + repo + ".git")
 	u.User = url.UserPassword("silo", g.tokens[sandboxName])
 	return u.String()
 }
@@ -203,19 +210,21 @@ func stepGitProxy(ctx context.Context, s *Session) (Undo, error) {
 	if err != nil {
 		return nil, err
 	}
-	nw, ok := b.(sandbox.Networker)
-	if !ok {
-		return nil, fmt.Errorf("git proxy: the sandbox backend cannot give sandboxes a private network to reach the proxy on")
-	}
 	policy, err := gitPolicy(s.File, s.gitCredentialSource)
 	if err != nil {
 		return nil, err
 	}
-	network, err := nw.CreateNetwork(ctx, s.ID)
-	if err != nil {
-		return nil, fmt.Errorf("git proxy: %w", err)
+	// A sandbox on a cluster reaches the proxy through its pod's tunnel
+	// (design §9.3), which silo dials from this machine, so a session
+	// whose only sandboxes with repos are there needs no network, and
+	// the proxy listens on loopback.
+	local := false
+	for _, sc := range s.File.Sandboxes {
+		local = local || (len(sc.Repos) > 0 && sc.Backend.K8s == nil)
 	}
 	var srv *gitproxy.Server
+	var nw sandbox.Networker
+	network := sandbox.Network{HostIP: "127.0.0.1"}
 	undo := func(ctx context.Context) error {
 		var errs []error
 		if srv != nil {
@@ -223,10 +232,23 @@ func stepGitProxy(ctx context.Context, s *Session) (Undo, error) {
 			errs = append(errs, srv.Close(cctx))
 			cancel()
 		}
-		return errors.Join(append(errs, nw.RemoveNetwork(ctx, network.Name))...)
+		if nw != nil {
+			errs = append(errs, nw.RemoveNetwork(ctx, network.Name))
+		}
+		return errors.Join(errs...)
 	}
-	if err := s.AddResource(Resource{Kind: KindNetwork, Runtime: s.runtime(), Network: network.Name}); err != nil {
-		return undo, err
+	if local {
+		var ok bool
+		if nw, ok = b.(sandbox.Networker); !ok {
+			return nil, fmt.Errorf("git proxy: the sandbox backend cannot give sandboxes a private network to reach the proxy on")
+		}
+		network, err = nw.CreateNetwork(ctx, s.ID)
+		if err != nil {
+			return nil, fmt.Errorf("git proxy: %w", err)
+		}
+		if err := s.AddResource(Resource{Kind: KindNetwork, Runtime: s.runtime(), Network: network.Name}); err != nil {
+			return undo, err
+		}
 	}
 	tokens := &gitproxy.TokenSet{}
 	g := &gitSession{network: network.Name, tokens: map[string]string{}}
@@ -250,8 +272,13 @@ func stepGitProxy(ctx context.Context, s *Session) (Undo, error) {
 			"a rootless Podman network's gateway is not on the host: use Docker or rootful Podman for sandboxes with repos", network.HostIP, err)
 	}
 	g.base = srv.URL
+	g.addr = strings.TrimPrefix(srv.URL, "http://")
 	s.git = g
-	s.status("git proxy: %d repositories for %d sandboxes, on network %s at %s", len(s.File.Git), len(g.tokens), network.Name, srv.URL)
+	if network.Name != "" {
+		s.status("git proxy: %d repositories for %d sandboxes, on network %s at %s", len(s.File.Git), len(g.tokens), network.Name, srv.URL)
+	} else {
+		s.status("git proxy: %d repositories for %d sandboxes, at %s", len(s.File.Git), len(g.tokens), srv.URL)
+	}
 	return undo, nil
 }
 
@@ -275,7 +302,7 @@ func (s *Session) checkout(ctx context.Context, sb sandbox.Sandbox, sc silofile.
 		}
 		s.status("sandbox %s: cloning %s into %s", sc.Name, repo, dir)
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Argv: []string{"git", "clone", "--quiet", "--", s.git.remoteURL(sc.Name, repo.String()), dir},
+			Argv: []string{"git", "clone", "--quiet", "--", s.git.remoteURL(sb, sc.Name, repo.String()), dir},
 			Cwd:  "/",
 			Env:  map[string]string{"GIT_TERMINAL_PROMPT": "0"},
 		})
@@ -319,10 +346,11 @@ func (s *Session) backend() (sandbox.Backend, error) {
 // network; and with sandboxes on a cluster (backend: {k8s: ...}), the
 // k8s backend, which needs neither.
 func newBackend(f *silofile.Silofile) (sandbox.Backend, error) {
-	usesGranule, local := false, false
+	usesGranule, local, builds := false, false, false
 	var specs []sandbox.SandboxSpec
 	for _, sc := range f.Sandboxes {
 		if sc.Backend.K8s != nil {
+			builds = builds || sc.Granulefile != ""
 			specs = append(specs, sandbox.SandboxSpec{K8s: &sandbox.K8sTarget{Context: sc.Backend.K8s.Context, Namespace: sc.Backend.K8s.Namespace}})
 			continue
 		}
@@ -331,7 +359,15 @@ func newBackend(f *silofile.Silofile) (sandbox.Backend, error) {
 	}
 	var kb sandbox.Backend
 	if len(specs) > 0 {
-		kb = &k8ssb.Backend{Targets: k8ssb.TargetsOf(specs)}
+		k := &k8ssb.Backend{Targets: k8ssb.TargetsOf(specs)}
+		if builds {
+			gb, err := granule.New()
+			if err != nil {
+				return nil, err
+			}
+			k.Builder = gb
+		}
+		kb = k
 		if !local {
 			return &sandbox.Kinds{K8s: kb}, nil
 		}
