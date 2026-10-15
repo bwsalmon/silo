@@ -166,8 +166,13 @@ func run(c check) (bool, string) {
 		}
 		defer conn.Close()
 		buf := make([]byte, 512)
+		msg := []byte("probe\n")
+		if c.Port == 53 {
+			// A DNS server answers only a query: one for silo.internal.
+			msg = []byte("\x51\x10\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04silo\x08internal\x00\x00\x01\x00\x01")
+		}
 		for range 3 {
-			conn.Write([]byte("probe\n"))
+			conn.Write(msg)
 			conn.SetReadDeadline(time.Now().Add(time.Second))
 			if _, err = conn.Read(buf); err == nil {
 				return true, "answered"

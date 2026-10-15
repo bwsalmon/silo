@@ -79,3 +79,25 @@ func (l Local) Fence(t testing.TB) (conformance.Fence, error) {
 	}
 	return f, err
 }
+
+// Pulling are the targets for cases that pull public images (alpine,
+// nginx, postgres) from docker.io into silos they make: All, but with
+// local/sandbox not runnable, since the installed target's silos have
+// no egress to docker.io's registry, and its probes' images are loaded
+// rather than pulled.
+func Pulling() []conformance.Target {
+	var out []conformance.Target
+	for _, t := range All() {
+		if l, ok := t.(Local); ok && l.Class == "sandbox" {
+			t = notPulling{l}
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+type notPulling struct{ Local }
+
+func (notPulling) Fence(testing.TB) (conformance.Fence, error) {
+	return nil, &conformance.NotRunnable{Why: "these cases pull public images from docker.io, which the installed target's silos have no egress for"}
+}

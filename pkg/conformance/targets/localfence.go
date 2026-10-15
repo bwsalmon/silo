@@ -132,7 +132,38 @@ func (f *localFence) API(caller, method, path string, body any) (int, map[string
 	case f.in.Root:
 		return f.rootAPI(method, path, body)
 	}
-	return f.fromProbe(caller, method, "http://"+f.Gateway()+":8080"+path, body)
+	f.t.Skipf("%s: not runnable here: a call as a silo other than the root comes from a container of it, to the fence API on gw0:8080, which an installed silod doesn't serve yet", "local/sandbox")
+	return 0, nil
+}
+
+// gatewayMissing are the gateway's ports on gw0 that an installed
+// silod doesn't serve yet: the fence API, the egress proxy and HTTP. A
+// check of one is reported unsupported, so that the case skips rather
+// than taking the refusal for the fence's.
+var gatewayMissing = map[int]string{8080: "the fence API", 3128: "the egress proxy", 80: "HTTP"}
+
+// unsupported is why c can't be run against this install, or "".
+func (f *localFence) unsupported(c conformance.Check) string {
+	port := c.Port
+	host := c.Host
+	if c.Kind == "http" || c.Kind == "call" {
+		u, err := url.Parse("http://" + c.Proxy)
+		if c.Proxy == "" {
+			u, err = url.Parse(c.URL)
+		}
+		if err != nil {
+			return ""
+		}
+		host = u.Hostname()
+		fmt.Sscanf(u.Port(), "%d", &port)
+		if u.Port() == "" {
+			port = 80
+		}
+	}
+	if what, ok := gatewayMissing[port]; ok && host == f.Gateway() {
+		return fmt.Sprintf("%s: an installed silod doesn't serve %s on gw0:%d yet", conformance.Unsupported, what, port)
+	}
+	return ""
 }
 
 func (f *localFence) rootAPI(method, path string, body any) (int, map[string]any) {
@@ -145,9 +176,9 @@ func (f *localFence) rootAPI(method, path string, body any) (int, map[string]any
 		for k, v := range m {
 			c[k] = v
 		}
-		q := map[string]any{"vcpu_m": 2000, "memory_mb": 2048, "disk_gb": 6, "containers": 6, "networks": 2, "volumes": 2}
+		q := map[string]any{"vcpu_m": 2000, "memory_mb": 768, "disk_gb": 6, "containers": 6, "networks": 2, "volumes": 2}
 		if !strings.HasPrefix(path, "/silo/v1/silos/-") {
-			q = map[string]any{"vcpu_m": 1000, "memory_mb": 1024, "disk_gb": 2, "containers": 2, "networks": 1, "volumes": 1}
+			q = map[string]any{"vcpu_m": 1000, "memory_mb": 256, "disk_gb": 2, "containers": 2, "networks": 1, "volumes": 1}
 		}
 		c["quota"] = map[string]any{"global": q}
 		body = c
@@ -404,7 +435,12 @@ func (p *localProbe) Run(checks []conformance.Check) map[string]conformance.Prob
 	p.rounds++
 	round := fmt.Sprintf("r%d", p.rounds)
 	var cs []conformance.Check
+	skipped := map[string]conformance.ProbeResult{}
 	for _, c := range checks {
+		if why := p.f.unsupported(c); why != "" {
+			skipped[c.ID] = conformance.ProbeResult{Detail: why}
+			continue
+		}
 		c.ID = round + "." + c.ID
 		cs = append(cs, c)
 	}
@@ -438,7 +474,7 @@ func (p *localProbe) Run(checks []conformance.Check) map[string]conformance.Prob
 		logs := string(p.f.dock(p.t, p.silo, "GET", "/containers/"+p.id+"/logs?stdout=1&stderr=1", "", nil))
 		report, _ := conformance.ParseProbeReport(logs)
 		if _, ok := report[round+".done"]; ok {
-			out := map[string]conformance.ProbeResult{}
+			out := skipped
 			for id, r := range report {
 				if k, ok := strings.CutPrefix(id, round+"."); ok && k != "done" {
 					out[k] = r

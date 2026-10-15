@@ -30,7 +30,9 @@ func eachFence(t *testing.T, fn func(t *testing.T, f conformance.F)) {
 	})
 }
 
-// hostAddrs are this machine's IPv4 addresses, loopback included.
+// hostAddrs are this machine's IPv4 addresses, loopback excepted: a
+// probe's own loopback is its own, in a container as on a VM, and
+// answers it.
 func hostAddrs(t *testing.T) []netip.Addr {
 	t.Helper()
 	as, err := net.InterfaceAddrs()
@@ -39,7 +41,7 @@ func hostAddrs(t *testing.T) []netip.Addr {
 	}
 	var out []netip.Addr
 	for _, a := range as {
-		if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Is4() {
+		if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Is4() && !p.Addr().IsLoopback() {
 			out = append(out, p.Addr())
 		}
 	}
