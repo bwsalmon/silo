@@ -720,7 +720,7 @@ func serve(ctx context.Context, args []string) error {
 				runsc, _ := exec.LookPath("runsc")
 				sbx, err := sandboxDriver(sandboxConfig{Exe: exe, State: holderState(*nsdState), Containerd: csock,
 					Dir: filepath.Join(dd.Cache(), "containers"), Volumes: dd.Silos(), Runsc: runsc, Toolbox: *toolbox,
-					SiloPaths: localusage.StoreSilos(db)})
+					SiloPaths: localusage.StoreSilos(db), DNS: names.API.String()})
 				if err != nil {
 					log.Printf("no sandbox class: %v", err)
 				} else {
@@ -743,6 +743,9 @@ func serve(ctx context.Context, args []string) error {
 		}
 		if be, err = localBackend(db, sd, *nsdState, *nftPath, names, leaderLed, objects, capacity); err != nil {
 			return err
+		}
+		if dk != nil && be.Fence != nil {
+			dk.SetFence(be.Fence)
 		}
 		if why == "" && *imageCacheSize > 0 {
 			if err := fenceapi.SeedCacheBudget(ctx, db, *imageCacheSize); err != nil {

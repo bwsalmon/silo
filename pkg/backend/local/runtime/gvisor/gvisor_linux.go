@@ -109,6 +109,11 @@ type Config struct {
 	CgroupsPath func(runtime.Spec) string
 	// Snapshotter is DefaultSnapshotter when empty.
 	Snapshotter string
+	// DNS is the address every container's /etc/resolv.conf names:
+	// the gateway's DNS, at silo.internal's address in silo-net
+	// (local-backend.md, "DNS"). Without it, a container has the
+	// image's resolv.conf, if any.
+	DNS string
 }
 
 // Driver is the sandbox class.
@@ -267,9 +272,11 @@ func (d *Driver) Create(ctx context.Context, spec runtime.Spec) (err error) {
 	}
 	defer done(context.WithoutCancel(ctx))
 	lease, _ := leases.FromContext(ctx)
+	etc := d.etcFiles(spec)
 	if out, err := d.cfg.InHolder(ctx, RemapArg, "--address", d.cfg.Address, "--namespace", d.cfg.Namespace,
 		"--lease", lease, "--image", img.Name(), "--snapshotter", d.cfg.Snapshotter, "--key", spec.ID,
-		"--outside", strconv.FormatUint(uint64(spec.Root.Outside), 10), "--size", strconv.FormatUint(uint64(spec.Root.Size), 10)); err != nil {
+		"--outside", strconv.FormatUint(uint64(spec.Root.Outside), 10), "--size", strconv.FormatUint(uint64(spec.Root.Size), 10),
+		"--hosts", etc.Hosts, "--hostname", etc.Hostname, "--resolv-conf", etc.ResolvConf); err != nil {
 		return fmt.Errorf("gvisor: remapping %s's snapshot: %v: %s", spec.ID, err, strings.TrimSpace(string(out)))
 	}
 	labels := map[string]string{LabelClass: string(runtime.Sandbox)}
@@ -341,17 +348,13 @@ func (d *Driver) specOpts(spec runtime.Spec, imageEnv []string, imageWorkdir, im
 	if wd == "" {
 		wd = "/"
 	}
-	host := spec.ID
-	if len(host) > 12 {
-		host = host[:12]
-	}
 	opts := []oci.SpecOpts{
 		oci.WithProcessArgs(spec.Process.Args...),
 		oci.WithEnv(imageEnv),
 		oci.WithEnv(spec.Process.Env),
 		oci.WithProcessCwd(wd),
 		oci.WithUIDGID(uid, gid),
-		oci.WithHostname(host),
+		oci.WithHostname(hostname(spec)),
 		// Each container is a sandbox of its own. Without saying so,
 		// the shim takes it for a subcontainer, gives runsc create no
 		// stdio, and hands the pipes to runsc start, which a sandbox's
@@ -407,6 +410,32 @@ func (d *Driver) specOpts(spec runtime.Spec, imageEnv []string, imageWorkdir, im
 		Range: nsd.Range{Outside: spec.Root.Outside, Size: spec.Root.Size}}, cg)
 	opts = append(opts, withPatch(patch))
 	return opts, nil
+}
+
+// hostname is a container's hostname: its id's first 12 characters,
+// as Docker's.
+func hostname(spec runtime.Spec) string {
+	if len(spec.ID) > 12 {
+		return spec.ID[:12]
+	}
+	return spec.ID
+}
+
+// etcFiles are the /etc files the remap writes into a container's
+// snapshot: its hostname, an /etc/hosts with localhost and the
+// container at its address on its first network, as Docker's, and an
+// /etc/resolv.conf naming the gateway's DNS when the driver has one.
+func (d *Driver) etcFiles(spec runtime.Spec) EtcFiles {
+	host := hostname(spec)
+	hosts := "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n"
+	if a := spec.Labels[runtime.LabelAddr]; a != "" {
+		hosts += a + "\t" + host + "\n"
+	}
+	e := EtcFiles{Hosts: hosts, Hostname: host + "\n"}
+	if d.cfg.DNS != "" {
+		e.ResolvConf = "nameserver " + d.cfg.DNS + "\n"
+	}
+	return e
 }
 
 // withPatch applies a rootless.Patch to the spec being built.

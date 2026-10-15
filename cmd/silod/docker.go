@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwsalmon/silo/pkg/backend/local/rootless"
@@ -16,6 +17,7 @@ import (
 	"github.com/bwsalmon/silo/pkg/backend/local/storage"
 	"github.com/bwsalmon/silo/pkg/facade/local/docker"
 	"github.com/bwsalmon/silo/pkg/facade/local/dockergw"
+	"github.com/bwsalmon/silo/pkg/fenceapi"
 	"github.com/bwsalmon/silo/pkg/gateway"
 	"github.com/bwsalmon/silo/pkg/registry"
 	"github.com/bwsalmon/silo/pkg/store"
@@ -58,12 +60,34 @@ type localDocker struct {
 	net   siloNet
 	// origin is origin identity in silo-net, from the gateway's tables.
 	pub *gateway.Publisher
+	// fence is the facade's Options.Fence: the local backend's applier,
+	// which is made after the facade, once SetFence is called.
+	fence lateFence
 }
 
 // cgroupTree makes containers' cgroups (rootless.SandboxTree).
 type cgroupTree interface {
 	Path(ctx context.Context, container string, siloPath ...string) (string, error)
 }
+
+// lateFence is a fenceapi.FenceApplier set after it is handed out.
+// Until then, and with none, WaitApplied doesn't wait.
+type lateFence struct {
+	a atomic.Pointer[fenceapi.FenceApplier]
+}
+
+func (l *lateFence) set(a fenceapi.FenceApplier) { l.a.Store(&a) }
+
+func (l *lateFence) WaitApplied(ctx context.Context, seq uint64) error {
+	if a := l.a.Load(); a != nil && *a != nil {
+		return (*a).WaitApplied(ctx, seq)
+	}
+	return nil
+}
+
+// SetFence gives the facade the fence's applier, which a container's
+// start waits on to pin its ports.
+func (d *localDocker) SetFence(a fenceapi.FenceApplier) { d.fence.set(a) }
 
 // sandboxConfig is where sandboxDriver finds what the sandbox class
 // runs on.
@@ -91,6 +115,9 @@ type sandboxConfig struct {
 	// Cgroups is the tree containers' cgroups are made in; nil is
 	// rootless.SandboxTree's default, the user manager's scope.
 	Cgroups cgroupTree
+	// DNS is the gateway's DNS address, silo.internal's in silo-net,
+	// which every container's /etc/resolv.conf names.
+	DNS string
 }
 
 // newLocalDocker builds the facade over the runtime drivers: fake ones
@@ -105,7 +132,8 @@ type sandboxConfig struct {
 func newLocalDocker(db store.Store, sd storage.Driver, names docker.Names, sn siloNet, fakeRuntime bool, drivers []runtime.Driver, volumes, version string,
 	reg *registry.Service, content registry.Content) *localDocker {
 	d := &localDocker{db: db, names: names, net: sn, pub: gateway.NewPublisher(db)}
-	o := docker.Options{Drivers: drivers, Storage: sd, Content: content, Version: version, Ready: func() string { return "" }}
+	o := docker.Options{Drivers: drivers, Storage: sd, Content: content, Version: version, Ready: func() string { return "" },
+		Fence: &d.fence}
 	if reg != nil {
 		o.Registry, o.Fetcher, o.Login = reg, reg, reg.Login
 	}

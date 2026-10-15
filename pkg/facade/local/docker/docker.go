@@ -137,6 +137,12 @@ type Options struct {
 	// PublishPorts is the range a published port with no HostPort is
 	// given one from; 32768 to 60999, as Docker's, if zero.
 	PublishPorts [2]int
+	// Fence, if set, is the fence's applier. A start waits, up to
+	// FenceWait, until it has applied the change log as it stood at
+	// the start, so that the container's ports are pinned
+	// (TopologyChangeKind) before its workload runs (local-backend.md,
+	// "Anti-spoofing"). Nil doesn't wait.
+	Fence fenceapi.FenceApplier
 }
 
 // Server serves the facade.
