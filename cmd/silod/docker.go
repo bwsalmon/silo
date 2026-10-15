@@ -65,6 +65,11 @@ type localDocker struct {
 	fence lateFence
 }
 
+// cgroupTree makes containers' cgroups (rootless.SandboxTree).
+type cgroupTree interface {
+	Path(ctx context.Context, container string, siloPath ...string) (string, error)
+}
+
 // lateFence is a fenceapi.FenceApplier set after it is handed out.
 // Until then, and with none, WaitApplied doesn't wait.
 type lateFence struct {
@@ -105,8 +110,11 @@ type sandboxConfig struct {
 	// the image.
 	Toolbox string
 	// SiloPaths gives each silo's ids from the root down, which name
-	// its slice; nil leaves containers' cgroupsPath empty.
+	// its cgroup; nil gives containers no cgroup of their own.
 	SiloPaths func(ctx context.Context) (map[string][]string, error)
+	// Cgroups is the tree containers' cgroups are made in; nil is
+	// rootless.SandboxTree's default, the user manager's scope.
+	Cgroups cgroupTree
 	// DNS is the gateway's DNS address, silo.internal's in silo-net,
 	// which every container's /etc/resolv.conf names.
 	DNS string

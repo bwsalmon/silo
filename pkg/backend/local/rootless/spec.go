@@ -130,16 +130,26 @@ const AnnotationRoot = "dev.silo.root"
 // SandboxPatch is the sandbox class's change to a spec (call L30): runsc
 // is started inside ns.User, so the spec names no user namespace and no
 // mappings, only the netns silo-nsd made inside it, which netstack
-// scrapes for the veth's address, MAC, MTU and routes.
-func SandboxPatch(ns nsd.ContainerNS, cgroupsPath string) Patch {
-	return Patch{
+// scrapes for the veth's address, MAC, MTU and routes. cgroup, if not
+// "", is the container's cgroup (AnnotationCgroup).
+func SandboxPatch(ns nsd.ContainerNS, cgroup string) Patch {
+	p := Patch{
 		Namespaces:   []Namespace{{Type: "network", Path: ns.Net}},
 		Drop:         []string{"user"},
 		NoIDMappings: true,
 		Annotations:  map[string]string{AnnotationUserNS: ns.User, AnnotationRoot: strconv.FormatUint(uint64(ns.Range.Outside), 10)},
-		CgroupsPath:  cgroupsPath,
 	}
+	if cgroup != "" {
+		p.Annotations[AnnotationCgroup] = cgroup
+	}
+	return p
 }
+
+// AnnotationCgroup is a sandbox-class container's cgroup, from the
+// mount's root (SandboxTree.Path). runsc ignores cgroups, so it travels
+// as an annotation rather than linux.cgroupsPath: `silod runsc create`
+// makes it, writes the spec's limits to it and starts runsc in it.
+const AnnotationCgroup = "dev.silo.cgroup"
 
 // AnnotationKeepGroups is crun's annotation that keeps the caller's
 // supplementary groups across the workload's setgroups (what Podman's

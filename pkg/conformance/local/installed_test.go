@@ -25,7 +25,8 @@ import (
 // local-conformance installs it (`silo install --backend local`): the
 // root's /info offers the class, a docker load of a busybox image
 // survives until the create, and the container runs under runsc as its
-// namespace's root with eth0 at its endpoint's address. It skips with
+// namespace's root with eth0 at its endpoint's address, and a
+// container's memory limit is enforced by its cgroup. It skips with
 // no install, unless targets.RequireLocalEnv is set.
 func TestInstalledSandbox(t *testing.T) {
 	r := installedRoot(t)
@@ -55,6 +56,19 @@ func TestInstalledSandbox(t *testing.T) {
 	}
 	if !slices.ContainsFunc(addrs, func(a string) bool { return a != "" && strings.Contains(logs, " "+a+"/") }) {
 		t.Errorf("the container's eth0 is none of its endpoints' %v: %q", addrs, logs)
+	}
+
+	// The kernel holds a container to its memory: under a 128 MiB limit,
+	// tail holding 16 MiB of a line runs, and holding 400 MiB is killed.
+	// local-conformance's runner delegates memory to the user's manager.
+	limit := map[string]any{"Memory": 128 << 20}
+	if _, code, logs := r.runWith(limit, "head -c 16m /dev/zero | tail | wc -c"); code != 0 || !strings.Contains(logs, "16777216") {
+		t.Errorf("16 MiB under a 128 MiB limit: exit %d, logs %q", code, logs)
+	}
+	if _, code, logs := r.runWith(limit, "head -c 400m /dev/zero | tail | wc -c"); code == 0 {
+		t.Errorf("400 MiB under a 128 MiB limit wasn't stopped: exit %d, logs %q", code, logs)
+	} else {
+		t.Logf("400 MiB under a 128 MiB limit: exit %d, logs %q", code, logs)
 	}
 }
 
@@ -155,10 +169,21 @@ func (r *installed) call(method, path, ctype string, body []byte, out any) {
 // and logs.
 func (r *installed) run(script string) (id string, code int, logs string) {
 	r.t.Helper()
+	return r.runWith(nil, script)
+}
+
+// runWith is run with hostConfig's fields added to the container's
+// HostConfig.
+func (r *installed) runWith(hostConfig map[string]any, script string) (id string, code int, logs string) {
+	r.t.Helper()
 	js := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	hc := map[string]any{"Runtime": "silo-sandbox"}
+	for k, v := range hostConfig {
+		hc[k] = v
+	}
 	var made struct{ Id string }
 	r.call("POST", "/containers/create", "application/json", js(map[string]any{"Image": r.image,
-		"HostConfig": map[string]any{"Runtime": "silo-sandbox"},
+		"HostConfig": hc,
 		"Cmd":        []string{"sh", "-c", script}}), &made)
 	r.t.Cleanup(func() { r.call("DELETE", "/containers/"+made.Id+"?force=1", "", nil, nil) })
 	r.call("POST", "/containers/"+made.Id+"/start", "", nil, nil)
@@ -183,7 +208,7 @@ func busyboxArchive(t *testing.T, busybox, tag string) []byte {
 	}
 	tw.WriteHeader(&tar.Header{Name: "bin/busybox", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(bb))})
 	tw.Write(bb)
-	for _, a := range []string{"sh", "echo", "id", "ip", "cat", "sleep", "nc", "ping", "wget", "nslookup"} {
+	for _, a := range []string{"sh", "echo", "id", "ip", "cat", "sleep", "nc", "ping", "wget", "nslookup", "head", "tail", "wc"} {
 		tw.WriteHeader(&tar.Header{Name: "bin/" + a, Typeflag: tar.TypeSymlink, Linkname: "busybox"})
 	}
 	tw.Close()

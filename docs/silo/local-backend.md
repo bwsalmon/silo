@@ -823,9 +823,9 @@ open, or leaves something for later:
   - runsc from silod's `PATH` for reading a writable layer, and
     `--toolbox`, a static busybox for `docker cp`;
   - containers' FIFOs and logs in `cache/containers`;
-  - each container's `cgroupsPath` a scope in its silo's slice
-    (`silo-<root>-…-<silo>.slice:silo:<id>`), as the shim's systemd
-    cgroup driver needs.
+  - each container a cgroup in its silo's, in silod's delegated scope
+    (`silo.slice/silo-sandboxes.scope/<root>/…/<silo>/<id>`, see
+    "Enforcement beside the ledger").
 
   The driver is passed in even when its probe fails, so a create says
   why the class can't run (409). The vm class still has no
@@ -1090,10 +1090,11 @@ user, against containerd 2.4 and gVisor 20261005 inside `silo-nsd`
   read-only at `/.silo/busybox` when the driver is given one, and from
   the image otherwise.
 - **Stats** are the shim's metrics (cgroup v1 or v2), with the pids
-  count as a fallback. A container gets a `cgroupsPath` only when the
-  driver is configured with one. Without delegated cgroups (CI), the
-  shim's options say `ignore-cgroups`, and CPU and memory are what
-  runsc reports for its own cgroup, not the container's.
+  count as a fallback. The shim's options say `ignore-cgroups`; a
+  container's cgroup, when the driver is configured with one, is
+  silod's (`dev.silo.cgroup`, "Enforcement beside the ledger"), so CPU
+  and memory are what runsc reports for its own cgroup, which is the
+  container's when it has one.
 - **Adoption.** `List` reads containerd, so it reports what an earlier
   silod made. `Adopt` restarts the log copier of any container whose
   sandbox is still alive but whose copier died. The test kills silod's
@@ -1887,7 +1888,33 @@ running, as a second layer:
 - **For `vm`,** the cgroup holds cloud-hypervisor, so the guest's
   vCPUs and memory are inside it.
 - **For `sandbox`,** gVisor documents that the host cgroup is what
-  limits a sandbox.
+  limits a sandbox. runsc can't make it: it runs as its container's
+  namespace root, a subordinate id, whose systemd driver dials the
+  system manager and whose cgroupfs driver owns no cgroup. A cgroup
+  under `silo-containerd.service` won't do either: enabling
+  controllers there for children leaves systemd unable to start the
+  unit's next main process in it (EBUSY), and containers outlive
+  containerd's restarts. So silod asks the user's manager for a
+  transient scope, `silo.slice/silo-sandboxes.scope`, with
+  `Delegate=yes` (`rootless.SandboxTree`). Its one process, a sleep,
+  sits in the leaf `keep`, so the scope lives while no container runs,
+  and the scope's cgroup is silod's to manage as cgroupfs:
+  - silod makes `<root>/…/<silo>` under it, with the controllers
+    enabled, and names `<…>/<silo>/<container>` in the spec's
+    `dev.silo.cgroup` annotation;
+  - `silod runsc create` makes that cgroup, writes the spec's
+    `memory.max` (with `memory.swap.max` 0), `cpu.max` and
+    `pids.max`, and starts runsc in it (`CLONE_INTO_CGROUP`), so the
+    sandbox and gofer it forks are inside; the shim's options still
+    say `ignore-cgroups`. The reaper, outside it, removes it when the
+    sandbox is gone;
+  - where the scope can't be made (no user manager, nothing
+    delegated, or the system install, whose `silo` user has no
+    manager), containers get no cgroup, and CPU and memory are the
+    ledger's alone. `silo uninstall` kills and stops the scope.
+
+  Silos' own cgroups don't yet carry their grants' limits; only
+  containers' do.
 - **Disk:** writable layers are capped by gVisor's overlay size, or by
   granule's overlay size (`-disk-size-mb`). Volumes are capped by
   project quotas. Images are charged and garbage-collected when no
@@ -2354,9 +2381,10 @@ Task 3420 built the split as far as silod's wiring allows:
     and runs it from there;
   - runsc's systemd cgroup driver, inside the container's user
     namespace, dials the system manager and is refused; the shim's
-    options say `ignore-cgroups` (`rootless.RunscSystemdCgroups`) and
-    CPU and memory are the ledger's until cgroups are delegated
-    another way;
+    options say `ignore-cgroups`, and containers' cgroups are silod's
+    own (task 3805, "Enforcement beside the ledger"), which
+    `TestInstalledSandbox` checks by running a container past its
+    memory limit;
   - gVisor 20261005's runsc needs its `gvisor-bin/gvisor_sentry`
     sidecar, which install now pins and fetches.
 
