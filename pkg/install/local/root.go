@@ -170,7 +170,7 @@ func (s *rootStep) request(o *rootObserved) *install.BootstrapRequest {
 	return &install.BootstrapRequest{
 		AddressSpace: s.c.AddressSpace,
 		Capacity:     map[string]map[string]string{"global": capacity},
-		Egress:       &install.RootEgress{Allow: []string{}, Deny: []string{}},
+		Egress:       &install.RootEgress{Allow: append([]string{}, s.c.EgressAllow...), Deny: []string{}},
 		Admins:       []string{"uid:" + strconv.Itoa(installerUID(s.h))},
 		Backing:      &install.RootBacking{Kind: "local"},
 		Isolation:    isolation(o.Classes),
@@ -193,6 +193,10 @@ func (s *rootStep) Plan(obs install.Observed) []install.Change {
 		space = "10.0.0.0/8"
 	}
 	caps := s.capacity(o)
+	egress := "none"
+	if len(s.c.EgressAllow) > 0 {
+		egress = strings.Join(s.c.EgressAllow, ", ")
+	}
 	wait := 10 * time.Second
 	if o.Health == nil {
 		wait = 30 * time.Second // silod starting for the first time
@@ -201,9 +205,9 @@ func (s *rootStep) Plan(obs install.Observed) []install.Change {
 		{Action: install.ActionCreate, Object: "/", Estimate: wait,
 			Detail: fmt.Sprintf("backing local, blocks %s (minus 10.255.254.0/23, the gateway's and control ranges), isolation %s (default %s), ingress host, admin %s",
 				space, strings.Join(req.Isolation.Allowed, " and "), req.Isolation.Default, req.Admins[0])},
-		{Action: install.ActionCreate, Detail: fmt.Sprintf("capacity vcpu_m %d (%d CPUs less 1, ×%g), memory_mb %d, disk_gb %d, containers %d, networks %d, volumes %d; egress none",
+		{Action: install.ActionCreate, Detail: fmt.Sprintf("capacity vcpu_m %d (%d CPUs less 1, ×%g), memory_mb %d, disk_gb %d, containers %d, networks %d, volumes %d; egress %s",
 			caps["vcpu_m"], o.CPUs, s.overcommit(),
-			caps["memory_mb"], caps["disk_gb"], caps["containers"], caps["networks"], caps["volumes"])},
+			caps["memory_mb"], caps["disk_gb"], caps["containers"], caps["networks"], caps["volumes"], egress)},
 	}
 }
 

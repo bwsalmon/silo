@@ -189,7 +189,7 @@ jobs:
     sandbox:
       cpus: 4
       memory-mb: 8192
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       # A download, so `infrastructure:`; the same pinned suite as the
       # registry job's.
@@ -230,17 +230,21 @@ jobs:
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           mkdir -p /tmp/silo-bin
           go build -o /tmp/silo-bin/ ./cmd/silo ./cmd/silod || exit 1
+          # -p 1 below: every package's local/sandbox cases make their
+          # silos in the one install, by the same names.
           uninstall() {
             echo "=== silo uninstall --backend local ==="
             /tmp/silo-bin/silo uninstall --backend local --yes --delete-data
           }
           trap uninstall EXIT
           echo "=== silo install --backend local ==="
-          if ! /tmp/silo-bin/silo install --backend local --yes; then
+          # --egress-allow '*': the fence cases' silos ask for any name,
+          # which no child may have that the root hasn't.
+          if ! /tmp/silo-bin/silo install --backend local --yes --egress-allow '*'; then
             journalctl --user --no-pager -u silo-nsd -u silo-containerd -u silod | tail -n 100
             exit 1
           fi
-          go test -count=1 -timeout 15m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ ./pkg/conformance/compose/ > /tmp/conformance.log 2>&1
+          go test -p 1 -count=1 -timeout 25m -v ./pkg/conformance/fence/ ./pkg/conformance/docker/ ./pkg/conformance/local/ ./pkg/conformance/compose/ > /tmp/conformance.log 2>&1
           status=$?
           cat /tmp/conformance.log
           if [ $status -ne 0 ]; then

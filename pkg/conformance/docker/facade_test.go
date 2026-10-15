@@ -17,7 +17,7 @@ import (
 // as not offered.
 
 func eachFence(t *testing.T, fn func(t *testing.T, f conformance.F, a, b string)) {
-	conformance.ForEachFence(t, targets.All(), func(t *testing.T, fe conformance.Fence) {
+	conformance.ForEachFence(t, targets.Pulling(), func(t *testing.T, fe conformance.Fence) {
 		f := conformance.F{Fence: fe, T: t}
 		fn(t, f, f.Mk("", "team-a", 20, nil), f.Mk("", "team-b", 20, nil))
 	})

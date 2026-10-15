@@ -211,3 +211,51 @@ func (s *Sockets) Close() {
 	}
 	s.servers = nil
 }
+
+// ByPeerUID serves h on silo.sock, silod's front door on the local
+// backend (local-backend.md §2): a call carries as its caller the
+// connection's peer uid's member silo, read with SO_PEERCRED when it
+// connects and looked up in the member table at each request
+// (via=front_door), as the Docker sockets' callers are. A peer that is
+// no silo's member is served with no caller, so that /silod/health and
+// install's bootstrap, which need none, still answer; the fence API
+// refuses it. ConnContext is the server's, which reads the peer uid.
+type ByPeerUID struct {
+	Store   store.Store
+	Handler http.Handler
+	// PeerUID is the uid of a connection's peer; SO_PEERCRED if nil.
+	PeerUID func(net.Conn) (uint32, error)
+}
+
+// ConnContext records c's peer uid in ctx, for http.Server.ConnContext.
+func (b *ByPeerUID) ConnContext(ctx context.Context, c net.Conn) context.Context {
+	peer := b.PeerUID
+	if peer == nil {
+		peer = PeerCred
+	}
+	uid, err := peer(c)
+	if err != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, uidKey{}, uid)
+}
+
+func (b *ByPeerUID) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if uid, ok := ctx.Value(uidKey{}).(uint32); ok {
+		id := fenceapi.UIDIdentity(uid)
+		member, err := frontdoor.MemberSilo(ctx, b.Store, id)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			body, _ := jsonMessage("silo: reading the member table: " + err.Error())
+			w.Write(body)
+			return
+		}
+		if member != "" {
+			stripSiloHeaders(r)
+			r = r.WithContext(fenceapi.ContextWithCaller(ctx, fenceapi.Caller{Silo: member, Via: fenceapi.ViaFrontDoor, Member: id}))
+		}
+	}
+	b.Handler.ServeHTTP(w, r)
+}
