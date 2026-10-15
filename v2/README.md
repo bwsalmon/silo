@@ -172,15 +172,16 @@ changing a type, run `go generate ./silofile` and
 | `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function or an HTTP client (a Unix socket's), and blocking tools; `Prelaunch`, `Reap` and `Gone` hooks front a server on the ssh agent host the same way; stage 6b's caller-provided servers are fronted the same way. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
-| `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. |
+| `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. A session's internal network, which sandboxes with `repos` join to reach the git proxy. |
 | `localexec` | The local executor (design §12): script snapshot, refusals, `silo validate`'s warnings, one tool per script run with no shell, and the approvers (terminal prompt, and the queue `silo approve` answers). |
 | `control` | The session's control socket: JSON-RPC 2.0 over a Unix socket, a method table later stages add to, and a client. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
-| `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. Wired into `silo run` by stage 7b. |
+| `gitproxy` | The git smart-HTTP proxy (design §9), copied and adapted from grain's `pkg/gitproxy` behind a `Policy` interface: `StaticPolicy` for a Silofile's `git:` entries, ref patterns, the fast-forward proof, one audit entry per request. Grain imports it. `silo run` starts one per session whose sandboxes have `repos` (stage 7b, design §9.3): on the session's internal network, a token per sandbox, the repos cloned into each workdir through it. |
 | `internal/safepath` | Path confinement, copied from grain's `pkg/safepath`. |
 | `internal/procgroup` | Process-group cancellation, copied from grain's `pkg/procgroup`. |
 | `internal/lockfile` | `.silo/lock.json`: one key per part of silo (`images`, `mcp`), each written without disturbing the others. |
 | `internal/mcptest` | A test MCP server over stdio or HTTP whose tool list can change, used by the proxy and session tests. |
+| `internal/githubsim` | A stand-in for github.com's git endpoints (who may fetch and push, with GitHub's statuses) over `git http-backend`, copied from grain's `pkg/github/githubsim`; the session's git proxy tests run against it over HTTPS. |
 | `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
 
 ## The tunnel sidecar image
@@ -284,4 +285,10 @@ version.
 
 `gitproxy`'s tests clone and push with the real `git` binary, through
 the proxy, to `git http-backend` over repositories on disk. They skip
-without git; CI sets `SILO_V2_REQUIRE_GIT=1`.
+without git; CI sets `SILO_V2_REQUIRE_GIT=1`. `session`'s git tests run
+a container sandbox (the `alpine/git` image) that clones and pushes
+through a session's proxy to `internal/githubsim` over HTTPS.
+`TestGitProxyLiveGitHub` does the same against real GitHub, only with
+`SILO_V2_LIVE_GITHUB=1` and the repository and token grain's
+`github-sandbox` capability places in `/home/debian`; it is not part of
+CI.

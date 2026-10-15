@@ -285,7 +285,10 @@ the folder:
   exists;
 - names are unique within their section, and every cross-reference
   resolves (`to: {sandbox: x}`, `sandboxes[].repos`, `git[].credential`,
-  `projects[].deliver_to`);
+  `projects[].deliver_to`); a sandbox with `repos` has an absolute
+  `workdir`, `git[].push` patterns parse (§9.1), and a `git[]` entry
+  without `credential` is not left to choose between several
+  credentials delivered to `{proxy: git}` (§9.3);
 - the agent's `remote_permissions` can be expressed by its `cli`, by the
   table in [`cli-mapping.md`](cli-mapping.md); `agy` with `none` fails
   here, not at run time;
@@ -923,7 +926,7 @@ the kind supports them); `network`: `none` (the default) or `open`,
 with an `allow:` list reserved for the egress proxy grain needs
 ([`grain.md`](grain.md) §2.3); `mounts` from the folder (read-only by
 default); `repos`, the `git[]` entries checked out into `workdir`
-through the git proxy; `env`; and `lifetime: session` (the default) or
+through the git proxy (one at `workdir`, several each at `workdir/<name>`, §9.3); `env`; and `lifetime: session` (the default) or
 `persistent`, reserved for grain's persistent workspaces.
 
 A sandbox starts with no host files: nothing of `$HOME`, no Docker
@@ -1033,8 +1036,9 @@ transformed by a command (base64, split across lines) is not caught.
 As built in stage 1b: values shorter than 4 bytes are not redacted
 (they would rewrite ordinary text all over the log while hiding nothing
 a guess would not find). The ambient `gh` and `git-credential` sources
-ask for `github.com` until the git proxy (stage 7) chooses the host per
-`git[]` entry. A `{file:}` source drops one trailing newline.
+ask for `github.com`, except that a credential delivered only to
+`{proxy: git}` is asked for the host of each `git[]` entry that uses it
+(stage 7b, §9.3). A `{file:}` source drops one trailing newline.
 `{store:}` is refused as not yet supported.
 
 ## 9. The git proxy
@@ -1059,8 +1063,10 @@ one.
   is a `RefRule` (grain's `model.RefPush`): `refs/heads/...` or
   `refs/tags/...`, so only a `refs/tags/` pattern names a tag, with
   `force` and `delete` flags, so only a rule with `delete` names a
-  deletion. How a Silofile's `push:` strings ask for `delete` is
-  stage 7b's to settle.
+  deletion. A Silofile's `push:` string is a rule as `RefRule.String`
+  writes it: the pattern, optionally followed by its flags in
+  parentheses, `refs/heads/scratch (delete)` or
+  `refs/tags/v* (force, delete)` (stage 7b, §9.3).
 - **Fast-forward proof**, optional per entry (`force: false`, the
   default): a non-fast-forward update is refused, proved from the pushed
   pack's commit graph and the upstream's history, as grain does.
@@ -1070,6 +1076,66 @@ one.
 - **Audit:** one record per request (repository, action, refs, outcome,
   credential name), written to the session's audit log, so the caller
   reads it from the same place.
+
+### 9.3 As built in stage 7b
+
+- **When it runs.** The proxy is a setup step of its own (order 35,
+  after the location and before the tools), started only when some
+  sandbox has `repos`; a `git[]` entry no sandbox names gets a warning
+  and nothing else. The sandboxes provider clones once its sandbox
+  exists. The audit log now opens in a step of its own (25), before the
+  location, so that the proxy and the gateway write the same
+  `audit.jsonl`.
+- **Reachability.** The container backend makes the session an
+  internal network (`docker network create --internal silo-<id>`,
+  labelled like the session's containers and recorded in `session.json`
+  as a `network` resource for `silo gc`). The proxy listens on that
+  network's gateway address, which is the invoking machine's own
+  address on the bridge, on a free port. A sandbox with `repos` and
+  `network: none` joins that network instead of none, so the proxy is
+  the only thing it can reach; one with `network: open` joins it beside
+  the runtime's default. The address is reachable from the host itself
+  too (any process on the invoking machine can connect to a local
+  address), so the per-sandbox token, not the listener, is what keeps
+  other callers out. A rootless Podman network's gateway is inside
+  Podman's network namespace, not on the host, so there the proxy
+  cannot listen and the session fails at start saying so: sandboxes with
+  `repos` need Docker or rootful Podman in v2.0.
+- **Tokens.** One per sandbox with `repos` (`gitproxy.TokenSet`), in
+  memory, so each audit line's `caller` names the session and the
+  sandbox. They die with the proxy at teardown.
+- **Checkout.** Each repo is cloned with the sandbox's own `git`
+  (`git clone` run in the sandbox, so the image needs git) with origin
+  `http://silo:<token>@<address>:<port>/<host>/<owner>/<name>.git`. A
+  sandbox with one repo has it at `workdir` itself; one with several has
+  each at `workdir/<git entry name>`. `repos` therefore needs an
+  absolute `workdir`, which validation checks. The origin is an ordinary
+  remote URL, so a later session re-attaching a persistent checkout
+  rewrites it with `git remote set-url` (grain.md §2.3). The git
+  identity is the sandbox's `env`: git reads `GIT_AUTHOR_NAME`,
+  `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`
+  itself, so silo sets nothing.
+- **Credentials.** An entry's `credential:`, or else the Silofile's one
+  credential delivered to `{proxy: git}`; with several, an entry must
+  name one (a validation error), and with none it goes anonymously. The
+  proxy asks for the secret on every request (`{ambient:}` sources cache
+  it for five minutes, per host), and an upstream 401 drops the cached
+  token. A value the caller passes in `Options.Credentials` is used as
+  it is.
+- **Audit lines** are `{"event": "git", "git": <gitproxy.AuditEntry>}`
+  beside the gateway's `start` and `end` lines, redacted the same way.
+  They are not tool calls, so the event stream does not repeat them.
+- **`--dry-run`** checks each `git[]` entry, changing nothing: its
+  credential resolves (for the entry's host), and an in-process proxy
+  holding it gets the repository's `info/refs` for `git-upload-pack`,
+  and for `access: push` also for `git-receive-pack`, which is the
+  host's own answer to whether the credential may push.
+- **Tests** run the proxy against grain's GitHub simulator
+  (`githubsim.GitUpstream`, copied into `v2/internal/githubsim`) over
+  HTTPS, which answers who may fetch and push with GitHub's own
+  statuses, in front of `git http-backend`. An opt-in test
+  (`SILO_V2_LIVE_GITHUB=1`) runs the same flow against real GitHub with
+  the repository and token grain's `github-sandbox` capability places.
 
 ### 9.2 What to copy, adapt and drop from grain's `pkg/gitproxy`
 

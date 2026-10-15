@@ -273,7 +273,7 @@
             "type": "string"
           },
           "push": {
-            "description": "Ref patterns a push may update.",
+            "description": "Ref patterns a push may update: refs/heads/... or refs/tags/..., globbing with * and ?, each optionally followed by (force), (delete) or (force, delete).",
             "items": {
               "type": "string"
             },
@@ -777,7 +777,7 @@
             "type": "string"
           },
           "repos": {
-            "description": "git[] entries checked out into workdir through the git proxy.",
+            "description": "git[] entries checked out through the git proxy: one at workdir, several each at workdir/\u003cname\u003e. Needs an absolute workdir and git in the image.",
             "items": {
               "type": "string"
             },
