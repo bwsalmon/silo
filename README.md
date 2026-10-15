@@ -43,6 +43,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `internal/pgtest` | Throwaway PostgreSQL servers for tests. |
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
+| `docs/ui.md` | A proposal, not decided: the hub's human web UI (hub.md §9, stage 2.6). |
 | `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |
 
 ## Building and testing
