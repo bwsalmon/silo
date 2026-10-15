@@ -199,7 +199,7 @@ type CLIError struct {
 
 // Exit is how a session ended.
 type Exit struct {
-	// Code is silo run's exit code (design §3.3).
+	// Code is the agent session's exit code.
 	Code   int       `json:"code"`
 	Reason string    `json:"reason"`
 	Detail string    `json:"detail,omitempty"`

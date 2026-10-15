@@ -1,5 +1,5 @@
 // Package live is the Silo hub's live event path (docs/hub.md §7): the
-// v2 session events a node streams up for each task it runs, sorted by
+// session events a node streams up for each task it runs, sorted by
 // class, kept or not by that class, and fanned out to the task's
 // subscribers over Server-Sent Events or a WebSocket; and the
 // view-through that reaches a node's diffs and tool logs without the
