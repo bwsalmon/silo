@@ -47,8 +47,9 @@ one; `silo run` carries it out once.
   grain nodes (Track 2): its architecture, the node registry
   (`hub/registry`), the outbound rendezvous (`hub/rendezvous`), human
   sign-on (`hub/identity`), the team directory with node tokens
-  (`hub/directory`) and the task backlog and dispatcher (`hub/tasks`),
-  all built, and the event stages after them.
+  (`hub/directory`), the task backlog and dispatcher (`hub/tasks`) and
+  live events with the SILO_ONLY view-through (`hub/live`), all built,
+  and the deployment stage after them.
 - [`docs/examples/`](docs/examples/): example silo folders.
 
 ## Module
@@ -216,6 +217,7 @@ changing a type, run `go generate ./silofile` and
 | `hub/identity` | Human sign-on (hub.md §5.1): IAP assertion and OIDC ID-token verification against the issuer's JWKS, and the OIDC relying party (code flow with PKCE, signed session cookie). |
 | `hub/directory` | The team directory in SQLite or PostgreSQL (hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
 | `hub/tasks` | The task backlog in SQLite or PostgreSQL, its intake API, and the dispatcher (hub.md §6). The dispatcher places tasks on nodes per team, offers each one over a task stream, requeues a refused task without the node that refused it, marks a task lost when its node goes away mid-run and resumes it when the node returns, and cancels tasks down the stream. |
+| `hub/live` | The hub's live events (hub.md §7): the event streams nodes open per task, the classification by schema (lifecycle and conversation stored, the token stream in an in-memory ring, node-only events kept as references), fan-out over SSE and WebSocket from a cursor, and the view-through to a node's diffs and tool logs. |
 | `internal/pgtest` | Throwaway PostgreSQL servers for tests, copied from v1's `pkg/internal/pgtest`. |
 | `internal/headtail` | Bounded command output, adapted from grain's `pkg/mcp/exec_output.go`. |
 
