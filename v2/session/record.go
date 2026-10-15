@@ -102,7 +102,8 @@ const (
 	KindProcessGroup = "process-group"
 	// KindDir: a directory, Path, removed by teardown.
 	KindDir = "dir"
-	// KindPod: the k8s location's pod and Secret, labelled with the
+	// KindPod: the k8s location's pod and Secret, and granule
+	// sandbox pods (backend k8s), all labelled with the
 	// session, in Context and Namespace.
 	KindPod = "k8s-pod"
 	// KindNetwork: the session's private network, Network, made by

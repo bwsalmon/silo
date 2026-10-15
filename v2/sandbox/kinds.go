@@ -6,14 +6,17 @@ import (
 	"fmt"
 )
 
-// Kinds is a Backend made of others: Create goes to the backend for
-// the spec's kind, or Default; Find and Sessions ask every one of
+// Kinds is a Backend made of others: Create goes to K8s for a spec
+// with a K8s target, else to the backend for the spec's kind, or
+// Default; Find and Sessions ask every one of
 // them. Networks are Default's, and the other backends' sandboxes join
 // them by name, so every backend in it has to share Default's
 // container runtime (granule runs its VMs on the local Docker).
 type Kinds struct {
 	Default Backend
 	ByKind  map[string]Backend
+	// K8s runs the sandboxes whose backend is a cluster (journey 9).
+	K8s Backend
 }
 
 var (
@@ -32,6 +35,9 @@ func (k *Kinds) all() []Backend {
 			out = append(out, b)
 		}
 	}
+	if k.K8s != nil {
+		out = append(out, k.K8s)
+	}
 	return out
 }
 
@@ -40,6 +46,9 @@ func (k *Kinds) Create(ctx context.Context, spec SandboxSpec) (Sandbox, error) {
 	b, ok := k.ByKind[spec.Kind]
 	if !ok {
 		b = k.Default
+	}
+	if spec.K8s != nil {
+		b = k.K8s
 	}
 	if b == nil {
 		return nil, fmt.Errorf("sandbox %q: no backend runs kind %q", spec.Name, spec.Kind)
@@ -83,6 +92,9 @@ func (k *Kinds) Sessions(ctx context.Context) ([]string, error) {
 }
 
 func (k *Kinds) networker() (Networker, error) {
+	if k.Default == nil {
+		return nil, errors.New("no local sandbox backend makes networks")
+	}
 	if nw, ok := k.Default.(Networker); ok {
 		return nw, nil
 	}

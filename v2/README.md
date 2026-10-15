@@ -105,7 +105,9 @@ checks MCP servers (a remote one on its own BatchMode connection to the
 agent host: its config read there, its binary found on its remote
 `PATH`), the ssh location, and for granule sandboxes the granule binary,
 `granule doctor` (KVM), that each VM image can be pulled, and whether
-each Granulefile is built already or will be built at run.
+each Granulefile is built already or will be built at run; for
+granule sandboxes with `backend: {k8s: ...}`, that some node offers
+`devic.es/kvm` (and `devic.es/tun` with `network: open`).
 
 `silo validate` decodes the Silofile strictly (design §2.1), resolves
 every path inside the silo folder (§2.2) and checks names,
@@ -189,8 +191,9 @@ changing a type, run `go generate ./silofile` and
 | `gateway/proxy` | Fronts MCP servers in the gateway (design §13.4): launch or connect, the 30 s start, allowlists, dead-server errors, `restart: on-failure`, `list_changed`, and SIGTERM-then-SIGKILL teardown of each launched server's process group. A `Spec` may carry a `Dial` function or an HTTP client (a Unix socket's), and blocking tools; `Prelaunch`, `Reap` and `Gone` hooks front a server on the ssh agent host the same way; stage 6b's caller-provided servers are fronted the same way. |
 | `gateway/audit` | `audit.jsonl`: a start line before each call, an end line after, credentials redacted. |
 | `sandbox` | The `Backend`/`Sandbox` interfaces (design §7.3), specs from a Silofile, and the images in `.silo/lock.json`. |
+| `sandbox/k8s` | `kind: granule` with `backend: {k8s: ...}` (journey 9): one unprivileged pod per sandbox from the granule VM image, given `/dev/kvm` by granule's KVM device plugin, reached with `kubectl exec ... granule exec`, labelled like the k8s location's pods so `silo gc` removes them; the git proxy carried into the guest over vsock through a tunnel sidecar; `granulefile:` images built here and pushed to `push_to:`; the `--dry-run` device check. |
 | `sandbox/container` | Docker or Podman containers; `kind: gvisor` is the same with `--runtime=runsc`. A session's internal network, which sandboxes with `repos` join to reach the git proxy. |
-| `sandbox/granule` | `kind: granule` (design §7.3, journeys 7 and 10): microVMs driven through the `granule` binary (`vm create`, `wait`, `exec`, `delete`), never its Go packages. A `granulefile:` is checked with `granule granulefile check`, built with `granule granulefile build` into `silo-granulefile:<key>`, and booted from there while its content key (the Granulefile, its directory, target and args) is unchanged. |
+| `sandbox/granule` | `kind: granule` (design §7.3, journeys 7 and 10): microVMs driven through the `granule` binary (`vm create`, `wait`, `exec`, `delete`), never its Go packages. A `granulefile:` is checked with `granule granulefile check`, built with `granule granulefile build` into `silo-granulefile:<key>`, and booted from there while its content key (the Granulefile, its directory, target and args) is unchanged. `Guest` is what both granule backends share: the environment file, the kill of a cancelled command, the file tools and `DeliverFile`, all through `granule exec`. |
 | `localexec` | The local executor (design §12): script snapshot, refusals, `silo validate`'s warnings, one tool per script run with no shell, and the approvers (terminal prompt, and the queue `silo approve` answers). |
 | `control` | The session's control socket: JSON-RPC 2.0 over a Unix socket, a method table later stages add to, and a client. |
 | `credentials` | Sources `env`, `file`, `ambient` (`gh`, `git-credential`, `gcloud`), and sandbox destinations. `store` comes later. |
@@ -207,7 +210,11 @@ changing a type, run `go generate ./silofile` and
 ## The tunnel sidecar image
 
 The `k8s` location (design §5.4) runs `cmd/silo-tunnel` beside the CLI
-in each session's pod. Its image is built from this module:
+in each session's pod. A granule sandbox pod with `repos` runs it too,
+listening on the VM's vsock socket for the git proxy. silo copies the
+same binary into the guest (`-self`), where it forwards git's
+connections over vsock (`-guest-forward`, design §7.3). Its image is
+built from this module:
 
 ```sh
 cd v2
@@ -221,8 +228,11 @@ default `location.k8s.tunnel_image`) with that command, by hand, when
 connection's hello line carries a version, so an old sidecar refuses a
 silo that speaks a newer protocol rather than misbehaving. Anyone can
 build the same image and push it where their cluster pulls from, and
-name it with `location.k8s.tunnel_image`. `silo run --dry-run` checks
-that the cluster can pull it.
+name it with `location.k8s.tunnel_image`, or for sandboxes with
+`backend.k8s.tunnel_image`. `silo run --dry-run` checks that the
+cluster can pull it for the location. The `-self` and `-guest-forward`
+modes and Unix-socket listeners came with stage 11b. A published image
+built before that cannot carry the git proxy to a sandbox.
 
 ## Building and testing
 
@@ -260,6 +270,26 @@ spec, that teardown deletes the pod and the Secret, that `silo gc`'s
 k8s part removes a leaked pod and keeps a live one, and the `--dry-run`
 checks. They need Docker, `kind` and `kubectl`, which the sandbox image
 carries; `SILO_V2_REQUIRE_DOCKER=1` makes their absence a failure.
+
+`sandbox/k8s`'s unit tests compare pod specs with golden files and
+check the no-network pod against the `restricted` Pod Security
+Standard. `TestGranulePod` boots a real granule sandbox pod on a kind
+cluster whose node has the host's `/dev/kvm`. It loads granule's
+device plugin and grain's guest image (`SILO_V2_GRANULE_IMAGE`
+overrides it) into the cluster, puts the sandbox in a namespace that
+enforces `restricted`, and checks exec, exit codes, stdin, the
+environment, that the guest has no network, the file tools,
+`DeliverFile`, a cancelled exec, `Find`, `kubectl logs` and `Destroy`.
+It also clones a repository through a git proxy on the test's loopback
+into the guest, which has no network. The clone runs over the guest's
+vsock, a locally built tunnel sidecar and `kubectl port-forward`.
+`sandbox/granule`'s `TestPush` pushes an image to a `registry:2`
+container and checks that it comes back by digest.
+Loading an 8 GB guest image into kind takes about two minutes and
+twice the image's size in disk, so the test runs only with
+`SILO_V2_REQUIRE_K8S_KVM=1`, which also makes missing Docker, kind,
+kubectl or `/dev/kvm` a failure. grain CI sets it. The kind node's udev gives `/dev/kvm` its own kvm
+group, which changes it on the host too, so the test gives it back.
 
 `location/ssh`'s tests run against a real `sshd` in a Docker container
 (Debian's `openssh-server`, built on first use as `silo-v2-sshd-test`)

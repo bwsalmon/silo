@@ -59,10 +59,9 @@ type Location struct {
 	created bool
 	removed []string
 
-	mu      sync.Mutex
-	torn    bool
-	stop    context.CancelFunc
-	tunDone chan struct{}
+	mu   sync.Mutex
+	torn bool
+	tun  *Tunnel
 }
 
 var _ location.Location = (*Location)(nil)
@@ -248,16 +247,13 @@ func (l *Location) Gateway(ctx context.Context, local net.Addr) (string, error) 
 	if l.pod == "" {
 		return "", errors.New("k8s: Gateway before Prepare")
 	}
-	target := local.String()
-	c, pf, err := l.connect(ctx, target)
+	t, err := StartTunnel(ctx, l.k, l.pod, ControlPort, local.String(), l.logf)
 	if err != nil {
 		return "", err
 	}
-	bg, stop := context.WithCancel(context.WithoutCancel(ctx))
 	l.mu.Lock()
-	l.stop, l.tunDone = stop, make(chan struct{})
+	l.tun = t
 	l.mu.Unlock()
-	go l.keep(bg, target, c, pf)
 	return fmt.Sprintf("http://127.0.0.1:%d/mcp", GatewayPort), nil
 }
 
@@ -267,9 +263,48 @@ func (l *Location) logf(format string, args ...any) {
 	}
 }
 
+// Tunnel is silo's end of a tunnel sidecar (internal/tunnel): kubectl
+// port-forward to the sidecar's control port, over which every
+// connection the sidecar accepts arrives as a stream that silo splices
+// to a target on the invoking machine.
+type Tunnel struct {
+	k      *Kubectl
+	pod    string
+	port   int
+	target string
+	logf   func(string, ...any)
+	stop   context.CancelFunc
+	done   chan struct{}
+}
+
+// StartTunnel connects to the sidecar of pod on its control port and
+// splices its streams to target. A goroutine keeps the connection up
+// until Close: if the port-forward or the control connection drops, it
+// opens them again, saying so through logf, which may be nil.
+func StartTunnel(ctx context.Context, k *Kubectl, pod string, port int, target string, logf func(string, ...any)) (*Tunnel, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	t := &Tunnel{k: k, pod: pod, port: port, target: target, logf: logf, done: make(chan struct{})}
+	c, pf, err := t.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bg, stop := context.WithCancel(context.WithoutCancel(ctx))
+	t.stop = stop
+	go t.keep(bg, c, pf)
+	return t, nil
+}
+
+// Close ends the tunnel and waits for its port-forward to exit.
+func (t *Tunnel) Close() {
+	t.stop()
+	<-t.done
+}
+
 // keep holds the tunnel up until bg ends.
-func (l *Location) keep(bg context.Context, target string, c *tunnel.Client, pf *exec.Cmd) {
-	defer close(l.tunDone)
+func (t *Tunnel) keep(bg context.Context, c *tunnel.Client, pf *exec.Cmd) {
+	defer close(t.done)
 	for {
 		select {
 		case <-c.Done():
@@ -281,7 +316,7 @@ func (l *Location) keep(bg context.Context, target string, c *tunnel.Client, pf 
 		if bg.Err() != nil {
 			return
 		}
-		l.logf("the connection to pod %s dropped; reconnecting", l.pod)
+		t.logf("the connection to pod %s dropped; reconnecting", t.pod)
 		for {
 			select {
 			case <-bg.Done():
@@ -290,20 +325,20 @@ func (l *Location) keep(bg context.Context, target string, c *tunnel.Client, pf 
 			}
 			cctx, cancel := context.WithTimeout(bg, 30*time.Second)
 			var err error
-			c, pf, err = l.connect(cctx, target)
+			c, pf, err = t.connect(cctx)
 			cancel()
 			if err == nil {
 				break
 			}
-			l.logf("%v", err)
+			t.logf("%v", err)
 		}
 	}
 }
 
 // connect starts kubectl port-forward to the sidecar's control port on
 // a free local port, and says hello over it.
-func (l *Location) connect(ctx context.Context, target string) (*tunnel.Client, *exec.Cmd, error) {
-	argv := l.k.Argv("port-forward", "--address", "127.0.0.1", "pod/"+l.pod, fmt.Sprintf(":%d", ControlPort))
+func (t *Tunnel) connect(ctx context.Context) (*tunnel.Client, *exec.Cmd, error) {
+	argv := t.k.Argv("port-forward", "--address", "127.0.0.1", "pod/"+t.pod, fmt.Sprintf(":%d", t.port))
 	cmd := exec.Command(argv[0], argv[1:]...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -321,7 +356,7 @@ func (l *Location) connect(ctx context.Context, target string) (*tunnel.Client, 
 		if msg := strings.TrimSpace(errb.String()); msg != "" {
 			err = fmt.Errorf("%w: %s", err, msg)
 		}
-		return nil, nil, fmt.Errorf("the gateway tunnel to pod %s: %w", l.pod, err)
+		return nil, nil, fmt.Errorf("the tunnel to pod %s: %w", t.pod, err)
 	}
 	ports := make(chan string, 1)
 	go func() {
@@ -353,7 +388,7 @@ func (l *Location) connect(ctx context.Context, target string) (*tunnel.Client, 
 		conn.Close()
 		return fail(err)
 	}
-	go c.Serve(target)
+	go c.Serve(t.target)
 	return c, cmd, nil
 }
 
@@ -477,9 +512,8 @@ func (l *Location) Teardown(ctx context.Context) error {
 		return nil
 	}
 	l.torn = true
-	if l.stop != nil {
-		l.stop()
-		<-l.tunDone
+	if l.tun != nil {
+		l.tun.Close()
 	}
 	if !l.created {
 		return nil

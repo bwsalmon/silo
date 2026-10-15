@@ -9,7 +9,8 @@
 # real sshd in Docker, and location/k8s's a kind cluster in Docker, so
 # SILO_V2_REQUIRE_DOCKER covers them too, and makes a missing kind or
 # kubectl a failure). The granule sandbox kind's tests boot real granule
-# microVMs (SILO_V2_REQUIRE_GRANULE): the job reads gke-labs/granule
+# microVMs (SILO_V2_REQUIRE_GRANULE), and sandbox/k8s's boot one as a
+# pod on a kind cluster (SILO_V2_REQUIRE_K8S_KVM): the job reads gke-labs/granule
 # through the git proxy (repo-read, below), builds its CLI at a pinned
 # commit, and pulls grain's published guest image and the images
 # granule builds Granulefiles with.
@@ -127,4 +128,7 @@ jobs:
           SILO_V2_REQUIRE_RUNSC: "1"
           SILO_V2_REQUIRE_GIT: "1"
           SILO_V2_REQUIRE_GRANULE: "1"
+          # sandbox/k8s's TestGranulePod: a granule sandbox pod on a kind
+          # cluster whose node has this runner's /dev/kvm.
+          SILO_V2_REQUIRE_K8S_KVM: "1"
         run: cd v2 && go test -race -timeout 20m ./...

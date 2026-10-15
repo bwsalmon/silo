@@ -24,6 +24,11 @@ func checkGranule(ctx context.Context, f *silofile.Silofile, environ []string) [
 		switch {
 		case sc.Kind != "granule":
 		case sc.Image != "":
+			// A cluster's nodes pull it; checkK8sSandboxes asks about
+			// those.
+			if sc.Backend.K8s != nil {
+				continue
+			}
 			images = append(images, sc.Image)
 		case sc.Granulefile != "":
 			built = append(built, sc)
