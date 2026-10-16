@@ -170,6 +170,10 @@ func serve(args []string) error {
 	grace := fs.Duration("shutdown-grace", server.DefaultShutdownGrace, "how long shutdown waits for nodes and requests")
 	heartbeat := fs.Duration("heartbeat", rendezvous.DefaultHeartbeat, "the interval nodes heartbeat at; a node is stale after three missed")
 	retry := fs.Duration("dispatch-retry", tasks.DefaultRetry, "how often the dispatcher looks at the queue unprompted")
+	pod := fs.String("pod", env("SILO_HUB_POD", ""),
+		"this pod's name in the shared node registry (docs/hub.md §2.2.2); the host's name when empty [SILO_HUB_POD]")
+	podAddr := fs.String("pod-addr", env("SILO_HUB_POD_ADDR", ""),
+		"the address the hub's other pods reach this one at; the host's name when empty [SILO_HUB_POD_ADDR]")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -191,6 +195,8 @@ func serve(args []string) error {
 		Heartbeat:        *heartbeat,
 		DispatchRetry:    *retry,
 		MetricsAddr:      *metricsAddr,
+		Pod:              *pod,
+		PodAddr:          *podAddr,
 		Logf:             log.Printf,
 	}
 	l, err := net.Listen("tcp", *addr)

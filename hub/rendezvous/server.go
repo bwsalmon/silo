@@ -225,6 +225,12 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		return
 	}
 	lease, err := s.Registry.Register(node, owner)
+	if err != nil && !errors.Is(err, registry.ErrOwner) && !errors.Is(err, registry.ErrInvalid) {
+		// The shared registry could not be written: not a refusal, so
+		// the node retries.
+		s.logf("rendezvous: could not register node %q of %s: %s", hello.Node.ID, owner, logsafe.Quote(err.Error()))
+		return
+	}
 	if err != nil {
 		refuse(err)
 		return

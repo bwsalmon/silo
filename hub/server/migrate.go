@@ -11,6 +11,7 @@ import (
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
+	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
 
@@ -47,6 +48,11 @@ func Migrate(ctx context.Context, url, runtimeRole string) error {
 		return fmt.Errorf("server: migrating the leases: %w", err)
 	}
 	l.Close()
+	n, err := registry.OpenStore(ctx, url)
+	if err != nil {
+		return fmt.Errorf("server: migrating the shared registry: %w", err)
+	}
+	n.Close()
 	if runtimeRole == "" {
 		return nil
 	}

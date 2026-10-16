@@ -26,6 +26,7 @@ func TestOneDispatcher(t *testing.T) {
 			Database:      pg.URL,
 			DevUserHeader: userHeader,
 			Holder:        holder,
+			Pod:           holder,
 			LeaseRetry:    100 * time.Millisecond,
 			ShutdownGrace: 10 * time.Second,
 			Logf:          logf(t),

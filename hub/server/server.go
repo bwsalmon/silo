@@ -5,7 +5,9 @@
 // (hub/registry) and the rendezvous nodes connect to
 // (hub/rendezvous), over one database and one human sign-on
 // (hub/identity). The dispatcher runs only while this process holds
-// the database lease "dispatcher" (hub/lease, docs/hub.md §2.2.1).
+// the database lease "dispatcher" (hub/lease, docs/hub.md §2.2.1), and
+// the node registry is shared with the hub's other pods through the
+// same database, under this pod's lease (docs/hub.md §2.2.2).
 //
 // It serves:
 //
@@ -31,12 +33,14 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -129,6 +133,15 @@ type Config struct {
 	// zero.
 	LeaseRetry time.Duration
 
+	// Pod names this pod in the shared registry (hub_pods), and PodAddr
+	// is the address the other pods reach it at; both are the host's
+	// name when empty, which is enough for one pod.
+	Pod     string
+	PodAddr string
+	// PodLease is the pod's lease in the shared registry;
+	// registry.DefaultPodLease when zero.
+	PodLease time.Duration
+
 	// MetricsAddr, when set, is the address Serve serves MetricsPath on:
 	// a listener of its own, so that the metrics are never on the
 	// routes the load balancer exposes.
@@ -202,6 +215,7 @@ type Hub struct {
 	Backlog    *tasks.Store
 	Events     *live.Store
 	Leases     *lease.Store
+	Nodes      *registry.Store
 	Registry   *registry.Registry
 	Rendezvous *rendezvous.Server
 	Dispatcher *tasks.Dispatcher
@@ -233,9 +247,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		h.Close()
 		return nil, err
 	}
-	openDirectory, openBacklog, openEvents, openLeases := directory.Open, tasks.Open, live.Open, lease.Open
+	openDirectory, openBacklog, openEvents, openLeases, openNodes := directory.Open, tasks.Open, live.Open, lease.Open, registry.OpenStore
 	if cfg.NoMigrate {
-		openDirectory, openBacklog, openEvents, openLeases = directory.OpenExisting, tasks.OpenExisting, live.OpenExisting, lease.OpenExisting
+		openDirectory, openBacklog, openEvents, openLeases, openNodes = directory.OpenExisting, tasks.OpenExisting, live.OpenExisting, lease.OpenExisting, registry.OpenExistingStore
 	}
 	if h.Directory, err = openDirectory(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the team directory: %w", err))
@@ -249,8 +263,19 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	if h.Leases, err = openLeases(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the leases: %w", err))
 	}
+	if h.Nodes, err = openNodes(ctx, cfg.Database); err != nil {
+		return fail(fmt.Errorf("server: opening the shared registry: %w", err))
+	}
 
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "hub"
+	}
 	h.Registry = registry.New()
+	h.Registry.Store = h.Nodes
+	h.Registry.Pod, h.Registry.PodAddr = cmp.Or(cfg.Pod, host), cmp.Or(cfg.PodAddr, host)
+	h.Registry.PodLease = cfg.PodLease
+	h.Registry.Logf = cfg.Logf
 	hb := cfg.Heartbeat
 	if hb <= 0 {
 		hb = rendezvous.DefaultHeartbeat
@@ -279,6 +304,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Observe:   h.metrics.observeRendezvous,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
+	dirAPI.Unbind = h.Registry.Unbind
 	h.Dispatcher = &tasks.Dispatcher{
 		Store:     h.Backlog,
 		Registry:  h.Registry,
@@ -389,6 +415,9 @@ func (h *Hub) Close() error {
 	if h.Leases != nil {
 		errs = append(errs, h.Leases.Close())
 	}
+	if h.Nodes != nil {
+		errs = append(errs, h.Nodes.Close())
+	}
 	return errors.Join(errs...)
 }
 
@@ -440,6 +469,15 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 		// nodes' WebSockets, which bodyDeadline leaves alone.
 		IdleTimeout: 2 * time.Minute,
 	}
+	// The pod's lease in the shared registry outlives the node
+	// connections, whose closes it publishes, and is deleted last.
+	podCtx, stopPod := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopPod()
+	podDone := make(chan struct{})
+	go func() {
+		defer close(podDone)
+		h.Registry.Run(podCtx)
+	}()
 	dispatchCtx, stopDispatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopDispatch()
 	// The dispatcher runs only while this process holds its lease, and
@@ -490,6 +528,12 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	case <-dispatched:
 	case <-sctx.Done():
 		h.cfg.logf("hub: the dispatcher did not stop in time")
+	}
+	stopPod()
+	select {
+	case <-podDone:
+	case <-sctx.Done():
+		h.cfg.logf("hub: the pod's lease was not deleted in time")
 	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
