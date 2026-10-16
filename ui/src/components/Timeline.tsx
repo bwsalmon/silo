@@ -4,7 +4,7 @@
 // as a stock one's; a type the UI does not know is shown by its name.
 import { Alert, Box, Chip, Stack, Typography } from '@mui/material';
 import type { HubEvent } from '../api';
-import { Markdown } from './Markdown';
+import Markdown from './Markdown';
 import { ArtifactView } from './ArtifactView';
 
 function time(t: string): string {
@@ -42,10 +42,10 @@ function EventBody({ e }: { e: HubEvent }) {
     if (t.kind === 'thinking')
       return (
         <Box sx={{ color: 'text.secondary', fontStyle: 'italic' }}>
-          <Markdown text={t.text ?? ''} />
+          <Markdown>{t.text ?? ''}</Markdown>
         </Box>
       );
-    return <Markdown text={t.text ?? ''} />;
+    return <Markdown>{t.text ?? ''}</Markdown>;
   }
   if (e.approval_request) {
     const a = e.approval_request;
@@ -84,7 +84,7 @@ function EventBody({ e }: { e: HubEvent }) {
             </Typography>
           )}
         </Box>
-        {r.final_text && <Markdown text={r.final_text} />}
+        {r.final_text && <Markdown>{r.final_text}</Markdown>}
         {r.errors?.map((err, i) => (
           <Alert key={i} severity="error">
             {err}

@@ -1,4 +1,9 @@
-// A task's lifecycle state (hub/tasks.State) as a chip.
+// A task's lifecycle state (hub/tasks.State) as a chip. The hub's own,
+// not a copy: grain draws its task states with style.css's .badge and
+// .state-pill classes over its own states (proposed, awaiting_reply,
+// completed, ...), not with a component, and its StateDot is only the
+// brand mark's animation for a running task. The colours are the
+// copied theme's palette (theme.ts).
 import { Chip, type ChipProps } from '@mui/material';
 import type { TaskState } from '../api';
 

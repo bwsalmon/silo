@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App } from './App';
-import { safeURL } from './components/Markdown';
+import { safeUrl } from './components/Markdown';
 import { FakeEventSource } from './test/setup';
 
 const xss = `<script>window.pwned = 1</script><img src=x onerror="window.pwned = 2"><svg onload="window.pwned = 3"></svg>`;
@@ -93,11 +93,11 @@ describe('node and submitter content', () => {
   });
 });
 
-describe('safeURL', () => {
+describe('safeUrl', () => {
   it('keeps only links a viewer may follow', () => {
     for (const ok of ['https://example.com/a?b#c', 'http://x', 'mailto:a@b.c', '/tasks/t-1', 'relative/path', '#frag'])
-      expect(safeURL(ok)).toBe(ok);
+      expect(safeUrl(ok)).toBe(ok);
     for (const bad of ['javascript:alert(1)', 'JavaScript:alert(1)', 'java\tscript:alert(1)', ' javascript:x', 'data:text/html,x', 'vbscript:x', 'file:///etc/passwd', 'jav\u0000ascript:x'])
-      expect(safeURL(bad)).toBe('');
+      expect(safeUrl(bad)).toBe('');
   });
 });
