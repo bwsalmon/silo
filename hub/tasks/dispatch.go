@@ -74,6 +74,9 @@ type Dispatcher struct {
 	// Observe, when set, is told of each dispatch event, with the task
 	// as the dispatcher last read it: the hub's metrics.
 	Observe func(ev Event, t Task)
+	// Finished, when set, is told of each task the dispatcher records as
+	// over: done, failed or cancelled. live.Hub.Finished.
+	Finished func(t Task)
 
 	once sync.Once
 	wake chan struct{}
@@ -199,6 +202,7 @@ func (d *Dispatcher) Cancel(ctx context.Context, id, reason string) (Task, error
 	if err != nil {
 		return t, err
 	}
+	d.finished(t)
 	d.mu.Lock()
 	l := d.live[id]
 	d.mu.Unlock()
@@ -610,6 +614,13 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	}
 }
 
+// finished tells Finished of t if it is over.
+func (d *Dispatcher) finished(t Task) {
+	if d.Finished != nil && t.State.Terminal() {
+		d.Finished(t)
+	}
+}
+
 // transition logs a store update's error. One the task's state no
 // longer allows is a human having cancelled the task meanwhile, which
 // is not an error.
@@ -633,8 +644,12 @@ func (d *Dispatcher) transition(ctx context.Context, id string) func(Task, error
 func (d *Dispatcher) record(ctx context.Context, id string, write func() (Task, error)) {
 	wait := 100 * time.Millisecond
 	for {
-		_, err := write()
-		if err == nil || errors.Is(err, ErrState) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalid) || ctx.Err() != nil {
+		t, err := write()
+		if err == nil {
+			d.finished(t)
+			return
+		}
+		if errors.Is(err, ErrState) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalid) || ctx.Err() != nil {
 			return
 		}
 		d.logf("tasks: updating %s: %v; retrying in %s", id, err, wait)
