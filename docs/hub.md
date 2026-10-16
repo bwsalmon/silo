@@ -861,6 +861,7 @@ The directory's HTTP API (`directory.API`):
 GET    /v1/me                                          the caller, their teams and roles
 GET    /v1/teams                                       the caller's teams (all, for a hub admin)
 POST   /v1/teams {"id","name"}                         hub admin
+GET    /v1/teams/{team}                                one team as /v1/teams lists it: its members, a hub admin
 DELETE /v1/teams/{team}                                hub admin; its repositories are left unowned
 PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin; principal is user:EMAIL or group:NAME
 DELETE /v1/teams/{team}/members/{principal}            team admin
@@ -870,6 +871,11 @@ GET    /v1/node-tokens                                 the caller's (all, for a 
 POST   /v1/node-tokens {"node"}                        mint one for the caller
 DELETE /v1/node-tokens/{id}                            its owner, or a hub admin
 ```
+
+`GET /v1/teams/{team}` was added for the web UI's team page
+([ui.md](ui.md) §8), which would otherwise list every team to show one;
+like every other route, it answers 404 for a team the caller is not
+in. The web UI uses only these routes and §6.1's, as any client can.
 
 ## 6. Task intake and federation (built: `hub/tasks`)
 

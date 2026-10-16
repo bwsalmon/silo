@@ -1,8 +1,12 @@
 // A task: its prompt, where it is in its life, and its live events,
-// with the node-only artifacts they name viewed through the hub.
-import type { ReactNode } from 'react';
-import { Alert, Box, Chip, LinearProgress, Paper, Stack, Typography } from '@mui/material';
-import { ApiError, getTask, type Task } from '../api';
+// with the node-only artifacts they name viewed through the hub; and,
+// for its submitter or a team admin, cancel and requeue.
+import { useState, type ReactNode } from 'react';
+import { Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Typography } from '@mui/material';
+import { ApiError, cancelTask, getTask, requeueTask, type Me, type Task } from '../api';
+import { useAction } from '../action';
+import { managesTask } from '../may';
+import { ConfirmButton } from '../components/ConfirmButton';
 import { useEventStream, type StreamState } from '../events';
 import { useLoad } from '../load';
 import { Link, routePath } from '../router';
@@ -62,6 +66,33 @@ function Lifecycle({ t }: { t: Task }) {
   );
 }
 
+// Actions are cancel and requeue (POST /v1/tasks/{id}/cancel and
+// /requeue), shown to whoever /v1/me says manages the task: its
+// submitter, a team admin or a hub admin. They are shown in every
+// state: whether the state allows one is the API's to say, with a 409.
+function Actions({ t, onDone }: { t: Task; onDone: () => void }) {
+  const [reason, setReason] = useState('');
+  const cancel = useAction(() => cancelTask(t.id, reason.trim() || undefined), onDone);
+  const requeue = useAction(() => requeueTask(t.id), onDone);
+  const busy = cancel.busy || requeue.busy;
+  return (
+    <Stack spacing={1} sx={{ mt: 2 }}>
+      <Typography variant="subtitle2">Actions</Typography>
+      <TextField size="small" label="Reason to cancel (optional)" value={reason} onChange={(e) => setReason(e.target.value)} />
+      <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+        <ConfirmButton confirm="Confirm cancel" disabled={busy} onConfirm={() => void cancel.run().then((ok) => ok && setReason(''))}>
+          Cancel task
+        </ConfirmButton>
+        <Button size="small" disabled={busy} onClick={() => void requeue.run()}>
+          Requeue
+        </Button>
+      </Stack>
+      {cancel.error && <Alert severity="error">{cancel.error}</Alert>}
+      {requeue.error && <Alert severity="error">{requeue.error}</Alert>}
+    </Stack>
+  );
+}
+
 function Events({ id }: { id: string }) {
   const stream = useEventStream(id);
   return (
@@ -75,7 +106,7 @@ function Events({ id }: { id: string }) {
   );
 }
 
-export function TaskPage({ id }: { id: string }) {
+export function TaskPage({ id, me }: { id: string; me?: Me }) {
   const task = useLoad((signal) => getTask(id, signal), [id], 10000);
   const t = task.data;
   if (task.error && !t) {
@@ -101,6 +132,7 @@ export function TaskPage({ id }: { id: string }) {
         <Paper sx={{ p: 2, flex: 1, minWidth: 280, width: '100%' }}>
           <Typography variant="h6">Lifecycle</Typography>
           <Lifecycle t={t} />
+          {managesTask(me, t) && <Actions t={t} onDone={task.reload} />}
         </Paper>
       </Stack>
       <Events id={t.id} />
