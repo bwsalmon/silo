@@ -175,17 +175,13 @@ func (d *Dispatcher) retry() time.Duration {
 
 // Wake asks the dispatcher to look at the queue again: a task was
 // submitted or requeued. With a Bus, the dispatcher on whichever pod
-// holds the lease is asked.
+// holds the lease is asked; a burst of wake-ups sends that pod one
+// notice (Bus.Post), and one that is lost leaves it to look again
+// within Retry.
 func (d *Dispatcher) Wake() {
 	d.wakeLocal()
 	if d.Bus != nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
-			defer cancel()
-			if err := d.Bus.Notify(ctx, notify.Message{Wake: true}); err != nil {
-				d.logf("tasks: waking the dispatcher on the other pods: %v; it looks again within %s", err, d.retry())
-			}
-		}()
+		d.Bus.Post(notify.Message{Wake: true})
 	}
 }
 

@@ -54,11 +54,31 @@ type Bus struct {
 	mu        sync.Mutex
 	handlers  []func(Message)
 	listening atomic.Bool
+
+	// Notices Post has queued, by what they are about, which sender
+	// sends.
+	pmu      sync.Mutex
+	pending  map[string]Message
+	order    []string
+	posted   chan struct{}
+	stop     chan struct{}
+	sent     chan struct{}
+	startOne sync.Once
+	stopOne  sync.Once
 }
 
 // maxConns caps the connections notices are sent on, all of which the
-// bus keeps open once made.
-const maxConns = 16
+// bus keeps open once made: Post's sender, one at a time, and Notify's
+// callers.
+const maxConns = 4
+
+// Post's sender gathers notices for postWindow before sending them,
+// and sends at most postBatch in one statement.
+const (
+	postWindow = 2 * time.Millisecond
+	postBatch  = 500
+	postWait   = 5 * time.Second
+)
 
 // Open returns a bus over the PostgreSQL database at url, or nil for
 // any other database: SQLite keeps its signals in memory.
@@ -77,11 +97,20 @@ func Open(url string) (*Bus, error) {
 	// (docs/test-runs/2026-10-16-hub-load.md).
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns)
-	return &Bus{url: url, db: db}, nil
+	return &Bus{url: url, db: db, pending: map[string]Message{}, posted: make(chan struct{}, 1),
+		stop: make(chan struct{}), sent: make(chan struct{})}, nil
 }
 
-// Close closes the connections notices are sent on.
-func (b *Bus) Close() error { return b.db.Close() }
+// Close sends what Post has queued, and closes the connections notices
+// are sent on.
+func (b *Bus) Close() error {
+	b.stopOne.Do(func() {
+		close(b.stop)
+		b.startOne.Do(func() { close(b.sent) })
+		<-b.sent
+	})
+	return b.db.Close()
+}
 
 func (b *Bus) logf(format string, args ...any) {
 	if b.Logf != nil {
@@ -108,6 +137,96 @@ func (b *Bus) Notify(ctx context.Context, m Message) error {
 	}
 	_, err = b.db.ExecContext(ctx, `SELECT pg_notify($1, $2)`, Channel, string(p))
 	return err
+}
+
+// Post queues m to be sent to every pod, and returns without waiting
+// for the database. Notices posted close together go out in one
+// statement, and so in one transaction, from a goroutine of the bus's
+// own; and the ones about the same thing are coalesced while they wait:
+// one wake-up, one per node, one per task's events, with the highest
+// seq posted. A receiver reads the state again at a notice, so a later
+// one stands for the earlier.
+//
+// What Post sends is not retried: a notice that fails is logged, and
+// lost, which every receiver tolerates (docs/hub.md §2.2.4). Notices
+// posted after Close are dropped.
+func (b *Bus) Post(m Message) {
+	var key string
+	switch {
+	case m.Wake:
+		key = "w"
+	case m.Node != "":
+		key = "n" + m.Node
+	case m.Event != "":
+		key = "e" + m.Event
+	case m.Cancel != "":
+		key = "c" + m.Cancel
+	default:
+		return
+	}
+	b.startOne.Do(func() { go b.send() })
+	b.pmu.Lock()
+	if old, ok := b.pending[key]; ok {
+		if old.Seq > m.Seq {
+			m.Seq = old.Seq
+		}
+	} else {
+		b.order = append(b.order, key)
+	}
+	b.pending[key] = m
+	b.pmu.Unlock()
+	select {
+	case b.posted <- struct{}{}:
+	default:
+	}
+}
+
+// send sends what Post queues until Close, and then what is left.
+func (b *Bus) send() {
+	defer close(b.sent)
+	for {
+		select {
+		case <-b.posted:
+		case <-b.stop:
+			b.flush()
+			return
+		}
+		// Gather the notices posted close behind this one; those posted
+		// while flush waits on the database gather by themselves.
+		select {
+		case <-time.After(postWindow):
+			b.flush()
+		case <-b.stop:
+			b.flush()
+			return
+		}
+	}
+}
+
+// flush sends every notice queued, postBatch at a time.
+func (b *Bus) flush() {
+	b.pmu.Lock()
+	order, pending := b.order, b.pending
+	b.order, b.pending = nil, make(map[string]Message, len(pending))
+	b.pmu.Unlock()
+	for len(order) > 0 {
+		n := min(len(order), postBatch)
+		ps := make([]string, 0, n)
+		for _, k := range order[:n] {
+			p, err := json.Marshal(pending[k])
+			if err != nil {
+				continue
+			}
+			ps = append(ps, string(p))
+		}
+		order = order[n:]
+		ctx, cancel := context.WithTimeout(context.Background(), postWait)
+		_, err := b.db.ExecContext(ctx, `SELECT pg_notify($1, p) FROM unnest($2::text[]) AS p`, Channel, ps)
+		cancel()
+		if err != nil {
+			b.logf("notify: sending %d notices on %s: %v; their receivers read again at their next look", len(ps), Channel, err)
+		}
+	}
 }
 
 func (b *Bus) deliver(m Message) {
