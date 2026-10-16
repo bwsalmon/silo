@@ -160,10 +160,13 @@ on the rest through a serverless NEG behind the same kind of load
 balancer. It is not built.
 
 **One replica.** The deployment runs one pod and rolls it with
-`Recreate`, because the dispatcher assumes it is the only one (§6.2):
-two overlapping pods would both recover the backlog. A roll therefore
-costs nodes a reconnect of a few seconds. §2.2 is the decision to
-stay that way, and what it costs.
+`Recreate`, because a node's connection, its events and the streams
+to it live on the one pod that holds it (§2.2). The dispatcher runs
+under a database lease (§2.2.1), so two overlapping pods never both
+recover the backlog, but the rest of the hub still assumes one pod. A
+roll therefore costs nodes a reconnect of a few seconds. §2.2 is the
+decision to stay that way for now, what it costs, and the staged
+design for several replicas.
 
 **Metrics.** With `-metrics-addr` (`:9091` as deployed) the hub serves
 Prometheus metrics at `/metrics` on a listener of its own, which no
@@ -179,57 +182,248 @@ how a Grain is pointed at the hub. [hub-operations.md](hub-operations.md)
 is the runbook for running it: upgrades, rotating secrets, restoring
 the database and reading the dashboard.
 
-### 2.2 One replica, by decision
+### 2.2 Replicas: one today, several in stages
 
-**Decision: the hub stays one replica.** It is a coordination plane,
-not a data path: an hour of a hub that is down a minute at a time
-costs nodes a reconnect and humans a retry, and loses nothing, because
-everything that matters is in the database and everything in memory
-is restated by the nodes (§2). Several replicas would buy availability
-the hub does not yet need, at the price of the hub's hardest code.
+**Decision: the hub runs one replica until one replica's recovery time
+or one pod's capacity runs out.** It is a coordination plane, not a
+data path: a hub that is down a minute at a time costs nodes a
+reconnect and humans a retry, and loses nothing, because everything
+that matters is in the database and everything in memory is restated
+by the nodes (§2). The exceptions are the view-through (§7.2) and a
+node's UI (§11), which put bytes through the one pod, so capacity is
+what is likeliest to force the move. This section is the design for
+several replicas, in five stages (§2.2.1 to §2.2.5). Stage R1 is
+built; R2 to R5 are follow-ups, each landing behind the one before it,
+and the Deployment stays at one replica until R5.
 
-**What several replicas would take**, which is why it is not built
-here. Every node's connection is held by one pod, and the dispatcher
-and the view-through reach a node only through the pod holding it
-(`Server.Open`). So:
-
-- The registry moves to the database, or each pod's registry learns
-  the others', and each entry names the pod that holds the node's
-  connection (and its address), with a lease so that a dead pod's
-  nodes go offline.
-- `Server.Open` on a pod that does not hold the node forwards to the
-  pod that does: a pod-to-pod stream (an internal HTTP upgrade to the
-  holder's pod IP), which the offer, resume, cancel and view streams
-  ride.
-- The dispatcher runs on one pod at a time, under a lease in the
-  database (v1's leader lease, in this repository's history, is the
-  basis), so that two pods never recover or place the same task; or
-  each task's update takes a row lock and every pod dispatches.
-- The live event fan-out (§7.1) moves to the database or a pub/sub,
-  since a node's events reach one pod and its subscribers may be on
-  another.
-- The rollout becomes `RollingUpdate`, and the Gateway needs no session
-  affinity: any pod serves any request.
-
-That is a stage of its own; a follow-up proposal covers it, to be
-taken up when one replica's recovery time below is no longer good
-enough, or one pod's capacity (the view-through and, if §11 is taken
-up, the relay's traffic) runs out.
-
-**Recovery time as deployed.** One pod, a zonal Cloud SQL instance,
-nodes that reconnect with backoff (1s doubling to a minute):
+**Recovery time as deployed.** One pod, nodes that reconnect with
+backoff (1s doubling to a minute):
 
 | Failure | What happens | Back in |
 | --- | --- | --- |
 | The hub process crashes or wedges | The kubelet restarts the container (liveness on `/healthz`); nodes reconnect; running tasks are lost until their nodes resume them, which they do on reconnecting | under a minute, plus up to a minute of node backoff |
 | An upgrade | `Recreate`: goodbye, at most 20s of shutdown, the new pod starts (§2.1) | about a minute |
 | The GKE node dies | The pod is rescheduled once the node is marked unreachable (the default 5-minute toleration) | 5 to 7 minutes |
-| The Cloud SQL zone or instance fails | ZONAL Cloud SQL has no standby: the instance is restored from backup or to a point in time into a new instance, and the hub pointed at it ([hub-operations.md](hub-operations.md)) | 30 to 60 minutes, by hand; at most seconds of writes lost (point-in-time recovery) |
-| The database is corrupted or wrongly changed | Point-in-time restore to before the change | the same |
+| The Cloud SQL zone or instance fails, ZONAL (the default) | No standby: the instance is restored from backup or to a point in time into a new instance, and the hub pointed at it ([hub-operations.md](hub-operations.md)) | 30 to 60 minutes, by hand; at most seconds of writes lost (point-in-time recovery) |
+| The Cloud SQL zone or instance fails, REGIONAL | Cloud SQL fails over to the standby in another zone; the hub's connections drop and are redialled, and `/readyz` is unready meanwhile | about a minute, nothing lost |
+| The database is corrupted or wrongly changed | Point-in-time restore to before the change | 30 to 60 minutes, by hand |
 
-Moving the instance to `availability_type = "REGIONAL"` (a standby in
-another zone, failover in about a minute) is the next step if the
-database's row matters, and is cheaper than several hub replicas.
+The Cloud SQL row is the cheapest to shorten, and does not wait on
+several hub replicas: terraform's `database_availability_type =
+"REGIONAL"` (stage R1) puts a standby in another zone, at about twice
+the instance's cost. It is left `ZONAL` by default, for a development
+hub; a hub whose backlog matters should set it.
+
+**What several replicas take.** Every node's connection is held by
+one pod. The dispatcher, the view-through and the node UI reach a node
+only through the pod holding it (`Server.Open`); a node's events reach
+only that pod (§7.1); and, before R1, the dispatcher assumed it was
+alone (§6.2). So the registry has to be shared (R2), `Server.Open` has to reach
+across pods (R3), the live fan-out and the dispatcher's wake-ups have
+to cross pods (R4), and only then can the Deployment run more than one
+pod (R5). The dispatcher's lease (R1) comes first because it is small,
+it is what every later stage leans on, and it already closes a gap in
+one replica: a GKE node that is unreachable but not dead can leave the
+old pod running beside its replacement, and two dispatchers would both
+recover the backlog.
+
+| Stage | What | State |
+| --- | --- | --- |
+| R1 | The dispatcher under a database lease (`hub/lease`), `database_availability_type` | built |
+| R2 | The shared registry: `hub_pods` and `hub_nodes` in the database, each node naming the pod holding it, under that pod's lease | follow-up |
+| R3 | `Server.Open` forwarded to the holder over a pod-to-pod stream; the directory read from the shared registry | follow-up, after R2 |
+| R4 | Cross-pod wake-ups and live events: LISTEN/NOTIFY for the dispatcher, subscriptions forwarded to the pod holding the task's node | follow-up, after R3 |
+| R5 | Two or more replicas, `RollingUpdate`, a PodDisruptionBudget, the operations runbook and alerts | follow-up, after R4 |
+
+#### 2.2.1 R1: the dispatcher under a lease (built)
+
+Every pod runs `lease.Run` for the lease named `dispatcher`, and runs
+the dispatcher only while it holds it (`hub/lease`, from v1's
+`pkg/leader` and its Postgres `Lead`, in this repository's history
+before 689c3a2):
+
+- **The lease** is a session-level PostgreSQL advisory lock
+  (`pg_try_advisory_lock`) on the lease name's fixed key, held on a
+  connection of its own and outside the stores' pools. A pod that does
+  not hold it tries again every five seconds. The holder pings its
+  connection every two seconds and gives the lease up on the first ping
+  that fails or takes longer than two seconds; PostgreSQL frees the lock
+  when the holder's session ends, which the connection's TCP keepalive
+  makes about ten seconds after the holder is cut off. On SQLite, which
+  is one process, the lease is taken at once.
+- **A term** is one hold of the lease. Taking it bumps the lease's
+  epoch, a row in `hub_leases` (name, epoch, holder, taken_at), so the
+  terms are numbered and the holder is visible in the database. The
+  dispatcher runs under a context that ends when the lease is lost, and
+  the next term starts only once the last term's dispatcher has
+  returned, its task streams closed.
+- **Recover runs once per term**, as the dispatcher's first act, and
+  never on a pod that does not hold the lease. A new term's Recover
+  costs what a hub restart costs today: an offered task is requeued, a
+  running one is lost until its node resumes it (§6.2). With R3 the
+  node is still connected, to some pod, so the resume follows at once.
+- **A stalled holder.** A holder whose session is killed outright can
+  keep writing for up to one ping (two seconds) after the next holder
+  has taken the lease. Every task update is conditional on the task's
+  state (and version) when it is written (§6.1), and the new term's
+  Recover moves every offered task back to the queue and every running
+  one to lost, so most of the stalled holder's late updates find the
+  task in the wrong state and fail. The remaining window is a task the
+  new term has already offered again: the stalled holder's `accept`
+  for its own offer would then be taken for the new one, and the node
+  could be running a task twice. Guarding every dispatcher write with
+  the term's epoch, as v1's `leader.Guard` did, closes it; it is not
+  built, because the window needs a database session killed under a
+  live holder and a re-offer within the same two seconds.
+- **What it shows.** `silo_hub_dispatcher_leader` is 1 on the pod
+  holding the lease and 0 on the others, and
+  `silo_hub_dispatcher_terms_total` counts the terms a pod has taken.
+  `/readyz` does not depend on the lease: a pod that is not dispatching
+  still serves nodes and humans.
+- **On shutdown** the pod stops its dispatcher and releases the lease
+  explicitly, so another pod takes it within one retry rather than
+  after the keepalive.
+
+#### 2.2.2 R2: the shared registry
+
+The registry stays in memory on each pod, authoritative for the
+connections that pod holds, and each pod publishes it to two tables:
+
+- `hub_pods (pod, addr, lease_until)`: each pod's name (the Kubernetes
+  pod name, from the downward API), its internal address (pod IP and
+  the internal port, R3), and a lease it renews every five seconds for
+  fifteen. A pod's row is deleted when it shuts down.
+- `hub_nodes (id, owner, pod, conn, repos, slots, version, labels,
+  free, settled, connected_at, last_seen)`: one row per node ever
+  registered, `pod` and `conn` (a random ID per connection) naming the
+  connection holding it, empty when it is offline.
+
+Each rule of §3 moves into a conditional statement:
+
+- **Ownership.** Registering inserts the row, or updates it only where
+  `owner` matches: a different owner gets `ErrOwner` from the database,
+  whichever pod either connection reached.
+- **Supersession.** Registering sets `pod` and `conn` to the new
+  connection's. The old connection's pod learns it was superseded when
+  its next heartbeat's update (`WHERE id = ? AND conn = ?`) matches no
+  row, and drops the connection; a late close is likewise conditional
+  on `conn`, so it never takes the newer connection offline.
+- **Status.** A node is online when its row names a pod whose
+  `lease_until` is in the future and its `last_seen` is within
+  `StaleAfter`; stale when the pod is live but the node is silent;
+  offline when `pod` is empty or the pod's lease has lapsed. A pod that
+  dies takes its nodes offline within one pod lease (fifteen seconds),
+  with no pod having to notice: the status is computed at read time.
+- **Claims** stay in the dispatcher's memory, since only the lease
+  holder claims. The leader's registry is a mirror: a `registry.Registry`
+  it refills from `hub_nodes` on every change notice (R4) and every
+  `StaleAfter`, keeping its claims across refills. A heartbeat writes
+  `free` and bumps `settled`; a refill that sees `settled` move settles
+  that node's outstanding claims, as the heartbeat does in memory today.
+- **Changes.** A pod's own registry changes are written through at
+  once; heartbeats are written at most every heartbeat interval, which
+  they already are.
+
+The alternative, gossiping registries between pods, was rejected: the
+database is already shared, consistent and the thing every pod must
+reach to be ready, where gossip would add membership, a protocol and
+its split-brain, for a table of at most a few thousand rows.
+
+#### 2.2.3 R3: `Server.Open` across pods
+
+Each pod serves a second listener, the **internal listener**
+(`-internal-addr`, `:9092` as deployed), on its pod IP, which no
+Service names: the load balancer and IAP never reach it. It answers
+one route, `GET /internal/v1/nodes/{id}/open`, an HTTP upgrade
+(`Upgrade: silo-open.v1`). The holder checks that it still holds the
+node's connection, opens a mux stream to the node as `Server.Open`
+does locally, answers `101`, and splices the two until either ends.
+
+`Server.Open(ctx, node)` opens locally when this pod holds the node,
+and otherwise reads the holder's `addr` from `hub_nodes` and
+`hub_pods`, dials it, upgrades, and returns the upgraded connection
+as the `net.Conn`. Everything that opens a stream rides it unchanged:
+the offer, resume and cancel streams (the dispatcher, on whichever pod
+holds the lease), the view stream (on the viewer's pod) and the node
+UI's `http` streams (on the browser's pod). A holder that answers 404
+(it lost the node since the read) is retried once after a fresh read;
+then `Open` fails as for an offline node.
+
+**Authentication.** Internal requests carry
+`Authorization: Bearer <HMAC>`: a token derived from a key all pods
+share (a Kubernetes Secret, `silo-hub-internal`, mounted as a file),
+over the target pod's name and a minute's timestamp, so a token cannot
+be replayed to another pod or later. A NetworkPolicy admits the
+internal port from hub pods only. The caller has already checked the
+human's or the dispatcher's right to the node; the holder trusts that
+check, as one pod trusts another's database writes.
+
+**The directory** (`GET /v1/nodes`) and the node UI's host check read
+the shared registry, so any pod answers either.
+
+The cost is one more hop for view-through and node-UI bytes when the
+browser's pod is not the node's. Session affinity on the Gateway
+cannot avoid it, since a browser and a node are different clients.
+
+#### 2.2.4 R4: wake-ups and live events across pods
+
+**Wake-ups.** Three things wake the dispatcher today from inside the
+pod: a task submitted or requeued (`Wake`), a cancel (`Cancel`, which
+signals the task's live stream) and a registry change. Each becomes a
+PostgreSQL `NOTIFY` on the channel `silo_hub`, with a short JSON
+payload (`{"wake":true}`, `{"cancel":"<task>"}`, `{"node":"<id>"}`),
+and every pod `LISTEN`s on a connection of its own. The leader wakes
+on `wake` and `node`, refilling its mirror on the latter, and signals
+the task's stream on `cancel`. A notice lost while the listening
+connection was down costs at most one `Retry` (30s): the dispatcher's
+pass still runs on its timer, and a reconnecting listener wakes the
+dispatcher once. SQLite, one process, keeps the in-memory signals.
+
+**Live events.** A task's events arrive on the pod holding its node,
+which stores the lifecycle and conversation events and keeps the
+token ring (§7.1) in memory. A subscriber's request lands on any pod:
+
+- If the task's node is held by another pod, the subscriber's pod
+  checks access as today, then forwards the subscription over the
+  internal listener (`GET /internal/v1/tasks/{id}/events?from=`) to
+  that pod, which serves it from its ring and store, and copies the
+  stream through. The ring stays on one pod, so late joiners see the
+  token history as today.
+- If no pod holds the node, the subscriber's pod serves the stored
+  events from the database and follows new ones on `NOTIFY silo_hub
+  {"event":"<task>","seq":N}`, which the ingesting pod sends after each
+  stored event. That covers a task whose node reconnects to a new pod
+  mid-subscription: the subscriber's stream ends without `end` when
+  the holder goes away, and it reconnects from its cursor, as after a
+  dropped subscriber today.
+
+Publishing every event through `NOTIFY` (or a pub/sub) was rejected:
+token deltas are many and `NOTIFY` payloads are capped at 8000 bytes,
+and the subscription would still have to hold a ring for late joiners
+on every pod.
+
+#### 2.2.5 R5: the Deployment
+
+- `replicas: 2`, `strategy: RollingUpdate` with `maxSurge: 1` and
+  `maxUnavailable: 0`, a `PodDisruptionBudget` of `minAvailable: 1`,
+  and a topology spread across zones and nodes. The pod's name and IP
+  come from the downward API (`SILO_HUB_POD`, `SILO_HUB_POD_ADDR`).
+  `validate.sh` checks these in place of its one-replica check.
+- The Gateway keeps no session affinity: any pod serves any request.
+- **A roll.** Each old pod says goodbye to its nodes, which reconnect
+  to a ready pod; if it held the dispatcher's lease, it releases it and
+  another pod's term starts, recovering the backlog, within five
+  seconds. Nodes reconnect within their backoff, and the hub is never
+  wholly down.
+- **Alerts.** "The hub is down" becomes "no pod is ready" (the sum of
+  `up` over the hub's pods is 0); a pod that is down while others serve
+  is a warning; and "no dispatcher" (the sum of
+  `silo_hub_dispatcher_leader` is 0 for five minutes) is an alert of
+  its own, since a hub can be up and not dispatching.
+- [hub-operations.md](hub-operations.md)'s upgrade section, and the
+  recovery table above, are rewritten for the rolling upgrade: a
+  crash or a GKE node's death then costs that pod's nodes a reconnect
+  to another pod, and the dispatcher's tasks a new term's resume.
 
 ## 3. The node registry (built: `hub/registry`)
 
@@ -642,8 +836,9 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 
 When the dispatcher starts, it has no streams. A task that was
 `offered` is requeued, and a task that was `running` is `lost` until
-its node resumes it. The dispatcher assumes it is the only one (one
-hub replica, §2.2).
+its node resumes it. Only one dispatcher runs at a time: each pod
+runs it only while holding the database lease `dispatcher`, and a new
+holder recovers the backlog as above (§2.2.1).
 
 ### 6.3 Lost running tasks: requeued after a team's grace, off by default
 
@@ -836,6 +1031,7 @@ anything leaves it.
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the one-replica decision (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
+| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry; R3, `Server.Open` across pods; R4, wake-ups and live events across pods; R5, the rolling Deployment. | here: R1 built, R2 to R5 follow-ups |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
@@ -851,8 +1047,8 @@ anything leaves it.
 
 Two questions that were here are decided: lost running tasks are
 requeued only after a grace a team turns on (§6.3), and the hub stays
-one replica, with its recovery time written down and several replicas
-a follow-up (§2.2).
+one replica for now, with its recovery time written down and several
+replicas designed in stages (§2.2).
 
 ## 11. A node's UI through the hub (built: `hub/nodeui`; grain's side to come)
 
@@ -955,7 +1151,9 @@ traffic over it. As built (`hub/nodeui`), with `silo hub serve
 - **Deployment.** The hub's Gateway needs the wildcard hostname, its
   Certificate Manager certificate a `*.nodes.<domain>` name (DNS
   authorization allows wildcards) and the DNS zone a wildcard record to
-  the hub's address. `deploy/` does not have these yet.
+  the hub's address. `deploy/` has them (`node_ui_domain` in
+  `deploy/terraform/hub`, the HTTPRoute `silo-hub-node-ui`); deploy.md
+  §8 turns them on.
 
 What it costs: the hub carries every UI byte, so its bandwidth and the
 one replica's capacity matter (§2.2); a hub outage takes the UIs with

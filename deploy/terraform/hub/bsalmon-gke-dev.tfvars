@@ -9,6 +9,9 @@ cluster_location = "us-central1"
 domain   = "silo-hub.example.com" # SET: a name whose DNS you control
 dns_zone = ""                     # or a Cloud DNS zone in the project that holds domain
 
+# The nodes' UI hosts are *.nodes.<domain> unless node_ui_domain says
+# otherwise; "" makes none (docs/deploy.md §8).
+
 # Who may pass IAP; the hub's team directory then decides what each
 # sees. IAP's OAuth client is made in the console (docs/deploy.md).
 iap_members = ["user:bsalmon@google.com"]

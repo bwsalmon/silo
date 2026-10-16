@@ -1,7 +1,8 @@
 # The Silo hub's GCP resources in a project that already has a GKE
 # cluster (docs/deploy.md): its database, the identity it reaches the
-# database as, IAP, a static IP and a managed certificate. The
-# Kubernetes side is deploy/kubernetes/hub.
+# database as, IAP, a static IP and managed certificates, for the hub's
+# host and for its nodes' UI hosts. The Kubernetes side is
+# deploy/kubernetes/hub.
 
 data "google_project" "this" {
   project_id = var.project
@@ -42,6 +43,10 @@ locals {
   workload_identity = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/${var.service_account}]"
   db_user           = "silo-hub"
   db_name           = "silo"
+  # SILO_HUB_NODE_UI_DOMAIN: node ws-1's UI is at ws-1.<it>
+  # (docs/hub.md §11.2). Empty when node_ui_domain is "".
+  node_ui_domain = var.node_ui_domain == null ? "nodes.${var.domain}" : var.node_ui_domain
+  node_ui        = local.node_ui_domain == "" ? toset([]) : toset([local.node_ui_domain])
 }
 
 resource "google_project_service" "apis" {
@@ -62,7 +67,7 @@ resource "google_sql_database_instance" "hub" {
 
   settings {
     tier              = var.database_tier
-    availability_type = "ZONAL"
+    availability_type = var.database_availability_type
     # Cloud SQL's own guard against deleting the instance (and with it
     # its automated backups), beside terraform's.
     deletion_protection_enabled = var.deletion_protection
@@ -193,6 +198,38 @@ resource "google_certificate_manager_certificate_map_entry" "hub" {
   certificates = [google_certificate_manager_certificate.hub.id]
 }
 
+# The nodes' UI hosts, *.<node_ui_domain>. A DNS authorization covers
+# its domain and the wildcard one label below it, so the hub's own
+# does not cover these and they have their own. Their own certificate,
+# too, so turning them on or off leaves the hub's certificate alone.
+resource "google_certificate_manager_dns_authorization" "node_ui" {
+  for_each = local.node_ui
+  name     = "${var.name}-nodes"
+  project  = var.project
+  domain   = each.value
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_certificate_manager_certificate" "node_ui" {
+  for_each = local.node_ui
+  name     = "${var.name}-nodes"
+  project  = var.project
+  managed {
+    domains            = ["*.${each.value}"]
+    dns_authorizations = [google_certificate_manager_dns_authorization.node_ui[each.key].id]
+  }
+}
+
+resource "google_certificate_manager_certificate_map_entry" "node_ui" {
+  for_each     = local.node_ui
+  name         = "${var.name}-nodes"
+  project      = var.project
+  map          = google_certificate_manager_certificate_map.hub.name
+  hostname     = "*.${each.value}"
+  certificates = [google_certificate_manager_certificate.node_ui[each.key].id]
+}
+
 # --- DNS, when the zone is in the project --------------------------------
 
 resource "google_dns_record_set" "hub" {
@@ -213,6 +250,26 @@ resource "google_dns_record_set" "cert_authorization" {
   type         = google_certificate_manager_dns_authorization.hub.dns_resource_record[0].type
   ttl          = 300
   rrdatas      = [google_certificate_manager_dns_authorization.hub.dns_resource_record[0].data]
+}
+
+resource "google_dns_record_set" "node_ui" {
+  for_each     = var.dns_zone == "" ? toset([]) : local.node_ui
+  project      = var.project
+  managed_zone = var.dns_zone
+  name         = "*.${each.value}."
+  type         = "A"
+  ttl          = 300
+  rrdatas      = [google_compute_global_address.hub.address]
+}
+
+resource "google_dns_record_set" "node_ui_cert_authorization" {
+  for_each     = var.dns_zone == "" ? toset([]) : local.node_ui
+  project      = var.project
+  managed_zone = var.dns_zone
+  name         = google_certificate_manager_dns_authorization.node_ui[each.key].dns_resource_record[0].name
+  type         = google_certificate_manager_dns_authorization.node_ui[each.key].dns_resource_record[0].type
+  ttl          = 300
+  rrdatas      = [google_certificate_manager_dns_authorization.node_ui[each.key].dns_resource_record[0].data]
 }
 
 # --- The image repository ------------------------------------------------

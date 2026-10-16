@@ -21,6 +21,10 @@ configMapGenerator:
       # The IAP-enabled backend service's audience (docs/deploy.md
       # says how to read it once the Gateway has made the backend).
       - SILO_HUB_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
+      # The domain each node's UI is served under, at <node>.<it>
+      # (docs/deploy.md): terraform output -raw node_ui_domain. Empty
+      # serves none.
+      - SILO_HUB_NODE_UI_DOMAIN=
       # Hub admins, comma-separated emails or groups.
       - SILO_HUB_ADMINS=
       # The Cloud SQL instance, PROJECT:REGION:INSTANCE.

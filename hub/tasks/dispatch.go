@@ -43,8 +43,9 @@ const (
 // asks it to resume the task. A team may set a grace after which a
 // lost task goes back to the queue for any node (LostRequeueAfter).
 //
-// The dispatcher assumes it is the only one: one hub replica
-// (docs/hub.md §2.2).
+// Only one dispatcher may run over a backlog at a time: the hub runs
+// it only while holding the database lease "dispatcher" (hub/lease,
+// docs/hub.md §2.2.1), and calls Run afresh for each term.
 type Dispatcher struct {
 	Store    *Store
 	Registry *registry.Registry
@@ -169,7 +170,7 @@ func (d *Dispatcher) Wake() {
 // requeued, and a running one is lost until its node resumes it.
 func (d *Dispatcher) Run(ctx context.Context) error {
 	d.init()
-	if err := d.Store.Recover(ctx, "the hub restarted"); err != nil {
+	if err := d.Store.Recover(ctx, "the dispatcher restarted: the hub restarted, or its lease changed hands"); err != nil {
 		return fmt.Errorf("tasks: recovering the backlog: %w", err)
 	}
 	changes, stop := d.Registry.Changes()
