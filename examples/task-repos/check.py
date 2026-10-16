@@ -24,6 +24,12 @@ This is a reviewer's aid, not the implementation. It:
 - checks code repos' grain folders: a task there came from an intake
   (moved_from) and is not a scheduled firing, and a template there carries
   no reads, writes, grants or target;
+- checks context: entries (§5.6): write only on a repo or folder at a
+  branch, depth only on files, input: only in templates, no overlapping
+  sandbox paths, and, in a code repo, only that repo; prints each task's
+  sandbox layout, following depth through Markdown body links;
+- treats any file that is not an object as an asset (§2.2), and checks
+  each kind: asset sidecar's asset, sha256 and bytes;
 - derives each task's status from its runs, and prints each lane's
   effective order, and each Grain's next picks across its lanes;
 - recomputes requirement hashes;
@@ -62,6 +68,8 @@ OPEN_RUN = ("accepted", "running", "waiting")
 CLOSED_RUN = ("done", "failed", "cancelled")
 PRIORITY = ["urgent", "high", "normal", "low"]
 CONFIG = ("include", "exclude")
+ASSET = "(asset)"
+CONTEXT_LIMITS = {"entries": 64, "depth": 3, "reached_files": 256, "reached_bytes": 64 << 20, "file_bytes": 32 << 20}
 LIMITS = {"depth": 8, "includes_per_space": 64, "spaces": 256, "repos": 32, "objects": 50000}
 errors = []
 
@@ -150,6 +158,8 @@ def canonical(repo, src, ref):
         sep = target.find("//", scheme_end)
         url, inpath = (target[:sep], target[sep + 2:]) if sep >= 0 else (target, "")
         inpath = inpath.rsplit("@", 1)[0] if "@" in inpath else inpath
+        if sep < 0 and "@" in url[scheme_end:]:
+            url = url.rsplit("@", 1)[0]  # a whole repo at a ref
         if url.startswith(EXTERNAL):
             return None, "external"
         if url not in HOSTED:
@@ -182,6 +192,8 @@ def resolve(objs, repo, src, ref):
         if ident[1] == "" or (HERE / ident[0] / ident[1]).is_dir():
             return ident, None, hops  # a repo or folder (applies_to)
         if ident not in objs:
+            if (HERE / ident[0] / ident[1]).is_file():
+                return ident, {"kind": ASSET}, hops  # an asset: any file that is not an object (§2.2)
             return None, "dangling", hops
         fm = objs[ident][0]
         if fm["kind"] != "moved":
@@ -205,6 +217,10 @@ def edges(fm):
             out.append((field, value, kind, pinned))
 
     kind = fm["kind"]
+    for e in (fm.get("context") or []) if kind in ("task", "template", "schedule") else []:
+        e = entry(e)
+        if e.get("ref"):
+            add("context", e["ref"])
     if kind == "task":
         add("template", fm.get("template"), "template")
         add("schedule", fm.get("schedule"), "schedule")
@@ -231,6 +247,10 @@ def edges(fm):
         add("task", fm.get("task"), "task")
         add("in_reply_to", fm.get("in_reply_to"), "comment")
         add("supersedes", fm.get("supersedes"), "comment")
+        for r in fm.get("attachments") or []:
+            add("attachments", r, ASSET)
+    elif kind == "asset":
+        add("asset", fm.get("asset"), ASSET)
     elif kind == "schedule":
         add("template", fm.get("template"), "template")
     elif kind == "include":
@@ -249,6 +269,181 @@ def edges(fm):
         for r in fm.get("supersedes") or []:
             add("supersedes", r, "design")
     return out
+
+
+def entry(e):
+    """A context: entry, with a bare string read as {ref, mode: read} (§5.6)."""
+    return {"ref": e, "mode": "read"} if isinstance(e, str) else {"mode": "read", **e}
+
+
+def target_type(ref):
+    """repo, folder or file, from the reference's form (§5.6)."""
+    path = ref.split("#", 1)[0]
+    if "://" in path:
+        sep = path.find("//", path.index("://") + 3)
+        path = path[sep + 2:] if sep >= 0 else ""
+    elif re.match(r"^[a-z][a-z0-9-]*:", path):
+        path = path.split(":", 1)[1]
+    path = path.rsplit("@", 1)[0] if "@" in path else path
+    return "repo" if path in ("", "/") else "folder" if path.endswith("/") else "file"
+
+
+def url_of(repo, src, ref):
+    """The repo URL, in-repo path and @ref a reference names, without resolving it."""
+    target = ref.split("#", 1)[0]
+    m = re.match(r"^([a-z][a-z0-9-]*):(?!//)(.*)$", target)
+    if m:
+        target = aliases(repo, src)[m.group(1)] + "//" + m.group(2)
+    at = ""
+    if "://" in target:
+        sep = target.find("//", target.index("://") + 3)
+        url, path = (target[:sep], target[sep + 2:]) if sep >= 0 else (target, "")
+        if "@" in path:
+            path, at = path.rsplit("@", 1)
+        elif "@" in url.split("://", 1)[1]:
+            url, at = url.rsplit("@", 1)
+        return url, path.lstrip("/"), at
+    if "@" in target:
+        target, at = target.rsplit("@", 1)
+    url = next(u for u, d in HOSTED.items() if d == repo)
+    path = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join(posixpath.dirname(src), target))
+    return url, path, at
+
+
+def default_path(url, path, kind, at, write_base):
+    """The sandbox layout's default place for an entry (§5.6)."""
+    name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    if kind in ("repo", "folder"):
+        return f"work/{name}/" if at in ("", write_base.get(url, at)) else f"work/{name}@{at.replace('/', '-')}/"
+    host, _, rpath = url.split("://", 1)[1].partition("/")
+    return f"context/{host.replace(':', '_')}/{rpath.removesuffix('.git')}/{path}"
+
+
+LINK = re.compile(r"!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)|^\[[^\]]+\]:\s*(\S+)", re.M)
+
+
+def body_links(repo, src, body):
+    """The links in a Markdown body that are references (§5.6): relative or
+    /-rooted paths, declared aliases, and git URLs with the // separator."""
+    out = []
+    for m in LINK.finditer(body):
+        link = m.group(1) or m.group(2)
+        if link.startswith("#"):
+            continue
+        if "://" in link:
+            if link.find("//", link.index("://") + 3) < 0:
+                continue  # an ordinary web link
+        elif re.match(r"^[a-z][a-z0-9+.-]*:", link) and link.split(":", 1)[0] not in aliases(repo, src):
+            continue  # mailto: and the like
+        out.append(link)
+    return out
+
+
+def materialise(objs, repo, path, fm):
+    """The listed and reached files of a task's context:, as §5.6's resolver
+    plans them (the PEP is the examples' own: everything readable here)."""
+    plan, skipped, queue, budget = [], [], [], {"files": 0, "bytes": 0}
+    for e in map(entry, fm.get("context") or []):
+        if target_type(e["ref"]) != "file":
+            continue
+        ident, t, _ = resolve(objs, repo, path, e["ref"])
+        if ident is None:
+            continue
+        plan.append(ident)
+        if e.get("depth"):
+            queue.append((ident, min(e["depth"], CONTEXT_LIMITS["depth"])))
+    reached = []
+    while queue:
+        (frepo, fpath), d = queue.pop(0)
+        if not fpath.endswith(".md"):
+            continue
+        for link in body_links(frepo, fpath, split(HERE / frepo / fpath)[1]):
+            if target_type(link) != "file":
+                skipped.append((link, (frepo, fpath), "not a file"))
+                continue
+            ident, t, _ = resolve(objs, frepo, fpath, link)
+            if ident is None:
+                skipped.append((link, (frepo, fpath), t))
+                continue
+            if ident in plan:
+                continue
+            size = (HERE / ident[0] / ident[1]).stat().st_size
+            if (budget["files"] + 1 > CONTEXT_LIMITS["reached_files"] or size > CONTEXT_LIMITS["file_bytes"]
+                    or budget["bytes"] + size > CONTEXT_LIMITS["reached_bytes"]):
+                skipped.append((link, (frepo, fpath), "limit"))
+                continue
+            budget["files"] += 1
+            budget["bytes"] += size
+            plan.append(ident)
+            reached.append((ident, (frepo, fpath)))
+            if d > 1:
+                queue.append((ident, d - 1))
+    return reached, skipped
+
+
+def check_context(objs, repo, path, fm, report):
+    """A task's, template's or schedule's context: entries (§5.6)."""
+    kind = fm["kind"]
+    gov = governor(repo, path)
+    code = bool(gov) and gov[2].get("role") == "code"
+    inputs = {i["name"]: i for i in fm.get("inputs") or []}
+    entries = [entry(e) for e in fm.get("context") or []]
+    if len(entries) > CONTEXT_LIMITS["entries"]:
+        err(f"{repo}/{path}: more than {CONTEXT_LIMITS['entries']} context entries")
+    own = next(u for u, d in HOSTED.items() if d == repo)
+    for i in inputs.values():
+        if i["type"] == "ref" and i.get("default") and code and url_of(repo, path, i["default"])[0] != own:
+            err(f"{repo}/{path}: input {i['name']}: a code repo's ref input may name only its own repo")
+    resolved, write_base = [], {}
+    for n, e in enumerate(entries, 1):
+        if "input" in e:
+            i = inputs.get(e["input"])
+            if kind != "template":
+                err(f"{repo}/{path}: context entry {n}: input: is for templates; a {kind} records the value")
+            elif not i or not (i["type"] == "ref" or (i["type"] == "list" and i.get("of") == "ref")):
+                err(f"{repo}/{path}: context entry {n}: input {e['input']} is not a declared input of type ref")
+            elif e["mode"] == "write" and i.get("ref_kind") not in ("repo", "folder"):
+                err(f"{repo}/{path}: context entry {n}: write needs an input with ref_kind repo or folder")
+            continue
+        what = target_type(e["ref"])
+        url, ipath, at = url_of(repo, path, e["ref"])
+        if code and url != own:
+            err(f"{repo}/{path}: context entry {n}: a code repo's grain folder may name only its own repo (§12.1)")
+        if e["mode"] == "write":
+            if what == "file":
+                err(f"{repo}/{path}: context entry {n}: write is only for a repo or a folder")
+            if not at or re.match(r"^[0-9a-f]{40}$", at) or at.startswith("v"):
+                err(f"{repo}/{path}: context entry {n}: write needs @<branch>, its base")
+            if url in write_base and write_base[url] != at:
+                err(f"{repo}/{path}: context entry {n}: two write bases for {url}")
+            write_base[url] = at
+        if e.get("depth") and what != "file":
+            err(f"{repo}/{path}: context entry {n}: depth is for files only")
+        resolved.append((e, what, url, ipath, at))
+    if kind != "task":
+        return
+    paths = {}
+    for e, what, url, ipath, at in resolved:
+        p = e.get("path") or default_path(url, ipath, what, at, write_base)
+        if p in ("task.md", "run.md") or p.startswith("thread/") or ".." in p.split("/"):
+            err(f"{repo}/{path}: context path {p}: reserved or escapes the sandbox")
+        key = (url, at) if what != "file" else (url, at, ipath)
+        for q, k in paths.items():
+            if k != key and (p == q or (q.endswith("/") and p.startswith(q) and what != "file")
+                             or (p.endswith("/") and q.startswith(p) and len(k) == 2)):
+                err(f"{repo}/{path}: context paths {q} and {p} overlap")
+        paths.setdefault(p, key)
+    reached, skipped = materialise(objs, repo, path, fm)
+    report.append(f"sandbox of {repo}/{path}:")
+    for e, what, url, ipath, at in resolved:
+        p = e.get("path") or default_path(url, ipath, what, at, write_base)
+        report.append(f"  {p} <- {e['ref']} ({what}, {e['mode']})")
+    for ident, via in reached:
+        url = next(u for u, d in HOSTED.items() if d == ident[0])
+        report.append(f"  {default_path(url, ident[1], 'file', '', {})} <- {short(ident)} (via {short(via)}, depth)")
+    for link, via, why in skipped:
+        report.append(f"  skipped {link} (via {short(via)}): {why}")
+    return reached
 
 
 def section_hashes(text):
@@ -510,6 +705,24 @@ def main():
             for k in ("reads", "writes", "grants", "target"):
                 if k in fm:
                     err(f"{repo}/{path}: a code repo's template may not carry {k}")
+
+    # context: entries, the sandbox layout and depth (§5.6); sidecars (§2.2).
+    reached = {}
+    for (repo, path), (fm, body) in objs.items():
+        if fm["kind"] in ("task", "template", "schedule") and fm.get("context"):
+            reached[(repo, path)] = check_context(objs, repo, path, fm, report)
+        if fm["kind"] == "asset" and fm.get("asset"):
+            ident, t, _ = resolve(objs, repo, path, fm["asset"])
+            if ident and t["kind"] == ASSET:
+                data = (HERE / ident[0] / ident[1]).read_bytes()
+                if "sha256" in fm and hashlib.sha256(data).hexdigest() != fm["sha256"]:
+                    err(f"{repo}/{path}: sha256 does not match {short(ident)}")
+                if "bytes" in fm and len(data) != fm["bytes"]:
+                    err(f"{repo}/{path}: bytes does not match {short(ident)}")
+    want = {("hub-shared", "designs/img/claims-flow.png")}
+    got = {i for i, via in reached.get(("hub-intake", "tasks/2026-10-16-reject-dangling-refs/task.md")) or []}
+    if got != want:
+        err(f"depth: 1 reached {sorted(got)}, expected {sorted(want)}")
 
     # Execution records, by task (§5.3).
     runs = {}

@@ -35,6 +35,13 @@
     "run": {
       "$ref": "common.schema.json#/$defs/refString",
       "description": "The thread of one execution record (§5.4)"
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      },
+      "description": "Assets beside the comment, at comments/<utc>-<author>/<file name> (§2.2)"
     }
   },
   "required": [

@@ -37,7 +37,8 @@ copied here.
 The tasks are real, except `2026-10-16-reject-dangling-refs` and the
 widgets repo's, which are illustrative. Their prompts and comments are reconstructed from their
 commits. Migration maps grain's team `default` to the Silo team `hub`,
-grain's `target: owner/name` to the repo's git URL, and grain task 4310
+grain's `target: owner/name` and `base` to a `write` entry in `context:`
+(the repo's git URL at that branch), and grain task 4310
 to the path `tasks/4310-carry-approver/task.md` (docs/task-repos.md §13).
 Commit shas *inside* the example repos are illustrative, since those
 repos do not exist; code-repo shas are real silo commits. The
@@ -130,6 +131,27 @@ repos do not exist; code-repo shas are real silo commits. The
   namespace has the org's `security-review` and `dependency-bump` and not
   `legacy-triage`, while a direct include of the org set would still
   have it (§3.3).
+- **A task's whole `context:`:** `hub-intake/tasks/2026-10-16-reject-dangling-refs/task.md`
+  lists silo at `main` to write, grain's `pkg/daemon/` at `candidate` to
+  read (a sparse checkout), the hub intake design with `depth: 1`, and a
+  screenshot attached to the task, stored beside it in `attachments/`.
+  `check.py` prints its sandbox layout (§5.6, §8.16).
+- **An image asset, reached by `depth: 1`:** the design
+  `hub-shared/designs/hub-intake.md` embeds `img/claims-flow.png` by a
+  relative link, so that task's sandbox gets the image too, while the
+  design's link to grain's `pkg/daemon/` folder is skipped and recorded
+  as not a file (§5.6).
+- **A sidecar:** `hub-shared/designs/img/claims-flow.png.md`, a
+  `kind: asset` with alt text, license and provenance, and the image's
+  `sha256` and `bytes`, which `check.py` checks (§2.2).
+- **A template input choosing the target repo:**
+  `hub-shared/templates/ghcr/prune-packages.md` and
+  `templates/granule-pull.md` declare an input `repo` of `type: ref`, and
+  take their `write` entry from it. Their schedules set it, and the fired
+  task records the concrete entry and the value in `template.inputs`
+  (§5.6, §8.16).
+- **What a run's sandbox held:** `grain-eu/runs/4310-carry-approver/run.md`
+  records its `context:`, with the commit of each entry (§5.6).
 - **X/Y/Z:** `ns-demo/`. X excludes Y; Z includes X and Y; Z's
   namespace contains Y. W includes and excludes Y and contributes none.
   V excludes X's include object, disabling that branch (§3.3, §8.15).
@@ -161,7 +183,15 @@ does these things:
   and `ref_mode`, and a relative one carries neither;
 - checks code repos' grain folders: a task there came from an intake and
   is not a scheduled firing, and a template there carries no `reads`,
-  `writes`, `grants` or `target`;
+  `writes`, `grants` or `target`, and no `context:` entry naming another
+  repo;
+- checks `context:` entries: `write` only on a repo or folder at a
+  branch, `depth` only on files, `input:` only in templates and only of a
+  `ref` input, and no overlapping sandbox paths; prints each task's
+  sandbox layout, following `depth` through Markdown body links under the
+  caps, and checks what the example's `depth: 1` reaches;
+- treats every file that is not an object as an asset, and checks each
+  sidecar's `asset`, `sha256` and `bytes`;
 
 - derives each task's status from its execution records, and prints
   each lane's effective order and each Grain's next picks across lanes;

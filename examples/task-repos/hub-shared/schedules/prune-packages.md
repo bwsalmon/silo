@@ -4,19 +4,20 @@ schema: grain/schedule@v1
 aka: ["repo:schedule:bwsalmon:grain:prune-packages"]
 title: Prune GHCR packages
 template: ../templates/ghcr/prune-packages.md
-inputs: {}
+inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
 weekly: {day: sunday, at: "04:00"}
 overlap: skip
 timezone: ""
 enabled: true
-base: candidate
 team: hub
-repo: https://github.com/bwsalmon/grain.git
 fires_in: silo
 auto_approve_proposals: true
 auto_merge: false
 created_at: "2026-09-26T04:43:16.568716Z"
 ---
+
+Grain's `target` and `base` became the template's `repo` input, a
+reference (docs/task-repos.md §5.6, §13).
 
 This is exported from grain/config `settings/schedules.yml`
 (`repo:schedule:bwsalmon:grain:prune-packages`), which was itself declared

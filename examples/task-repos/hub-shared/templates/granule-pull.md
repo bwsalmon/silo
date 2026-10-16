@@ -5,13 +5,17 @@ aka:
 - template-1
 name: Nightly granule pull
 title: Pull new changes from granule into vendored copy
-inputs: []
+inputs:
+  - name: repo
+    type: ref
+    ref_kind: repo
+    default: "https://github.com/bwsalmon/grain.git@candidate"
+    label: The repo the change lands in, with its base branch
 team: hub
-repo: https://github.com/bwsalmon/grain.git
-base: candidate
 auto_merge: true
-reads:
-- https://github.com/gke-labs/granule.git
+context:
+  - {input: repo, mode: write}
+  - {ref: "https://github.com/gke-labs/granule.git@main", mode: read}
 created_at: '2026-10-02T18:30:00Z'
 ---
 

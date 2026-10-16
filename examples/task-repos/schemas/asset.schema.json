@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/asset.schema.json",
+  "title": "grain/asset@v1: a sidecar, optional metadata for an asset (a file that is not an object) or for an external artefact (docs/task-repos.md §2.2)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "asset"
+    },
+    "schema": {
+      "const": "grain/asset@v1"
+    },
+    "aka": {
+      "$ref": "common.schema.json#/$defs/aka"
+    },
+    "moved_from": {
+      "$ref": "common.schema.json#/$defs/movedFrom"
+    },
+    "asset": {
+      "$ref": "common.schema.json#/$defs/refString",
+      "description": "The asset, usually relative: by convention the sidecar sits beside it, named <file name>.md"
+    },
+    "external": {
+      "type": "object",
+      "description": "An artefact too large for git, referenced where it lives; sha256 pins its content",
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^(https|gs|s3)://"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "media_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "sha256",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "alt": {
+      "type": "string",
+      "description": "Alternative text, for an image someone will show"
+    },
+    "media_type": {
+      "type": "string",
+      "pattern": "^[a-z]+/[a-z0-9.+-]+$"
+    },
+    "license": {
+      "type": "string",
+      "description": "An SPDX identifier or expression, or proprietary"
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "author": {
+          "$ref": "common.schema.json#/$defs/principal"
+        },
+        "created_at": {
+          "$ref": "common.schema.json#/$defs/time"
+        },
+        "source": {
+          "type": "string"
+        },
+        "generated_by": {
+          "type": "string"
+        },
+        "derived_from": {
+          "$ref": "common.schema.json#/$defs/refString"
+        }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "kind",
+    "schema"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "asset"
+      ]
+    },
+    {
+      "required": [
+        "external"
+      ]
+    }
+  ]
+}

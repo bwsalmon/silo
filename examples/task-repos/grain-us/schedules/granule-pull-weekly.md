@@ -4,13 +4,11 @@ schema: grain/schedule@v1
 title: Weekly granule pull
 derived_from: "shared:schedules/granule-pull.md"
 template: "shared:templates/granule-pull.md"
-inputs: {}
+inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
 weekly: {day: monday, at: "06:00"}
 overlap: skip
 enabled: true
-base: candidate
 team: hub
-repo: https://github.com/bwsalmon/grain.git
 fires_in: grain
 auto_approve_proposals: false
 created_at: "2026-10-16T17:30:00Z"

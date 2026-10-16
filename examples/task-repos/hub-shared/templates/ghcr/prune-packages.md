@@ -7,10 +7,15 @@ moved_from:
 - /templates/prune-packages.md
 name: Prune GHCR packages
 title: Prune superseded GHCR package versions with package-publish capability
-inputs: []
+inputs:
+  - name: repo
+    type: ref
+    ref_kind: repo
+    default: "https://github.com/bwsalmon/grain.git@candidate"
+    label: The repo the change lands in, with its base branch
 team: hub
-repo: https://github.com/bwsalmon/grain.git
-base: candidate
+context:
+  - {input: repo, mode: write}
 auto_merge: true
 created_at: '2026-09-26T04:43:16.568716Z'
 ---

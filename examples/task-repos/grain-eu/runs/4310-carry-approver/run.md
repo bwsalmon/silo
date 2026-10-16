@@ -8,6 +8,11 @@ grain: eu
 state: done
 accepted_at: "2026-10-16T13:58:30Z"
 started_at: "2026-10-16T13:58:31Z"
+context:                    # what the sandbox held (docs/task-repos.md §5.6)
+  entries:
+    - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write, rev: 776f8e8d2941fc5a1f2f52b9cc5ad84372235456, path: work/silo/, branch: grain/eu/task-4310}
+    - {ref: "shared:designs/hub-intake.md", mode: read, rev: e3c5b90fb62a5ee1d1d3102b820212bbf7e77fc4, path: context/silo.example.com/git/hub/shared/designs/hub-intake.md, bytes: 3023}
+  skipped: []
 closed:
   outcome: done
   at: "2026-10-16T14:58:30Z"

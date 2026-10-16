@@ -413,7 +413,7 @@ provenance:
   created_at: "2026-10-16T19:10:00Z"
   source: drawn for this design
 sha256: "…"                         # optional for an asset in git; checked when present
-bytes: 3412
+bytes: 250
 ---
 <an optional longer description, for humans and for agents>
 ```
@@ -1063,7 +1063,7 @@ for the objects in a namespace, or in a repo:
   <git URL>//<path>`, plus Backstage's own `backstage.io/source-location`,
   so a catalog user can always get back to the file;
 - relations from references: `implements` as `dependsOn` a design
-  entity, `depends_on` as `dependsOn`, `repo:` as a relation to the
+  entity, `depends_on` as `dependsOn`, the primary repo (§5.6) as a relation to the
   catalog's `Component` for that repo when one exists;
 - a `Location` per included folder, so the catalog can follow the same
   structure. The exporter applies excludes itself, because `Location`
@@ -1479,7 +1479,9 @@ accepted | running | waiting → superseded (the Grain, once it sees its placeme
 ```
 
 - **`waiting`** is a coarse state for a run held on something outside
-  it: a dependency, a human's answer, or a held gate.
+  it: a dependency, a human's answer, a held gate, or the Grain's own
+  policy refusing a `context:` entry (§5.6). `waiting: {on, entry,
+  reason}` says which.
 - **The Grain writes every state**, `superseded` included: its root has
   one writer. When Silo withdraws a placement (re-placement, §8.8), it
   writes only in its own repo. An open run whose `from` is a placement
@@ -1814,12 +1816,12 @@ context:
   entries:
     - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write, rev: <commit>, path: work/silo/, branch: grain/eu/2026-10-16-reject-dangling-refs}
     - {ref: "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate", mode: read, rev: <commit>, path: work/grain/}
-    - {ref: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/hub-intake.md", bytes: 4912}
-    - {ref: "shared:designs/img/claims-flow.png", via: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/img/claims-flow.png", bytes: 3412}
-    - {ref: "intake:tasks/2026-10-16-reject-dangling-refs/attachments/dangling-ref-error.png", mode: read, rev: <commit>, path: context/screenshot.png, bytes: 2210}
+    - {ref: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/hub-intake.md", bytes: 3230}
+    - {ref: "shared:designs/img/claims-flow.png", via: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/img/claims-flow.png", bytes: 250}
+    - {ref: "intake:tasks/2026-10-16-reject-dangling-refs/attachments/dangling-ref-error.png", mode: read, rev: <commit>, path: context/screenshot.png, bytes: 150}
   skipped:
-    - {ref: "../../hub.md", via: "shared:designs/hub-intake.md", reason: dangling}
-  limits: {reached_files: 1, reached_bytes: 3412}
+    - {ref: "grain-code:pkg/daemon/", via: "shared:designs/hub-intake.md", reason: not a file}
+  limits: {reached_files: 1, reached_bytes: 250}
 ```
 
 #### Only `context:` materialises
@@ -3056,7 +3058,7 @@ design with `depth: 1`, and a screenshot attached to the task, at
    staging, and its body has one image, `![…](img/claims-flow.png)`, and a
    link to `grain-code:pkg/daemon/`. The image resolves to
    `shared:designs/img/claims-flow.png`, passes the policy for `read`,
-   and is 3,412 bytes, inside the caps: it is planned, `via` the doc. The
+   and is 250 bytes, inside the caps: it is planned, `via` the doc. The
    folder link is skipped (`not a file`): the task lists that folder
    itself. The sidecar beside the image is not linked, so it is not
    brought; a task that wants it lists it.
@@ -3538,7 +3540,8 @@ becomes a Markdown file with front matter, read by the same parser as
 every other object, in a grain folder governed by `.grain/README.md`
 (§3.1). Workflows are the one exception (§12.2). The keys do not change:
 each kind carries exactly the keys `pkg/declschema` defines for it today,
-and this design adds and removes none. The loader accepts the hyphenated
+and this design adds and removes none, except that a schedule's `base`
+becomes the value of its template's `ref` input (§5.6). The loader accepts the hyphenated
 spellings (`auto-merge`) as aliases of the `snake_case` ones (§10).
 
 ### 12.1 The mapping
@@ -3546,7 +3549,7 @@ spellings (`auto-merge`) as aliases of the `snake_case` ones (§10).
 | `.grain/` today | Becomes | `kind:` | Front matter | Body |
 | --- | --- | --- | --- | --- |
 | `templates/<name>.yml` | `templates/<name>.md` | `template` | every template key, verbatim; `fields` become `inputs` (§13) | the prompt, now Markdown rather than a YAML block scalar; `{{name}}` placeholders are already Jinja (§6.1) |
-| `schedules/<name>.yml` | `schedules/<name>.md` | `schedule` | every schedule key, verbatim: the cadence, `overlap`, `timezone`, `enabled`, `base`, `team`, `auto-approve-proposals`; `template: <name>` becomes the reference `../templates/<name>.md` | notes: the YAML file's leading comment |
+| `schedules/<name>.yml` | `schedules/<name>.md` | `schedule` | every schedule key, verbatim: the cadence, `overlap`, `timezone`, `enabled`, `team`, `auto-approve-proposals`; `template: <name>` becomes the reference `../templates/<name>.md`; `base` becomes `inputs.repo`, the repo itself at that branch (§5.6) | notes: the YAML file's leading comment |
 | `suites/<name>.yml` | `suites/<name>.md` | `suite` | every suite key, verbatim | the suite's description: the leading comment |
 | `triggers/<name>.yml` | `triggers/<name>.md` | `trigger` | every trigger key, verbatim (`on`, `paths`, `gate`, `human`, `sensitive`, …); a trigger that files a task names its template by reference, and its variables (`{{group}}`, `{{from_sha}}`) become that template's declared inputs | the leading comment |
 | `workflows/<name>.yml` | unchanged | — | — | — |

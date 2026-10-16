@@ -3,8 +3,9 @@ kind: task
 schema: grain/task@v1
 title: Interop test that a Grain refuses an offer approved by its own submitter
 team: hub
-repo: https://github.com/bwsalmon/silo.git
-base: main
+context:
+  - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write}
+  - {ref: "shared:designs/hub-intake.md"}
 state: approved
 submitter: "user:bsalmon@google.com"
 submitted_via: git

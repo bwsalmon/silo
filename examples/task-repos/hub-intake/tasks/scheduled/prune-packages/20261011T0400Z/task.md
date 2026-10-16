@@ -3,8 +3,8 @@ kind: task
 schema: grain/task@v1
 title: Prune superseded GHCR package versions with package-publish capability
 team: hub
-repo: https://github.com/bwsalmon/grain.git
-base: candidate
+context:
+  - {ref: "https://github.com/bwsalmon/grain.git@candidate", mode: write}
 state: approved
 submitter: "silo:schedule"
 submitted_via: schedule
@@ -15,7 +15,7 @@ auto_merge: true
 template:
   ref: "shared:templates/prune-packages.md"
   rev: 4b1d0c6a3e9f27d58c0e1a6b9f3d2c7e8a5b4f10
-  inputs: {}
+  inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
 schedule:
   ref: "shared:schedules/prune-packages.md"
   fired_at: "2026-10-11T04:00:01Z"

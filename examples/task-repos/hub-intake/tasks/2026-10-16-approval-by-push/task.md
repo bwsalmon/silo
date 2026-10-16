@@ -3,7 +3,8 @@ kind: task
 schema: grain/task@v1
 title: Add HS-6 to the hub intake design (approval is a push to the intake repo)
 team: hub
-repo: https://silo.example.com/git/hub/shared.git
+context:
+  - {ref: "https://silo.example.com/git/hub/shared.git@main", mode: write}
 state: proposed
 submitter: "user:alice@example.com"
 submitted_via: git

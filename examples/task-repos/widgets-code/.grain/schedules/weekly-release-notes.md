@@ -7,9 +7,7 @@ inputs: {since: latest-tag}
 weekly: {day: friday, at: "16:00"}
 overlap: skip
 enabled: true
-base: main
 team: hub
-repo: https://git.example.com/hub/widgets.git
 fires_in: silo
 auto_approve_proposals: false
 created_at: "2026-10-16T18:05:00Z"
