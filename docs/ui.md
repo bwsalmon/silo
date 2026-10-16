@@ -1,8 +1,7 @@
 # The hub's human UI: a new UI in silo, or grain's UI pointed at the hub
 
-Part of the [hub design](hub.md). Status: **a proposal for the owner to
-decide.** No code is written for it yet, and no implementation task is
-filed until an option is chosen.
+Part of the [hub design](hub.md). Status: **option (a) chosen by the
+owner; stage U1 built** (`hub/ui`, `ui/`; §6, and §7 for running it).
 
 People need a page where they file, approve and watch tasks across
 teams. The hub (hub.md) has the APIs for it: intake (§6), the directory
@@ -170,9 +169,86 @@ Each stage is a candidate task, to be filed once the owner chooses.
 
 | Stage | What | Where |
 | --- | --- | --- |
-| U1 | `silo hub serve` serves an embedded SPA at `/`. Read-only pages: backlog, task with live events and the view-through, nodes. The frontend build in silo CI, or a committed bundle (the owner's choice). | silo |
+| U1 | `silo hub serve` serves an embedded SPA at `/`. Read-only pages: backlog, task with live events and the view-through, nodes. The frontend build in silo CI, or a committed bundle (the owner's choice). **Built:** `hub/ui` and `ui/`, built in silo CI (`.grain/workflows/ui.yml` and the image's Dockerfile); §7. | silo |
 | U2 | Filing, cancel and requeue. Team admin. Minting and revoking node tokens. | silo |
 | U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
 | U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. | silo |
 | U5 | A Grain's local UI shows the hub task ID and links to the hub page for tasks the hub placed. | bwsalmon/grain |
 | U6 | Future: "Open Grain UI" for team admins, a Grain's own UI proxied by the hub on its own origin, read-only unless the Grain's owner opts in. Designed in [grain-ui-proxy.md](grain-ui-proxy.md), with its own silo (S1–S5) and grain (G1–G4) stages. | silo, then bwsalmon/grain |
+
+## 7. As built: U1
+
+**Where.** The app's source is `ui/` (React, MUI and Vite, with vitest).
+`npm run build` writes its bundle to `hub/ui/static/app`, which is not
+committed. Package `hub/ui` embeds it with `go:embed`, and `hub/server`
+serves it on every path the API does not have. A Go build without the
+bundle embeds `hub/ui/static/placeholder.html` instead, so `go build`
+needs no Node. grain CI builds the bundle in `.grain/workflows/ui.yml`
+(type-check, build, vitest, then `hub/ui` and `hub/server`'s tests with
+the bundle embedded), and the image's Dockerfile builds it in a Node
+stage of its own.
+
+**Pages.** The backlog at `/` (every team the caller is in) and
+`/teams/{team}`, filtered by state; a task at `/tasks/{id}` (its prompt,
+lifecycle, and its events over SSE from `GET /v1/tasks/{id}/events`,
+with each artifact the events name viewed on request through
+`/artifacts?ref=`); and the node directory at `/nodes`. The app calls
+only `/v1/me`, `/v1/tasks`, `/v1/tasks/{id}`, its `events` and
+`artifacts`, and `/v1/nodes`. `/v1/me` fills the team selector and
+says who is signed in; it decides nothing.
+
+**The trust boundary.** An artifact is fetched with `cache: 'no-store'`
+into component state, shown as text or a `react-diff-view` diff, and
+dropped when the view is closed. A 503 says the node is offline and
+shows no copy. The app names no browser storage API. The hub serves it
+under a CSP with `worker-src 'none'`, so the browser refuses a service
+worker; `connect-src 'self'`; scripts only from the hub's files; and
+styles from its files or a `<style>` carrying a nonce `hub/ui` writes
+into each load of the page. `ui/src/trust.test.tsx` checks the view
+(no service worker registered, nothing written to storage, the fetch
+uncached, the offline case) and that the bundle registers no service
+worker.
+
+**Content.** Every title, prompt, reason and event is text: markdown
+renders with raw HTML dropped, links only to `http`, `https`, `mailto`
+or relative URLs, and images as links rather than loads. React never
+sets HTML from a string. `ui/src/content.test.tsx` feeds script-bearing
+text through every field and event type (threat-model T-TB4-1, INV-15).
+
+**Copied components.** None. The sandbox that built U1 could not read
+bwsalmon/grain, so the leaf components (markdown, the diff pane, state
+chips, theme) are small ones of silo's own on the same libraries. They
+can be swapped for grain's copies later, each with a note of its grain
+path and commit.
+
+**Auth.** Same-origin behind IAP or the OIDC session. The app sends the
+browser's own cookie and no other credential, and the hub answers no
+CORS. In local development the hub's `-dev-user-header` signs the
+caller in. A browser cannot set that header, so Vite's dev server sets
+it on the requests it proxies.
+
+### 7.1 Running the UI locally
+
+With Node 20.19 or later:
+
+```sh
+# The hub, on SQLite, signing callers in from a header.
+go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db \
+    -dev-user-header X-Silo-User -admins user:dev@example.com
+
+# The UI with hot reload at http://localhost:5173. It proxies /v1 to
+# the hub and adds X-Silo-User: dev@example.com to each request.
+cd ui && npm ci && npm run dev
+```
+
+`SILO_HUB` (default `http://localhost:8080`), `SILO_DEV_USER_HEADER`
+(default `X-Silo-User`) and `SILO_DEV_USER` (default `dev@example.com`)
+change what the dev server proxies to and as whom. To see the embedded
+UI as the hub serves it, run `npm run build` in `ui/` and then
+`go run ./cmd/silo hub serve ...`; the page is at `/`, and needs the
+dev user header set by the browser (an extension) or a hub behind a
+real sign-on.
+
+`npm test` runs vitest and `npm run typecheck` runs tsc. The trust
+boundary's bundle test runs after `npm run build`, and is skipped
+without a bundle unless `SILO_UI_REQUIRE_BUNDLE` is set, as CI sets it.

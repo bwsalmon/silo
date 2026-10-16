@@ -3,3 +3,7 @@ old
 deploy
 docs
 *.md
+# The web UI's packages, and a bundle built outside the image: its own
+# stage builds the one it embeds.
+ui/node_modules
+hub/ui/static/app
