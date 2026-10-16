@@ -9,16 +9,21 @@
         "width": 24,
         "height": 8,
         "widget": {
-          "title": "Hub ready",
+          "title": "Hub pods ready",
           "scorecard": {
             "timeSeriesQuery": {
-              "prometheusQuery": "max(silo_hub_ready{${selector}})"
+              "prometheusQuery": "sum(silo_hub_ready{${selector}})"
             },
             "thresholds": [
               {
                 "value": 0.5,
                 "direction": "BELOW",
                 "color": "RED"
+              },
+              {
+                "value": ${replicas - 0.5},
+                "direction": "BELOW",
+                "color": "YELLOW"
               }
             ]
           }
@@ -59,7 +64,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "$${status}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (status) (silo_hub_nodes{${selector}})"
+                  "prometheusQuery": "max by (status) (silo_hub_nodes{${selector}})"
                 }
               }
             ],
@@ -84,7 +89,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "$${team} online",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (team) (silo_hub_team_nodes{${selector},status=\"online\"})"
+                  "prometheusQuery": "max by (team) (silo_hub_team_nodes{${selector},status=\"online\"})"
                 }
               },
               {
@@ -92,7 +97,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "$${team} free slots",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (team) (silo_hub_team_free_slots{${selector}})"
+                  "prometheusQuery": "max by (team) (silo_hub_team_free_slots{${selector}})"
                 }
               }
             ],
@@ -158,7 +163,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "$${team} $${state}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (team, state) (silo_hub_backlog_tasks{${selector}})"
+                  "prometheusQuery": "max by (team, state) (silo_hub_backlog_tasks{${selector}})"
                 }
               }
             ],
@@ -466,6 +471,47 @@
                 "legendTemplate": "$${store} waits/s",
                 "timeSeriesQuery": {
                   "prometheusQuery": "sum by (store) (rate(silo_hub_db_wait_count_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 120,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Hub pods up, ready and dispatching",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "up",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(up{${selector}})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "ready",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(silo_hub_ready{${selector}})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "dispatcher",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(silo_hub_dispatcher_leader{${selector}})"
                 }
               }
             ],

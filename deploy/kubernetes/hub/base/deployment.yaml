@@ -1,17 +1,23 @@
-# One hub replica. A node's connection and the streams to it live on
-# the one pod holding it (docs/hub.md §2.2), so the rollout is
-# Recreate: the old pod says goodbye to its nodes and stops before the
-# new one starts, and nodes reconnect within their backoff. The
-# dispatcher runs under a database lease (§2.2.1); several replicas
-# are designed in stages in §2.2 and not yet built.
+# Two hub replicas (docs/hub.md §2.2.5). Any pod serves any request: a
+# node's connection lives on one pod, the registry naming it is shared
+# through the database, and streams and events to the node are
+# forwarded to that pod over the internal listener. The rollout starts
+# a new pod before it stops an old one, and never has fewer ready than
+# the replicas: each old pod says goodbye to its nodes, which reconnect
+# to a ready pod, and the dispatcher's lease (§2.2.1) moves to another
+# pod within seconds. The PodDisruptionBudget (pdb.yaml) keeps a pod
+# serving through node upgrades and drains.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: silo-hub
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: silo-hub
@@ -21,6 +27,27 @@ spec:
         app: silo-hub
     spec:
       serviceAccountName: silo-hub
+      # The pods on different zones where the cluster has them, and on
+      # different GKE nodes always, so one node's or one zone's loss
+      # leaves a pod serving. A zonal cluster has one zone, and
+      # ScheduleAnyway lets it schedule anyway.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: silo-hub
+          matchLabelKeys:
+            - pod-template-hash
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: silo-hub
+          matchLabelKeys:
+            - pod-template-hash
       # The hub's own shutdown grace (20s) and the proxy's, inside it.
       terminationGracePeriodSeconds: 40
       # Numeric, so runAsNonRoot can check it whatever USER each image
@@ -138,6 +165,19 @@ spec:
             # (docs/deploy.md).
             - name: SILO_HUB_INTERNAL_KEY_FILE
               value: /var/run/secrets/silo-hub-internal/key
+            # This pod's name in the shared registry, and the address
+            # the hub's other pods reach its internal listener at
+            # (docs/hub.md §2.2.2), from the downward API.
+            - name: SILO_HUB_POD
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SILO_HUB_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SILO_HUB_POD_ADDR
+              value: $(SILO_HUB_POD_IP):9092
           volumeMounts:
             - name: internal-key
               mountPath: /var/run/secrets/silo-hub-internal

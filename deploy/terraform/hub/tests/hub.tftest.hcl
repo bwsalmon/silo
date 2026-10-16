@@ -51,8 +51,8 @@ run "defaults" {
   command = apply
 
   assert {
-    condition     = google_sql_database_instance.hub.settings[0].availability_type == "ZONAL"
-    error_message = "the database is zonal by default"
+    condition     = google_sql_database_instance.hub.settings[0].availability_type == "REGIONAL"
+    error_message = "the database has a standby by default"
   }
 
   assert {
@@ -146,20 +146,46 @@ run "defaults" {
     error_message = "Cloud SQL's own deletion protection is on"
   }
   assert {
-    condition     = toset(keys(google_monitoring_alert_policy.hub)) == toset(["hub_down", "no_online_nodes", "dispatch_stuck", "error_rate", "no_dispatcher", "database_errors"])
-    error_message = "the six alert policies"
+    condition     = toset(keys(google_monitoring_alert_policy.hub)) == toset(["hub_down", "hub_pod_down", "no_online_nodes", "dispatch_stuck", "error_rate", "no_dispatcher", "database_errors"])
+    error_message = "the seven alert policies"
+  }
+  assert {
+    condition = (
+      strcontains(google_monitoring_alert_policy.hub["hub_down"].conditions[0].condition_prometheus_query_language[0].query, "sum(up{namespace=\"silo-hub\",job=\"silo-hub\"}) == 0") &&
+      strcontains(google_monitoring_alert_policy.hub["hub_down"].conditions[0].condition_prometheus_query_language[0].query, "max(silo_hub_ready{namespace=\"silo-hub\",job=\"silo-hub\"}) == 0") &&
+      google_monitoring_alert_policy.hub["hub_down"].severity == "CRITICAL"
+    )
+    error_message = "the hub is down when no pod is up or ready"
+  }
+  assert {
+    condition = (
+      google_monitoring_alert_policy.hub["hub_pod_down"].conditions[0].condition_prometheus_query_language[0].query == "count(silo_hub_ready{namespace=\"silo-hub\",job=\"silo-hub\"} == 1) < 2" &&
+      google_monitoring_alert_policy.hub["hub_pod_down"].severity == "WARNING"
+    )
+    error_message = "a pod down while others serve is a warning, against the two replicas"
+  }
+  assert {
+    condition = (
+      strcontains(google_monitoring_alert_policy.hub["no_dispatcher"].conditions[0].condition_prometheus_query_language[0].query, "sum(silo_hub_dispatcher_leader{namespace=\"silo-hub\",job=\"silo-hub\"}) == 0") &&
+      google_monitoring_alert_policy.hub["no_dispatcher"].severity == "CRITICAL"
+    )
+    error_message = "no pod dispatching is an alert of its own"
   }
   assert {
     condition     = alltrue([for p in google_monitoring_alert_policy.hub : strcontains(p.conditions[0].condition_prometheus_query_language[0].query, "namespace=\"silo-hub\",job=\"silo-hub\"")])
     error_message = "every alert selects the hub's scrape target"
   }
   assert {
-    condition     = length(jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles) == 17
+    condition     = length(jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles) == 18
     error_message = "the dashboard is JSON, with its tiles"
   }
   assert {
-    condition     = strcontains(jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles[0].widget.scorecard.timeSeriesQuery.prometheusQuery, "silo_hub_ready{namespace=\"silo-hub\",job=\"silo-hub\"}")
-    error_message = "the dashboard's queries select the hub's scrape target"
+    condition     = jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles[0].widget.scorecard.timeSeriesQuery.prometheusQuery == "sum(silo_hub_ready{namespace=\"silo-hub\",job=\"silo-hub\"})"
+    error_message = "the dashboard's queries select the hub's scrape target, and it counts the ready pods"
+  }
+  assert {
+    condition     = jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles[0].widget.scorecard.thresholds[1].value == 1.5
+    error_message = "the ready pods' scorecard warns below the replicas"
   }
 }
 
@@ -296,17 +322,40 @@ run "bad_domain" {
   expect_failures = [var.domain]
 }
 
-run "regional_database" {
-  command = apply
+run "zonal_database" {
+  command = plan
 
   variables {
-    database_availability_type = "REGIONAL"
+    database_availability_type = "ZONAL"
   }
 
   assert {
-    condition     = google_sql_database_instance.hub.settings[0].availability_type == "REGIONAL"
-    error_message = "database_availability_type = REGIONAL gives the instance a standby"
+    condition     = google_sql_database_instance.hub.settings[0].availability_type == "ZONAL"
+    error_message = "database_availability_type = ZONAL leaves the instance without a standby"
   }
+}
+
+run "three_replicas" {
+  command = plan
+
+  variables {
+    hub_replicas = 3
+  }
+
+  assert {
+    condition     = endswith(google_monitoring_alert_policy.hub["hub_pod_down"].conditions[0].condition_prometheus_query_language[0].query, "< 3")
+    error_message = "the pod-down warning follows hub_replicas"
+  }
+}
+
+run "bad_replicas" {
+  command = plan
+
+  variables {
+    hub_replicas = 0
+  }
+
+  expect_failures = [var.hub_replicas]
 }
 
 run "bad_availability_type" {

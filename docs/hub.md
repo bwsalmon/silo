@@ -10,8 +10,9 @@ and `hub/directory`), task intake and dispatch (stage 2.3, §6,
 as one server, with its deployment on GKE behind IAP (stage 2.5, §2.1,
 `hub/server`, `deploy/`, [deploy.md](deploy.md)), and what it takes to
 run in production: metrics, alerts and a dashboard, backups and their
-restore, requeueing lost tasks, and the decision to stay on one
-replica (stage 2.8, §2.2, §6.3, [hub-operations.md](hub-operations.md)).
+restore, requeueing lost tasks (stage 2.8, §6.3,
+[hub-operations.md](hub-operations.md)), and several replicas, rolled
+one pod at a time (stage 2.9, §2.2).
 
 ## 1. What the hub is
 
@@ -152,9 +153,9 @@ its database, before anyone can reach its API.
 **Why GKE and not Cloud Run.** The node WebSocket lives as long as the
 load balancer's backend timeout allows: a day, as deployed, where Cloud
 Run ends every request at 60 minutes. The client reconnects cleanly
-either way, because pods roll. GKE also leaves room for several
-replicas later (§2.2): session affinity, and a registry that records
-which pod holds each node. The shape is grain's own load balancer and
+either way, because pods roll. GKE also runs several replicas (§2.2)
+side by side, each reaching the others' pods directly on an internal
+port, under a PodDisruptionBudget and a topology spread. The shape is grain's own load balancer and
 IAP setup (grain's `deploy/terraform/gcp/iap.tf`, and
 `deploy/terraform/relay` with `iap_mode = "load_balancer"`). Cloud
 Run remains possible for a small hub that accepts hourly reconnects:
@@ -162,16 +163,16 @@ it would serve the same image, with the node path left public and IAP
 on the rest through a serverless NEG behind the same kind of load
 balancer. It is not built.
 
-**One replica.** The deployment runs one pod and rolls it with
-`Recreate`, because a node's events, and the wake-ups its connection
-gives the dispatcher, still reach only the pod that holds it (§2.2).
-The dispatcher runs under a database lease (§2.2.1), so two
-overlapping pods never both recover the backlog, the registry is
-shared (§2.2.2), and streams to a node are forwarded to its pod
-(§2.2.3), but live events still assume one pod. A
-roll therefore costs nodes a reconnect of a few seconds. §2.2 is the
-decision to stay that way for now, what it costs, and the staged
-design for several replicas.
+**Several replicas.** The deployment runs two pods and rolls them one
+at a time (`RollingUpdate`, `maxSurge: 1`, `maxUnavailable: 0`), with
+a PodDisruptionBudget of one and the pods spread over zones and GKE
+nodes (§2.2.5). Any pod serves any request: the registry is shared
+(§2.2.2), streams to a node are forwarded to its pod (§2.2.3), wake-ups
+and live events cross pods (§2.2.4), and the dispatcher runs on one pod
+at a time under a database lease (§2.2.1). A roll, a crash or a GKE
+node's loss costs that pod's nodes a reconnect of a few seconds to
+another pod, and never takes the hub wholly down. §2.2 is the design,
+in the stages it was built in, and the recovery time of each failure.
 
 **Metrics.** With `-metrics-addr` (`:9091` as deployed) the hub serves
 Prometheus metrics at `/metrics` on a listener of its own, which no
@@ -189,37 +190,38 @@ how a Grain is pointed at the hub. [hub-operations.md](hub-operations.md)
 is the runbook for running it: upgrades, rotating secrets, restoring
 the database and reading the dashboard.
 
-### 2.2 Replicas: one today, several in stages
+### 2.2 Replicas: several, built in stages
 
-**Decision: the hub runs one replica until one replica's recovery time
-or one pod's capacity runs out.** It is a coordination plane, not a
-data path: a hub that is down a minute at a time costs nodes a
-reconnect and humans a retry, and loses nothing, because everything
-that matters is in the database and everything in memory is restated
-by the nodes (§2). The exceptions are the view-through (§7.2) and a
-node's UI (§11), which put bytes through the one pod, so capacity is
-what is likeliest to force the move. This section is the design for
-several replicas, in five stages (§2.2.1 to §2.2.5). Stages R1 to
-R4 are built; R5 is a follow-up, and the Deployment stays at one
-replica until it lands.
+**Decision: the hub runs two replicas, rolled one at a time.** It is a
+coordination plane, not a data path: a hub that is down a minute at a
+time costs nodes a reconnect and humans a retry, and loses nothing,
+because everything that matters is in the database and everything in
+memory is restated by the nodes (§2). It ran one replica on that
+argument until one replica's recovery time (a minute per upgrade, and
+minutes for a GKE node's loss) and one pod's capacity (the
+view-through, §7.2, and a node's UI, §11, put bytes through the pod)
+were worth the work of several. This section is the design for
+several replicas, in five stages (§2.2.1 to §2.2.5), all built.
 
-**Recovery time as deployed.** One pod, nodes that reconnect with
-backoff (1s doubling to a minute):
+**Recovery time as deployed.** Two pods on different GKE nodes (and
+zones, where the cluster has them), nodes that reconnect with backoff
+(1s doubling to a minute):
 
 | Failure | What happens | Back in |
 | --- | --- | --- |
-| The hub process crashes or wedges | The kubelet restarts the container (liveness on `/healthz`); nodes reconnect; running tasks are lost until their nodes resume them, which they do on reconnecting | under a minute, plus up to a minute of node backoff |
-| An upgrade | `Recreate`: goodbye, at most 20s of shutdown, the new pod starts (§2.1) | about a minute |
-| The GKE node dies | The pod is rescheduled once the node is marked unreachable (the default 5-minute toleration) | 5 to 7 minutes |
-| The Cloud SQL zone or instance fails, ZONAL (the default) | No standby: the instance is restored from backup or to a point in time into a new instance, and the hub pointed at it ([hub-operations.md](hub-operations.md)) | 30 to 60 minutes, by hand; at most seconds of writes lost (point-in-time recovery) |
-| The Cloud SQL zone or instance fails, REGIONAL | Cloud SQL fails over to the standby in another zone; the hub's connections drop and are redialled, and `/readyz` is unready meanwhile | about a minute, nothing lost |
+| A hub pod's process crashes or wedges | The kubelet restarts the container (liveness on `/healthz`); meanwhile the load balancer sends everything to the other pod, the crashed pod's nodes reconnect to it, and the crashed pod's lease in the registry lapses (fifteen seconds), taking any of its nodes that have not reconnected offline. If it held the dispatcher's lease, PostgreSQL frees it when its session ends and another pod's term starts, recovering the backlog: running tasks are resumed at once on nodes already reconnected | the hub stays up; that pod's nodes back within their backoff, under a minute |
+| An upgrade | `RollingUpdate`, one pod at a time: a new pod is ready before an old one says goodbye (§2.2.5); the dispatcher's lease moves within five seconds | the hub stays up; each pod's nodes back within seconds |
+| A GKE node dies | As a crash, for the pod on it, whose nodes reconnect to the other pod; the pod is rescheduled once the node is marked unreachable (the default 5-minute toleration), and until then the hub runs on one pod (the pod-down warning) | the hub stays up; that pod's nodes back within their backoff |
+| A zone fails | With the pods in two zones (a regional cluster), as a GKE node's death. On a zonal cluster both pods are in the one zone, and the hub is down with it | regional cluster: the hub stays up |
+| The Cloud SQL zone or instance fails, ZONAL | No standby: the instance is restored from backup or to a point in time into a new instance, and the hub pointed at it ([hub-operations.md](hub-operations.md)) | 30 to 60 minutes, by hand; at most seconds of writes lost (point-in-time recovery) |
+| The Cloud SQL zone or instance fails, REGIONAL (the default) | Cloud SQL fails over to the standby in another zone; the hub's connections drop and are redialled, and `/readyz` is unready meanwhile | about a minute, nothing lost |
 | The database is corrupted or wrongly changed | Point-in-time restore to before the change | 30 to 60 minutes, by hand |
 
-The Cloud SQL row is the cheapest to shorten, and does not wait on
-several hub replicas: terraform's `database_availability_type =
-"REGIONAL"` (stage R1) puts a standby in another zone, at about twice
-the instance's cost. It is left `ZONAL` by default, for a development
-hub; a hub whose backlog matters should set it.
+With the pods spread over zones, the database is the one zone's
+failure left, so terraform's `database_availability_type` (stage R1)
+is `REGIONAL` by default, a standby in another zone, at about twice
+the instance's cost. A development hub can set `ZONAL` (bsalmon-gke-dev's tfvars says
+how) and accept a restore by hand.
 
 **What several replicas take.** Every node's connection is held by
 one pod. The dispatcher, the view-through and the node UI reach a node
@@ -240,7 +242,7 @@ recover the backlog.
 | R2 | The shared registry: `hub_pods` and `hub_nodes` in the database, each node naming the pod holding it, under that pod's lease (`hub/registry`) | built |
 | R3 | `Server.Open` forwarded to the holder over a pod-to-pod stream; the directory read from the shared registry | built |
 | R4 | Cross-pod wake-ups and live events: LISTEN/NOTIFY for the dispatcher, subscriptions forwarded to the pod holding the task's node | built |
-| R5 | Two or more replicas, `RollingUpdate`, a PodDisruptionBudget, the operations runbook and alerts | follow-up, after R4 |
+| R5 | Two or more replicas, `RollingUpdate`, a PodDisruptionBudget, the operations runbook and alerts | built |
 
 #### 2.2.1 R1: the dispatcher under a lease (built)
 
@@ -306,8 +308,9 @@ connections that pod holds, and each pod publishes it to two tables
   name when unset, which is the pod's name on Kubernetes and enough for
   one pod; the address, when unset, is the internal listener's (the
   host's name and its port, when it listens on every address, as
-  deployed: the pod's name resolves to its IP). R5 sets both from the
-  downward API.
+  deployed: the pod's name resolves to its IP). As deployed (R5), both
+  come from the downward API: the pod's name, and its IP with the
+  internal port.
 - `hub_nodes (id, owner, pod, conn, repos, slots, version, labels,
   free, settled, connected_at, last_seen)`: one row per node ever
   registered, `pod` and `conn` (a random ID per connection) naming the
@@ -468,12 +471,17 @@ token deltas are many and `NOTIFY` payloads are capped at 8000 bytes,
 and the subscription would still have to hold a ring for late joiners
 on every pod.
 
-#### 2.2.5 R5: the Deployment
+#### 2.2.5 R5: the Deployment (built)
 
 - `replicas: 2`, `strategy: RollingUpdate` with `maxSurge: 1` and
   `maxUnavailable: 0`, a `PodDisruptionBudget` of `minAvailable: 1`,
   and a topology spread across zones and nodes. The pod's name and IP
-  come from the downward API (`SILO_HUB_POD`, `SILO_HUB_POD_ADDR`).
+  come from the downward API (`SILO_HUB_POD`, and `SILO_HUB_POD_ADDR`
+  as the IP and the internal port). The zone spread is
+  `ScheduleAnyway`, so a zonal cluster still schedules; the node
+  spread is `DoNotSchedule`, so the cluster needs two GKE nodes. Both
+  count the pods of one revision (`matchLabelKeys: pod-template-hash`),
+  so a roll's surge pod is not held back by the old ones.
   `validate.sh` checks these in place of its one-replica check.
 - The Gateway keeps no session affinity: any pod serves any request.
 - **A roll.** Each old pod says goodbye to its nodes, which reconnect
@@ -481,11 +489,14 @@ on every pod.
   another pod's term starts, recovering the backlog, within five
   seconds. Nodes reconnect within their backoff, and the hub is never
   wholly down.
-- **Alerts.** "The hub is down" becomes "no pod is ready" (the sum of
-  `up` over the hub's pods is 0); a pod that is down while others serve
-  is a warning; and "no dispatcher" (the sum of
-  `silo_hub_dispatcher_leader` is 0 for five minutes) is an alert of
-  its own, since a hub can be up and not dispatching.
+- **Alerts.** "The hub is down" becomes "no pod is ready" (no scrape,
+  the sum of `up` over the hub's pods 0, or no pod reporting
+  `silo_hub_ready` 1); fewer pods ready than terraform's
+  `hub_replicas` while some serve is a warning; and "not dispatching"
+  (the sum of `silo_hub_dispatcher_leader` is 0 for five minutes)
+  stays an alert of its own, since a hub can be up and not
+  dispatching. Every pod reports the whole registry and backlog, so
+  those gauges are taken as the max across pods, not the sum.
 - [hub-operations.md](hub-operations.md)'s upgrade section, and the
   recovery table above, are rewritten for the rolling upgrade: a
   crash or a GKE node's death then costs that pod's nodes a reconnect
@@ -1159,8 +1170,8 @@ audit plan. This section is the hub's part of it in brief.
 | 2.5 | `silo hub serve` (`hub/server`, `cmd/silo`): every part above as one server, health and readiness, graceful shutdown with `goodbye`. Its image, GKE manifests and terraform for GKE behind IAP (§2.1, §5.2.1, `deploy/`, [deploy.md](deploy.md)). | here, built (not applied to any project) |
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
-| 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the one-replica decision (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
-| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods (`hub/notify`); R5, the rolling Deployment. | here: R1 to R4 built, R5 a follow-up |
+| 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the recovery time of each failure (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
+| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods (`hub/notify`); R5, the rolling Deployment. | here, built (not applied to any project) |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
@@ -1175,9 +1186,9 @@ audit plan. This section is the hub's part of it in brief.
   says. Until grain has a read-only role to map them to, owners only.
 
 Two questions that were here are decided: lost running tasks are
-requeued only after a grace a team turns on (§6.3), and the hub stays
-one replica for now, with its recovery time written down and several
-replicas designed in stages (§2.2).
+requeued only after a grace a team turns on (§6.3), and the hub runs
+several replicas, built in stages, with each failure's recovery time
+written down (§2.2).
 
 ## 11. A node's UI through the hub (built: `hub/nodeui`; grain's side to come)
 
@@ -1284,8 +1295,9 @@ traffic over it. As built (`hub/nodeui`), with `silo hub serve
   `deploy/terraform/hub`, the HTTPRoute `silo-hub-node-ui`); deploy.md
   §8 turns them on.
 
-What it costs: the hub carries every UI byte, so its bandwidth and the
-one replica's capacity matter (§2.2); a hub outage takes the UIs with
+What it costs: the hub carries every UI byte, so its bandwidth and its
+pods' capacity matter (§2.2), with one more hop when the browser's pod
+is not the node's (§2.2.3); a hub outage takes the UIs with
 it, where today the relay and the hub fail separately. The
 no-code-at-rest rule (§1) holds, since nothing is stored, but much more
 code passes through the hub than the artifact view carries.
