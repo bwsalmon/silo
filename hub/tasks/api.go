@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/identity"
 )
 
 // TasksPath is the backlog's HTTP API.
@@ -33,7 +34,9 @@ type API struct {
 	Directory *directory.API
 }
 
-// Handler serves the API's paths.
+// Handler serves the API's paths. A write a browser sent from anywhere
+// but the hub's own origin, or with a body that is not JSON, is refused
+// (identity.SameOrigin).
 func (a *API) Handler() http.Handler {
 	m := http.NewServeMux()
 	h := func(pattern string, f func(http.ResponseWriter, *http.Request, *directory.Access) error) {
@@ -53,7 +56,7 @@ func (a *API) Handler() http.Handler {
 	h("GET "+TasksPath+"/{id}", a.get)
 	h("POST "+TasksPath+"/{id}/cancel", a.cancel)
 	h("POST "+TasksPath+"/{id}/requeue", a.requeue)
-	return m
+	return identity.SameOrigin(m)
 }
 
 type httpError struct {

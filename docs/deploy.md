@@ -369,6 +369,16 @@ existing connection. It is off until the hub is told the domain.
   this one is. Who may pass IAP is the same `iap_members`; the hub then
   admits only each node's owner (others get 404), and a node checking
   the assertion itself uses the hub's `SILO_HUB_IAP_AUDIENCE`.
+- **Prefer a domain of its own.** `nodes.<domain>` is the same *site*
+  as the hub (one registrable domain), so a node's UI page, which is
+  the Grain's own content, gets the hub's `SameSite` cookies on its
+  requests to the hub. The hub refuses every write that a browser
+  sends from anywhere but its own origin (`identity.SameOrigin`,
+  threat-model.md INV-16), but a node UI host on another registrable
+  domain (`node_ui_domain = "nodes.example-grain-ui.com"`, not a
+  subdomain of `domain`) keeps those cookies off its requests
+  altogether. Its DNS records then go in that domain's zone, from
+  `terraform output dns_records`, as without `dns_zone`.
 - **Which nodes.** Only a node whose ID is a DNS label (lower-case
   letters, digits and `-`) has a host. A node's UI is served at its
   host's root, so grain's UI works there unchanged.

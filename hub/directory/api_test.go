@@ -78,6 +78,9 @@ func (h *testHub) do(t *testing.T, user, method, path string, body any, groups .
 	if user != "" {
 		req.Header.Set("X-User", user)
 	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if len(groups) > 0 {
 		req.Header.Set("X-Groups", strings.Join(groups, ","))
 	}
@@ -281,5 +284,64 @@ func TestIsHubAdmin(t *testing.T) {
 		if got := a.isHubAdmin(c.p); got != c.want {
 			t.Errorf("isHubAdmin(%+v) = %v, want %v", c.p, got, c.want)
 		}
+	}
+}
+
+// TestAPISameOrigin: a page on a node's UI host, which is the same site
+// as the hub, cannot mint or revoke its viewer's node tokens or
+// administer teams as them (SA1-M1), nor can another site, nor a
+// no-cors text/plain body.
+func TestAPISameOrigin(t *testing.T) {
+	h := newTestHub(t)
+	const root, admins = "root@example.com", "hub-admins@example.com"
+	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "infra"}, admins)
+	nodeUI := "http://ws-1.nodes." + strings.TrimPrefix(h.url, "http://")
+	send := func(method, path, contentType, body string, header ...string) int {
+		t.Helper()
+		req, _ := http.NewRequest(method, h.url+path, strings.NewReader(body))
+		req.Header.Set("X-User", root)
+		req.Header.Set("X-Groups", admins)
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		for i := 0; i < len(header); i += 2 {
+			req.Header.Set(header[i], header[i+1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for _, c := range []struct {
+		method, path, ctype, body string
+		header                    []string
+		want                      int
+	}{
+		{"POST", NodeTokensPath, "text/plain;charset=UTF-8", `{"node":"ws-2"}`, []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+		{"POST", NodeTokensPath, "application/json", `{"node":"ws-2"}`, []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+		{"POST", NodeTokensPath, "text/plain", `{"node":"ws-2"}`, nil, 415},
+		{"POST", TeamsPath, "application/json", `{"id":"forged"}`, []string{"Origin", nodeUI}, 403},
+		{"POST", TeamsPath, "application/json", `{"id":"forged"}`, []string{"Sec-Fetch-Site", "cross-site", "Origin", "https://evil.example"}, 403},
+		{"DELETE", TeamsPath + "/infra", "", "", []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+		{"PUT", TeamsPath + "/infra/members/user:eve@example.com", "text/plain", `{"role":"admin"}`, nil, 415},
+	} {
+		if got := send(c.method, c.path, c.ctype, c.body, c.header...); got != c.want {
+			t.Errorf("%s %s %s %v: %d, want %d", c.method, c.path, c.ctype, c.header, got, c.want)
+		}
+	}
+	var tokens struct {
+		NodeTokens []json.RawMessage `json:"node_tokens"`
+	}
+	json.Unmarshal(h.want(t, 200, root, "GET", NodeTokensPath, nil, admins), &tokens)
+	var teams struct{ Teams []json.RawMessage }
+	json.Unmarshal(h.want(t, 200, root, "GET", TeamsPath, nil, admins), &teams)
+	if len(tokens.NodeTokens) != 0 || len(teams.Teams) != 1 {
+		t.Errorf("after refused writes: %d tokens and %d teams, want 0 and 1", len(tokens.NodeTokens), len(teams.Teams))
+	}
+	// The hub's own page is let through.
+	if got := send("POST", NodeTokensPath, "application/json", `{"node":"ws-2"}`, "Sec-Fetch-Site", "same-origin", "Origin", h.url); got != http.StatusCreated {
+		t.Errorf("same-origin mint: %d, want 201", got)
 	}
 }

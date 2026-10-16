@@ -237,7 +237,9 @@ func (o *OIDC) Principal(r *http.Request) (Principal, error) {
 func (o *OIDC) Handler() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET "+LoginPath, o.login)
-	m.HandleFunc("POST "+LogoutPath, o.logout)
+	// Signing out is a write too: another origin on the hub's site
+	// must not sign the viewer out.
+	m.Handle("POST "+LogoutPath, SameOrigin(http.HandlerFunc(o.logout)))
 	cb := "/auth/callback"
 	if u, err := url.Parse(o.RedirectURL); err == nil && u.Path != "" {
 		cb = u.Path

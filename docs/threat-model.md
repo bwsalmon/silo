@@ -252,16 +252,25 @@ with the member as requester), cancel a task, mint a node token (which
 revokes the member's existing one, `MintNodeToken`), or, for a hub
 admin, create a team. *Mitigation:* the WebSocket subscription checks
 `Origin` (`live.Hub.serveWebSocket`); the OIDC cookie is
-`SameSite=Lax`, which keeps it off cross-site POSTs. **Nothing else:**
-the JSON APIs (`tasks.API.Handler`, `directory.API.Handler`) do not
-check `Content-Type`, `Origin` or `Sec-Fetch-Site`, so a cross-site
-`text/plain` form POST whose body is JSON is decoded. Behind IAP the
-browser's credential is IAP's own cookie, whose `SameSite` attribute
-the hub does not control. *Residual:* filing work as a member is
-approval laundering by another route (T-TB1-7). *Status:* **open, high**
-(O-1): refuse a state-changing request whose `Content-Type` is not
-`application/json` or whose `Sec-Fetch-Site`/`Origin` is cross-site,
-before the hub UI ships. INV-16.
+`SameSite=Lax`, which keeps it off cross-site POSTs. `SameSite` is not
+enough on its own: behind IAP the browser's credential is IAP's own
+cookie, whose `SameSite` attribute the hub does not control, and a
+node's UI host (`<node>.nodes.<domain>`, hub.md §11.2) is the hub's
+*site*, so a Grain's own UI page gets the hub's cookies on a
+no-preflight POST, marked `Sec-Fetch-Site: same-site` (audit SA1-M1).
+So every `POST`, `PUT` and `DELETE` of the JSON APIs
+(`tasks.API.Handler`, `directory.API.Handler`) and the OIDC sign-out is
+refused unless `Sec-Fetch-Site` is absent (not a browser) or exactly
+`same-origin`, an `Origin`, if sent, is the hub's own scheme and host,
+and a body is `Content-Type: application/json`, which no form and no
+fetch without a CORS preflight can send (`identity.SameOrigin`;
+`hub/identity` `TestSameOrigin`, `TestOIDCSignIn`; `hub/tasks` and
+`hub/directory` `TestAPISameOrigin`). The hub answers no CORS
+preflight. *Residual:* a browser that sends neither `Origin` nor
+`Sec-Fetch-Site` on a POST (none current) is held only by the content
+type; deploy.md §8 recommends a node UI domain on another registrable
+domain, which keeps the cookies off altogether. *Status:* mitigated
+(O-1, SA1-M1 closed). INV-16.
 
 **T-TB1-5 (S) Session or token theft and replay (humans).**
 *Mitigation:* IAP assertions are short-lived and audience-bound; OIDC
@@ -501,7 +510,10 @@ origin; only the owner may open it, not hub admins
 hub's cookies are dropped; a `Set-Cookie` with a `Domain` is dropped
 (`modifyResponse`), so a node cannot set cookies on the hub or its
 siblings; WebSocket upgrades must come from the node's own origin
-(`sameOrigin`). *Residual:* (a) a malicious node receives a valid IAP
+(`sameOrigin`); a node's pages are the hub's *site* under the default
+domain, so they would carry the viewer's hub cookies to the hub, but
+the hub refuses every write not from its own origin (T-TB1-4, INV-16).
+*Residual:* (a) a malicious node receives a valid IAP
 assertion for the hub's audience, usable within its lifetime against
 anything that verifies that audience without IAP in front of it: other
 Grains that add the hub's audience (hub.md §11.3), or a hub pod reached
@@ -755,7 +767,7 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-13 | A node's UI is served only on that node's own host, only to the node's owner (not hub admins), never with the hub's `Authorization` header or session cookies, never setting a cookie with a `Domain`, and accepts WebSocket upgrades only from its own origin. | `hub/nodeui` `TestNode`, `TestAccess`, `TestWebSocket`, `TestViewThrough`; `hub/server` `TestNodeUIHosts`; gap: IAP's own cookies (O-2) |
 | INV-14 | A browser's WebSocket subscription to task events is accepted only from the hub's own origin. | `hub/live` `TestWebSocket` |
 | INV-15 | No text a node, an agent or a submitter supplied is ever interpreted as HTML or script in the hub's origin. | gap: the hub UI's tests (tasks 4222–4227) and a security suite case with a script-bearing title, prompt, conversation event, reason, kind and artifact |
-| INV-16 | The hub refuses a state-changing request (`POST`, `PUT`, `DELETE`) sent cross-site by a browser. | gap: not built (O-1) |
+| INV-16 | The hub refuses a state-changing request (`POST`, `PUT`, `DELETE`) a browser sent from any origin but the hub's own, a node UI host on the hub's site included, and one whose body is not `application/json`. | `hub/identity` `TestSameOrigin`, `TestOIDCSignIn`; `hub/tasks` `TestAPISameOrigin`; `hub/directory` `TestAPISameOrigin` |
 | INV-17 | Only a human signed in to the hub can be a task's `approved_by`, never its requester, a node or an agent; a task filed by a node or an agent is `proposed` until such an approval; a Grain does not treat a hub task as approved unless it carries `approved_by`. | `hub/tasks` `TestCreate` (never the submitter), `TestAPISubmit` (a submission cannot set it), `TestOfferApprovedBy` (offered and signed); gap: the hub's approval flow and `proposed` (O-4) |
 | INV-18 | The hub never logs a prompt, an event payload, artifact or node UI bytes, a token, a cookie or an IAP assertion; node-supplied strings it logs are truncated and quoted. | `internal/logsafe` `TestQuote`; `hub/tasks` `TestNodeStringsLogged` (the dispatcher's log) |
 | INV-19 | Everything a node sends is bounded: a control, task or event line ≤ 1 MiB, a node UI answer line ≤ 64 KiB, a ref ≤ 512 printable bytes, a kind by pattern, the token ring ≤ 1024 events or 1 MiB per task, the listed refs kept ≤ 4096 per task; a mux session ≤ 1024 open streams, 1 MiB unread per stream and 16 MiB unread in all, one owed pong, 1024 queued resets, and a write that waits ≤ the ping timeout; and (open) nodes per user, slots, repositories and stored events per task. | `hub/live` `TestRingBound`, `TestRefsBound`, `TestClassify`; `hub/faulttest` `TestLoad`; `internal/tunnel/mux` `abuse_test.go`; gap: the open bounds (O-5) |
@@ -771,7 +783,6 @@ a candidate task; none is fixed by this document.
 
 | ID | Finding | Severity | Threat | Where it is fixed |
 | --- | --- | --- | --- | --- |
-| O-1 | No CSRF defence on the JSON APIs: refuse a non-`application/json` body and a cross-site `Sec-Fetch-Site`/`Origin` on every state-changing route. | high | T-TB1-4 | silo, before the hub UI (U2) |
 | O-3 | A Grain connected to a hub may run without a local policy. | high | T-TB3-2 | grain (`-hub-url` requires `-policy`); conformance kit (4236) |
 | O-4 | No hub approval flow to record `approved_by` (carried and signed since task 4406; grain files offers without one for local approval); no design yet for agent-filed tasks, `approve` or `message`. | high, before 4229/4230/4233/4235 | T-TB1-7, T-TB3-5, T-TB7-3 | silo (`proposed`, an approval flow), grain (`hubTasks.Start`) |
 | O-8 | Hub-placed tasks reach host sandboxes with ambient credentials. | high | T-TB7-1 | grain (policy rule; register as unisolated) |
@@ -783,6 +794,12 @@ a candidate task; none is fixed by this document.
 | O-12 | `validate.sh` does not check that the dev sign-on is unset and the IAP-off route is an exact match. | low | T-TB1-1, T-TB5-4 | silo `deploy/` |
 | O-9 | The node directory shows a node's repositories of other teams. | low | T-TB1-2 | silo (`SeesNode` filtering the entry) |
 | O-11 | Node tokens never expire. | low | T-TB2-5 | silo `hub/directory` |
+
+Closed with security audit 1's medium finding SA1-M1: O-1 (every
+state-changing route of the JSON APIs and the OIDC sign-out refuses a
+browser's request from any origin but the hub's, including a node UI
+host on the hub's own site, and a body that is not
+`application/json`: `identity.SameOrigin`; T-TB1-4, INV-16).
 
 Closed by security audit 1's low findings: O-7 (node-supplied strings
 are quoted and cut in logs, reasons cut in the task row: SA1-L3),
@@ -866,7 +883,7 @@ Stages with a named focus:
 
 | Stage | Focus |
 | --- | --- |
-| UI U1–U2 (tasks 4222–4224) | T-TB4-1, INV-15, INV-16 (O-1, O-6) |
+| UI U1–U2 (tasks 4222–4224) | T-TB4-1, INV-15, INV-16 (O-6) |
 | UI U3, interactive sessions (4229, 4230) | T-TB1-7, T-TB3-5, INV-17 (O-4) |
 | Node UI, grain's side (4228, hub.md §11.3) | T-TB3-3, T-TB3-4, INV-13 (O-2) |
 | Upward filing, cross-Grain dependencies (4233, 4235) | T-TB1-7, T-TB7-3, T-TB7-1 (O-4, O-8): a dependency's output is untrusted input to the next task |
