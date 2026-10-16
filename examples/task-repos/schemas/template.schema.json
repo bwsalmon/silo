@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/template.schema.json",
+  "title": "grain/template@v1: a task template; title and body are rendered with the Jinja2 subset (docs/task-repos.md §6.1)",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "template"},
+    "schema": {"const": "grain/template@v1"},
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "aka": {"$ref": "common.schema.json#/$defs/aka"},
+    "name": {"type": "string"},
+    "title": {"type": "string", "description": "Rendered: the title of each task it files"},
+    "partial": {"type": "boolean", "description": "Include/import only: never files a task itself"},
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*$"},
+          "type": {"enum": ["string", "text", "int", "bool", "enum", "list"]},
+          "label": {"type": "string"},
+          "default": {},
+          "options": {"type": "array", "items": {"type": "string"}},
+          "required": {"type": "boolean"}
+        },
+        "required": ["name", "type"],
+        "if": {"properties": {"type": {"const": "enum"}}}, "then": {"required": ["options"]}
+      }
+    },
+    "team": {"type": "string"},
+    "repo": {"type": "string"},
+    "base": {"type": "string"},
+    "auto_merge": {"type": "boolean"},
+    "network": {"type": "string"},
+    "model": {"type": "string"},
+    "nothing_needed": {"type": "string"},
+    "capabilities": {"type": "array", "items": {"type": "string"}},
+    "reads": {"type": "array", "items": {"type": "string"}},
+    "writes": {"type": "array", "items": {"type": "object"}},
+    "created_at": {"$ref": "common.schema.json#/$defs/time"}
+  },
+  "required": ["kind", "schema", "id"],
+  "anyOf": [{"required": ["title"]}, {"properties": {"partial": {"const": true}}, "required": ["partial"]}]
+}

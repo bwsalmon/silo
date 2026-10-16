@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/repo.schema.json",
+  "title": "grain/repo@v1: a task repo's README.md front matter (docs/task-repos.md §3)",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "repo"},
+    "schema": {"const": "grain/repo@v1"},
+    "role": {"type": "string", "description": "A convention: grain, intake, shared, code, archive, ..."},
+    "title": {"type": "string"},
+    "owner": {
+      "type": "object",
+      "properties": {
+        "team": {"type": "string"},
+        "grain": {"type": "string"},
+        "user": {"type": "string"},
+        "silo": {"type": "string", "format": "uri"}
+      },
+      "minProperties": 1
+    },
+    "host": {"enum": ["silo", "local", "other"]},
+    "default_ref": {"type": "string", "default": "main"},
+    "ref_policy": {
+      "type": "object",
+      "properties": {
+        "protected": {"type": "array", "items": {"type": "string"}},
+        "fast_forward_only": {"type": "boolean", "default": true},
+        "review_prefix": {"type": "string"}
+      }
+    },
+    "aliases": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9-]*$"},
+      "additionalProperties": {"type": "string", "pattern": "^(https|ssh|file)://"}
+    },
+    "require_signed": {"type": "boolean", "default": false},
+    "keys": {
+      "description": "Signing keys per principal, for require_signed and the signed-commit upgrade (§11.8)",
+      "type": "object",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}}
+    },
+    "writers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "who": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "may": {
+            "oneOf": [
+              {"enum": ["create", "update", "delete"]},
+              {"type": "array", "items": {"enum": ["create", "update", "delete"]}}
+            ]
+          },
+          "kinds": {"type": "array", "items": {"enum": ["repo", "task", "comment", "template", "schedule", "design"]}},
+          "paths": {"type": "array", "items": {"type": "string"}},
+          "fields": {"oneOf": [{"const": "*"}, {"type": "array", "items": {"type": "string"}}]},
+          "where": {"type": "object"},
+          "transition": {
+            "type": "object",
+            "properties": {
+              "field": {"type": "string"},
+              "from": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+              "to": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+            },
+            "required": ["field", "from", "to"],
+            "additionalProperties": false
+          },
+          "merge_of": {"type": "string", "description": "The commit must be a merge whose second parent is the tip of a ref matching this glob, authored by someone other than the pusher (§8.9)"},
+          "bind": {"type": "object", "additionalProperties": {"type": "string"}},
+          "forbid": {"type": "object", "additionalProperties": {"type": "string"}},
+          "refs": {"type": "array", "items": {"type": "string"}, "description": "Refs this rule applies on; default: default_ref"},
+          "note": {"type": "string"}
+        },
+        "required": ["who", "may"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["kind", "schema", "role", "owner", "host", "writers"]
+}
