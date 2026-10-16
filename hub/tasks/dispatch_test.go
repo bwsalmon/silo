@@ -767,11 +767,11 @@ type countingDirectory struct {
 	admits int
 }
 
-func (c *countingDirectory) AdmitContext(ctx context.Context, owner string, n registry.Node) error {
+func (c *countingDirectory) Admission(ctx context.Context, owners, repos []string) (*directory.Admission, error) {
 	c.mu.Lock()
 	c.admits++
 	c.mu.Unlock()
-	return c.Directory.AdmitContext(ctx, owner, n)
+	return c.Directory.Admission(ctx, owners, repos)
 }
 
 func (c *countingDirectory) count() int {
@@ -784,13 +784,14 @@ func TestAdmissionAskedOncePerPass(t *testing.T) {
 	cd := &countingDirectory{}
 	h := newHarness(t, func(d *Dispatcher) { cd.Directory, d.Directory = d.Directory, cd })
 	var ids []string
-	for range 4 {
-		ids = append(ids, h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"}).ID)
+	for _, repo := range []string{"bwsalmon/silo", "bwsalmon/grain", "bwsalmon/silo", "bwsalmon/grain"} {
+		ids = append(ids, h.submit(t, Spec{Team: "infra", Repo: repo}).ID)
 	}
 	// Queued with no node to take them: one node then takes all four in
-	// a single pass, asking the directory about its owner once.
+	// a single pass, reading the directory once for its owner and both
+	// repositories.
 	time.Sleep(100 * time.Millisecond)
-	n := h.node(t, "alice@example.com", silo("ws-1", 4))
+	n := h.node(t, "alice@example.com", registry.Node{ID: "ws-1", Repos: []string{"bwsalmon/silo", "bwsalmon/grain"}, Slots: 4})
 	for range ids {
 		n.next(t, TypeOffer)
 	}
@@ -798,7 +799,7 @@ func TestAdmissionAskedOncePerPass(t *testing.T) {
 		h.await(t, id, "offered", inState(Offered))
 	}
 	if got := cd.count(); got != 1 {
-		t.Errorf("%d admission checks for 4 tasks on one node, want 1", got)
+		t.Errorf("%d admission reads for 4 tasks in 2 repositories on one node, want 1", got)
 	}
 }
 

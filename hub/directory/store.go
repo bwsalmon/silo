@@ -580,6 +580,65 @@ func (s *Store) memberships(ctx context.Context, principals []string) (map[strin
 	return out, rows.Err()
 }
 
+// membershipsOf is memberships for each of principals apart: it adds
+// each one's teams to out[principal], which must exist, in one query.
+func (s *Store) membershipsOf(ctx context.Context, principals []string, out map[string]map[string]Role) error {
+	if len(principals) == 0 {
+		return nil
+	}
+	args := make([]any, len(principals))
+	for i, p := range principals {
+		args[i] = p
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT principal, team, role FROM team_members WHERE principal IN (?`+strings.Repeat(", ?", len(principals)-1)+`)`), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p, team, role string
+		if err := rows.Scan(&p, &team, &role); err != nil {
+			return err
+		}
+		if teams := out[p]; teams != nil && teams[team] != Admin {
+			teams[team] = Role(role)
+		}
+	}
+	return rows.Err()
+}
+
+// repoOwners sets out[repo] to the team that owns each of repos, which
+// are normalized, leaving the ones no team owns as they are: one query
+// for each maxAdmissionArgs of them.
+func (s *Store) repoOwners(ctx context.Context, repos []string, out map[string]string) error {
+	for len(repos) > 0 {
+		chunk := repos[:min(len(repos), maxAdmissionArgs)]
+		repos = repos[len(chunk):]
+		args := make([]any, len(chunk))
+		for i, r := range chunk {
+			args[i] = r
+		}
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team FROM team_repos WHERE repo IN (?`+strings.Repeat(", ?", len(chunk)-1)+`)`), args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var r, team string
+			if err := rows.Scan(&r, &team); err != nil {
+				rows.Close()
+				return err
+			}
+			out[r] = team
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // reposOf maps each repository the teams own to its team.
 func (s *Store) reposOf(ctx context.Context, teams map[string]Role) (map[string]string, error) {
 	out := map[string]string{}
