@@ -69,10 +69,15 @@ Check afterwards: `silo_hub_ready` is 1, the online node count is back
 to where it was (it takes up to a minute, the nodes' longest backoff),
 and the backlog's `lost` count falls back to what it was before.
 
-**Schema changes.** Each store creates its tables if they are missing
-(`CREATE TABLE IF NOT EXISTS`) when the hub starts; a new table (such
-as `team_settings`) appears on the first start of the version that
-adds it. There is no down-migration: to roll back past a version that
+**Schema changes.** The pod's `migrate` init container runs `silo hub
+migrate` as the schema's owner, `silo-hub`, before the hub starts: each
+store creates its tables if they are missing (`CREATE TABLE IF NOT
+EXISTS`), so a new table (such as `team_settings`) appears on the first
+start of the version that adds it, and the hub's runtime role is
+granted its rows (deploy.md, "The database's two roles"). The hub
+itself cannot change the schema. If the `migrate` container fails, the
+pod does not start and the old one is already gone (`Recreate`): read
+`kubectl -n silo-hub logs deploy/silo-hub -c migrate`. There is no down-migration: to roll back past a version that
 changed a table, restore the database from before the upgrade (§4) as
 well as the image. Take an on-demand backup before such an upgrade:
 `gcloud sql backups create --instance=silo-hub --project=bsalmon-gke-dev`.
@@ -138,21 +143,31 @@ revoke its live one and mint none.
 
 ### 3.3 The database password
 
-The hub's database user's password is terraform's `random_password.db`,
-and reaches the pod as the Secret `silo-hub-db` (key `url`). To rotate
-it:
+Only the schema owner, `silo-hub`, has a password: terraform's
+`random_password.db`, which reaches the pod as the Secret
+`silo-hub-db`'s `migrate-url`, given to the `migrate` init container
+alone. The hub serves as its IAM database user, which has no password
+to rotate: the proxy logs it in with short-lived tokens from the pod's
+Workload Identity. To rotate the owner's password:
 
 ```sh
 terraform -chdir=deploy/terraform/hub apply -var-file=bsalmon-gke-dev.tfvars -replace=random_password.db
 kubectl -n silo-hub create secret generic silo-hub-db \
   --from-literal=url="$(terraform -chdir=deploy/terraform/hub output -raw database_url)" \
+  --from-literal=migrate-url="$(terraform -chdir=deploy/terraform/hub output -raw migrate_database_url)" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n silo-hub rollout restart deploy/silo-hub
 ```
 
-Between the apply and the restart the running hub's open connections
-keep working, but a new one fails, and the `Silo hub database errors`
-alert may fire; do the three steps together.
+The running hub is untouched by the apply: it does not use the
+password. Only the next pod start needs the new one, so if the Secret
+still holds the old password then, the `migrate` container fails and
+the pod does not start; the restart above checks it while you are
+watching.
+
+To cut the hub off from the database (a leaked pod, say), remove
+`roles/cloudsql.instanceUser` from its service account, or delete its
+IAM database user; terraform puts both back.
 
 ### 3.4 OIDC (a hub not behind IAP)
 
@@ -215,8 +230,15 @@ gcloud sql backups restore BACKUP_ID --restore-instance=silo-hub-restored \
 ```
 
 The restored instance has the `silo-hub` user with its old password,
-so the `silo-hub-db` Secret is unchanged. Then point the hub at it
-(4.7).
+so the `silo-hub-db` Secret is unchanged. Check it has the hub's IAM
+user too (`gcloud sql users list --instance=silo-hub-restored`; if not,
+`gcloud sql users create silo-hub@bsalmon-gke-dev.iam
+--type=cloud_iam_service_account --instance=silo-hub-restored`) and
+takes IAM logins (`gcloud sql instances describe
+silo-hub-restored --format='value(settings.databaseFlags)'` lists
+`cloudsql.iam_authentication`; if not, `gcloud sql instances patch
+silo-hub-restored --database-flags=cloudsql.iam_authentication=on`).
+Then point the hub at it (4.7).
 
 ### 4.4 To a point in time (a clone)
 
@@ -241,6 +263,11 @@ gcloud sql import sql silo-hub-restored gs://BUCKET/silo-hub-2026-10-15.sql.gz \
   --database=silo --user=silo-hub --project=bsalmon-gke-dev
 ```
 
+Import as `silo-hub`, as above, so the tables are its own and the
+`migrate` container can grant them; into a new instance, first create
+that user and the IAM user (`gcloud sql users create
+silo-hub@bsalmon-gke-dev.iam --type=cloud_iam_service_account
+--instance=...`) and turn on `cloudsql.iam_authentication` as in 4.3.
 The instance's service account needs `roles/storage.objectAdmin` on the
 bucket. With plain PostgreSQL tools the same is
 `pg_dump --format=custom --no-owner --no-privileges` and
@@ -266,15 +293,25 @@ instance when the instance's settings change.
 
 ### 4.7 Pointing the hub at the restored instance
 
-1. Set the overlay's `CLOUD_SQL_INSTANCE` to
+1. The hub's `roles/cloudsql.client` and `roles/cloudsql.instanceUser`
+   are conditioned on the instance's name, so they do not reach the
+   restored one. Grant them on it for now (or restore into an instance
+   named `silo-hub`, step 5):
+   `gcloud projects add-iam-policy-binding bsalmon-gke-dev
+   --member=serviceAccount:silo-hub@bsalmon-gke-dev.iam.gserviceaccount.com
+   --role=ROLE --condition='expression=resource.name == "projects/bsalmon-gke-dev/instances/<the restored instance>",title=silo-hub-restored'`
+   for each ROLE.
+2. Set the overlay's `CLOUD_SQL_INSTANCE` to
    `bsalmon-gke-dev:us-central1:<the restored instance>` and apply.
    With `Recreate`, the old pod stops first, so the two never write at
-   once.
-2. Watch the hub start: `kubectl -n silo-hub logs deploy/silo-hub -c hub`,
-   then `silo_hub_ready` and `silo_hub_database_up` on the dashboard.
-3. Nodes reconnect within a minute, and the registry fills up again:
+   once. The `migrate` container grants the runtime role again on the
+   restored tables.
+3. Watch the hub start: `kubectl -n silo-hub logs deploy/silo-hub -c migrate`
+   and `-c hub`, then `silo_hub_ready` and `silo_hub_database_up` on
+   the dashboard.
+4. Nodes reconnect within a minute, and the registry fills up again:
    it is memory, never in the backup.
-4. Once it is right, bring terraform into line: either import the new
+5. Once it is right, bring terraform into line: either import the new
    instance in place of the old one
    (`terraform state rm google_sql_database_instance.hub` and
    `terraform import ... projects/bsalmon-gke-dev/instances/<name>`, with
@@ -410,8 +447,13 @@ within five seconds.
 **Database errors** (critical). The database did not answer, or the
 stores failed, for 5 minutes. Check the proxy's logs, the instance in
 the console (Cloud SQL → `silo-hub`: running? maintenance? out of
-disk or connections?), and whether the `silo-hub-db` Secret's password
-still matches (3.3). If the instance is gone or corrupt, restore (4).
+disk or connections?), and that the hub's IAM database user can still
+log in: the proxy's logs say if its token was refused, which is
+`roles/cloudsql.instanceUser`, the IAM user or
+`cloudsql.iam_authentication` gone (terraform puts each back). A pod
+that will not start at all is usually the `migrate` container: its
+logs, and whether `migrate-url`'s password still matches (3.3). If the
+instance is gone or corrupt, restore (4).
 
 ## 6. Lost tasks
 

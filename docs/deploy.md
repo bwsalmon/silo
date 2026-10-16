@@ -12,8 +12,8 @@ The pieces:
 | Path | What it is |
 | --- | --- |
 | `Dockerfile` | The hub's image: a static `silo` binary on distroless. |
-| `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, Certificate Manager certificates (the hub's host and the nodes' UI hosts, `*.nodes.<domain>`) and their map, DNS records (optional), an Artifact Registry repository, and Cloud Monitoring alert policies and a dashboard over the hub's metrics (`monitoring.tf`). `bsalmon-gke-dev.tfvars` is the example for this project. |
-| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), and the GKE policies (IAP, timeouts, health checks), and a `PodMonitoring` that scrapes the hub's metrics. `validate.sh` checks them on a kind cluster. |
+| `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL) with its two database users (below), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, Certificate Manager certificates (the hub's host and the nodes' UI hosts, `*.nodes.<domain>`) and their map, DNS records (optional), an Artifact Registry repository, and Cloud Monitoring alert policies and a dashboard over the hub's metrics (`monitoring.tf`). `bsalmon-gke-dev.tfvars` is the example for this project. |
+| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it and a `migrate` init container, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), and the GKE policies (IAP, timeouts, health checks), and a `PodMonitoring` that scrapes the hub's metrics. `validate.sh` checks them on a kind cluster. |
 
 Traffic, once deployed:
 
@@ -66,6 +66,29 @@ them to the `silo-hub` Service and so behind the same IAP.
      `https://iap.googleapis.com/v1/oauth/clientIds/<CLIENT_ID>:handleRedirect`.
   3. Keep the client ID and secret for step 3.
 
+### The database's two roles
+
+The hub reaches PostgreSQL as two roles (security audit 1, SA1-L8):
+
+| Role | Who it is | What it may do | Used by |
+| --- | --- | --- | --- |
+| `silo-hub` | a Cloud SQL built-in user, with a password (terraform's `random_password.db`) | own the schema: create and change the hub's tables. Cloud SQL makes it a member of `cloudsqlsuperuser`. | the `migrate` init container alone: `silo hub migrate`, through the proxy's port 5433 |
+| `silo-hub@bsalmon-gke-dev.iam` | the hub's Google service account's IAM database user; no password, the proxy logs it in with the pod's Workload Identity | `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the hub's tables, and nothing else: no DDL, no other schema's tables | the hub (`silo hub serve -migrate=false`), and `silo hub team` and `token` run in its container, through the proxy's port 5432 |
+
+Each time the pod starts, `silo hub migrate` runs as `silo-hub`: it
+creates any table this version adds, then grants the runtime role
+(`-runtime-role`, the config's `SILO_HUB_RUNTIME_ROLE`) its privileges
+on every table, and by default on every table `silo-hub` creates
+later. It stops the pod from starting if the runtime role could change
+the schema (a `cloudsqlsuperuser` member, one that may create roles,
+databases or objects in the schema, or one that owns a table). The
+hub then opens its tables without creating anything, and says to run
+`silo hub migrate` if one is missing.
+
+Locally, none of this is needed: `silo hub serve -database
+sqlite:hub.db` (or one `postgres://` URL) creates its own tables as
+before, since `-migrate` defaults to true.
+
 ## 2. Terraform
 
 ```sh
@@ -107,6 +130,7 @@ Fill in the overlay, `deploy/kubernetes/hub/bsalmon-gke-dev/kustomization.yaml`
 
 - `newTag`: the tag pushed in step 3.
 - `CLOUD_SQL_INSTANCE`: `terraform output -raw sql_connection_name`.
+- `SILO_HUB_RUNTIME_ROLE`: `terraform output -raw runtime_role`.
 - The HTTPRoute's host name: the `domain` given to terraform.
 - The HTTPRoute `silo-hub-node-ui`'s host name: `*.` and
   `terraform output -raw node_ui_domain`. `SILO_HUB_NODE_UI_DOMAIN`
@@ -121,13 +145,17 @@ service account) are the manifests' defaults; if `name` or
 `networking.gke.io/certmap` annotation and the service account's
 annotation to match.
 
-Then create the two Secrets and apply:
+Then create the two Secrets and apply. `silo-hub-db` holds both
+database URLs: `url`, the hub's (its IAM user, no password), and
+`migrate-url`, the schema owner's (with its password), which only the
+`migrate` init container is given:
 
 ```sh
 eval "$(terraform -chdir=deploy/terraform/hub output -raw get_credentials)"
 kubectl create namespace silo-hub
 kubectl -n silo-hub create secret generic silo-hub-db \
-  --from-literal=url="$(terraform -chdir=deploy/terraform/hub output -raw database_url)"
+  --from-literal=url="$(terraform -chdir=deploy/terraform/hub output -raw database_url)" \
+  --from-literal=migrate-url="$(terraform -chdir=deploy/terraform/hub output -raw migrate_database_url)"
 kubectl -n silo-hub create secret generic silo-hub-iap --from-literal=key=<the OAuth client's secret>
 kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev
 kubectl -n silo-hub rollout status deploy/silo-hub
@@ -178,7 +206,10 @@ kubectl -n silo-hub exec deploy/silo-hub -c hub -- /silo hub token \
   -owner bsalmon@google.com -node my-workstation
 ```
 
-They take the database from the pod's `SILO_HUB_DATABASE`. The token
+They take the database from the pod's `SILO_HUB_DATABASE`, as the
+hub's own least-privileged role (the container's `SILO_HUB_MIGRATE` is
+`false`, so they create no tables; the `migrate` init container made
+them). The token
 (`silo-node_...`) is printed once; the hub keeps only its hash. Minting
 again for the same node revokes the earlier token. Later tokens can
 be minted by their owners through `POST /v1/node-tokens` (the planned
@@ -219,7 +250,7 @@ alerts. In short:
   stops, then the new one starts, so nodes are away for a few seconds
   and running tasks resume when their node is back (hub.md §6.2).
 - **Logs:** `kubectl -n silo-hub logs deploy/silo-hub -c hub` (and
-  `-c cloud-sql-proxy`).
+  `-c migrate`, `-c cloud-sql-proxy`).
 - **Metrics:** Managed Service for Prometheus scrapes the pod's port
   9091 (the `PodMonitoring` `silo-hub`); the **Silo hub** dashboard and
   six alert policies are terraform's (`monitoring.tf`), notifying
@@ -250,6 +281,22 @@ alerts. In short:
 - **Removing it:** `kubectl delete -k deploy/kubernetes/hub/bsalmon-gke-dev`,
   then `terraform destroy` (after setting `deletion_protection = false`
   for the database).
+
+### A hub deployed before the two roles
+
+A hub deployed when it served as `silo-hub` moves over once, in this
+order, with the image built from this change or later:
+
+1. `terraform apply`: it turns on `cloudsql.iam_authentication` (if
+   Cloud SQL restarts the instance for it, the hub is without its
+   database for a minute or so), creates the IAM database user and grants `roles/cloudsql.instanceUser` on the
+   instance. `silo-hub`'s password is unchanged.
+2. Add `SILO_HUB_RUNTIME_ROLE` to the overlay, and replace the Secret
+   with both keys (the `kubectl create secret` above, with
+   `--dry-run=client -o yaml | kubectl apply -f -`).
+3. `kubectl apply -k` the overlay. The new pod's `migrate` container
+   finds the tables there and already `silo-hub`'s, grants the runtime
+   role, and the hub starts as it.
 
 ## 8. The nodes' UIs
 

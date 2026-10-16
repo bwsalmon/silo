@@ -528,8 +528,14 @@ accepted: this is the stated scope of the hub's data (hub.md §1).
 **T-TB5-2 (T/E) The database or its operator rewriting the
 directory.** Adding a membership or a repository ownership admits a
 node and a viewer. *Mitigation:* Cloud SQL through workload identity and
-the Cloud SQL proxy; no public listener (`deploy/`). *Residual:*
-ACT-12 is trusted; there is no audit trail of directory changes in the
+the Cloud SQL proxy; no public listener (`deploy/`). The hub serves as
+its service account's IAM database user, which may read and write the
+hub's rows and nothing more: no DDL, and not a `cloudsqlsuperuser`
+member; `silo hub migrate` refuses a runtime role that could change
+the schema. The schema owner's password is given only to the pod's
+`migrate` init container (SA1-L8, O-15 closed). *Residual:* a
+compromised hub process can still rewrite or delete every row of the
+hub's tables, which serving needs; ACT-12 is trusted; there is no audit trail of directory changes in the
 hub (O-10). *Status:* accepted for the operator; audit trail open.
 
 **T-TB5-3 (I) Logs leaking code or secrets.** *Mitigation:* the hub
@@ -721,10 +727,13 @@ a candidate task; none is fixed by this document.
 | O-9 | The node directory shows a node's repositories of other teams. | low | T-TB1-2 | silo (`SeesNode` filtering the entry) |
 | O-11 | Node tokens never expire. | low | T-TB2-5 | silo `hub/directory` |
 | O-14 | Group and email principals share one namespace in `team_members` and `HubAdmins`; an identity provider whose groups users can name grants membership or hub admin (SA1-L6). | low | T-TB1-1 | silo `hub/directory` |
-| O-15 | The hub's database user is in `cloudsqlsuperuser`; migrations and serving share it (SA1-L8). | low | T-TB5-1 | silo `deploy/terraform/hub`, `hub` |
 
 Closed by security audit 1's low findings: O-7 (node-supplied strings
-are quoted and cut in logs, reasons cut in the task row: SA1-L3).
+are quoted and cut in logs, reasons cut in the task row: SA1-L3) and
+O-15 (the hub serves as a least-privileged database role, its service
+account's IAM database user with DML on its own tables alone, and only
+the `migrate` init container, as the schema's owner, changes the
+schema: SA1-L8; `hub/server` `TestMigrateThenServeLeastPrivileged`).
 
 The accepted risks, for the record: forged claims from a compromised hub
 (T-TB3-1, T-TB6-2), a Grain's account of its own work (T-TB2-6), text a
