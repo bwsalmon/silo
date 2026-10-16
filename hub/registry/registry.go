@@ -13,9 +13,20 @@
 // itself. It is in memory, because everything in it is restated by the
 // node on its next connection; a hub that restarts learns its nodes
 // again as they reconnect.
+//
+// With a Store, the registry is shared between the hub's pods
+// (docs/hub.md §2.2.2, stage R2): each pod's registry stays
+// authoritative for the connections that pod holds and writes them
+// through to the database, under the pod's lease, and mirrors the rest
+// from it (Run). Ownership and supersession are then conditional
+// statements in the database, so they hold across pods, and a node held
+// by another pod is online only while that pod's lease is.
 package registry
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -96,6 +107,14 @@ var ErrNoNode = errors.New("registry: no online node with a free slot")
 // client's default heartbeats.
 const DefaultStaleAfter = 45 * time.Second
 
+// DefaultPodLease is PodLease when zero: a pod renews its lease every
+// third of it, every five seconds.
+const DefaultPodLease = 15 * time.Second
+
+// storeTimeout bounds each of the registry's writes through to its
+// Store.
+const storeTimeout = 5 * time.Second
+
 // Registry is the node directory. Its zero value is not usable; call New.
 type Registry struct {
 	// StaleAfter is how long a connected node may go without a
@@ -104,14 +123,46 @@ type Registry struct {
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 
+	// Store, when set, shares the registry with the hub's other pods,
+	// as Pod (docs/hub.md §2.2.2). Pod names this pod, and PodAddr is
+	// where the other pods reach it; set all three before the first
+	// Register, and run Run.
+	Store   *Store
+	Pod     string
+	PodAddr string
+	// PodLease is how long each renewal of the pod's lease lasts;
+	// DefaultPodLease when zero. Run renews it every third of that.
+	PodLease time.Duration
+	// Logf, when set, receives the Store's failures.
+	Logf func(format string, args ...any)
+
+	// wmu serialises Register, so that the database and the memory
+	// agree on which of two connections for a node came last.
+	wmu   sync.Mutex
 	mu    sync.Mutex
 	nodes map[string]*node
 	subs  map[chan struct{}]struct{}
+	// seq counts this pod's own changes to nodes, so that a refill read
+	// from the database before one does not undo it.
+	seq uint64
 }
 
 type node struct {
 	entry Entry
-	lease *Lease // nil when offline
+	lease *Lease // nil unless this pod holds the node's connection
+	// conn names the connection holding the node, here or on pod; empty
+	// when it is offline.
+	conn string
+	pod  string
+	// podUntil is pod's lease, as the last refill read it, for a node
+	// another pod holds.
+	podUntil time.Time
+	// settled is the database's count of the node's heartbeats, as the
+	// last refill read it: a refill that sees it move settles the
+	// node's claims, as a heartbeat here does.
+	settled int64
+	// changed is seq when this pod last changed the node.
+	changed uint64
 	// epoch counts the heartbeats that settled claims, so that a claim
 	// released after one does not give back a later claim's slot.
 	epoch uint64
@@ -127,6 +178,30 @@ func (r *Registry) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+func (r *Registry) logf(format string, args ...any) {
+	if r.Logf != nil {
+		r.Logf(format, args...)
+	}
+}
+
+func (r *Registry) podLease() time.Duration {
+	if r.PodLease > 0 {
+		return r.PodLease
+	}
+	return DefaultPodLease
+}
+
+func storeContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), storeTimeout)
+}
+
+// newConn names a connection.
+func newConn() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (r *Registry) staleAfter() time.Duration {
@@ -172,6 +247,11 @@ func Validate(n Node) (Node, error) {
 // owner is superseded: its old lease is ended (Lease.Done closes) and
 // the new connection takes its place, which is how a node that lost its
 // connection without the hub noticing reconnects at once.
+//
+// With a Store, the owner is checked in the database, whichever pod
+// registered the node first, and a connection on another pod is
+// superseded there: its pod learns so at its next heartbeat. An error
+// that is neither ErrInvalid nor ErrOwner is the database's.
 func (r *Registry) Register(n Node, owner string) (*Lease, error) {
 	n, err := Validate(n)
 	if err != nil {
@@ -180,43 +260,104 @@ func (r *Registry) Register(n Node, owner string) (*Lease, error) {
 	if owner == "" {
 		return nil, fmt.Errorf("%w: no owner", ErrInvalid)
 	}
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
+	now := r.now()
+	l := &Lease{r: r, id: n.ID, conn: newConn(), done: make(chan struct{})}
+	e := Entry{Node: n, Owner: owner, Free: n.Slots, ConnectedAt: now, LastSeen: now}
+	if r.Store != nil {
+		ctx, cancel := storeContext()
+		err := r.Store.register(ctx, e, r.Pod, l.conn)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	now := r.now()
 	cur := r.nodes[n.ID]
-	if cur != nil && cur.entry.Owner != owner {
+	// The database has checked the owner; a mirrored entry may be older
+	// than it.
+	if r.Store == nil && cur != nil && cur.entry.Owner != owner {
 		return nil, fmt.Errorf("%w: %s", ErrOwner, n.ID)
 	}
 	if cur != nil && cur.lease != nil {
 		cur.lease.end()
 	}
-	l := &Lease{r: r, id: n.ID, done: make(chan struct{})}
-	r.nodes[n.ID] = &node{
-		entry: Entry{Node: n, Owner: owner, Free: n.Slots, ConnectedAt: now, LastSeen: now},
-		lease: l,
-	}
+	r.seq++
+	r.nodes[n.ID] = &node{entry: e, lease: l, conn: l.conn, pod: r.Pod, changed: r.seq}
 	r.notify()
 	return l, nil
 }
 
-// Forget removes an offline node from the directory. It reports whether
-// there was one to remove; an online node is not removed.
+// Forget removes an offline node from the directory, and with a Store
+// from the database, which unbinds its ID from its owner. It reports
+// whether there was one to remove; a node that is not offline is not
+// removed.
 func (r *Registry) Forget(id string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	n := r.nodes[id]
-	if n == nil || n.lease != nil {
+	if n == nil || r.status(n, r.now()) != Offline {
+		r.mu.Unlock()
 		return false
 	}
-	delete(r.nodes, id)
-	r.notify()
+	conn := n.conn
+	r.mu.Unlock()
+	if r.Store != nil {
+		ctx, cancel := storeContext()
+		ok, err := r.Store.forget(ctx, id, conn)
+		cancel()
+		if err != nil {
+			r.logf("registry: forgetting %s: %v", id, err)
+		}
+		if !ok {
+			return false
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur := r.nodes[id]; cur != nil && cur.lease == nil && cur.conn == conn {
+		delete(r.nodes, id)
+		r.notify()
+	}
 	return true
 }
 
-// status is n's status at now; r.mu is held.
+// Unbind removes a node from the directory whatever its status, and
+// with a Store from the database, so that its ID belongs to nobody: the
+// ID was given up (docs/hub.md §5.2). A connection this pod holds for it
+// is ended (Lease.Done closes); one on another pod finds at its next
+// heartbeat that it no longer holds the node, and ends too.
+func (r *Registry) Unbind(id string) error {
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
+	if r.Store != nil {
+		ctx, cancel := storeContext()
+		err := r.Store.unbind(ctx, id)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n := r.nodes[id]; n != nil {
+		if n.lease != nil {
+			n.lease.end()
+		}
+		delete(r.nodes, id)
+		r.notify()
+	}
+	return nil
+}
+
+// status is n's status at now; r.mu is held. A node held by another pod
+// is offline once that pod's lease has lapsed, with no pod having to
+// notice; one the database says this pod holds, but whose connection
+// this pod does not have, is offline too.
 func (r *Registry) status(n *node, now time.Time) Status {
 	switch {
-	case n.lease == nil:
+	case n.lease == nil && (n.conn == "" || n.pod == r.Pod || !now.Before(n.podUntil)):
 		return Offline
 	case now.Sub(n.entry.LastSeen) > r.staleAfter():
 		return Stale
@@ -314,7 +455,7 @@ func (r *Registry) ClaimFor(repos []string, ok func(Entry) bool) (*Claim, error)
 		n := r.nodes[e.ID]
 		if n != nil && r.status(n, r.now()) == Online && n.entry.Free-n.entry.Claimed > 0 {
 			n.entry.Claimed++
-			c := &Claim{r: r, NodeID: e.ID, lease: n.lease, epoch: n.epoch}
+			c := &Claim{r: r, NodeID: e.ID, conn: n.conn, epoch: n.epoch}
 			r.notify()
 			r.mu.Unlock()
 			return c, nil
@@ -353,6 +494,7 @@ func (r *Registry) notify() {
 type Lease struct {
 	r    *Registry
 	id   string
+	conn string
 	once sync.Once
 	done chan struct{}
 }
@@ -375,21 +517,59 @@ func (l *Lease) current() *node {
 	return n
 }
 
+// offline marks n, which l held, offline; r.mu is held.
+func (l *Lease) offline(n *node) {
+	n.lease, n.conn = nil, ""
+	n.entry.Free, n.entry.Claimed = 0, 0
+	l.r.seq++
+	n.changed = l.r.seq
+	l.r.notify()
+}
+
 // Heartbeat records that the node is alive with free slots free, and
 // settles the hub's outstanding claims against it. It reports false
-// when the lease has ended.
+// when the lease has ended: with a Store, also when a newer connection
+// on another pod has superseded it, which ends the lease.
 func (l *Lease) Heartbeat(free int) bool {
-	l.r.mu.Lock()
-	defer l.r.mu.Unlock()
+	r := l.r
+	r.mu.Lock()
 	n := l.current()
 	if n == nil {
+		r.mu.Unlock()
 		return false
 	}
-	n.entry.Free = min(max(free, 0), n.entry.Slots)
+	free = min(max(free, 0), n.entry.Slots)
+	now := r.now()
+	r.mu.Unlock()
+	if r.Store != nil {
+		ctx, cancel := storeContext()
+		held, err := r.Store.heartbeat(ctx, l.id, l.conn, free, now)
+		cancel()
+		switch {
+		case err != nil:
+			// The node is still connected here; the database will hear
+			// from it at the next heartbeat.
+			r.logf("registry: heartbeat of %s: %v", l.id, err)
+		case !held:
+			r.mu.Lock()
+			if n := l.current(); n != nil {
+				l.offline(n)
+			}
+			r.mu.Unlock()
+			l.end()
+			return false
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n = l.current(); n == nil {
+		return false
+	}
+	n.entry.Free = free
 	n.entry.Claimed = 0
 	n.epoch++
-	n.entry.LastSeen = l.r.now()
-	l.r.notify()
+	n.entry.LastSeen = now
+	r.notify()
 	return true
 }
 
@@ -397,20 +577,28 @@ func (l *Lease) Heartbeat(free int) bool {
 // connection has already superseded it.
 func (l *Lease) Close() {
 	l.r.mu.Lock()
-	defer l.r.mu.Unlock()
-	if n := l.current(); n != nil {
-		n.lease = nil
-		n.entry.Free, n.entry.Claimed = 0, 0
-		l.r.notify()
+	n := l.current()
+	if n != nil {
+		l.offline(n)
 	}
+	l.r.mu.Unlock()
 	l.end()
+	if n != nil && l.r.Store != nil {
+		// Conditional on the connection, so a late close never takes a
+		// newer connection, on any pod, offline.
+		ctx, cancel := storeContext()
+		if err := l.r.Store.close(ctx, l.id, l.conn); err != nil {
+			l.r.logf("registry: closing %s: %v", l.id, err)
+		}
+		cancel()
+	}
 }
 
 // Claim is one slot the dispatcher holds on a node.
 type Claim struct {
 	r      *Registry
 	NodeID string
-	lease  *Lease
+	conn   string
 	epoch  uint64
 	once   sync.Once
 }
@@ -423,7 +611,7 @@ func (c *Claim) Release() {
 		c.r.mu.Lock()
 		defer c.r.mu.Unlock()
 		n := c.r.nodes[c.NodeID]
-		if n != nil && n.lease == c.lease && n.epoch == c.epoch && n.entry.Claimed > 0 {
+		if n != nil && n.conn != "" && n.conn == c.conn && n.epoch == c.epoch && n.entry.Claimed > 0 {
 			n.entry.Claimed--
 			c.r.notify()
 		}

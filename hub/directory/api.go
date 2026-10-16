@@ -52,6 +52,10 @@ type API struct {
 	// Disconnect, when set, ends a node's connection when its token is
 	// revoked: rendezvous.Server.Disconnect.
 	Disconnect func(nodeID string) bool
+	// Unbind, when set, is called once a node ID has been given up, so
+	// that the node registry forgets the owner it bound the ID to:
+	// registry.Registry.Unbind.
+	Unbind func(nodeID string) error
 }
 
 // Access authenticates r and loads what its caller may see.
@@ -383,6 +387,11 @@ func (a *API) releaseNodeID(w http.ResponseWriter, r *http.Request, acc *Access)
 	}
 	if a.Disconnect != nil {
 		a.Disconnect(node)
+	}
+	if a.Unbind != nil {
+		if err := a.Unbind(node); err != nil {
+			return err
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil

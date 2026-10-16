@@ -20,7 +20,7 @@ database `silo`.
 | Teams, members, repositories, team settings, node tokens (hashes) | PostgreSQL: `teams`, `team_members`, `team_repos`, `team_settings`, `node_tokens` | no |
 | The backlog | PostgreSQL: `tasks` | no |
 | Stored events (lifecycle and conversation) | PostgreSQL: `task_events` | no |
-| The node registry: who is connected, their slots and heartbeats | memory | yes: rebuilt as nodes reconnect, within their backoff (at most a minute) |
+| The node registry: who is connected, their slots and heartbeats | memory, published to PostgreSQL for the other pods: `hub_pods` (each pod's lease) and `hub_nodes` (each node's owner, pod and connection) (hub.md §2.2.2) | the connections, yes: rebuilt as nodes reconnect, within their backoff (at most a minute). A node's owner, no |
 | Token-stream rings, live subscribers | memory | yes: subscribers reconnect from their cursor; ring events older than the restart are not replayed |
 | Open task streams | memory | yes: on start, offered tasks are requeued and running ones are `lost` until their nodes resume them (hub.md §6.2) |
 | The dispatcher's lease | PostgreSQL: an advisory lock held by the dispatching pod's session; `hub_leases` numbers its terms and names the holder | released: the next pod to start takes it (hub.md §2.2.1) |

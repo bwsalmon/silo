@@ -117,9 +117,11 @@ with its messages as built in `hub/rendezvous` and `hub/tasks`:
 
 The **store** is a database: SQLite for one replica, PostgreSQL for
 more. It holds teams, the backlog and the event metadata. The
-**registry** is in memory. Everything in it is restated by each node
-when the node connects, so it would only go stale in a database. A hub
-that restarts relearns its nodes within one reconnect backoff.
+**registry** is in memory, on each pod, for the connections that pod
+holds, and published to the database for the other pods (§2.2.2).
+Everything but a node's owner is restated by each node when the node
+connects, so a hub that restarts relearns its nodes within one
+reconnect backoff.
 
 The hub is deployed on **GKE behind IAP**: a GKE Gateway fronts it
 with Google's HTTPS load balancer, and IAP is enabled on that load
@@ -131,7 +133,8 @@ balancer's backend service for humans (§4.1, §5.1).
 server over one database: the directory, the backlog and its
 dispatcher, and the event store, each in its own tables of the same
 PostgreSQL database (SQLite only for local development), with the
-registry and rendezvous in memory. It is configured by flags or their
+rendezvous in memory and the registry in memory and published to the
+database (§2.2.2). It is configured by flags or their
 `SILO_HUB_*` environment variables, and needs exactly one human
 sign-on: an IAP audience, an OIDC issuer, or, for development only, a
 header taken on trust. `/healthz` is liveness; `/readyz` answers 200
@@ -192,9 +195,9 @@ that matters is in the database and everything in memory is restated
 by the nodes (§2). The exceptions are the view-through (§7.2) and a
 node's UI (§11), which put bytes through the one pod, so capacity is
 what is likeliest to force the move. This section is the design for
-several replicas, in five stages (§2.2.1 to §2.2.5). Stage R1 is
-built; R2 to R5 are follow-ups, each landing behind the one before it,
-and the Deployment stays at one replica until R5.
+several replicas, in five stages (§2.2.1 to §2.2.5). Stages R1 and
+R2 are built; R3 to R5 are follow-ups, each landing behind the one
+before it, and the Deployment stays at one replica until R5.
 
 **Recovery time as deployed.** One pod, nodes that reconnect with
 backoff (1s doubling to a minute):
@@ -230,7 +233,7 @@ recover the backlog.
 | Stage | What | State |
 | --- | --- | --- |
 | R1 | The dispatcher under a database lease (`hub/lease`), `database_availability_type` | built |
-| R2 | The shared registry: `hub_pods` and `hub_nodes` in the database, each node naming the pod holding it, under that pod's lease | follow-up |
+| R2 | The shared registry: `hub_pods` and `hub_nodes` in the database, each node naming the pod holding it, under that pod's lease (`hub/registry`) | built |
 | R3 | `Server.Open` forwarded to the holder over a pod-to-pod stream; the directory read from the shared registry | follow-up, after R2 |
 | R4 | Cross-pod wake-ups and live events: LISTEN/NOTIFY for the dispatcher, subscriptions forwarded to the pod holding the task's node | follow-up, after R3 |
 | R5 | Two or more replicas, `RollingUpdate`, a PodDisruptionBudget, the operations runbook and alerts | follow-up, after R4 |
@@ -284,19 +287,26 @@ before 689c3a2):
   explicitly, so another pod takes it within one retry rather than
   after the keepalive.
 
-#### 2.2.2 R2: the shared registry
+#### 2.2.2 R2: the shared registry (built)
 
 The registry stays in memory on each pod, authoritative for the
-connections that pod holds, and each pod publishes it to two tables:
+connections that pod holds, and each pod publishes it to two tables
+(`registry.Store`, with `Registry.Run` keeping the pod in them):
 
 - `hub_pods (pod, addr, lease_until)`: each pod's name (the Kubernetes
   pod name, from the downward API), its internal address (pod IP and
   the internal port, R3), and a lease it renews every five seconds for
-  fifteen. A pod's row is deleted when it shuts down.
+  fifteen. A pod's row is deleted when it shuts down, after its node
+  connections have closed. The name and address are `-pod` and
+  `-pod-addr` (`SILO_HUB_POD`, `SILO_HUB_POD_ADDR`), both the host's
+  name when unset, which is the pod's name on Kubernetes and enough for
+  one pod; R5 sets them from the downward API.
 - `hub_nodes (id, owner, pod, conn, repos, slots, version, labels,
   free, settled, connected_at, last_seen)`: one row per node ever
   registered, `pod` and `conn` (a random ID per connection) naming the
-  connection holding it, empty when it is offline.
+  connection holding it, empty when it is offline. Times are the
+  writing pod's clock, in milliseconds; the pods' clocks are taken to
+  agree to well within a second, as GKE's nodes' do.
 
 Each rule of §3 moves into a conditional statement:
 
@@ -307,7 +317,16 @@ Each rule of §3 moves into a conditional statement:
   connection's. The old connection's pod learns it was superseded when
   its next heartbeat's update (`WHERE id = ? AND conn = ?`) matches no
   row, and drops the connection; a late close is likewise conditional
-  on `conn`, so it never takes the newer connection offline.
+  on `conn`, so it never takes the newer connection offline. Each
+  renewal of a pod's lease also takes offline any row naming the pod
+  whose connection it does not hold: an earlier process's under the
+  same name (one pod, restarted), or a close that did not reach the
+  database.
+- **Giving an ID up.** Since the owner now outlives a restart, giving a
+  node ID up in the team directory (`DELETE /v1/node-tokens/nodes/
+  {node}`, §5.2) deletes its row too (`Registry.Unbind`), whichever pod
+  holds it: that pod's next heartbeat matches no row and drops the
+  connection, and the next owner can register the ID.
 - **Status.** A node is online when its row names a pod whose
   `lease_until` is in the future and its `last_seen` is within
   `StaleAfter`; stale when the pod is live but the node is silent;
@@ -315,14 +334,25 @@ Each rule of §3 moves into a conditional statement:
   dies takes its nodes offline within one pod lease (fifteen seconds),
   with no pod having to notice: the status is computed at read time.
 - **Claims** stay in the dispatcher's memory, since only the lease
-  holder claims. The leader's registry is a mirror: a `registry.Registry`
-  it refills from `hub_nodes` on every change notice (R4) and every
-  `StaleAfter`, keeping its claims across refills. A heartbeat writes
-  `free` and bumps `settled`; a refill that sees `settled` move settles
-  that node's outstanding claims, as the heartbeat does in memory today.
+  holder claims. Every pod's registry is a mirror of the others' nodes,
+  which it refills from `hub_nodes` (joined with `hub_pods`) at each
+  renewal of its own lease, every five seconds, and on every change
+  notice once R4 lands. That is more often than the `StaleAfter` this
+  section first named, because a mirror refilled only every
+  `StaleAfter` would see another pod's fifteen-second lease, and its
+  nodes' heartbeats, lapse between refills; a few thousand rows every
+  five seconds is cheap. A refill keeps the claims on a node still on
+  the same connection. A heartbeat writes `free` and bumps `settled`; a
+  refill that sees `settled` move settles that node's outstanding
+  claims, as a heartbeat on the claiming pod does. Each pod's metrics
+  count every node in the shared registry, not only its own.
 - **Changes.** A pod's own registry changes are written through at
-  once; heartbeats are written at most every heartbeat interval, which
-  they already are.
+  once, outside the registry's lock; heartbeats are written at most
+  every heartbeat interval, which they already are. A write that fails
+  is logged: a registration is then not refused but dropped, so the
+  node retries, and a heartbeat's is retried by the next one.
+- **SQLite**, one process, uses the same tables, so ownership outlives
+  a restart there too.
 
 The alternative, gossiping registries between pods, was rejected: the
 database is already shared, consistent and the thing every pod must
@@ -427,6 +457,11 @@ on every pod.
 
 ## 3. The node registry (built: `hub/registry`)
 
+Each pod keeps the registry in memory for the connections it holds.
+With several pods it is shared through the database (§2.2.2), and each
+rule below is a conditional statement there, so it holds whichever pod
+each connection reached.
+
 A node registers with a `registry.Node`:
 
 | Field | Meaning |
@@ -450,25 +485,30 @@ The hub adds what the node may not claim for itself:
   default, three heartbeats).
 - `stale`: connected but silent. It may be wedged, so the dispatcher
   passes it over.
-- `offline`: no connection. The entry stays, showing when the node was
-  last seen, until `Forget`.
+- `offline`: no connection, or the pod holding it has let its lease
+  lapse (§2.2.2). The entry stays, showing when the node was last seen,
+  until `Forget`, or `Unbind` when its ID is given up (§5.2).
 
 **Ownership.** A node ID belongs to the first owner that registered it.
 A different owner naming the same ID is refused (`ErrOwner`), even
-while the node is offline. A user cannot take over another user's node
+while the node is offline, on any pod and across restarts (`hub_nodes`
+keeps the owner). A user cannot take over another user's node
 or its repositories by guessing the ID.
 
 **Supersession.** When the same owner registers an ID that is already
 online, the new connection replaces the old one. The old lease's `Done`
 closes, and the rendezvous drops the old connection. A late `Close` on
-the old lease does not take the node offline. This lets a node that
+the old lease does not take the node offline. When the old connection
+is on another pod, that pod's next heartbeat finds the node's row on
+another connection and ends the old lease (§2.2.2). This lets a node that
 lost its connection, before the hub noticed, come back at once.
 
 **Claims.** `Claim(repo)` reserves one slot on the online node with the
 most available slots (`free − claimed`). Two dispatches therefore never
 count the same free slot. Each heartbeat reports the node's own free
 count, and that count is taken to include every task it has accepted,
-so the heartbeat settles all outstanding claims. If the node refuses a
+so the heartbeat settles all outstanding claims (on another pod, at
+that pod's next refill, §2.2.2). If the node refuses a
 task, the dispatcher releases that claim. Releasing a claim after the
 heartbeat that settled it does nothing (each claim carries the
 settlement epoch), so it cannot hand back a later claim's slot.
@@ -611,12 +651,13 @@ A node cannot do an interactive sign-in for every connection. Instead:
    token. **A node ID belongs to the first owner to mint a token for
    it, for good** (SA1-H1): another owner's mint is refused while any
    token of the first's for it, live or revoked, is unreleased. So node
-   IDs stay bound to their owner across hub restarts, which the
-   in-memory registry alone would forget, and across revocation, which
-   would otherwise hand a stranger the ID's lost tasks (§6.2). The
-   owner, or a hub admin, gives the ID up with `DELETE
-   /v1/node-tokens/nodes/{node}`, which revokes the owner's tokens for
-   it (every owner's, for a hub admin) and marks them released.
+   IDs stay bound to their owner across hub restarts, as the shared
+   registry's `hub_nodes` also keeps them (§2.2.2), and across
+   revocation, which would otherwise hand a stranger the ID's lost
+   tasks (§6.2). The owner, or a hub admin, gives the ID up with
+   `DELETE /v1/node-tokens/nodes/{node}`, which revokes the owner's
+   tokens for it (every owner's, for a hub admin), marks them released,
+   and unbinds the ID in the registry (`Registry.Unbind`).
 3. The node presents the token as a bearer token at the handshake.
    `Store.Authenticate` returns its owner and node ID, and the
    rendezvous refuses a hello for any other ID (§4.2).
@@ -1071,7 +1112,7 @@ audit plan. This section is the hub's part of it in brief.
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the one-replica decision (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
-| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry; R3, `Server.Open` across pods; R4, wake-ups and live events across pods; R5, the rolling Deployment. | here: R1 built, R2 to R5 follow-ups |
+| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods; R4, wake-ups and live events across pods; R5, the rolling Deployment. | here: R1 and R2 built, R3 to R5 follow-ups |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
