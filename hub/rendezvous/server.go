@@ -56,6 +56,11 @@ type Server struct {
 	Heartbeat time.Duration
 	// Logf, when set, receives one line per connection event.
 	Logf func(format string, args ...any)
+	// Observe, when set, is told of each connection event, for the
+	// hub's metrics: a node welcomed (EventConnected), its connection
+	// ending (EventDisconnected), or a connection refused before a node
+	// was registered (EventRefused).
+	Observe func(ev Event)
 
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
@@ -77,6 +82,22 @@ var ErrUnavailable = errors.New("rendezvous: the hub cannot admit nodes now")
 // ErrShuttingDown is a node connecting to a hub that Shutdown has
 // been called on: answered 503, which the node retries.
 var ErrShuttingDown = errors.New("rendezvous: the hub is shutting down")
+
+// Event is a connection event, for Server.Observe.
+type Event string
+
+// The connection events.
+const (
+	EventConnected    Event = "connected"
+	EventDisconnected Event = "disconnected"
+	EventRefused      Event = "refused"
+)
+
+func (s *Server) observe(ev Event) {
+	if s.Observe != nil {
+		s.Observe(ev)
+	}
+}
 
 func (s *Server) logf(format string, args ...any) {
 	if s.Logf != nil {
@@ -134,6 +155,7 @@ func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.logf("rendezvous: refused a node from %s: %v", r.RemoteAddr, err)
+		s.observe(EventRefused)
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
@@ -176,6 +198,7 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		return
 	}
 	refuse := func(err error) {
+		s.observe(EventRefused)
 		s.logf("rendezvous: refused node %q of %s: %v", hello.Node.ID, owner, err)
 		l.write(Message{Type: TypeError, Error: err.Error()})
 		ctl.CloseWrite()
@@ -241,6 +264,8 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		return
 	}
 	s.logf("rendezvous: node %q of %s online: %d slots for %v", node.ID, owner, node.Slots, node.Repos)
+	s.observe(EventConnected)
+	defer s.observe(EventDisconnected)
 
 	go s.acceptNodeStreams(node.ID, m)
 	go func() {

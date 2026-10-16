@@ -33,6 +33,8 @@ const (
 //	DELETE /v1/teams/{team}/members/{principal}       team admin
 //	PUT    /v1/teams/{team}/repos/{owner}/{name}      team admin
 //	DELETE /v1/teams/{team}/repos/{owner}/{name}      team admin
+//	GET    /v1/teams/{team}/settings                  its members
+//	PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds"}   team admin
 //	GET    /v1/node-tokens                            the caller's; every owner's for a hub admin
 //	POST   /v1/node-tokens {"node"}                   mint one for the caller: grain hub login
 //	DELETE /v1/node-tokens/{id}                       its owner, or a hub admin
@@ -105,6 +107,8 @@ func (a *API) Handler() http.Handler {
 	h("DELETE "+TeamsPath+"/{team}/members/{principal}", a.removeMember)
 	h("PUT "+TeamsPath+"/{team}/repos/{owner}/{name}", a.assignRepo)
 	h("DELETE "+TeamsPath+"/{team}/repos/{owner}/{name}", a.releaseRepo)
+	h("GET "+TeamsPath+"/{team}/settings", a.getSettings)
+	h("PUT "+TeamsPath+"/{team}/settings", a.setSettings)
 	h("GET "+NodeTokensPath, a.listTokens)
 	h("POST "+NodeTokensPath, a.mintToken)
 	h("DELETE "+NodeTokensPath+"/{id}", a.revokeToken)
@@ -221,6 +225,33 @@ func (a *API) deleteTeam(w http.ResponseWriter, r *http.Request, acc *Access) er
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+func (a *API) getSettings(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	team := r.PathValue("team")
+	if !acc.SeesTeam(team) {
+		return errNoTeam
+	}
+	set, err := a.Store.TeamSettings(r.Context(), team)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, set)
+}
+
+func (a *API) setSettings(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	team, err := teamAdmin(r, acc)
+	if err != nil {
+		return err
+	}
+	var set Settings
+	if err := readJSON(r, &set); err != nil {
+		return err
+	}
+	if err := a.Store.SetTeamSettings(r.Context(), team, set); err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, set)
 }
 
 func (a *API) setMember(w http.ResponseWriter, r *http.Request, acc *Access) error {

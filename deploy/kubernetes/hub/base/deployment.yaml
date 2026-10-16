@@ -64,7 +64,10 @@ spec:
       containers:
         - name: hub
           image: silo-hub
-          args: ["hub", "serve", "-addr=:8080"]
+          # Metrics on a port of their own, which no Service names, so
+          # the load balancer never reaches them; the PodMonitoring
+          # (monitoring.yaml) scrapes the pod directly.
+          args: ["hub", "serve", "-addr=:8080", "-metrics-addr=:9091"]
           envFrom:
             - configMapRef:
                 name: silo-hub-config
@@ -79,6 +82,8 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: metrics
+              containerPort: 9091
           readinessProbe:
             httpGet:
               path: /readyz

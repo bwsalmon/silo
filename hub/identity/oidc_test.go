@@ -139,7 +139,7 @@ func TestOIDCSignIn(t *testing.T) {
 	// The session cookie is signed: editing it signs nobody in.
 	u, _ := url.Parse(hub.URL)
 	for _, ck := range jar.Cookies(u) {
-		if ck.Name == sessionCookie {
+		if ck.Name == SessionCookie {
 			payload, _, _ := strings.Cut(ck.Value, ".")
 			b, _ := b64.DecodeString(payload)
 			forged := strings.Replace(string(b), "bob@", "eve@", 1)

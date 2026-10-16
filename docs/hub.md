@@ -8,7 +8,10 @@ and `hub/directory`), task intake and dispatch (stage 2.3, §6,
 `hub/tasks`), and live events with the SILO_ONLY view-through (stage
 2.4, §7, `hub/live`), and the `silo hub serve` command that runs them
 as one server, with its deployment on GKE behind IAP (stage 2.5, §2.1,
-`hub/server`, `deploy/`, [deploy.md](deploy.md)).
+`hub/server`, `deploy/`, [deploy.md](deploy.md)), and what it takes to
+run in production: metrics, alerts and a dashboard, backups and their
+restore, requeueing lost tasks, and the decision to stay on one
+replica (stage 2.8, §2.2, §6.3, [hub-operations.md](hub-operations.md)).
 
 ## 1. What the hub is
 
@@ -147,7 +150,7 @@ its database, before anyone can reach its API.
 load balancer's backend timeout allows: a day, as deployed, where Cloud
 Run ends every request at 60 minutes. The client reconnects cleanly
 either way, because pods roll. GKE also leaves room for several
-replicas later (§10): session affinity, and a registry that records
+replicas later (§2.2): session affinity, and a registry that records
 which pod holds each node. The shape is grain's own load balancer and
 IAP setup (grain's `deploy/terraform/gcp/iap.tf`, and
 `deploy/terraform/relay` with `iap_mode = "load_balancer"`). Cloud
@@ -159,12 +162,74 @@ balancer. It is not built.
 **One replica.** The deployment runs one pod and rolls it with
 `Recreate`, because the dispatcher assumes it is the only one (§6.2):
 two overlapping pods would both recover the backlog. A roll therefore
-costs nodes a reconnect of a few seconds. Several replicas are §10's
-question, not this stage's.
+costs nodes a reconnect of a few seconds. §2.2 is the decision to
+stay that way, and what it costs.
+
+**Metrics.** With `-metrics-addr` (`:9091` as deployed) the hub serves
+Prometheus metrics at `/metrics` on a listener of its own, which no
+Service names, so the load balancer and IAP never reach it. GKE's
+Managed Service for Prometheus scrapes it (a `PodMonitoring`), and
+Cloud Monitoring alerts on it and charts it (`deploy/terraform/hub/
+monitoring.tf`). [hub-operations.md](hub-operations.md) lists the
+metrics, the alerts and the dashboard.
 
 [deploy.md](deploy.md) is the runbook: the terraform
 (`deploy/terraform/hub`), the manifests (`deploy/kubernetes/hub`) and
-how a Grain is pointed at the hub.
+how a Grain is pointed at the hub. [hub-operations.md](hub-operations.md)
+is the runbook for running it: upgrades, rotating secrets, restoring
+the database and reading the dashboard.
+
+### 2.2 One replica, by decision
+
+**Decision: the hub stays one replica.** It is a coordination plane,
+not a data path: an hour of a hub that is down a minute at a time
+costs nodes a reconnect and humans a retry, and loses nothing, because
+everything that matters is in the database and everything in memory
+is restated by the nodes (§2). Several replicas would buy availability
+the hub does not yet need, at the price of the hub's hardest code.
+
+**What several replicas would take**, which is why it is not built
+here. Every node's connection is held by one pod, and the dispatcher
+and the view-through reach a node only through the pod holding it
+(`Server.Open`). So:
+
+- The registry moves to the database, or each pod's registry learns
+  the others', and each entry names the pod that holds the node's
+  connection (and its address), with a lease so that a dead pod's
+  nodes go offline.
+- `Server.Open` on a pod that does not hold the node forwards to the
+  pod that does: a pod-to-pod stream (an internal HTTP upgrade to the
+  holder's pod IP), which the offer, resume, cancel and view streams
+  ride.
+- The dispatcher runs on one pod at a time, under a lease in the
+  database (v1's leader lease, in this repository's history, is the
+  basis), so that two pods never recover or place the same task; or
+  each task's update takes a row lock and every pod dispatches.
+- The live event fan-out (§7.1) moves to the database or a pub/sub,
+  since a node's events reach one pod and its subscribers may be on
+  another.
+- The rollout becomes `RollingUpdate`, and the Gateway needs no session
+  affinity: any pod serves any request.
+
+That is a stage of its own; a follow-up proposal covers it, to be
+taken up when one replica's recovery time below is no longer good
+enough, or one pod's capacity (the view-through and, if §11 is taken
+up, the relay's traffic) runs out.
+
+**Recovery time as deployed.** One pod, a zonal Cloud SQL instance,
+nodes that reconnect with backoff (1s doubling to a minute):
+
+| Failure | What happens | Back in |
+| --- | --- | --- |
+| The hub process crashes or wedges | The kubelet restarts the container (liveness on `/healthz`); nodes reconnect; running tasks are lost until their nodes resume them, which they do on reconnecting | under a minute, plus up to a minute of node backoff |
+| An upgrade | `Recreate`: goodbye, at most 20s of shutdown, the new pod starts (§2.1) | about a minute |
+| The GKE node dies | The pod is rescheduled once the node is marked unreachable (the default 5-minute toleration) | 5 to 7 minutes |
+| The Cloud SQL zone or instance fails | ZONAL Cloud SQL has no standby: the instance is restored from backup or to a point in time into a new instance, and the hub pointed at it ([hub-operations.md](hub-operations.md)) | 30 to 60 minutes, by hand; at most seconds of writes lost (point-in-time recovery) |
+| The database is corrupted or wrongly changed | Point-in-time restore to before the change | the same |
+
+Moving the instance to `availability_type = "REGIONAL"` (a standby in
+another zone, failover in about a minute) is the next step if the
+database's row matters, and is cheaper than several hub replicas.
 
 ## 3. The node registry (built: `hub/registry`)
 
@@ -285,8 +350,8 @@ or a newer connection superseded it.
 Either side opens further streams once the node is welcomed:
 
 - **The hub to a node:** `Server.Open(ctx, nodeID)`. This is how the
-  dispatcher offers a task (§6.2), and how a viewer reads a diff or log
-  through (§7.2).
+  dispatcher offers a task (§6.2), how a viewer reads a diff or log
+  through (§7.2), and how a node's owner reaches its UI (§11).
 - **A node to the hub:** handed to `Server.NodeStream`. These are the
   node's event streams (§7.1). With none set, they are reset.
 
@@ -544,8 +609,8 @@ does not hold back another team's first task. For each task:
 5. If the node goes offline while the task is `offered`, the claim is
    released and the task is requeued, with the node passed over for
    `Retry` but not excluded. If it goes offline while the task is
-   `running`, the task is marked `lost` and stays with its node. A lost
-   task is never placed elsewhere automatically (§10). When the node is
+   `running`, the task is marked `lost` and stays with its node, unless
+   its team has turned on requeueing lost tasks (§6.3). When the node is
    next online, the dispatcher opens a stream and writes
    `{"type":"resume","task":{...}}`. The node answers `accept` (the
    task is `running` again, on a new stream), `result` (it ended while
@@ -578,7 +643,65 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 When the dispatcher starts, it has no streams. A task that was
 `offered` is requeued, and a task that was `running` is `lost` until
 its node resumes it. The dispatcher assumes it is the only one (one
-hub replica, §10).
+hub replica, §2.2).
+
+### 6.3 Lost running tasks: requeued after a team's grace, off by default
+
+A running task whose node goes away is `lost` (§6.2), and stays with
+its node: when the node comes back, it is asked to resume the task. The
+question is what happens when the node does not come back.
+
+**The trade.** Requeueing a lost task to another node risks **duplicate
+work**: the first node may only be cut off from the hub, and still be
+running the task, pushing its branch or opening its pull request,
+while a second node starts it again. Two runs of one task can push
+conflicting branches, open two pull requests, or each spend the task's
+budget. Never requeueing risks a **stuck task**: a node that is gone
+for good (a laptop closed for the weekend, a VM deleted) keeps its
+tasks `lost` until a human notices and requeues them (`POST
+/v1/tasks/{id}/requeue`), and nothing else of the team's backlog waits
+on them, but their submitters do.
+
+**Decision.** The hub requeues a lost task automatically **only for a
+team that has turned it on**, after a grace the team sets, and the
+default is **off**. The reasons:
+
+- The hub cannot tell a dead node from a cut-off one, and a node's own
+  runs keep going without the hub: a Grain's task does not stop when
+  its rendezvous connection drops. Duplicate work is therefore the
+  likely outcome of an early requeue, not an edge case.
+- Duplicate work is worse than a stuck task for most teams: a stuck
+  task is visible (the backlog's `lost` count, §2.1's metrics) and a
+  human fixes it with one call; a duplicate pushes to a repository,
+  which is not undone by the hub.
+- The right grace depends on the team's nodes. A team of always-on
+  VMs can say "an hour away is dead"; a team of laptops cannot. So it
+  is a team's setting, not the hub's.
+- The hub itself restarting marks every running task lost at once
+  (`Recover`), and nodes take up to a minute to reconnect. The grace
+  has a floor of five minutes (`directory.MinLostRequeueAfter`), so a
+  hub restart never requeues anything.
+
+**As built.** A team admin sets the grace with `PUT
+/v1/teams/{team}/settings {"lost_requeue_after_seconds": N}` (`GET`
+reads it; 0 turns it off), or `silo hub team -id T
+-lost-requeue-after 2h` on the database. It is kept in
+`team_settings`, which is deleted with its team. On each pass, the
+dispatcher (`Dispatcher.LostRequeueAfter`, filled by
+`directory.Store.LostRequeueAfter`) looks at each lost task whose node
+is not online: once the task has been lost for longer than its team's
+grace, measured from when it was marked lost, it goes back to the queue
+(`Store.RequeueLost`) for any node, its old node included, with a
+reason saying why. The update applies only if the task is still lost
+since that moment, so a task its node resumed in the meantime is left
+alone. The node is not excluded: if it comes back first, it may be
+offered the task afresh. It is not told the task was taken from it,
+since it is away; when it comes back it is not asked to resume the
+task, and events it streams for it are refused (§7.1), because the
+task is no longer placed on it. Telling a returning node to drop a
+task that was requeued from it (a cancel owed to the old node) is the
+refinement that would make the duplicate stop early; it is not built.
+
 
 ## 7. Live events and privacy (built: `hub/live`)
 
@@ -690,10 +813,11 @@ anything leaves it.
   claims on trust and holds every task to its owner's local policy,
   failing closed.
 - **The hub can reach a node only through the streams the protocol
-  defines:** offer, resume, cancel and view ([the
-  contract](hub-interface.md)). A node serves only those, so a
-  compromised hub can ask a node to run a task but cannot read the
-  node's files beyond the artifacts that node has itself listed. It
+  defines:** offer, resume, cancel, view and, where the node's owner
+  has turned it on, http ([the contract](hub-interface.md)). A node
+  serves only those, so a compromised hub can ask a node to run a task
+  but cannot read the node's files beyond the artifacts that node has
+  itself listed, and what its own UI shows a signed-in user (§11). It
   could forge a task's claims (requester, approval), but it cannot get
   a task past the Grain's local policy. Claims a Grain verifies
   independently are future work, not built.
@@ -710,58 +834,170 @@ anything leaves it.
 | 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
 | 2.5 | `silo hub serve` (`hub/server`, `cmd/silo`): every part above as one server, health and readiness, graceful shutdown with `goodbye`. Its image, GKE manifests and terraform for GKE behind IAP (§2.1, §5.2.1, `deploy/`, [deploy.md](deploy.md)). | here, built (not applied to any project) |
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
+| 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
+| 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the one-replica decision (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
+| — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
 ## 10. Open questions
 
-- **Lost running tasks.** Should the hub requeue a `lost` running task
-  automatically after a grace period? A second node would then redo
-  work that the first may still be pushing.
-- **Several hubs.** Run one hub replica, or several? Several replicas
-  need the registry to say which replica holds each node's connection,
-  so that `Server.Open` can be routed. The leader or lease machinery in
-  v1's store (deleted from this repository; it is in git history) is
-  the obvious basis. As deployed (§2.1) the hub is one pod, rolled with
-  `Recreate`.
+- **Team members' views of a node's UI.** §11 lets in a node's owner
+  only. A team member who `SeesNode` could later be given a read-only
+  view, but the hub cannot tell a read from a write in grain's UI (a
+  GET can be a long poll; a WebSocket carries both), so it would have
+  to be grain's decision: the hub passing `viewer` and the IAP
+  assertion, and the Grain serving that viewer as its own access list
+  says. Until grain has a read-only role to map them to, owners only.
 
-## 11. The relay and the hub
+Two questions that were here are decided: lost running tasks are
+requeued only after a grace a team turns on (§6.3), and the hub stays
+one replica, with its recovery time written down and several replicas
+a follow-up (§2.2).
+
+## 11. A node's UI through the hub (built: `hub/nodeui`; grain's side to come)
+
+### 11.1 What grain's relay carries
 
 grain's UI can be reached from outside a node's machine through
-grain's relay (`grain-relay`, on Cloud Run): the node holds an outbound
-connection to the relay, and the relay carries a viewer's requests to
-the node's UI through it. Once a node also holds a rendezvous
-connection to the hub, it keeps two outbound tunnels that do the same
-thing: a reverse path from a cloud service to the node.
+grain's relay (`grain-relay`, `pkg/relay` and `cmd/grain-relay` in
+bwsalmon/grain, deployed by its `deploy/terraform/relay`). As built
+there:
 
-**The hub could carry the relay's traffic.** The rendezvous is
-already a multiplexed reverse tunnel. `Server.Open` opens a stream to
-any connected node, and the view-through (§7.2) is a request carried
-over such a stream to the node, whose bytes are copied to the viewer
-and never kept. A UI view-through is the same with HTTP inside: the
-hub opens a stream of a new kind, `{"type":"http"}`, writes the
-viewer's request, and copies the node's response back, WebSocket
-upgrades included. The node answers it only for its own UI, and only
-if it has turned the UI view-through on. That would give:
+- **The tunnel.** The daemon dials `/relay/daemon` (a WebSocket
+  upgrade carrying grain's `pkg/tunnel/mux`, the mux this repository
+  copied into `internal/tunnel/mux`) and holds it. Cloud Run ends every
+  request at the service's timeout, so the daemon rotates its tunnel
+  make-before-break every 240s, and checks `/relay/status` every ~20s
+  to re-attach after a redeploy. The service runs exactly one instance,
+  because the tunnel lives in that instance's memory.
+- **What rides it.** Every request to the relay's host that is not one
+  of its own paths (`/relay/*`, `/_grain/*`, `/healthz`) is the UI's:
+  the relay opens a mux stream, tags it `http`, writes the request on
+  it as HTTP/1.1 (one request per stream), reads the response back and
+  flushes each write, so SSE streams. A `101 Switching Protocols`
+  splices the browser's connection to the stream both ways, which is
+  how WebSockets pass. The relay also carries **remote executors**:
+  `/relay/executor` streams, tagged `executor`, to the daemon's
+  executor handler.
+- **No path prefix.** The UI is served at the relay host's root, and
+  it uses absolute paths (`/api/...`, `/grain-mark-light.png`). It
+  cannot be put under a prefix without changing grain's UI.
+- **Who the viewer is.** The relay decides nothing about it. IAP admits
+  identities to the whole Cloud Run service; the relay strips the
+  plaintext identity headers only a client could have set
+  (`X-Forwarded-User`, `X-User-LDAP`, `X-Grain-User`, `Grain-User`)
+  and passes the rest, IAP's `X-Goog-IAP-JWT-Assertion` and grain's own
+  session cookie or bearer token among them. The daemon verifies the
+  assertion against its own `GRAIN_IAP_AUDIENCE` (the relay's), or
+  takes its own sign-in, and applies its own teams and access list.
+  It marks each relayed request (`via.Relay`) so that it is not
+  mistaken for an in-process call, and `-ui-trust-relay` decides
+  whether such requests count as loopback. grain keeps the relay's IAP
+  binding in step with its teams (`docs/beyondcorp.md`).
+- **The hour.** The relay's request timeout is 3600s, so each browser
+  stream (an SSE subscription, a WebSocket) and each executor
+  connection through it ends at an hour. The tunnel itself does not
+  hit the cap; it rotates.
 
-- **One outbound connection per node**, one credential (the node
-  token) and one place to revoke it.
-- **One sign-on and one access check.** IAP and the team directory
-  decide who may open a node's UI (to begin with, its owner; §5.3's
-  `SeesNode` for read-only views later), instead of the relay's own
-  configuration.
-- **No 60-minute cap.** The relay on Cloud Run ends every request at an
-  hour, as §2.1 says of the hub; the hub on GKE does not.
+(§11 as first written, without access to grain, said the relay's own
+configuration decides who may open a UI, and that the relay caps the
+tunnel at an hour. Neither is so: grain decides, and the cap is per
+viewer stream. It did not know the relay carries executors, or that
+the UI cannot sit under a path prefix.)
+
+### 11.2 The hub's `http` stream
+
+Once a node holds a rendezvous connection, the hub carries the same
+traffic over it. As built (`hub/nodeui`), with `silo hub serve
+-node-ui-domain=nodes.hub.example.com` (`SILO_HUB_NODE_UI_DOMAIN`):
+
+- **Each node has its own host**, `<node>.nodes.hub.example.com`, and
+  every path on it is the node's UI, at its root as grain expects. A
+  node's host never reaches the hub's API. This, rather than a route
+  such as `/v1/nodes/{id}/ui/...`, is deliberate: grain's UI has no
+  base path, and a node's pages served from the hub's own origin could
+  script the hub's API (and every other node's UI) with the viewer's
+  sign-on. On its own host, a node's UI reaches only itself. A node
+  whose ID is not a DNS label (capitals, `.` or `_`) has no host.
+- **Access.** The viewer is signed in by the hub's sign-on and must be
+  the node's owner: any other caller, and a node the hub does not
+  know, gets 404. An offline node is 503. Hub admins are not let in:
+  a node's UI is its owner's grain, with everything it holds.
+  Team members (`SeesNode`) are §10's question.
+- **The stream.** The hub opens a stream with `Server.Open` and, like
+  the artifact view (§7.2), writes one line and reads one:
+
+  ```
+  hub → node  {"type":"http","node":"ws-1","viewer":"alice@example.com"}
+  node → hub  {"type":"ok"}, then the node reads one HTTP/1.1 request and writes its response
+              or {"type":"error","error":"..."}   (answered 403)
+  ```
+
+  After `ok` the stream is an HTTP/1.1 connection for one request, as
+  the relay's are: the hub writes the request, copies the response to
+  the viewer, flushing each write, and on a 101 splices the two
+  connections (WebSockets). Nothing is stored or cached. `viewer` is
+  the hub's claim; a node that wants proof verifies the IAP assertion
+  itself (below).
+- **What is passed on.** The request goes as the browser sent it, Host
+  included (the node's host), with `X-Forwarded-For`, `-Host` and
+  `-Proto` set, and IAP's assertion. The hub drops its own credentials,
+  `Authorization` and its OIDC cookies, which are not the node's to
+  see, and the plaintext identity headers the relay drops. From the
+  response it drops a `Set-Cookie` with a `Domain`, so one node's UI
+  cannot set cookies on its siblings or on the hub. A WebSocket
+  upgrade must come from the node's own origin (or none, which is not
+  a browser).
+- **Sign-on.** The node hosts need IAP: an OIDC session cookie is the
+  hub host's alone, so behind OIDC a node host signs nobody in. The
+  same IAP backend serves both, so a node verifying the assertion uses
+  the hub's audience.
+- **Deployment.** The hub's Gateway needs the wildcard hostname, its
+  Certificate Manager certificate a `*.nodes.<domain>` name (DNS
+  authorization allows wildcards) and the DNS zone a wildcard record to
+  the hub's address. `deploy/` does not have these yet.
 
 What it costs: the hub carries every UI byte, so its bandwidth and the
-one replica's capacity matter (§10); a hub outage takes the UIs with
-it, where today the relay and the hub fail separately; and the node
-side has to serve the UI over a mux stream, which is grain's change.
-The no-code-at-rest rule (§1) holds, since nothing is stored, but more
-code passes through the hub than the artifact view-through carries.
+one replica's capacity matter (§2.2); a hub outage takes the UIs with
+it, where today the relay and the hub fail separately. The
+no-code-at-rest rule (§1) holds, since nothing is stored, but much more
+code passes through the hub than the artifact view carries.
 
-**Recommendation: fold the relay into the hub,** after Grain embeds the
-rendezvous client (§9), and retire `grain-relay` for nodes that use a
-hub, keeping it for nodes that do not. A follow-up proposal covers the
-hub side (the `http` stream, its access check and route) and the
-Grain side (answering it from the node's UI server); it is not built
-here.
+### 11.3 The node's end (bwsalmon/grain, after the rendezvous client)
+
+Grain answers a stream whose first line is `http` only if its owner has
+turned the UI view-through on; otherwise it refuses (`nodeui.Refuse`,
+which the viewer sees as 403). It serves the request with the same
+handler the relay client hands relayed requests (`pkg/ui`'s server),
+by `nodeui.Serve` or its own equivalent of the relay client's
+`serveHTTP`, and:
+
+- marks the request as coming through a public edge, as `via.Relay`
+  does (a new `via.Hub`), so it is never an in-process call, and does
+  not let `-ui-trust-relay` or loopback trust apply to it;
+- adds the hub's IAP audience (`/projects/NUMBER/global/backendServices/ID`)
+  to `GRAIN_IAP_AUDIENCE`, so that the viewer is whoever IAP signed,
+  checked by the node and not only by the hub (§1.2: the hub decides,
+  the Grain enforces); grain's own sign-in still works through it,
+  its cookie on the node's host;
+- accepts the node's host in its host guard, as it does the relay's.
+
+This waits for Grain to embed `rendezvous.Client` (§9).
+
+### 11.4 Retiring `grain-relay`
+
+- **A node that uses a hub** turns the UI view-through on, and its
+  owner opens `https://<node>.nodes.<hub domain>`. Once that works, it
+  stops dialling the relay (`-relay-url` unset) **unless it has remote
+  executors that reach it through `/relay/executor`**: the hub carries
+  no executor traffic, so such a node keeps the relay for its
+  executors until executors have another way in. A relay serving only
+  executors still needs its IAP and daemon allow-list, and no longer
+  its UI members.
+- **A node without a hub** keeps the relay exactly as it is.
+- **A deployment none of whose nodes still dials the relay** removes
+  `module "relay"` (`enable_cloudrun_relay = false`), with its load
+  balancer or Cloud Run IAP, its token secret and its image
+  repository.
+
+Nothing in the relay changes: it is retired by not being used.

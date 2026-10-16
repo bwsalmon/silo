@@ -190,3 +190,22 @@ func pgCommand(ctx context.Context, path string, args ...string) *exec.Cmd {
 	}
 	return cmd
 }
+
+// Run runs one of PostgreSQL's client programs (pg_dump, pg_restore,
+// psql) with args, failing t with its output if it fails. A missing
+// program skips t, or fails it when RequireEnv is set, as Start does.
+func Run(t testing.TB, program string, args ...string) {
+	t.Helper()
+	path, err := findBinary(program)
+	if err != nil {
+		if Required() {
+			t.Fatalf("%v (%s is set, so postgres is required)", err, RequireEnv)
+		}
+		t.Skipf("%v; install Debian's postgresql package to run this test", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if out, err := pgCommand(ctx, path, args...).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v: %v\n%s", program, args, err, out)
+	}
+}

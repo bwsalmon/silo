@@ -110,6 +110,9 @@ func (s *Store) Close() error { return s.db.Close() }
 // Ping checks that the database answers: the hub's readiness.
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
+// Stats is the store's connection pool's statistics.
+func (s *Store) Stats() sql.DBStats { return s.db.Stats() }
+
 const schema = `
 CREATE TABLE IF NOT EXISTS teams (
 	id TEXT PRIMARY KEY,
@@ -138,6 +141,10 @@ CREATE TABLE IF NOT EXISTS node_tokens (
 );
 CREATE INDEX IF NOT EXISTS node_tokens_node ON node_tokens (node);
 CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_live ON node_tokens (node) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS team_settings (
+	team TEXT PRIMARY KEY REFERENCES teams (id) ON DELETE CASCADE,
+	lost_requeue_seconds BIGINT NOT NULL
+);
 `
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -242,7 +249,7 @@ func (s *Store) CreateTeam(ctx context.Context, id, name string) error {
 // team takes them.
 func (s *Store) DeleteTeam(ctx context.Context, id string) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		for _, q := range []string{`DELETE FROM team_members WHERE team = ?`, `DELETE FROM team_repos WHERE team = ?`} {
+		for _, q := range []string{`DELETE FROM team_members WHERE team = ?`, `DELETE FROM team_repos WHERE team = ?`, `DELETE FROM team_settings WHERE team = ?`} {
 			if _, err := tx.ExecContext(ctx, s.q(q), id); err != nil {
 				return err
 			}

@@ -40,10 +40,11 @@ const (
 // to the queue; a node that accepts runs it. A node lost before it
 // answered gets the task back in the queue; one lost while the task
 // ran leaves it lost, and when that node is next online the dispatcher
-// asks it to resume the task.
+// asks it to resume the task. A team may set a grace after which a
+// lost task goes back to the queue for any node (LostRequeueAfter).
 //
 // The dispatcher assumes it is the only one: one hub replica
-// (docs/hub.md §10).
+// (docs/hub.md §2.2).
 type Dispatcher struct {
 	Store    *Store
 	Registry *registry.Registry
@@ -61,8 +62,17 @@ type Dispatcher struct {
 	// to wake it, and how long it passes over a node it could not reach
 	// for a task; DefaultRetry when zero.
 	Retry time.Duration
+	// LostRequeueAfter, when set, is how long a task's team lets it stay
+	// lost before the dispatcher puts it back in the queue for any node
+	// (docs/hub.md §6.3): directory.Store.LostRequeueAfter, a per-team
+	// setting. Zero, for a team, or nil leaves a lost task with its node
+	// until the node resumes it or a human requeues it.
+	LostRequeueAfter func(ctx context.Context, team string) (time.Duration, error)
 	// Logf, when set, receives one line per dispatch event.
 	Logf func(format string, args ...any)
+	// Observe, when set, is told of each dispatch event, with the task
+	// as the dispatcher last read it: the hub's metrics.
+	Observe func(ev Event, t Task)
 
 	once sync.Once
 	wake chan struct{}
@@ -71,6 +81,37 @@ type Dispatcher struct {
 	mu   sync.Mutex
 	live map[string]*live // tasks with a stream open, by ID
 	hold map[[2]string]time.Time
+}
+
+// Event is something the dispatcher did or saw, for Observe.
+type Event string
+
+// The dispatcher's events.
+const (
+	// EventAccepted is a node accepting an offer.
+	EventAccepted Event = "accepted"
+	// EventResumed is a node resuming a lost task.
+	EventResumed Event = "resumed"
+	// EventRefused is a node refusing an offer or a resume.
+	EventRefused Event = "refused"
+	// EventTimeout is a node not answering an offer or a resume within
+	// OfferTimeout.
+	EventTimeout Event = "timeout"
+	// EventUnreachable is a node that could not be reached for an offer
+	// or a resume, or went away before it answered.
+	EventUnreachable Event = "unreachable"
+	// EventLost is a running task's node going away.
+	EventLost Event = "lost"
+	// EventLostRequeued is a lost task requeued after its team's grace.
+	EventLostRequeued Event = "lost_requeued"
+	// EventStoreError is the backlog failing an update or a read.
+	EventStoreError Event = "store_error"
+)
+
+func (d *Dispatcher) observe(ev Event, t Task) {
+	if d.Observe != nil {
+		d.Observe(ev, t)
+	}
 }
 
 // live is a task the dispatcher has a stream open for.
@@ -136,6 +177,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	for {
 		if err := d.pass(ctx); err != nil && ctx.Err() == nil {
 			d.logf("tasks: dispatching: %v", err)
+			d.observe(EventStoreError, Task{})
 		}
 		select {
 		case <-ctx.Done():
@@ -183,6 +225,10 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 			queued = append(queued, t)
 		case t.State == Lost && d.reachable(t.ID, t.Node):
 			d.start(ctx, t, nil, TypeResume)
+		case t.State == Lost:
+			if q, ok := d.requeueLost(ctx, t); ok {
+				queued = append(queued, q)
+			}
 		case t.State == Cancelled && d.reachable(t.ID, t.Node):
 			d.start(ctx, t, nil, TypeCancel)
 		}
@@ -194,6 +240,37 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// requeueLost puts a lost task whose node is away back in the queue,
+// once it has been lost for longer than its team's LostRequeueAfter.
+// Its node is not excluded: if it comes back first, it may be offered
+// the task afresh. The node is not told either, since it is away; a
+// node that comes back still running the task is never asked to
+// resume it, and its events for it are refused (docs/hub.md §6.3).
+func (d *Dispatcher) requeueLost(ctx context.Context, t Task) (Task, bool) {
+	if d.LostRequeueAfter == nil || t.CancelPending {
+		return Task{}, false
+	}
+	grace, err := d.LostRequeueAfter(ctx, t.Team)
+	if err != nil {
+		d.logf("tasks: team %s's lost-task grace: %v", t.Team, err)
+		d.observe(EventStoreError, t)
+		return Task{}, false
+	}
+	lost := d.Store.now().Sub(t.Updated)
+	if grace <= 0 || lost < grace {
+		return Task{}, false
+	}
+	reason := fmt.Sprintf("requeued: node %s was lost for %s, past team %s's grace of %s", t.Node, lost.Truncate(time.Second), t.Team, grace)
+	q, err := d.Store.RequeueLost(ctx, t.ID, reason, t.Updated)
+	if err != nil {
+		d.transition(ctx, t.ID)(q, err)
+		return Task{}, false
+	}
+	d.logf("tasks: %s: %s", t.ID, reason)
+	d.observe(EventLostRequeued, t)
+	return q, true
 }
 
 // fair orders queued tasks, oldest first, for placing: round the teams,
@@ -416,6 +493,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	}
 	conn, err := d.Open(ctx, t.Node)
 	if err != nil {
+		d.observe(EventUnreachable, t)
 		unanswered("could not reach the node: "+err.Error(), false)
 		return
 	}
@@ -423,6 +501,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	defer st.Close()
 	spec := t.Spec
 	if err := st.Write(Message{Type: kind, Task: &spec}); err != nil {
+		d.observe(EventUnreachable, t)
 		unanswered("could not write the "+kind+": "+err.Error(), false)
 		return
 	}
@@ -467,15 +546,18 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 		case <-grace:
 			return
 		case <-unansweredC:
+			d.observe(EventTimeout, t)
 			unanswered(fmt.Sprintf("no answer to the %s within %s", kind, d.offerTimeout()), true)
 			return
 		case r := <-msgs:
 			if r.err != nil {
 				if !answered {
+					d.observe(EventUnreachable, t)
 					unanswered("lost the node before it answered: "+r.err.Error(), false)
 					return
 				}
 				d.logf("tasks: %s: lost node %s: %v", t.ID, t.Node, r.err)
+				d.observe(EventLost, t)
 				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Lose(ctx, t.ID, "lost the node while the task ran") })
 				return
 			}
@@ -486,6 +568,11 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 				}
 				answered, unansweredC = true, nil
 				d.logf("tasks: node %s accepted %s as %q", t.Node, t.ID, r.m.NodeTask)
+				if kind == TypeOffer {
+					d.observe(EventAccepted, t)
+				} else {
+					d.observe(EventResumed, t)
+				}
 				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Accept(ctx, t.ID, r.m.NodeTask) })
 			case TypeRefuse:
 				if answered {
@@ -494,6 +581,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 				}
 				release()
 				d.logf("tasks: node %s refused %s: %s", t.Node, t.ID, r.m.Reason)
+				d.observe(EventRefused, t)
 				reason := "refused by node " + t.Node
 				if r.m.Reason != "" {
 					reason += ": " + r.m.Reason
@@ -521,6 +609,18 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	}
 }
 
+// transition logs a store update's error. One the task's state no
+// longer allows is a human having cancelled the task meanwhile, which
+// is not an error.
+func (d *Dispatcher) transition(ctx context.Context, id string) func(Task, error) {
+	return func(_ Task, err error) {
+		if err != nil && !errors.Is(err, ErrState) && ctx.Err() == nil {
+			d.logf("tasks: updating %s: %v", id, err)
+			d.observe(EventStoreError, Task{Spec: Spec{ID: id}})
+		}
+	}
+}
+
 // record writes a task's transition to the store, retrying with
 // backoff while the store fails (the database is away) until the
 // dispatcher stops: a transition dropped would leave the task offered or
@@ -537,6 +637,7 @@ func (d *Dispatcher) record(ctx context.Context, id string, write func() (Task, 
 			return
 		}
 		d.logf("tasks: updating %s: %v; retrying in %s", id, err, wait)
+		d.observe(EventStoreError, Task{Spec: Spec{ID: id}})
 		select {
 		case <-ctx.Done():
 			return

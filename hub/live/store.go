@@ -130,6 +130,16 @@ func (s *Store) Since(ctx context.Context, task string, after, upto int64) ([]Ev
 	return out, rows.Err()
 }
 
+// Size is how many events the store holds and how many bytes their
+// bodies take: the hub's store-size metric.
+func (s *Store) Size(ctx context.Context) (events, bytes int64, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM task_events`).Scan(&events, &bytes)
+	return events, bytes, err
+}
+
+// Stats is the store's connection pool's statistics.
+func (s *Store) Stats() sql.DBStats { return s.db.Stats() }
+
 // Last returns task's last event's seq and type.
 func (s *Store) Last(ctx context.Context, task string) (int64, string, error) {
 	var (

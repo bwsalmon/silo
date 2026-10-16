@@ -25,8 +25,11 @@ const (
 )
 
 const (
-	sessionCookie = "silo_session"
-	flowCookie    = "silo_oidc_flow"
+	// SessionCookie holds a signed-in session, and FlowCookie a sign-in
+	// in progress. Both are the hub's own: whatever the hub proxies to
+	// (a node's UI, hub/nodeui) is not given them.
+	SessionCookie = "silo_session"
+	FlowCookie    = "silo_oidc_flow"
 	flowTTL       = 10 * time.Minute
 	// DefaultSessionTTL is how long a sign-in lasts when
 	// OIDC.SessionTTL is zero.
@@ -216,12 +219,12 @@ func (o *OIDC) Principal(r *http.Request) (Principal, error) {
 		}
 		return o.verifyIDToken(o.ctx(r.Context()), d, tok, "")
 	}
-	ck, err := r.Cookie(sessionCookie)
+	ck, err := r.Cookie(SessionCookie)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
 	var s session
-	if err := o.open(sessionCookie, ck.Value, &s); err != nil {
+	if err := o.open(SessionCookie, ck.Value, &s); err != nil {
 		return Principal{}, err
 	}
 	if o.now().Unix() >= s.Expires {
@@ -282,12 +285,12 @@ func (o *OIDC) login(w http.ResponseWriter, r *http.Request) {
 		State: random(), Nonce: random(), Verifier: oauth2.GenerateVerifier(),
 		Return: localReturn(r.URL.Query().Get("return")), Expires: o.now().Add(flowTTL).Unix(),
 	}
-	v, err := o.seal(flowCookie, f)
+	v, err := o.seal(FlowCookie, f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	o.setCookie(w, flowCookie, v, flowTTL)
+	o.setCookie(w, FlowCookie, v, flowTTL)
 	http.Redirect(w, r, d.cfg.AuthCodeURL(f.State, oauth2.S256ChallengeOption(f.Verifier), oauth2.SetAuthURLParam("nonce", f.Nonce)), http.StatusFound)
 }
 
@@ -298,17 +301,17 @@ func (o *OIDC) callback(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable, err)
 		return
 	}
-	ck, err := r.Cookie(flowCookie)
+	ck, err := r.Cookie(FlowCookie)
 	if err != nil {
 		fail(http.StatusBadRequest, errors.New("no sign-in in progress"))
 		return
 	}
 	var f flow
-	if err := o.open(flowCookie, ck.Value, &f); err != nil {
+	if err := o.open(FlowCookie, ck.Value, &f); err != nil {
 		fail(http.StatusBadRequest, err)
 		return
 	}
-	o.setCookie(w, flowCookie, "", -1)
+	o.setCookie(w, FlowCookie, "", -1)
 	q := r.URL.Query()
 	switch {
 	case o.now().Unix() >= f.Expires:
@@ -341,16 +344,16 @@ func (o *OIDC) callback(w http.ResponseWriter, r *http.Request) {
 	if ttl <= 0 {
 		ttl = DefaultSessionTTL
 	}
-	v, err := o.seal(sessionCookie, session{Principal: p, Expires: o.now().Add(ttl).Unix()})
+	v, err := o.seal(SessionCookie, session{Principal: p, Expires: o.now().Add(ttl).Unix()})
 	if err != nil {
 		fail(http.StatusInternalServerError, err)
 		return
 	}
-	o.setCookie(w, sessionCookie, v, ttl)
+	o.setCookie(w, SessionCookie, v, ttl)
 	http.Redirect(w, r, f.Return, http.StatusFound)
 }
 
 func (o *OIDC) logout(w http.ResponseWriter, r *http.Request) {
-	o.setCookie(w, sessionCookie, "", -1)
+	o.setCookie(w, SessionCookie, "", -1)
 	w.WriteHeader(http.StatusNoContent)
 }

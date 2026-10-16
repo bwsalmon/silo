@@ -106,6 +106,10 @@ func serve(args []string) error {
 	devHeader := fs.String("dev-user-header", env("SILO_HUB_DEV_USER_HEADER", ""),
 		"INSECURE, local development only: take the caller's email from this header, unverified [SILO_HUB_DEV_USER_HEADER]")
 	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, emails or groups [SILO_HUB_ADMINS]")
+	metricsAddr := fs.String("metrics-addr", env("SILO_HUB_METRICS_ADDR", ""),
+		"address to serve Prometheus metrics on, at /metrics; keep it off the load balancer's routes [SILO_HUB_METRICS_ADDR]")
+	nodeUI := fs.String("node-ui-domain", env("SILO_HUB_NODE_UI_DOMAIN", ""),
+		"serve each node's own UI, to its owner, at <node>.<this domain> (docs/hub.md §11); empty serves none [SILO_HUB_NODE_UI_DOMAIN]")
 	grace := fs.Duration("shutdown-grace", server.DefaultShutdownGrace, "how long shutdown waits for nodes and requests")
 	heartbeat := fs.Duration("heartbeat", rendezvous.DefaultHeartbeat, "the interval nodes heartbeat at; a node is stale after three missed")
 	retry := fs.Duration("dispatch-retry", tasks.DefaultRetry, "how often the dispatcher looks at the queue unprompted")
@@ -124,9 +128,11 @@ func serve(args []string) error {
 		OIDCSessionKey:   []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
 		DevUserHeader:    *devHeader,
 		HubAdmins:        list(*admins),
+		NodeUIDomain:     *nodeUI,
 		ShutdownGrace:    *grace,
 		Heartbeat:        *heartbeat,
 		DispatchRetry:    *retry,
+		MetricsAddr:      *metricsAddr,
 		Logf:             log.Printf,
 	}
 	l, err := net.Listen("tcp", *addr)
@@ -149,6 +155,8 @@ func team(args []string) error {
 	fs.Var(&admins, "admin", "an admin of the team, an email or group (repeatable)")
 	fs.Var(&members, "member", "a member of the team, an email or group (repeatable)")
 	fs.Var(&repos, "repo", "a repository, owner/name, the team owns (repeatable)")
+	lostRequeue := fs.String("lost-requeue-after", "",
+		"requeue the team's lost running tasks after this long, at least 5m; 0 turns it off (docs/hub.md §6.3)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -179,6 +187,16 @@ func team(args []string) error {
 		if err := s.AssignRepo(ctx, *id, r); err != nil {
 			return err
 		}
+	}
+	if *lostRequeue != "" {
+		d, err := time.ParseDuration(*lostRequeue)
+		if err != nil {
+			return fmt.Errorf("silo hub team: -lost-requeue-after: %w", err)
+		}
+		if err := s.SetTeamSettings(ctx, *id, directory.Settings{LostRequeueAfter: d}); err != nil {
+			return err
+		}
+		fmt.Printf("team %s: lost running tasks requeued after %s (0: never)\n", *id, d)
 	}
 	fmt.Printf("team %s: %d admins, %d members and %d repositories added\n", *id, len(admins), len(members), len(repos))
 	return nil

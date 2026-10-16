@@ -58,6 +58,10 @@ type Hub struct {
 	Logf func(format string, args ...any)
 	// Now, when set, is the clock.
 	Now func() time.Time
+	// Ingested, when set, is told of each event a node streams up, for
+	// the hub's metrics: its class, and err if the hub rejected it or
+	// could not keep it.
+	Ingested func(c Class, err error)
 
 	mu        sync.Mutex
 	topics    map[string]*topic
@@ -67,6 +71,12 @@ type Hub struct {
 func (h *Hub) logf(format string, args ...any) {
 	if h.Logf != nil {
 		h.Logf(format, args...)
+	}
+}
+
+func (h *Hub) ingested(c Class, err error) {
+	if h.Ingested != nil {
+		h.Ingested(c, err)
 	}
 }
 
@@ -283,6 +293,7 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		e, class, err := Classify(line)
 		if err != nil {
 			h.logf("live: node %q: %v", nodeID, err)
+			h.ingested(class, err)
 			continue
 		}
 		if t == nil {
@@ -313,6 +324,7 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		}
 		err = h.publish(ctx, t, e, class)
 		t.mu.Unlock()
+		h.ingested(class, err)
 		if err != nil {
 			// The node replays it after it reconnects.
 			h.logf("live: task %s: keeping event %d: %v", t.id, e.Seq, err)
