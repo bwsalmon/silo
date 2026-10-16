@@ -419,10 +419,11 @@ Top row: **Hub ready** and **Database up** should both read 1.
 - **Store errors** and **Database connections by store**: the database
   from the hub's side. Waits that climb mean the pool is starved. Each
   store's pool is capped, and keeps its connections open once made:
-  `events` 32, `backlog` 16, `directory` 8, and the shared registry's 8,
-  which the metric does not report. That is 64 a pod, plus the lease's
-  own connection (hub.md §2.2.1), so the database's `max_connections`
-  should allow about 70 for each replica.
+  `events` 32, `backlog` 16, `directory` 8, and two the metric does not
+  report: the shared registry's 8 and the notice bus's 16 (hub.md
+  §2.2.4). That is 80 a pod, plus the lease's and the bus listener's
+  own connections, so the database's `max_connections` should allow
+  about 85 for each replica.
 
 ### 5.4 The alerts, and what to do
 
