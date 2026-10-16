@@ -101,6 +101,7 @@ type topic struct {
 	ringSize int
 	subs     map[*sub]struct{}
 	upstream int
+	over     bool // the task is known to be over
 	idle     time.Time
 }
 
@@ -334,25 +335,79 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 }
 
 // upstreamClosed notes a stream's end. When the task's last stream ends
-// with the task over, its subscribers have had everything.
+// with the task over, its subscribers have had everything. If the task
+// cannot be read, it is read again until it can be (recheck).
 func (h *Hub) upstreamClosed(t *topic) {
 	t.mu.Lock()
 	t.upstream--
 	t.idle = h.now()
-	open := t.upstream
+	open, over := t.upstream, t.over
 	t.mu.Unlock()
 	if open > 0 {
 		return
 	}
-	task, err := h.Tasks.Get(context.Background(), t.id)
-	if err != nil || !task.State.Terminal() {
+	if over {
+		h.ended(t)
 		return
 	}
+	task, err := h.Tasks.Get(context.Background(), t.id)
+	if err != nil {
+		h.logf("live: task %s: reading it after its last stream closed: %v", t.id, err)
+		go h.recheck(t)
+		return
+	}
+	if task.State.Terminal() {
+		h.ended(t)
+	}
+}
+
+// recheck reads t's task again, backing off, until it can, and ends its
+// subscribers if it is over. It gives up when a stream opens, which
+// closes in turn, or the subscribers have gone.
+func (h *Hub) recheck(t *topic) {
+	wait := 100 * time.Millisecond
+	for {
+		time.Sleep(wait)
+		t.mu.Lock()
+		waiting := !t.dead && !t.over && t.upstream == 0 && len(t.subs) > 0
+		t.mu.Unlock()
+		if !waiting {
+			return
+		}
+		task, err := h.Tasks.Get(context.Background(), t.id)
+		if err == nil {
+			if task.State.Terminal() {
+				h.ended(t)
+			}
+			return
+		}
+		h.logf("live: task %s: reading it after its last stream closed: %v; retrying in %s", t.id, err, wait)
+		wait = min(2*wait, 5*time.Second)
+	}
+}
+
+// ended notes that t's task is over, and ends its subscribers unless a
+// stream is still open: that stream's end does.
+func (h *Hub) ended(t *topic) {
 	t.mu.Lock()
+	t.over = true
 	if t.upstream == 0 {
 		t.endAll(whyEnd)
 	}
 	t.mu.Unlock()
+}
+
+// Finished tells the hub that a task is over: done, failed or
+// cancelled. Hand it tasks.Dispatcher.Finished. Its subscribers are
+// ended once no stream of its events is open, even if its result event
+// never reached the hub, and without the hub having to read the task.
+func (h *Hub) Finished(task string) {
+	h.mu.Lock()
+	t := h.topics[task]
+	h.mu.Unlock()
+	if t != nil {
+		h.ended(t)
+	}
 }
 
 func readLine(r *bufio.Reader) ([]byte, error) {
@@ -399,7 +454,7 @@ func (h *Hub) subscribe(ctx context.Context, task tasks.Task, from int64) (*subs
 		}
 	}
 	sn := &subscription{t: t, hw: t.last}
-	if over := t.lastType == events.TypeResult || (task.State.Terminal() && t.upstream == 0); !over {
+	if over := t.lastType == events.TypeResult || ((task.State.Terminal() || t.over) && t.upstream == 0); !over {
 		sn.s = &sub{ch: make(chan Event, subBuffer)}
 		t.subs[sn.s] = struct{}{}
 	}

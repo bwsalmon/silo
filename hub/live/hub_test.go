@@ -44,15 +44,20 @@ func (headerAuth) Principal(r *http.Request) (identity.Principal, error) {
 	return identity.Principal{Email: u}, nil
 }
 
-// fakeTasks is a backlog whose tasks the test places by hand.
+// fakeTasks is a backlog whose tasks the test places by hand. While
+// down, it cannot be read, as when the database is away.
 type fakeTasks struct {
-	mu sync.Mutex
-	m  map[string]tasks.Task
+	mu   sync.Mutex
+	m    map[string]tasks.Task
+	down bool
 }
 
 func (f *fakeTasks) Get(_ context.Context, id string) (tasks.Task, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.down {
+		return tasks.Task{}, errors.New("the database is away")
+	}
 	t, ok := f.m[id]
 	if !ok {
 		return tasks.Task{}, fmt.Errorf("%w: %s", tasks.ErrNotFound, id)
@@ -64,6 +69,12 @@ func (f *fakeTasks) put(t tasks.Task) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.m[t.ID] = t
+}
+
+func (f *fakeTasks) setDown(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = down
 }
 
 // recordingLog is the event store, remembering every Append.
@@ -478,6 +489,85 @@ func TestEndsWithTask(t *testing.T) {
 	}
 	if got := ids(collect(t, h.subscribe(t, "alice@example.com", "t-1", "", nil))); got != "1:status end" {
 		t.Fatalf("after: %s", got)
+	}
+}
+
+// TestEndsWithTaskAfterOutage: a task that ended without a result event
+// ends its subscriptions even if the backlog could not be read when its
+// node's stream closed, once it can be.
+func TestEndsWithTaskAfterOutage(t *testing.T) {
+	h := newHarness(t)
+	st := upstream(t, h.connect(t, "ws-1"))
+	send(t, st, status(1, "one"))
+	h.waitLast(t, "t-1", 1)
+	sub := h.subscribe(t, "alice@example.com", "t-1", "", nil)
+	next(t, sub, 1)
+	task, _ := h.tasks.Get(context.Background(), "t-1")
+	task.State = tasks.Failed
+	h.tasks.put(task)
+	h.tasks.setDown(true)
+	st.Close()
+	stillOpen(t, sub)
+	h.tasks.setDown(false)
+	if got := ids(collect(t, sub)); got != "end" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// TestFinished: a task the dispatcher says is over ends its
+// subscriptions once its last stream closes, without the hub reading
+// the backlog, whose copy of the task need not have caught up.
+func TestFinished(t *testing.T) {
+	h := newHarness(t)
+	c := h.connect(t, "ws-1")
+	st := upstream(t, c)
+	send(t, st, status(1, "one"))
+	h.waitLast(t, "t-1", 1)
+	sub := h.subscribe(t, "alice@example.com", "t-1", "", nil)
+	next(t, sub, 1)
+
+	// Over with a stream still open: that stream's end ends them, even
+	// with the backlog away.
+	h.hub.Finished("t-1")
+	stillOpen(t, sub)
+	h.tasks.setDown(true)
+	st.Close()
+	if got := ids(collect(t, sub)); got != "end" {
+		t.Fatalf("with a stream open: got %s", got)
+	}
+	h.tasks.setDown(false)
+
+	// Over after the last stream closed, with the backlog still saying
+	// it runs: ended at once.
+	h2 := newHarness(t)
+	st2 := upstream(t, h2.connect(t, "ws-1"))
+	send(t, st2, status(1, "one"))
+	h2.waitLast(t, "t-1", 1)
+	sub2 := h2.subscribe(t, "alice@example.com", "t-1", "", nil)
+	next(t, sub2, 1)
+	st2.Close()
+	stillOpen(t, sub2)
+	h2.hub.Finished("t-1")
+	if got := ids(collect(t, sub2)); got != "end" {
+		t.Fatalf("with no stream open: got %s", got)
+	}
+	// And a later subscriber is replayed to the end, not followed.
+	if got := ids(collect(t, h2.subscribe(t, "alice@example.com", "t-1", "", nil))); got != "1:status end" {
+		t.Fatalf("after: %s", got)
+	}
+}
+
+// stillOpen checks that sub has neither ended nor sent anything for a
+// moment.
+func stillOpen(t *testing.T, sub <-chan received) {
+	t.Helper()
+	select {
+	case m, ok := <-sub:
+		if !ok {
+			t.Fatal("the subscription ended")
+		}
+		t.Fatalf("unexpected message %v", m)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
