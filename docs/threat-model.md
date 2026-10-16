@@ -429,7 +429,7 @@ writes its first line is held for the connection's life
 (`NodeStream` has no first-line deadline); the number of nodes, and so
 of sessions each with its own caps, is not bounded per user; the event
 store has no per-task or per-node quota; one connection's bandwidth
-through the one replica is unbounded. *Status:* open, medium (O-5).
+through the pod holding it is unbounded. *Status:* open, medium (O-5).
 INV-19.
 
 ### TB3: hub → Grain (offers, cancels, views, the node UI, planned messages)

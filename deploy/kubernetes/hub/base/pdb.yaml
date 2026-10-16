@@ -1,0 +1,12 @@
+# A voluntary disruption (a GKE node's upgrade or drain) leaves at least
+# one hub pod serving (docs/hub.md §2.2.5). The rollout's own
+# maxUnavailable: 0 does the same for an upgrade of the hub.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: silo-hub
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: silo-hub
