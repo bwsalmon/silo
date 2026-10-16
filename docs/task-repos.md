@@ -48,6 +48,28 @@ this conflicts with the amendments above, this one wins:*
 - *the design borrows ideas, not the envelope, from Backstage's catalog,
   Android `repo` manifests, Kustomize and Plan 9 (§3.4).*
 
+*Amended a fourth time 2026-10-16 (task 4453), as the owner settled. Where
+this conflicts with the amendments above, this one wins:*
+
+- *a task declares everything its sandbox holds in one list,
+  **`context:`**: repos, repo folders, objects and other files, each a
+  reference with a mode (`read`, or `write` for a repo or folder, which
+  pushes only the task's own branch), an optional landing `path` and an
+  optional `depth`. It replaces grain's target repo, `Reads`, `Writes`
+  and ad-hoc pasted context, and 4446's `repo:` and `base:`. Only
+  `context:` materialises; every other reference is metadata.
+  Transitivity is off unless an entry sets `depth`, under caps. The
+  Grain's policy checks every resolved entry before it fetches anything,
+  and refuses closed, naming the entry. Includes and `context:` share one
+  resolver: one builds a Grain's namespace, the other a sandbox's view
+  (§5.6, §8.16, §11.19–§11.26);*
+- *every file that is not a `kind:` object is an **asset**, referenceable
+  by path like any object but never in a namespace, with optional
+  metadata in a `kind: asset` sidecar, size limits, Git LFS allowed and
+  never required, external artefacts referenced by URL and digest, and
+  grain's task and comment attachments migrated to assets beside their
+  objects (§2.2, §13).*
+
 This design stores grain's **tasks, schedules, templates and design docs**
 as self-contained Markdown files in a **graph of plain-git repositories**
 ("task repos"). Each object is one file, and the repos link to each other
@@ -153,7 +175,7 @@ rules keep the split clean:
 
 | Git-backed | Runtime only (database) |
 | --- | --- |
-| task: `title`, body (the prompt), `team`, `repo`, `base` | the attempt list, attempt numbers, sandboxes, leases |
+| task: `title`, body (the prompt), `team`, `context` (§5.6), its `attachments/` | the attempt list, attempt numbers, sandboxes, leases |
 | task: `submitter`, `approved_by`, `approved_at`, `origin`, `filed_by`, `state` (proposed, approved, rejected, cancelled), `cancel` | the live `running` sub-states (sandboxing, agent turn, waiting for CI) |
 | task: `template` (+ `inputs`, `rev`), `schedule`, `depends_on`, `implements`, `capabilities`, `constraints` | events, `seq`, transcripts, tool calls, diffs, logs |
 | backlog reference: `to`, `spec_rev`, `rank`, `priority`, `expedite`, `attestation`, who added it and when | heartbeats, slot counts, offer timers |
@@ -169,11 +191,13 @@ Every object is one UTF-8 file. The file has **YAML front matter**
 between `---` lines, then a **Markdown body**. Every file declares:
 
 - `kind:`, one of `repo`, `task`, `ref`, `run`, `comment`, `template`,
-  `schedule`, `suite`, `trigger`, `design`, `moved`, `include` or
-  `exclude`;
+  `schedule`, `suite`, `trigger`, `design`, `moved`, `include`,
+  `exclude` or `asset` (a sidecar, §2.2);
 - `schema:`, as in `grain/task@v1` (§10).
 
 There is **no `id:` field.** An object is named by where it is (§2.1).
+Every other file in a repo, an image or a CSV or Markdown without `kind:`,
+is an **asset**: referenceable the same way, but not an object (§2.2).
 
 The body carries what a human reads: a task's prompt, a template's text,
 a design's prose. A file means something on its own. You can read it,
@@ -199,6 +223,7 @@ templates/<name>.md                        kind: include (a shared template set)
 tasks/<name>/task.md                       kind: task    (its owner's own work)
 runs/<name>/run.md                         kind: run     (one execution record)
 runs/<name>/comments/<utc>-<author>.md     kind: comment (the run's thread)
+runs/<name>/comments/<utc>-<author>/<file> an asset    (a reply's attachment, §2.2)
 ```
 
 Silo's placements repo, one folder per Grain:
@@ -214,6 +239,7 @@ An intake or a shared repo:
 ```
 README.md                                  kind: repo
 tasks/<name>/task.md                       kind: task
+tasks/<name>/attachments/<file>            an asset      (attached to the task, §2.2)
 tasks/<name>/comments/<utc>-<author>.md    kind: comment (discussion of the task)
 backlog/<name>.md                          kind: ref     (one ranked reference to a task)
 templates/<name>.md                        kind: template
@@ -221,6 +247,8 @@ templates/partials/<name>.md               kind: template (include-only, inputs 
 templates/<name>.md                        kind: include or kind: exclude (another shared set, and cuts from it)
 schedules/<name>.md                        kind: schedule (or, in an intake, kind: include: an adopted schedule)
 designs/<name>.md                          kind: design
+designs/img/<file>                         an asset      (an image the design embeds)
+designs/img/<file>.md                      kind: asset   (its optional sidecar, §2.2)
 <an old path>                              kind: moved   (a tombstone, §2.1)
 ```
 
@@ -309,7 +337,9 @@ address. Silo's hook refuses any change to a tombstone and its deletion,
 so no new object can ever be created there (§8.1). **Only backlog
 references, includes and excludes are ever deleted**: they are pointers
 and configuration, not addresses anyone keeps (§5.2, §3.3). Every other
-object leaves its path only by becoming a tombstone.
+object leaves its path only by becoming a tombstone. Assets are not
+objects, and are deleted or moved like any file (§2.2), except a task's
+`attachments/`, which are frozen with its spec (§5.1).
 
 **Repo moves.** References name repos by URL, usually through an alias
 declared in the referring repo's README. Moving a repo therefore means:
@@ -325,6 +355,171 @@ object's identities from before migration, such as `grain:eu/task/4310`,
 `silo:hub/task/812` or `repo:template:bwsalmon:grain:prune-packages`.
 Silo indexes them so the old names can be looked up. References never use
 them.
+
+### 2.2 Assets: every other file
+
+**Any file in a repo can be referenced**: an image, a PDF, JSON or CSV
+data, a diagram, a binary, or Markdown without `kind:` front matter. Only
+Markdown files with `kind:` are **objects**. Every other file is an
+**asset**. An asset's identity follows the same rule as an object's: its
+repo plus its path (§2.1), named by a relative path, an alias or a git
+URL, plus an optional `@ref` (§4). `shared:designs/img/claims-flow.png`
+is an asset. So is a design doc that has no front matter yet (§12.3).
+
+What an asset is for, and what it is not:
+
+- **Reachable by reference.** A `context:` entry (§5.6), a link or image
+  in a Markdown body, or a sidecar's `asset:` (below) may name one. A
+  field that expects a kind (`template:`, `depends_on:`, `implements:`,
+  a backlog reference's `to:`) never resolves to an asset: an asset
+  there is reported as the wrong kind, as a template named in
+  `depends_on` would be.
+- **Materialised only when a task lists it** in `context:`, or when an
+  entry's `depth:` reaches it from a Markdown file that links to it, such
+  as an image embedded in a design doc by a relative link (§5.6).
+- **Never in a namespace.** Assets are not work. An include contributes
+  objects only, so an asset under an included folder adds no name, and
+  `kinds: ["*"]` means every object kind, not every file (§3.3). Nothing
+  ranks, places, fires or runs an asset.
+- **Never executed** by Silo or a Grain: an asset is data, whatever its
+  name or mode bits say (§11.24).
+
+**Tombstones work for objects only.** A `kind: moved` tombstone is a
+Markdown object, and cannot sit at an asset's path (`img/flow.png`). An
+asset that moves leaves nothing behind. References to it dangle, unless
+it has a sidecar, which moves with it and leaves a tombstone of its own.
+So **give an asset that others reference from other repos a sidecar**,
+and reference the sidecar. Within one repo, a move is one commit, and the
+same commit fixes the links.
+
+#### Sidecars: optional metadata for an asset
+
+An asset has no front matter, so its metadata, where it needs any, is in
+a **sidecar**: a `kind: asset` object that references it.
+
+```yaml
+---
+kind: asset
+schema: grain/asset@v1
+asset: claims-flow.png              # the asset: a reference, usually relative
+title: How a signed claim travels from Silo to a Grain
+alt: >-
+  Silo signs a placement's attestation; the Grain verifies it against
+  silo_issuer before it accepts the run.
+media_type: image/png
+license: CC-BY-4.0                  # an SPDX identifier
+provenance:
+  author: "user:bsalmon@google.com"
+  created_at: "2026-10-16T19:10:00Z"
+  source: drawn for this design
+sha256: "…"                         # optional for an asset in git; checked when present
+bytes: 3412
+---
+<an optional longer description, for humans and for agents>
+```
+
+This is [`hub-shared/designs/img/claims-flow.png.md`](../examples/task-repos/hub-shared/designs/img/claims-flow.png.md).
+Schema: [`schemas/asset.schema.json`](../examples/task-repos/schemas/asset.schema.json).
+
+- **Where it lives.** By convention, beside the asset, named for it with
+  `.md` appended: `img/claims-flow.png.md` describes `img/claims-flow.png`.
+  A reader finds that sidecar by opening one path, with no index. A
+  sidecar may live elsewhere, describing an asset in a repo its author
+  cannot write. Silo's reverse index (§4) maps each asset to every
+  sidecar that names it. Where the two disagree, the one beside the asset
+  wins for display.
+- **What it carries:** `asset` (or `external`, below), `title`,
+  `description` or a body, `alt` (required for an image someone will
+  show), `media_type`, `license`, `provenance` (`author`, `created_at`,
+  `source`, `generated_by` for a generated file, `derived_from` as a
+  reference), and optionally `bytes` and `sha256`. Silo's hook checks that
+  `asset` resolves to a file that is not an object, and checks `sha256`
+  and `bytes` against the blob when they are present.
+- **What it is not.** A sidecar is configuration about data, like an
+  include. It is never ranked, placed or run. It may be in a namespace
+  like any object (an include with `kinds: [asset]`), where it means
+  nothing to a Grain.
+- **Optional.** No asset needs one. An image in a design doc needs only
+  the doc's own alt text in the link.
+
+#### Size and storage
+
+Assets live in git, and every clone carries every version of them, so
+task repos keep them small:
+
+| What | Recommended | Enforced |
+| --- | --- | --- |
+| an image or a diagram | ≤ 1 MiB (PNG, JPEG or WebP; SVG as data only, §11.25) | Silo's hook warns over 1 MiB |
+| any one asset | ≤ 10 MiB | Silo's hook refuses a blob over 10 MiB, which is also its push cap (§14) |
+| a repo's assets, all versions | ≤ 1 GiB | Silo's health view warns |
+| anything larger | an external artefact (below) | the materialiser's caps (§5.6) |
+
+- **Git LFS is allowed where the host supports it**, because it is still
+  git: a pointer file in the tree, the content on the host's LFS
+  endpoint. The materialiser fetches an LFS object through the Grain's
+  git proxy when the host serves LFS and the Grain's policy allows that
+  host, under the same size caps as any file. A pointer that cannot be
+  resolved is skipped and recorded (§5.6), and never handed over as if
+  it were the content. **Nothing in this design requires LFS**: no
+  object may be an LFS pointer (the hook refuses a `*.md` with `kind:`
+  that is one), and Silo's own git host does not serve LFS in the stages
+  of §16.
+- **Very large artefacts are referenced where they live**, not copied in:
+  a build output, a dataset, a model checkpoint, a video. The reference
+  is a sidecar with `external:` in place of `asset:`:
+
+  ```yaml
+  ---
+  kind: asset
+  schema: grain/asset@v1
+  title: Widget corpus, October snapshot
+  external:
+    url: https://storage.googleapis.com/widgets-corpus/2026-10/corpus.tar.zst
+    sha256: "9f1c…"                 # required: it pins the content, as a commit pins a tree
+    bytes: 2147483648
+    media_type: application/zstd
+  license: proprietary
+  ---
+  ```
+
+  Everything else names the sidecar, a git path, so identity, moves and
+  references work as for any object. The `sha256` makes the reference
+  immutable: what the URL serves must match it, or nothing is
+  materialised. `url` is `https://`. A Grain may also accept `gs://` or
+  `s3://` where a capability gives it a credential for that store. Only
+  the Grain fetches it, never the sandbox, and only when the Grain's
+  network policy allows the host (§5.6, §11.21).
+
+#### Attachments become assets
+
+Grain today stores a file attached to a task or to a comment as a blob
+on that task or comment, with its file name and content type. With task
+repos, **an attachment is an asset stored next to the object it belongs
+to, and referenced from it**:
+
+| Attached to | Stored at | Referenced from |
+| --- | --- | --- |
+| a task | `tasks/<name>/attachments/<file name>` | the task's `context:`, as a `read` entry (`attachments/<file name>`), because only `context:` materialises (§5.6); and from the body, where the prompt mentions it |
+| a comment | `comments/<utc>-<author>/<file name>`, a folder named for the comment beside its file | the comment's `attachments:` list, references relative to the comment, and its body |
+
+- **New attachments** are commits like everything else. Silo's UI and API
+  add the file in the same commit as the task or comment it belongs to,
+  so the intake's `authenticated` rule covers it: its `kinds` list
+  `asset`, which in a `writers` rule means files that are not objects, and
+  its `paths` limit those to the new task's `attachments/` (§3). A Grain
+  commits the attachments of a reply in its root with the reply (§5.4).
+- **They are part of the task's spec.** A relative `context:` entry reads
+  the task's own commit (§5.6), and the hook freezes a task's
+  `attachments/` with the rest of its spec on approval (§5.1). So what the
+  approver saw is what the agent gets.
+- **The migration**, in `grain tasks export` (§13): each attachment is
+  written at its path above, with its file name made safe (Unicode NFC,
+  no `/`, `\`, `..` or control characters, at most 255 bytes, and `-2`,
+  `-3`… on a collision). Each task attachment gains a `context:` entry. A
+  content type the extension does not imply gets a sidecar with
+  `media_type`. An attachment over 10 MiB goes to the deployment's
+  artefact bucket and is exported as an external sidecar with its
+  `sha256`.
 
 ## 3. Repo metadata: `README.md` front matter (`kind: repo`)
 
@@ -350,9 +545,10 @@ aliases:                           # optional shorthand: alias → git URL
 writers:                           # write ownership; whatever is not allowed is refused
   - who: [authenticated]
     may: create
-    kinds: [task]
+    kinds: [task, asset]               # asset: the new task's attachments (§2.2)
+    paths: [tasks/**]
     where: {state: proposed}
-    fields: [kind, schema, title, team, repo, base, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
+    fields: [kind, schema, title, team, context, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
     bind: {submitter: $pusher}
   - who: [team:hub#approver]
     may: update
@@ -429,6 +625,8 @@ adds names to a namespace: that is what `kind: include` objects are for
   object with a tombstone and creates it at its new path with
   `moved_from` (§2.1). `delete` is only ever granted on `kind: ref`.
 - `kinds` and `paths`: globs that limit which files the rule covers.
+  `asset` in `kinds` covers files that are not objects (§2.2), and
+  `kind: asset` sidecars.
 - `fields`: the front-matter fields the push may set or change. `body` is
   the Markdown body, and `"*"` means every field.
 - `where`: required values in the result.
@@ -587,7 +785,10 @@ reached by several routes is one name.
 the reader's rights (§4, §11.4), and **never adds a name to a
 namespace**. A task can use a template no namespace contains. **Only
 `kind: include` adds names**, so no other object, and no README, can
-widen a namespace.
+widen a namespace. **Assets** (§2.2) are never names at all: an include
+contributes the objects under its target, never its other files. And
+**a reference never materialises anything** in a sandbox either; only a
+task's `context:` does, through the same resolver (§5.6).
 
 #### Include objects
 
@@ -959,11 +1160,16 @@ Those are for humans and carry no meaning.
    Silo re-checks references on every push it receives, and lists the
    dangling ones in the repo's health view.
 
+**One resolver.** These steps are one function, `resolve`, with a gate
+supplied by its caller. Namespaces (§3.3) call it with the reader's
+credential as the only gate; a task's `context:` calls it with the
+Grain's policy as the gate too, checked before every fetch (§5.6).
+
 **Indexes.** Nothing needs an id index any more, because a reader opens
 the path. Silo does keep **reverse indexes**, rebuilt from git on start
 and updated on each received push: task → backlog references, task →
-execution records, task → dependents, requirement → tasks, and
-`aka` → path.
+execution records, task → dependents, requirement → tasks, asset →
+sidecars, and `aka` → path.
 
 **The edges:**
 
@@ -985,6 +1191,9 @@ execution records, task → dependents, requirement → tasks, and
 | exclude → what it cuts | `names: [<ref>]`, `patterns` | subtracts from its own space only; may name what is not there |
 | schedule → the schedule it was customised from | `derived_from: <ref>` | provenance only: inherits nothing (§6.2) |
 | repo → its new URL | README `moved_to` | a repo-level redirect |
+| task → what its sandbox holds | `context: [{ref, mode, path, depth}]` | **the only edge that materialises anything** (§5.6); a relative entry reads the task's own commit |
+| comment → its attachments | `attachments: [<ref>]` | assets beside the comment (§2.2) |
+| sidecar → its asset | `asset: <ref>`, or `external: {url, sha256}` | metadata only (§2.2) |
 
 ## 5. Tasks, backlogs, execution records and comments
 
@@ -1004,8 +1213,9 @@ schema: grain/task@v1
 aka: [grain:eu/task/4310]
 title: Carry a hub task's approver on its offer and attestation
 team: hub
-repo: https://github.com/bwsalmon/silo.git
-base: main
+context:                    # what its sandbox holds (§5.6); the first write entry is its repo
+  - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write}
+  - {ref: "shared:designs/hub-intake.md"}
 state: approved             # proposed | approved | rejected | cancelled (§5.1)
 submitter: user:bsalmon@google.com
 approved_by: user:approver@example.com
@@ -1042,8 +1252,9 @@ Each state has one writer:
 On a standalone Grain, the Grain and its owner hold every role.
 
 **After approval, the spec is frozen.** The hook refuses any change to
-`title`, the body, `repo`, `base`, `template`, `depends_on`,
-`implements`, `capabilities` or `constraints`. An attestation's
+`title`, the body, `context`, `template`, `depends_on`,
+`implements`, `capabilities` or `constraints`, and any change to the
+task's `attachments/` (§2.2). An attestation's
 `spec_digest` therefore stays true, and a changed request is a new task
 with `supersedes:`.
 
@@ -1343,7 +1554,8 @@ task_home: {mode: promote, path: tasks/}  # path: where tasks are committed, und
 
 A bare mode (`task_home: promote`) is short for `{mode: promote}`. The
 **effective mode** for an approved task is the first of these that is
-set, for the code repo its `repo:` names:
+set, for the code repo that is the task's primary repo, its first
+`write` entry (§5.6):
 
 1. that code repo's `.grain/README.md` `task_home.mode`, if the team's
    `allow` lists it;
@@ -1351,7 +1563,8 @@ set, for the code repo its `repo:` names:
 3. the team's `task_home.mode`;
 4. `intake`.
 
-A task with no `repo:` (team-targeted) is always homed in the intake.
+A task with no `write` entry (team-targeted, or read-only) is always
+homed in the intake.
 The code repo's choice comes first because nothing lands in it except
 through its own review anyway, so its maintainers have the last say over
 what is committed there. The team's `allow` bounds it because a task's
@@ -1444,7 +1657,7 @@ Any approved task whose home is the intake may be promoted, closed
 ones included: its runs keep resolving through the tombstone. A
 proposal cannot be promoted (approval happens in the intake), and
 neither can a rejected, cancelled or scheduled task. The target is the
-code repo the task's `repo:` names, and the promotion fails if that
+task's primary repo (§5.6), and the promotion fails if that
 repo's effective mode is `intake`. A promotion is a move, so it cannot be
 undone by moving back to a tombstoned path (§2.1). A task promoted by
 mistake is cancelled where it now lives.
@@ -1459,6 +1672,377 @@ maintainers is honoured too: it only ever stops work.
 
 The worked flows, with the commits each repo receives, are in §8.14.
 
+### 5.6 What a run sees: `context:`
+
+A task declares **everything its sandbox holds** in one list, `context:`.
+Each entry is a reference (§4) to a repo, a folder of a repo, or a single
+file, with a mode. When a Grain runs the task, it resolves the list,
+holds every entry to its local policy, and materialises exactly that in
+the sandbox. **Nothing else reaches the sandbox.**
+
+```yaml
+context:
+  - ref: "https://github.com/bwsalmon/silo.git@main"                 # a repo
+    mode: write                                                       # push the task's branch, based on main
+  - ref: "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate" # a folder: sparse checkout
+    mode: read
+  - ref: "shared:designs/hub-intake.md"                               # an object
+    depth: 1                                                          # and the files its body links to
+  - ref: attachments/dangling-ref-error.png                           # an asset beside the task (§2.2)
+    path: context/screenshot.png                                      # optional: where it lands
+```
+
+This is the `context:` of
+[`hub-intake/tasks/2026-10-16-reject-dangling-refs/task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-reject-dangling-refs/task.md),
+walked through in §8.16. A bare string is short for `{ref: <string>,
+mode: read}`.
+
+**It replaces four things.** Grain's `model.Task` has a target repo
+(`Target`, with `Base`), extra repos to read (`Reads`) and extra repos to
+land work in (`Writes`). Ad-hoc context (attachments, pasted file
+contents, "see this doc") travels in the prompt. Those are four
+mechanisms for one idea, *what this run may see and change*. Each is now
+an entry. 4446's `repo:` and `base:` on a task, template and schedule are
+gone: the task's **primary repo** is its first `write` entry, and its
+base is that entry's `@ref` (below). §13 maps the old fields.
+
+**Why `context`.** The field says what the list is for: the context the
+work is done in, which is also how agent frameworks name what a model is
+given. Other names were weighed:
+
+- `mounts:` describes one mechanism, and implies a filesystem mount. An
+  entry may be a git checkout, a sparse checkout or a copied file, and
+  a `write` entry grants a push, which no mount does.
+- `workspace:` suggests the one writable checkout. Most entries are
+  read-only.
+- `sandbox:` already names a workflow job's resources (`cpus`,
+  `memory-mb`, in `.grain/workflows/`).
+- `inputs:` is a template's parameters (§6.1).
+- `reads:` and `writes:` are the two lists this replaces. Splitting by
+  mode puts one target in two places when a task needs a read of one
+  folder and a write of another in the same repo, and leaves the target
+  repo a third field.
+
+#### Entries
+
+| Field | Meaning |
+| --- | --- |
+| `ref` | what to materialise: a repo (a git URL or alias with no path), a folder (a path ending in `/`), or a file (an object or an asset, §2.2), with an optional `@ref` (§4) |
+| `mode` | `read` (the default) or `write`. **`write` is valid only for a repo or a repo folder**, and means the run may push **its own task branch** to that repo, based on the entry's `@ref`, and nothing else (below). Every other target is read-only |
+| `path` | optional: where it lands, relative to the sandbox's working root. Otherwise the default layout below |
+| `depth` | optional, file entries only: also materialise the files this one's Markdown body links to, `n` links deep (below). The default is `0` |
+| `input` | in a template only, in place of `ref`: take the reference from a template input of type `ref` (§6.1) |
+
+**Which ref an entry reads:**
+
+- **A relative or `/`-rooted entry** (`attachments/x.png`,
+  `/designs/a.md`) reads **the task's own commit**, the `spec_rev` it was
+  placed at, as a relative include reads its includer's (§3.3). So a
+  task's attachments are exactly the ones that were approved.
+- **An entry in another repo** reads its `@ref`. With no `@`, it reads the
+  target repo's `default_ref`, or the remote's `HEAD` for a repo with no
+  task-repo README, at the moment the run is materialised. Either way the
+  execution record notes the commit it used (below), as every unpinned
+  reference is recorded pinned (§4).
+- **A `write` entry must name a branch** (`@main`, `@candidate`). It is
+  the base: the run's branch starts there, and its change targets it.
+  A tag, a commit or no `@` is refused for `write` on push (§8.1).
+
+**The task's branch.** Each run pushes to one branch,
+`grain/<grain>/<run name>` (`grain/eu/2026-10-16-reject-dangling-refs`),
+in every repo it has a `write` entry for. It may create it, push to it
+and rewrite it. It may not push to any other ref: not the base, another
+branch, a tag, or a deletion. A `write` folder narrows that further: the
+push is refused if any of its commits changes a path outside the
+folder's `write` entries (§11.22). **The primary repo** is the first
+`write` entry. It is what `repo:` meant: the code repo whose `task_home`
+applies (§5.5), the change `closed.change` records, the repo the hub
+groups the task under. A task with no `write` entry is team-targeted
+(§5.5) or read-only, such as a review or an investigation. A run with
+several `write` entries records one change per repo, `closed.change` as
+a list.
+
+**Duplicates.** Two entries naming the same target at the same ref are
+one entry, with the stronger mode and the larger `depth`. Two `write`
+entries naming one repo at different branches are refused: a run has one
+base per repo.
+
+#### The sandbox layout
+
+The sandbox's working root (`$HOME` in grain's sandboxes today) holds
+exactly this:
+
+```
+task.md                                 the task as placed, at spec_rev: read-only
+run.md                                  the execution record, kept current by the Grain: read-only
+thread/<utc>-<author>.md                replies relayed to the running agent (§5.4), and their
+thread/<utc>-<author>/<file name>         attachments: read-only
+work/<repo name>/                       a repo entry, or the folder entries of one repo, at the resolved commit
+context/<host>/<repo path>/<path>       a file entry, an object or an asset: read-only
+```
+
+- **`<repo name>`** is the last element of the repo's URL path without
+  `.git` (`silo`, `grain`), as for scheduled firings (§6.2). If two
+  repos' names collide, **each** of them lands at `work/<host>/<repo
+  path>/` instead, so the layout does not depend on the order of the
+  entries. One repo at two refs, a `write` base and a `read` of an older
+  tag say, gives the second ref its own checkout,
+  `work/<repo name>@<ref>/`, with `/` in the ref written as `-`.
+- **Folder entries** of one repo at one ref share that repo's checkout,
+  as one sparse checkout of their union. A repo entry for the same repo
+  and ref makes it a full checkout. A `write` checkout is writable; a
+  `read` checkout is mounted read-only.
+- **`<host>`** is the URL's host (with `_<port>` if it has one), and
+  `local` for `file://`. **`<repo path>`** is the URL's path without the
+  leading `/` and the `.git`: `context/silo.example.com/git/hub/shared/designs/hub-intake.md`.
+- **A file inside a checkout** at the same commit is not copied again. Its
+  place in the record is its path under `work/`.
+- **An external artefact** (§2.2) lands at its sidecar's path with `.md`
+  dropped, beside the sidecar, which is materialised too.
+- **`path:`** is relative to the working root, must not contain `..`, and
+  must not be or contain `task.md`, `run.md` or `thread/`, or overlap
+  another entry's path. Silo's hook refuses a task that breaks these
+  rules (§8.1), and the Grain checks them again.
+
+The agent sees **only** these files. The Grain writes `run.md`, never
+the agent. Its `context:` section is the record of what was materialised
+and what was skipped, so it is also the agent's manifest:
+
+```yaml
+# in runs/<name>/run.md, written with the run's `running` commit
+context:
+  entries:
+    - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write, rev: <commit>, path: work/silo/, branch: grain/eu/2026-10-16-reject-dangling-refs}
+    - {ref: "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate", mode: read, rev: <commit>, path: work/grain/}
+    - {ref: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/hub-intake.md", bytes: 4912}
+    - {ref: "shared:designs/img/claims-flow.png", via: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/img/claims-flow.png", bytes: 3412}
+    - {ref: "intake:tasks/2026-10-16-reject-dangling-refs/attachments/dangling-ref-error.png", mode: read, rev: <commit>, path: context/screenshot.png, bytes: 2210}
+  skipped:
+    - {ref: "../../hub.md", via: "shared:designs/hub-intake.md", reason: dangling}
+  limits: {reached_files: 1, reached_bytes: 3412}
+```
+
+#### Only `context:` materialises
+
+Tasks hold many other references, and **none of them pulls anything into
+a sandbox**: `depends_on`, `template`, `implements`, `supersedes`,
+`schedule`, a backlog reference's `to`, `moved_from`, `filed_by`, a
+comment's `run` or `task`. They are metadata. The Grain reads some of
+them itself, outside the sandbox (a dependency's runs, §8.9; the
+template, §6.1), and shows them in `task.md`, but the agent gets the
+target only if `context:` lists it. A task that depends on another task
+in another repo does not get that repo; a task that implements a
+requirement does not get the design doc unless it lists it, which most
+should.
+
+**Transitivity is off by default.** A design doc in `context:` that links
+to other docs brings only itself. With `depth: n`, the Grain also follows
+the links in the Markdown body of each file it materialised for that
+entry, `n` levels deep:
+
+- **What counts as a link:** an inline link or image (`[t](x)`,
+  `![t](x)`) or a reference-style definition, whose target is a
+  relative or `/`-rooted path, a declared alias, or a git URL with the
+  `//` separator. An ordinary web link (`https://example.com/page`) is not
+  a reference, and is ignored. Front-matter fields are never followed:
+  depth reaches what the text shows a reader, not the doc's metadata.
+- **What is followed:** files only, objects or assets. A link to a
+  folder or a repo is skipped and recorded: those are whole checkouts,
+  and a task that wants one lists it. Only Markdown files have links, so
+  an image ends its branch.
+- **The commit:** a relative link reads the linking file's commit; a
+  link with `@ref` reads that ref; an unpinned link into another repo
+  reads its `default_ref`, as any reference does.
+- **Order and caps:** breadth-first, in entry order and then document
+  order, so the result is deterministic. Each reached file counts against
+  `reached_files` and `reached_bytes` (below). Once a cap is reached, the
+  rest are skipped and recorded, never silently dropped.
+
+#### Limits
+
+| Limit | Default | Over it |
+| --- | --- | --- |
+| `entries` | 64 listed entries | the task is refused (below) |
+| `depth` | 3 | an entry's `depth` is clamped, and the clamp recorded |
+| `reached_files` | 256 files reached through `depth` | the rest are skipped and recorded |
+| `reached_bytes` | 64 MiB reached through `depth` | the rest are skipped and recorded |
+| `file_bytes` | 32 MiB for one file from git, LFS content included | a listed file refuses the task; a reached one is skipped |
+| `files_bytes` | 512 MiB for every file entry and reached file together | as `file_bytes` |
+| `external_bytes` | 1 GiB for one external artefact, as its sidecar's `bytes` and as downloaded | as `file_bytes` |
+| `checkout_bytes` | 8 GiB for one checkout, as inflated on disk | the task is refused |
+| `hops` | 8 redirects per reference (§4) | dangling |
+
+A Grain's local policy may lower any of these (`context_limits`), and
+nothing can raise them. **A listed entry is never cut**: the task's
+author asked for it, so a listed entry the Grain cannot materialise in
+full refuses the task, with the entry named. **A reached file may be
+skipped**: nobody asked for it by name, so the run goes ahead and the
+record says what is missing.
+
+#### The PEP checks before fetching
+
+The Grain's local policy decides what a task may see, as it decides
+today which repos a Grain serves, which capabilities it grants and which
+network it allows (hub.md §1.2). **Every resolved entry is checked
+before the Grain reads a byte of it**, including those reached through
+`depth`, every hop of a redirect, and an external artefact's URL:
+
+- a repo or folder against the policy's `repos:`, for its mode: `read`,
+  or `read` and `write`;
+- a file against `repos:` for `read`;
+- an external artefact's host against the policy's `network`, and its
+  store's credential against `capabilities`;
+- LFS content against `repos:` and `network` for the LFS endpoint's host.
+
+The Grain resolves outside the sandbox, with its own credential, into a
+staging area. A file it must read to find links is fetched only after it
+has passed. **Nothing enters the sandbox until the whole set has
+passed**, and then the git proxy's scope is set to exactly that set.
+This generalises grain task 4303's fix, which made the policy check the
+repositories a capability implies: no repo, file or URL reaches a sandbox
+unseen by policy, and **a capability no longer implies a repo**. A
+`repo-write:<repo>` capability becomes a `write` entry (§13).
+
+**Refusal fails closed, naming the entry.** A listed entry that the
+policy refuses, that does not resolve, or that is over a limit, stops
+the run before anything is fetched into the sandbox:
+
+- **A placed task** gets an execution record in `refused`, with
+  `refusal: {reason, at, entry}`, where `entry` names the entry by its
+  index and canonical reference and gives the rule that refused it.
+  Silo shows that as the task's waiting reason: "waiting: refused by
+  `eu`: context entry 2, `https://github.com/gke-labs/granule.git` (read),
+  is not in this Grain's `repos`". Silo may place the task on a Grain
+  whose policy admits it (§8.8).
+- **A task from the Grain's own lane** has nowhere else to go. Its record
+  goes to `waiting`, with `waiting: {on: policy, entry, reason}`, until
+  the owner widens the policy or cancels the task. The Grain re-checks
+  the record whenever its policy changes.
+
+A **reached** file the policy refuses is skipped and recorded with
+`reason: policy`. It was never fetched, so this too fails closed.
+
+#### Templates and schedules contribute entries
+
+A template carries a `context:` list like a task's. Its entries may take
+their reference from a **template input of type `ref`**, so one template
+serves many repos:
+
+```yaml
+inputs:
+  - name: repo
+    type: ref
+    ref_kind: repo                       # repo | folder | file: what the value must resolve to
+    default: "https://github.com/bwsalmon/grain.git@candidate"
+    label: The repo the change lands in, with its base branch
+context:
+  - {input: repo, mode: write}
+  - {ref: "https://github.com/gke-labs/granule.git@main", mode: read}
+```
+
+- **The value is a reference, not text.** It is checked against §4's
+  grammar and `ref_kind`, and never rendered by Jinja. Front matter is
+  still never rendered (§6.1), so a template cannot compute an entry. An
+  input of `type: list` with `of: ref` expands to one entry per item.
+- **A relative value** resolves against the object that supplied it: the
+  schedule, or the task for a task filed in Silo's UI. The API requires a
+  URL or an alias of the intake's README.
+- **A schedule** supplies the values in its `inputs:`, and may add
+  entries of its own in its own `context:`, after the template's.
+  `prune-packages`'s schedule sets `repo:` to grain at `candidate`
+  (§8.16).
+- **A filed task records the result.** Filing, by hand, by a schedule or
+  by planning, writes the concrete `context:` into the task, every
+  `input:` replaced by its value, and `template.inputs` records the
+  values used. The task's `context:` is what the approver reads, what
+  `spec_digest` covers, and what the Grain's policy checks. The template
+  is never consulted again.
+- **In a code repo's grain folder,** a template's or schedule's entries,
+  and its `ref` inputs' defaults and values, may name only that repo.
+  Readers refuse anything else, as they refuse `reads` and `writes`
+  there today (§12.1). An adopting team that wants another repo
+  supplies it from its own schedule.
+
+#### One resolver, two consumers
+
+Includes (§3.3) and `context:` use the **same reference resolution**:
+canonicalisation, aliases from the governing README, refs and pins,
+redirects with the hop limit, cycle detection, and dangling handling
+(§4). They differ in what they build:
+
+| | Includes | `context:` |
+| --- | --- | --- |
+| builds | a **Grain's namespace**: the names it acts on | a **sandbox's view**: what one run sees and may write |
+| accepts | objects, narrowed by `kinds` | repos, folders, objects and assets, with a mode |
+| transitive | always, with excludes and a depth limit of 8 | off, unless an entry sets `depth` (at most 3), over body links only |
+| on a bad target | skip the branch; the namespace only shrinks | a listed entry refuses the run; a reached file is skipped |
+| gate | the reader's credential (§11.18) | the reader's credential **and** the Grain's policy, before each fetch |
+| written by | the root's writers | the task's author, frozen on approval |
+
+So one package, `taskrepo`, has one `resolve` with a gate supplied by its
+caller, and two consumers:
+
+```
+resolve(ref, from, cred, gate):                 # §4; shared by namespaces and sandboxes
+    id   = canonicalise(ref, from)              # alias, relative path, /-rooted; keeps @ref
+    seen = []
+    loop at most LIMITS.hops times:
+        if id in seen: return dangling("redirect loop")
+        seen += id
+        if not gate(id): return refused(id, gate.rule)   # before any read of id's repo
+        if id.repo's README has moved_to: id = id at moved_to; continue
+        t = stat(id, at id.ref or id.repo's default_ref, cred)
+        if t is missing or unreadable: return dangling(t.reason)
+        if t is a kind: moved object: id = canonicalise(t.to, from = id); continue
+        return Target(id, commit = t.commit,
+                      what = repo | folder | object(t.kind) | asset)
+    return dangling("more than 8 redirects")
+
+# Includes (§3.3): gate = always true; the credential is the gate.
+# contribution(...) calls resolve(i.target, i, reader's credential, ALLOW).
+
+materialise(task, grain):
+    L     = min(CONTEXT_LIMITS, grain.policy.context_limits)
+    gate  = lambda mode: lambda id: grain.policy.admits(id, mode)  # repos, network, capabilities
+    if |task.context| > L.entries: return refuse(task, entry = None, "too many entries")
+    plan, skipped, queue = [], [], []
+    for n, e in enumerate(task.context):                       # listed entries: never cut
+        T = resolve(e.ref, task @ spec_rev, grain.cred, gate(e.mode))
+        if T is dangling or refused:     return refuse(task, entry = n, T.reason)
+        if e.mode == write and (T.what not in (repo, folder) or e.ref's @ is not a branch):
+                                         return refuse(task, entry = n, "write needs a repo or folder at a branch")
+        if T.what in (object, asset) and size(T) > L.file_bytes:
+                                         return refuse(task, entry = n, "over file_bytes")
+        plan += (e, T)
+        if e.depth: queue += (T, min(e.depth, L.depth), n)
+    while queue:                                               # reached files: breadth-first
+        (F, d, n) = pop front of queue
+        if F is not Markdown: continue
+        body = fetch(F into staging)                           # F has already passed the gate
+        for link in markdown_links(body) in document order:
+            R = resolve(link, F, grain.cred, gate(read))
+            if R is not a reference:           continue        # a web link
+            if R is dangling or refused:       skipped += (link, via F, R.reason); continue
+            if R.what in (repo, folder):       skipped += (link, via F, "not a file"); continue
+            if R in plan:                      continue
+            if over L.reached_files, L.reached_bytes or L.file_bytes:
+                                               skipped += (link, via F, "limit"); continue
+            plan += (read entry for R, via F)
+            if d > 1: queue += (R, d - 1, n)
+    if total file bytes of plan > L.files_bytes: return refuse(task, entry = the first over it, "over files_bytes")
+    # Every entry, listed or reached, has passed the gate. Only now:
+    proxy.scope = {(T.repo, folders or all, commit, mode) for repos and folders in plan}
+                  + push: refs/heads/grain/<grain>/<run> in each write repo, paths ⊆ its write folders
+    for repos and folders: clone through the proxy (partial, sparse for folders); abort over L.checkout_bytes
+    for files: copy from staging, read-only, executable bits cleared; external: download, verify sha256
+    record run.context = {entries: plan with commits and paths, skipped, limits used}
+```
+
+`refuse` is the record of the PEP section above: `refused` for a placed
+task, `waiting` for one from the Grain's own lane. Silo uses the same
+resolver to show a task's context in its views and to check it on push,
+with the pusher's rights as the gate (§8.1).
+
 ## 6. Templates and schedules
 
 
@@ -1467,7 +2051,10 @@ The worked flows, with the commits each repo receives, are in §8.14.
 Template front matter declares its **inputs**. Each input has:
 
 - `name`;
-- `type`: `string`, `text`, `int`, `bool`, `enum` or `list`;
+- `type`: `string`, `text`, `int`, `bool`, `enum`, `list` (with `of:`
+  for its items' type) or `ref`, a reference with an optional `ref_kind`
+  (`repo`, `folder` or `file`), which only a `context:` entry's `input:`
+  may use and Jinja never renders (§5.6);
 - an optional `default`, `options` (for `enum`) and `required`;
 - an optional `label`.
 
@@ -1517,9 +2104,11 @@ inputs.
 
 A schedule's front matter carries the cadence exactly as grain writes it
 today (`daily: {at: "09:00"}`, `weekly: {day: sunday, at: "04:00"}`,
-`overlap`, `timezone`, `enabled`, `base`, `team`, `auto_approve_proposals`),
+`overlap`, `timezone`, `enabled`, `team`, `auto_approve_proposals`),
 plus `template: <ref>` and `inputs`, `fires_in` (`silo` or `grain`), and
-optionally `derived_from` (below). Its body is optional notes.
+optionally `context:` entries of its own and `derived_from` (below). Its
+body is optional notes. Grain's `target` and `base` on a schedule become
+the value of the template's `ref` input (§5.6, §13).
 
 **A firing creates a task and a reference to it**, at a path derived from
 the schedule and the firing time, so a retried firing writes nothing new:
@@ -1764,8 +2353,8 @@ intake, it works at the level of kinds, files and front-matter fields:
 3. **Paths.** Identity is the path (§2.1), so:
    - a `kind: moved` file can never be changed or deleted, so no new
      object can be created at a tombstoned path;
-   - only `kind: ref`, `kind: include` and `kind: exclude` files may be
-     deleted. Any other object leaves its path only by becoming a
+   - only `kind: ref`, `kind: include` and `kind: exclude` files, and
+     assets outside a frozen task's `attachments/`, may be deleted. Any other object leaves its path only by becoming a
      tombstone (in an intake, under a `may: move` rule);
    - a tombstone's `to:` must resolve to an object whose `moved_from`
      lists the tombstone's global address. Within one repo, both are in
@@ -1789,6 +2378,14 @@ intake, it works at the level of kinds, files and front-matter fields:
      placement Silo has since removed, takes only `state: superseded`
      (§8.8).
    - A task's spec fields are frozen once it is approved (§5.1).
+   - A task's `context:` entries must resolve with the pusher's rights.
+     `write` must name a repo or folder at a branch, `depth` is at most 3
+     and only on files, and no two entries may land at overlapping paths
+     (§5.6). A template's `input:` entries must name a declared input of
+     type `ref`.
+   - A `kind: asset` sidecar's `asset` must resolve to a file that is not
+     an object, matching its `sha256` and `bytes` where given. A blob over
+     10 MiB is refused, and an object may not be an LFS pointer (§2.2).
    - A push that adds a `depends_on` cycle within Silo's graph is
      refused.
 5. **Secrets scan.** Content is checked against secret patterns (§11.6).
@@ -1895,7 +2492,11 @@ none.
 2. **Accept:** the Grain creates `runs/<yyyy-mm-dd>-<slug>/run.md` in
    its root, with `state: accepted`, `task: {ref, rev}`, `from: {ref,
    rev}`, `grain` and `accepted_at`, and pushes. When the lanes give it
-   the task (§5.2) and a slot is free, it commits `state: running`.
+   the task (§5.2) and a slot is free, it resolves the task's
+   `context:`, holds every entry to its policy, and materialises the
+   sandbox (§5.6). Then it commits `state: running`, with the record's
+   `context:` saying what was materialised and skipped. An entry the
+   policy refuses makes the run `refused` instead, naming it.
    **Refuse:** it creates the record with `state: refused` and
    `refusal: {reason, at}` instead.
 3. **While it runs:** the thread is pushed as comment files under the
@@ -2437,6 +3038,122 @@ against 2, a tie, which `order` breaks for Silo's lane: `approval-flow`
 first and Silo's three after it. Nothing is written to pick: the
 choice shows up as the next run's `accepted` commit in the root.
 
+### 8.16 Worked flows for context and assets
+
+**A task with a write repo, a read folder, a design doc and an image.**
+`intake:tasks/2026-10-16-reject-dangling-refs/task.md` is placed on
+Grain `eu`. Its `context:` is the one at the top of §5.6: silo at `main`
+to write, grain's `pkg/daemon/` at `candidate` to read, the hub intake
+design with `depth: 1`, and a screenshot attached to the task, at
+`attachments/dangling-ref-error.png` beside it.
+
+1. **Resolve and check.** `eu` resolves each entry with its node
+   credential, and holds each to its policy before reading it. Its
+   `repos:` allows `https://github.com/bwsalmon/*` for `read` and
+   `write`, and `https://silo.example.com/git/hub/*` for `read`. All four
+   pass. The screenshot is relative, so it reads the task's `spec_rev`.
+2. **Follow the design's links** (`depth: 1`). The doc is fetched into
+   staging, and its body has one image, `![…](img/claims-flow.png)`, and a
+   link to `grain-code:pkg/daemon/`. The image resolves to
+   `shared:designs/img/claims-flow.png`, passes the policy for `read`,
+   and is 3,412 bytes, inside the caps: it is planned, `via` the doc. The
+   folder link is skipped (`not a file`): the task lists that folder
+   itself. The sidecar beside the image is not linked, so it is not
+   brought; a task that wants it lists it.
+3. **Scope the proxy and materialise.** The proxy is scoped to silo
+   (read, and push to `grain/eu/2026-10-16-reject-dangling-refs` only)
+   and to grain's `pkg/daemon/` at the resolved `candidate` commit (read).
+   The sandbox gets `work/silo/` (writable), `work/grain/` (a read-only
+   sparse checkout of `pkg/daemon/`), the design and the image under
+   `context/silo.example.com/git/hub/shared/designs/`, and the screenshot
+   at its `path:`, `context/screenshot.png`.
+4. **Record it.** `eu` commits `state: running` with the run's `context:`
+   (§5.6): five entries with their commits and paths, and one skipped
+   link.
+5. **Work and push.** The agent changes `work/silo/` and pushes its
+   branch. A push to `main`, or to grain, is refused by the proxy.
+
+Commits: **eu**, the run's own (§8.5). Nothing in any other repo.
+
+**A refused task: one entry is outside the policy.** The weekly granule
+pull (`us:schedules/granule-pull-weekly.md`) fires on Grain `us`, and its
+task's `context:` is grain at `candidate` to write and
+`https://github.com/gke-labs/granule.git@main` to read (§6.2). Suppose
+`us`'s policy admits only `https://github.com/bwsalmon/*`:
+
+1. `us` resolves entry 1, grain: admitted. It reaches entry 2, granule,
+   and the gate refuses it before anything is read from granule. Nothing
+   is fetched into the sandbox, and no sandbox is built.
+2. The firing is in `us`'s own lane, so there is no other Grain to try.
+   `us` commits its run as `waiting`:
+
+   ```yaml
+   state: waiting
+   waiting:
+     on: policy
+     entry: {index: 2, ref: "https://github.com/gke-labs/granule.git@main", mode: read}
+     reason: "not in this Grain's repos policy (allowed: https://github.com/bwsalmon/*)"
+   ```
+
+3. Silo's views show the task as "waiting on `us`'s policy: context entry
+   2, granule (read)". When the owner adds `https://github.com/gke-labs/*`
+   for `read`, `us` re-checks, admits it, and commits `running`. The same
+   task placed by Silo would instead be `refused`, with the same `entry`
+   in `refusal`, and Silo could place it elsewhere (§8.8).
+
+Commits: **us**, 1 (`waiting`), then the run's own once the policy admits
+it.
+
+**A template whose input chooses the target repo.**
+`shared:templates/ghcr/prune-packages.md` declares an input `repo` of
+type `ref`, `ref_kind: repo`, defaulting to grain at `candidate`, and has
+`context: [{input: repo, mode: write}]`. Its schedule,
+`shared:schedules/prune-packages.md`, says `inputs: {repo:
+"https://github.com/bwsalmon/grain.git@candidate"}`. When it fires in
+Silo:
+
+1. Silo checks the value against §4's grammar and `ref_kind`: a repo, with
+   a branch. A value naming a file, or `@<tag>`, files nothing and is
+   reported on the schedule.
+2. Silo writes the task at
+   `intake:tasks/scheduled/prune-packages/20261011T0400Z/task.md` with
+   `context: [{ref: "https://github.com/bwsalmon/grain.git@candidate",
+   mode: write}]` and `template.inputs.repo` recording the value. No
+   `input:` survives into a task.
+3. The placement's `spec_digest` covers that `context:`, and the Grain's
+   policy checks it like any task's. Another team's schedule can use the
+   same template for its own repo by setting `repo` to it.
+
+Commits: **intake**, 1, as any firing (§8.12).
+
+**A design doc whose embedded images arrive through `depth: 1`.** The
+same task as the first flow, but say its author had listed only the
+design doc, with no `depth`:
+
+- **`depth: 0`** (the default): the sandbox gets `hub-intake.md` and
+  nothing else. Its image link points at a file the agent does not have,
+  and the run records nothing as skipped, because nothing was followed.
+- **`depth: 1`**: the image comes too, at its own `context/…` path, so
+  the doc's relative link still works inside the sandbox: the doc and
+  its images keep their relative layout under `context/<host>/<repo
+  path>/`. The run records the image with `via:` the doc.
+- **`depth: 2`** would also follow the links in every Markdown file the
+  doc links to. A design that links to twenty other designs, each with
+  their own images, can reach `reached_files` quickly. Past the caps, the
+  rest are skipped and recorded, and the agent sees which in `run.md`.
+
+**An attachment, before and after migration.** The illustrative task
+`2026-10-16-reject-dangling-refs` has one attachment, a
+screenshot of the hook's refusal. Today it is a blob on the task. After
+`grain tasks export`, it is
+`intake:tasks/2026-10-16-reject-dangling-refs/attachments/dangling-ref-error.png`,
+next to `task.md`, and the task's `context:` lists it (§2.2). A reply
+with an attachment on a running task arrives through Silo's relay. The
+Grain commits the comment and its file, at
+`runs/<name>/comments/<utc>-<author>.md` and
+`runs/<name>/comments/<utc>-<author>/<file name>`, and drops both into
+the sandbox's `thread/`.
+
 ## 9. How the task interface reduces
 
 
@@ -2459,6 +3176,8 @@ The contract becomes:
 - namespace resolution: include and exclude objects, and lanes (§3.3,
   §5.2);
 - the layout of Silo's folder for a Grain: `backlog/` and `schedules/`;
+- a task's `context:`, its resolution and limits, and the sandbox layout
+  (§5.6);
 - the `pull` notification.
 
 A customised Grain conforms by reading and writing those files. Until
@@ -2480,6 +3199,12 @@ list of principals, or, for an intake, the list of rules. An intake's
 `run`'s `superseded` is written by the Grain and records `withdrawn_at`
 (§8.8). `include` has `target`, `ref_mode`, `kinds` and `max_depth`, and
 no `transitive` field, because includes are always transitive (§3.3).
+`task` and `template` replace `repo` and `base` with `context` (§5.6), and
+`template` inputs gain `type: ref`; `schedule` drops them too, and may
+carry `context`. `run` gains `context` (what was materialised and
+skipped) and `waiting`, and `refusal` gains `entry`. `comment` gains
+`attachments`. `asset` is new: a sidecar (§2.2). The shared definition of
+a `context:` entry is in `common`.
 
 - **Every file names its schema** (`grain/task@v1`). A minor addition,
   an optional field, keeps `v1`. Readers ignore fields they do not know
@@ -2639,7 +3364,8 @@ messages to commits plus notifications.
       the team at all until an admin re-pins it. What remains is prompt injection, bounded by
       local policy (item 5).
     - **Grant itself access.** A template, schedule, suite or trigger
-      with `reads`, `writes`, `grants` or `target` is refused (§12.1). A
+      with `reads`, `writes`, `grants` or `target`, or with a `context:`
+      entry or `ref` input naming another repo, is refused (§12.1). A
       capability named in a homed task is a request, granted only in
       Silo's attestation (item 6).
     - **Flood a team.** A schedule naming a team the team has not adopted
@@ -2717,6 +3443,91 @@ messages to commits plus notifications.
     own. Read access is per repo, so a team's placements repo is
     readable by all the team's Grains (§8.12); a deployment that must
     isolate Grains from one another gives each its own placements repo.
+19. **`context:` is the sandbox's whole world.** A run sees its task file,
+    its execution record and thread, and the entries of `context:`, and
+    nothing else: no other repo, no other file, no reference that is not
+    an entry (§5.6). Every other reference field is metadata, so a task
+    cannot reach a repo by depending on a task there, implementing a
+    design there, or using a template from there. The list is part of the
+    spec: the approver reads it, the hook freezes it on approval (§5.1),
+    and `spec_digest` covers it in canonical form (item 7). A Grain that
+    materialises more than the list is a bug in the Grain, not a grant.
+20. **The proxy's scope is exactly the resolved set.** The sandbox's git
+    proxy serves the repos and folders the run's plan holds, at the
+    commits it resolved, and refuses everything else (403, "not in scope
+    for this sandbox", as today). For a **folder** entry it serves the
+    commit and its trees with `--filter=blob:none`, and serves blobs only
+    from the folder's subtree at that commit, so a sparse checkout is
+    enforced by the proxy, not merely chosen by the checkout. The rest of
+    the repo's **file names and commit messages** are still visible in
+    those trees and commits. A policy that must hide them grants no
+    folder of that repo, or serves the folder from a repo of its own.
+    Files and external artefacts are not served by the proxy at all: the
+    Grain copied them in.
+21. **The PEP checks before it fetches.** The Grain's policy sees every
+    entry, every entry reached through `depth`, every redirect hop, every
+    LFS endpoint and every external URL, before the Grain reads a byte of
+    it, and before anything enters the sandbox (§5.6). A listed entry it
+    refuses stops the run with the entry named; a reached one it refuses
+    is skipped and recorded. Neither is fetched. This is task 4303's fix
+    made general: a capability no longer implies a repo, so there is no
+    second route by which a repo reaches a sandbox.
+22. **`write` is the task's branch, and nothing else.** A `write` entry
+    lets the run push `grain/<grain>/<run name>` to that repo, created
+    from the entry's base branch. The proxy refuses any other ref, any
+    tag, any deletion outside that branch, and, for a `write` folder,
+    any commit that changes a path outside its `write` folders. Landing
+    the branch is the merge queue's job, under the repo's own rules, as
+    today. `write` on a file is refused on push, and by the Grain if it
+    gets that far.
+23. **Transitive reach and archive bombs are bounded.** `depth` is off by
+    default, at most 3, follows body links only, and stops at
+    `reached_files` and `reached_bytes`. Every file is capped at
+    `file_bytes` and the set at `files_bytes`, counted as fetched, not as
+    declared (§5.6). Checkouts are capped at `checkout_bytes` as inflated
+    on disk, so a pack of highly compressible blobs aborts the clone
+    rather than filling the disk. The materialiser never unpacks an
+    archive: a `.zip` or `.tar.zst` asset arrives as the file it is, and
+    an agent that unpacks it does so inside its own sandbox's quota.
+    External artefacts are downloaded with their declared `bytes` as a
+    hard limit, and checked against `sha256` before they are moved into
+    place.
+24. **Assets are data, never executed by Silo or a Grain.** Neither runs,
+    imports, opens with a plugin or interprets an asset. The Grain's
+    staging clones run with hooks disabled, no `filter.*`, `core.fsmonitor`
+    or `core.hooksPath`, and no smudge filters but LFS's own, so a
+    hostile `.gitattributes` or config cannot run anything while it
+    fetches. Copied files are read-only with their executable bits
+    cleared, a symlink is never followed out of its checkout, and a
+    single-file entry that is a symlink is refused. Whatever the agent
+    then does with an asset is the agent's, inside its sandbox, bounded
+    by the Grain's policy, as with any repo content today (TB7).
+25. **Assets are untrusted where they are shown.** Silo's UI and the
+    Grain's node UI serve an asset by content type, decided from an
+    allowlist and checked against the bytes, never taken from the
+    asset's name or a sidecar alone:
+    - **inline** only for raster images (PNG, JPEG, GIF, WebP), after the
+      server checks their dimensions (at most 50 megapixels) and
+      re-encodes a thumbnail, so a decompression bomb never reaches the
+      browser;
+    - **never inline: SVG, HTML, XML, PDF**, or anything else. SVG and
+      HTML can carry script. They are served as downloads
+      (`Content-Disposition: attachment`), or SVG is rasterised by the
+      server, sandboxed, without network or scripts;
+    - always with `X-Content-Type-Options: nosniff` and a
+      `Content-Security-Policy: sandbox` response, from a separate origin
+      for user content, never from the origin that holds the UI's
+      session;
+    - Markdown is rendered as it is today (item 11), with image links
+      rewritten to that origin, and never to an external URL, so that
+      viewing a design does not report to a third party.
+26. **`context:` cannot be used to read what its author cannot.** Silo's
+    hook checks every new or changed entry with **the pusher's** read
+    rights, as it checks every reference (item 4). Silo grants a Grain
+    read on the Silo-hosted repos a placement's `context:` names, for as
+    long as the placement exists, and no more. A repo on another host is
+    read with the Grain's own credential, which its policy already
+    governs.
 
 
 ## 12. Grain folders in code repos: `.grain/` and `docs/design/`
@@ -2755,7 +3566,8 @@ The Go loader, on YAML 1.2, accepts both.
   `aka:`. Settings rows in grain/config that cite it keep working.
 - **The refusals of `docs/declaration-schema.md` still hold, for every
   kind:** a repo declaration carries no `reads`, `writes`, `grants` or
-  `target`. The schemas say so, and readers enforce it on every object
+  `target`, and its `context:` entries, and its `ref` inputs' defaults
+  and values, name only its own repo (§5.6). The schemas say so, and readers enforce it on every object
   in a code repo's grain folder, whatever its README says (§8.13). A job
   that needs another repo's access stays a settings-owned row.
 - **One parser.** The `taskrepo` package's front-matter reader (§16)
@@ -2878,6 +3690,29 @@ they are**. Nothing moves:
   attempt rows are not exported.
 - **Templates.** A template's `fields` (`model.TemplateField`) become
   `inputs`.
+- **Target, reads and writes become `context:`** (§5.6). For a task, in
+  this order:
+
+  | grain today (`model.Task`) | `context:` entry |
+  | --- | --- |
+  | `Target: owner/name`, `Base: b` | `{ref: "<forge URL of owner/name>@b", mode: write}`, first, so it is the primary repo |
+  | each `Writes[i]: {repo, base}` | `{ref: "<URL>@<base, or Base>", mode: write}` |
+  | each `Reads[i]: owner/name` | `{ref: "<URL>", mode: read}`, unpinned |
+  | a `repo-write:owner/name` capability | a `write` entry for that repo, if none exists, and the capability is dropped: a capability no longer implies a repo |
+  | each attachment | an asset beside the task and a `read` entry for it (§2.2) |
+  | no `Target` (team-targeted) | no `write` entry |
+
+  `<forge URL>` is the deployment's configured forge,
+  `https://github.com/owner/name.git` for these deployments. Pasted
+  context stays in the prompt, where it was; an author who wants it as a
+  file attaches it instead.
+- **Templates and schedules** with `repo` and `base` get an input `repo`
+  of type `ref`, defaulting to that repo at that base, and
+  `context: [{input: repo, mode: write}]`; a template's `reads` become
+  `read` entries. A schedule's `target` and `base` become its
+  `inputs.repo` (§8.16).
+- **Attachments** on tasks and comments become assets beside them, as
+  §2.2 describes.
 
 `grain tasks import` reads the files back. The test is the round trip:
 
@@ -2969,7 +3804,8 @@ as plain files.
 - **Hook performance.**
   - It parses front matter only, for changed `.md` files only.
   - It caches directory lookups for the length of the push.
-  - It caps a push at 1,000 changed files and 10 MiB.
+  - It caps a push at 1,000 changed files and 10 MiB, and so any one
+    asset at 10 MiB (§2.2).
   - Target: p99 under 200 ms for a 10-file push.
   - Writes to one repo are serialised, and different repos run in
     parallel.
@@ -3045,15 +3881,22 @@ as plain files.
 | Placement waits for the code-repo commit to land | Delays the work by a review, for nothing: the spec is the same at both addresses, and references follow the move (§5.5) |
 | Scheduled firings committed to code repos | A commit, and a review, per firing, in the code's history, for content that is the schedule plus a time (§6.2) |
 | Let a code repo name the team its schedules fire for, with no adoption | Any repo could fill any team's intake. Adoption makes the team's admins the ones who choose (§6.2) |
+| Materialise every reference a task holds | `depends_on` would pull other tasks' repos into the sandbox, `template` and `moved_from` would bring files nobody meant the agent to have, and a placement's `to:` would bring the intake. The sandbox would be whatever the graph happened to touch. Only `context:` materialises, and the rest stays metadata (§5.6) |
+| Transitive `context:` by default | Unbounded sandboxes: one design that links to its neighbours brings the whole docs tree, and what a run sees would change whenever someone adds a link. Off by default, `depth: n` where wanted, under file and byte caps that skip and record (§5.6) |
+| Keep separate `Target`, `Reads` and `Writes` fields | Three mechanisms for one idea, plus attachments and pasted context as a fourth and fifth. Each needed its own policy check, and task 4303 was a repo that reached a sandbox by a route the policy did not see. One list with a mode is one check (§5.6, §11.21) |
+| Require Git LFS for assets | Not plain git everywhere: Silo's git host, a bare `git daemon`, a `file://` root and many mirrors do not serve it, and a clone without LFS gets pointer files. LFS is allowed where the host has it; size limits and external artefacts cover the rest (§2.2) |
+| Other names for `context:` (`mounts`, `workspace`, `sandbox`, `inputs`, `reads`/`writes`) | Each names one mechanism or collides with an existing field (§5.6) |
+| A sidecar for every asset | Metadata most assets do not need: an image in a design has its alt text in the link. Sidecars are optional, and are where an asset needs a license, provenance, or an external location (§2.2) |
+| Attachments inline in front matter (base64) | Front matter is for review; a megabyte of base64 is not. Every diff, digest and parse would carry it. A file beside the object is plain git, and renders in any forge (§2.2) |
 
 
 ## 16. Staged implementation plan
 
 | Stage | silo (bwsalmon/silo) | grain (bwsalmon/grain) |
 | --- | --- | --- |
-| **1. Format** | a `taskrepo` package: front-matter parse and write (field-preserving), JSON Schemas (`suite`, `trigger`, `include` and `exclude` included), the reference grammar and resolver with redirects (tombstones and repo `moved_to`), nearest-README discovery and `scope`, the namespace resolver of §3.3 with its limits, the path rules, rank keys, lanes and backlog ordering, `task_home` resolution, and `writers` evaluation (principal lists, and the intake's rules); the Jinja subset on gonja with the Python fixture CI job | pin `taskrepo`; `grain tasks export/import` with the round-trip test on a copy of the database; `pkg/repodecl` and `grain declarations check` read `.md` declarations beside `.yml` (§13.1); `grain declarations convert`; convert bwsalmon/grain's own `.grain/` |
-| **2. Standalone Grain on a task repo** | none | a local root becomes the backlog's source of truth for git-backed fields, with the database as runtime and index: tasks, ranked references in `backlog/`, execution records in `runs/`, comments as files; schedules from the namespace; includes of shared folders |
-| **3. Silo hosts git** | `silo-git`: smart HTTP behind IAP and node tokens, the pre-receive hook, protected refs, bundles to GCS, restore drill, metrics; intake and placements repos per team; hosted Grain roots writable by the Grain only; propose and approve by push and through the API (the same commit); the threat-model boundary | `grain tasks link/unlink` as include objects; push and pull to a Silo remote; lanes |
+| **1. Format** | a `taskrepo` package: front-matter parse and write (field-preserving), JSON Schemas (`suite`, `trigger`, `include` and `exclude` included), the reference grammar and resolver with redirects (tombstones and repo `moved_to`), nearest-README discovery and `scope`, the namespace resolver of §3.3 with its limits, the path rules, rank keys, lanes and backlog ordering, `task_home` resolution, and `writers` evaluation (principal lists, and the intake's rules); the `context:` resolver shared with namespaces, with its limits and default layout, and the `asset` kind; the Jinja subset on gonja with the Python fixture CI job | pin `taskrepo`; `grain tasks export/import` with the round-trip test on a copy of the database; `pkg/repodecl` and `grain declarations check` read `.md` declarations beside `.yml` (§13.1); `grain declarations convert`; convert bwsalmon/grain's own `.grain/` |
+| **2. Standalone Grain on a task repo** | none | a local root becomes the backlog's source of truth for git-backed fields, with the database as runtime and index: tasks, ranked references in `backlog/`, execution records in `runs/`, comments as files; schedules from the namespace; includes of shared folders; `context:` materialisation: the PEP before fetch, staging, the proxy's scope and push rule, the sandbox layout, and the run's `context:` record; attachments as assets |
+| **3. Silo hosts git** | `silo-git`: smart HTTP behind IAP and node tokens, the pre-receive hook, protected refs, bundles to GCS, restore drill, metrics; intake and placements repos per team; hosted Grain roots writable by the Grain only; propose and approve by push and through the API (the same commit); assets served from a user-content origin (§11.25); the threat-model boundary | `grain tasks link/unlink` as include objects; push and pull to a Silo remote; lanes |
 | **4. Placement by commit** | the dispatcher adds, moves and removes placements in its own repo, and writes cancels on tasks, in §8.11 order; the fence on withdrawn placements; the run index and dependency resolution from execution records; the `pull` notify; WebSocket offers derived from commits behind a flag, then retired | accept, refuse and close as execution records, attestation on the reference, the removed-reference fence, upward filing through Silo; then drop `offer`/`resume` handling |
 | **5. Shared definitions and planning** | templates and schedules fired in Silo; the design index, planning and flood control; the review-branch gate | render shared templates locally; `implements`/`closed.design_revs`; trailers from refs |
 | **5b. Code repos and task homes** | the code-repo reader (webhook or poll) with validation on read (§8.13); schedule adoption; designs planned in place; `task_home`: landing a task by direct push or a change through grain's merge queue, the pending-change record, the tombstone and reference rewrite, `silo task promote`; cancels of homed tasks | `propose_promotion`; inline firings; local policy for code repos a Grain trusts |
