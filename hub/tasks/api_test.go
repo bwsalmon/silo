@@ -123,6 +123,8 @@ func TestAPISubmit(t *testing.T) {
 		{"alice@example.com", map[string]any{"prompt": "x"}, http.StatusBadRequest},
 		{"alice@example.com", map[string]any{"repo": "bwsalmon/silo"}, http.StatusBadRequest},
 		{"alice@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "x", "submitter": "bob@example.com"}, http.StatusBadRequest},
+		// A submission cannot name its own approver (INV-17).
+		{"alice@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "x", "approved_by": "bob@example.com"}, http.StatusBadRequest},
 		{"root@example.com", map[string]any{"team": "nope", "prompt": "x"}, http.StatusNotFound},
 	} {
 		if code, b := h.do(t, c.user, "POST", TasksPath, c.body); code != c.want {

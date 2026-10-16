@@ -283,20 +283,24 @@ Grain as an ordinary hub task; an agent answering an
 `approval_request` through a planned `approve` path; a cross-Grain
 dependency (task 4235) feeding one task's output into another's
 prompt. *Mitigation today:* there is no upward filing and no approval
-path; `approved_by` is not carried (`tasks.Spec`). **But** grain files
-every hub offer as **already approved** with the submitter as its
-principal (grain `pkg/daemon/hub.go`, `hubTasks.Start`: `Approved:
-true`, `Creator: spec.Submitter`), so today a hub submission *is* an
-approval, and grain's own approval rule ("approved by somebody other
-than the requester", `docs/local-policy.md`) is satisfied by the hub's
-say-so. *Residual:* once the hub accepts tasks from nodes or agents,
-anything the hub dispatches is an approved task at the receiving
-Grain. *Status:* **open, must be closed before tasks 4233 and 4235
-ship** (O-4): an agent- or node-filed task enters the hub as `proposed`
-with a non-human requester, only a signed-in human other than the
-requester may approve it (ui.md U3), `approved_by` is carried as its
-own claim, and grain stops treating a hub offer as approved unless it
-carries `approved_by`. INV-17.
+path. The hub carries `approved_by` on the offer (`tasks.Spec`) and
+signs it as the attestation's own claim, never equal to the submitter;
+a submission cannot set it, so it is empty on every hub task today.
+grain files a hub offer that names no approver other than its
+submitter as a proposal a local human has to approve (grain
+`pkg/daemon/hub.go`, `hubOffer.ApprovedBy`; grain task 4310, GSA1-11),
+so a hub submission is no longer an approval at the Grain. Before
+that, grain filed every hub offer as **already approved** with the
+submitter as its principal, and grain's own approval rule ("approved
+by somebody other than the requester", `docs/local-policy.md`) was
+satisfied by the hub's say-so. *Residual:* the hub has no approval
+flow and no `proposed` state; once it accepts tasks from nodes or
+agents, what records `approved_by` decides whether this is closed.
+*Status:* **open, must be closed before tasks 4233 and 4235 ship**
+(O-4): an agent- or node-filed task enters the hub as `proposed` with
+a non-human requester, and only a signed-in human other than the
+requester may approve it (ui.md U3), recorded as `approved_by`.
+INV-17.
 
 **T-TB1-8 (D) A user exhausting the hub.** *Mitigation:* bodies are
 bounded (`readJSON`: 64 KiB for the directory, the prompt limit plus
@@ -736,7 +740,7 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-14 | A browser's WebSocket subscription to task events is accepted only from the hub's own origin. | `hub/live` `TestWebSocket` |
 | INV-15 | No text a node, an agent or a submitter supplied is ever interpreted as HTML or script in the hub's origin. | gap: the hub UI's tests (tasks 4222–4227) and a security suite case with a script-bearing title, prompt, conversation event, reason, kind and artifact |
 | INV-16 | The hub refuses a state-changing request (`POST`, `PUT`, `DELETE`) sent cross-site by a browser. | gap: not built (O-1) |
-| INV-17 | Only a human signed in to the hub can be a task's `approved_by`, never its requester, a node or an agent; a task filed by a node or an agent is `proposed` until such an approval; a Grain does not treat a hub task as approved unless it carries `approved_by`. | gap: not built (O-4) |
+| INV-17 | Only a human signed in to the hub can be a task's `approved_by`, never its requester, a node or an agent; a task filed by a node or an agent is `proposed` until such an approval; a Grain does not treat a hub task as approved unless it carries `approved_by`. | `hub/tasks` `TestCreate` (never the submitter), `TestAPISubmit` (a submission cannot set it), `TestOfferApprovedBy` (offered and signed); gap: the hub's approval flow and `proposed` (O-4) |
 | INV-18 | The hub never logs a prompt, an event payload, artifact or node UI bytes, a token, a cookie or an IAP assertion; node-supplied strings it logs are truncated and quoted. | `internal/logsafe` `TestQuote`; `hub/tasks` `TestNodeStringsLogged` (the dispatcher's log) |
 | INV-19 | Everything a node sends is bounded: a control, task or event line ≤ 1 MiB, a node UI answer line ≤ 64 KiB, a ref ≤ 512 printable bytes, a kind by pattern, the token ring ≤ 1024 events or 1 MiB per task; a mux session ≤ 1024 open streams, 1 MiB unread per stream and 16 MiB unread in all, one owed pong, 1024 queued resets, and a write that waits ≤ the ping timeout; and (open) nodes per user, slots, repositories and stored events per task. | `hub/live` `TestRingBound`, `TestClassify`; `hub/faulttest` `TestLoad`; `internal/tunnel/mux` `abuse_test.go`; gap: the open bounds (O-5) |
 | INV-20 | A deployed hub has exactly one human sign-on, and it is IAP or OIDC, never `-dev-user-header`; the IAP-off backend serves exactly `/v1/nodes/connect`; node UI hosts route only to the IAP backend; containers run nonroot with a read-only root filesystem. | `hub/server` `TestConfigSignOn`; `deploy/kubernetes/hub/validate.sh` (node UI route, metrics, NetworkPolicy, numeric user); gap: dev sign-on and the exact match (O-12) |
@@ -753,7 +757,7 @@ a candidate task; none is fixed by this document.
 | --- | --- | --- | --- | --- |
 | O-1 | No CSRF defence on the JSON APIs: refuse a non-`application/json` body and a cross-site `Sec-Fetch-Site`/`Origin` on every state-changing route. | high | T-TB1-4 | silo, before the hub UI (U2) |
 | O-3 | A Grain connected to a hub may run without a local policy. | high | T-TB3-2 | grain (`-hub-url` requires `-policy`); conformance kit (4236) |
-| O-4 | Hub offers are filed as approved at the Grain; no `approved_by`; no design yet for agent-filed tasks, `approve` or `message`. | high, before 4229/4230/4233/4235 | T-TB1-7, T-TB3-5, T-TB7-3 | silo (`proposed`, `approved_by`), grain (`hubTasks.Start`) |
+| O-4 | No hub approval flow to record `approved_by` (carried and signed since task 4406; grain files offers without one for local approval); no design yet for agent-filed tasks, `approve` or `message`. | high, before 4229/4230/4233/4235 | T-TB1-7, T-TB3-5, T-TB7-3 | silo (`proposed`, an approval flow), grain (`hubTasks.Start`) |
 | O-8 | Hub-placed tasks reach host sandboxes with ambient credentials. | high | T-TB7-1 | grain (policy rule; register as unisolated) |
 | O-2 | The node UI forwards the viewer's IAP assertion, and possibly IAP's cookie, to the node. | medium | T-TB3-3, T-TB3-4 | silo (`nodeui.rewrite`), before grain's side ships |
 | O-6 | The hub UI must render node and agent content safely (§5 TB4). | medium, blocks U1 | T-TB4-1 | silo, tasks 4222–4227 |

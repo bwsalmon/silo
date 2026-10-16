@@ -78,6 +78,23 @@ func TestOfferAndResumeAttested(t *testing.T) {
 	h.await(t, task.ID, "running again", inState(Running))
 }
 
+// TestOfferApprovedBy: a task approved at the hub is offered with its
+// approver, and its attestation's approved_by claim names them.
+func TestOfferApprovedBy(t *testing.T) {
+	s := testSigner(t)
+	h := newHarness(t, func(d *Dispatcher) { d.Claims = s })
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo", Prompt: "fix the parser", Submitter: "carol@example.com", ApprovedBy: "dave@example.com"})
+
+	o := n.next(t, TypeOffer)
+	if o.first.Task.ApprovedBy != "dave@example.com" {
+		t.Errorf("offered %+v", o.first.Task)
+	}
+	if c := verifyAttestation(t, s, o.first, "ws-1"); c.Requester != "carol@example.com" || c.ApprovedBy != "dave@example.com" {
+		t.Errorf("claims %+v", c)
+	}
+}
+
 func TestOfferUnattestedWithoutKey(t *testing.T) {
 	h := newHarness(t)
 	n := h.node(t, "alice@example.com", silo("ws-1", 1))

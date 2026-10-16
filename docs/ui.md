@@ -33,7 +33,8 @@ from and recommends one.
 The two gaps are API work in `hub/tasks` and `hub/live`, and both
 options need them. With them in place, the hub decides who may approve
 (it is the PDP, hub.md §1.2), and records the approver in the task's
-`approved_by` claim, which `tasks.Spec` does not carry yet. The node
+`approved_by` claim, which `tasks.Spec` carries and the offer's
+attestation signs. The node
 carries the decision out under its own local policy (it is the PEP).
 
 Grain's own approval of held changes (named approvers on sensitive

@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	title TEXT NOT NULL,
 	prompt TEXT NOT NULL,
 	submitter TEXT NOT NULL,
+	approved_by TEXT NOT NULL DEFAULT '',
 	constraints TEXT NOT NULL,
 	state TEXT NOT NULL,
 	node TEXT NOT NULL,
@@ -118,8 +119,11 @@ CREATE INDEX IF NOT EXISTS tasks_team ON tasks (team, created_at)
 // node_owner (SA1-H1) is empty on a task offered before it: such a task,
 // if lost, is never resumed, since its node's owner cannot be checked,
 // and goes back to the queue after its team's grace.
+// approved_by (INV-17) is empty on a task created before it, as it is
+// on every task nobody approved at the hub.
 var added = []dbaccess.Column{
 	{Table: "tasks", Name: "node_owner", Add: `ALTER TABLE tasks ADD COLUMN node_owner TEXT NOT NULL DEFAULT ''`},
+	{Table: "tasks", Name: "approved_by", Add: `ALTER TABLE tasks ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`},
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -160,7 +164,7 @@ func (s *Store) q(query string) string {
 	return b.String()
 }
 
-const columns = `id, team, repo, title, prompt, submitter, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
+const columns = `id, team, repo, title, prompt, submitter, approved_by, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
 
 type scanner interface{ Scan(...any) error }
 
@@ -172,7 +176,7 @@ func scanTask(r scanner) (Task, error) {
 		created, updated int64
 		state            string
 	)
-	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
+	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
 		&t.Reason, &excl, &t.Attempts, &pending, &created, &updated, &t.version); err != nil {
 		return Task{}, err
 	}
@@ -213,8 +217,8 @@ func (s *Store) Create(ctx context.Context, spec Spec) (Task, error) {
 	spec.ID, spec.Created = newID(), now
 	t := Task{Spec: spec, State: Queued, Excluded: []string{}, Updated: now, version: 1}
 	cons, _ := json.Marshal(t.Constraints)
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
 		now.UnixMilli(), now.UnixMilli(), t.version)
 	if err != nil {
 		return Task{}, err

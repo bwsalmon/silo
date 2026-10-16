@@ -10,13 +10,15 @@ import "github.com/bwsalmon/silo/hub/claims"
 // capabilities or network access of its own, so those are empty, as
 // the node sees them. A team-targeted task has no target: its node
 // chooses the repository, and its own policy decides whether this
-// task may run there. Nobody approves a hub task beyond its
-// submission, so approved_by is empty.
+// task may run there. approved_by is the task's approver, empty for a
+// task nobody approved at the hub; the digest does not cover it, as
+// grain's does not.
 func Attest(s Spec, node string) claims.Claims {
 	return claims.Claims{
-		Audience:  node,
-		Requester: s.Submitter,
-		Team:      s.Team,
+		Audience:   node,
+		Requester:  s.Submitter,
+		Team:       s.Team,
+		ApprovedBy: s.ApprovedBy,
 		SpecDigest: claims.SpecDigest(claims.Spec{
 			Target: s.Repo,
 			Title:  s.Title,
