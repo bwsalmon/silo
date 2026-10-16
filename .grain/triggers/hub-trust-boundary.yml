@@ -1,0 +1,30 @@
+# The hub's trust boundary (docs/hub.md, docs/hub-interface.md): who is
+# signed in (identity), which teams and node tokens exist (directory),
+# how nodes dial in and who may reach them (rendezvous, internal/tunnel,
+# nodeui), where a task is dispatched (tasks, registry), what streams to
+# whom (live), and `silo hub serve`'s routing and middleware (cmd/silo,
+# hub/server). The UI's auth/API layer is listed ahead of time: its
+# directory is not decided yet (docs/ui.md stage U1), so both likely
+# homes are named.
+#
+# `sensitive: true` files grain's security review on every pull request
+# that touches these paths and withdraws its auto-merge. `human:
+# on-findings` releases it once the review finishes with no findings;
+# only a review that finds something waits for a human.
+on: pull_request
+paths:
+  - hub/identity/**
+  - hub/directory/**
+  - hub/rendezvous/**
+  - hub/tasks/**
+  - hub/live/**
+  - hub/nodeui/**
+  - hub/registry/**
+  - hub/server/**
+  - internal/tunnel/**
+  - cmd/silo/**
+  - ui/**
+  - hub/ui/**
+gate: true
+human: on-findings
+sensitive: true

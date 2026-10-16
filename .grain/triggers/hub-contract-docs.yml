@@ -1,0 +1,10 @@
+# The hub's contract with nodes, UIs and SDKs (docs/hub-interface.md)
+# and its threat model (docs/threat-model.md, once written). The code
+# is reviewed against these, so a change to either is reviewed too.
+on: pull_request
+paths:
+  - docs/hub-interface.md
+  - docs/threat-model.md
+gate: true
+human: on-findings
+sensitive: true
