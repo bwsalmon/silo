@@ -11,6 +11,7 @@ mock_provider "google" {
     defaults = {
       workload_identity_config = [{ workload_pool = "bsalmon-gke-dev.svc.id.goog" }]
       gateway_api_config       = [{ channel = "CHANNEL_STANDARD" }]
+      monitoring_config        = [{ managed_prometheus = [{ enabled = true }] }]
     }
   }
   mock_resource "google_certificate_manager_dns_authorization" {
@@ -81,6 +82,74 @@ run "defaults" {
     condition     = google_certificate_manager_certificate_map_entry.hub.hostname == "silo-hub.example.com"
     error_message = "the certificate map serves the domain"
   }
+  assert {
+    condition = (
+      google_sql_database_instance.hub.settings[0].backup_configuration[0].enabled &&
+      google_sql_database_instance.hub.settings[0].backup_configuration[0].point_in_time_recovery_enabled &&
+      google_sql_database_instance.hub.settings[0].backup_configuration[0].transaction_log_retention_days == 7 &&
+      google_sql_database_instance.hub.settings[0].backup_configuration[0].start_time == "03:00" &&
+      google_sql_database_instance.hub.settings[0].backup_configuration[0].backup_retention_settings[0].retained_backups == 14
+    )
+    error_message = "daily backups, 14 kept, and 7 days of point-in-time recovery"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].deletion_protection_enabled
+    error_message = "Cloud SQL's own deletion protection is on"
+  }
+  assert {
+    condition     = toset(keys(google_monitoring_alert_policy.hub)) == toset(["hub_down", "no_online_nodes", "dispatch_stuck", "error_rate", "database_errors"])
+    error_message = "the five alert policies"
+  }
+  assert {
+    condition     = alltrue([for p in google_monitoring_alert_policy.hub : strcontains(p.conditions[0].condition_prometheus_query_language[0].query, "namespace=\"silo-hub\",job=\"silo-hub\"")])
+    error_message = "every alert selects the hub's scrape target"
+  }
+  assert {
+    condition     = length(jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles) == 17
+    error_message = "the dashboard is JSON, with its tiles"
+  }
+  assert {
+    condition     = strcontains(jsondecode(google_monitoring_dashboard.hub[0].dashboard_json).mosaicLayout.tiles[0].widget.scorecard.timeSeriesQuery.prometheusQuery, "silo_hub_ready{namespace=\"silo-hub\",job=\"silo-hub\"}")
+    error_message = "the dashboard's queries select the hub's scrape target"
+  }
+}
+
+run "monitoring_off" {
+  command = plan
+
+  variables {
+    monitoring                  = false
+    alert_notification_channels = ["projects/bsalmon-gke-dev/notificationChannels/1"]
+  }
+
+  assert {
+    condition     = length(google_monitoring_alert_policy.hub) == 0 && length(google_monitoring_dashboard.hub) == 0
+    error_message = "monitoring = false makes no policies or dashboard"
+  }
+}
+
+run "notification_channels" {
+  command = plan
+
+  variables {
+    alert_notification_channels = ["projects/bsalmon-gke-dev/notificationChannels/1"]
+  }
+
+  assert {
+    condition     = alltrue([for p in google_monitoring_alert_policy.hub : toset(p.notification_channels) == toset(["projects/bsalmon-gke-dev/notificationChannels/1"])])
+    error_message = "every policy notifies the channels"
+  }
+}
+
+run "bad_backup_settings" {
+  command = plan
+
+  variables {
+    backup_start_time           = "3am"
+    point_in_time_recovery_days = 30
+  }
+
+  expect_failures = [var.backup_start_time, var.point_in_time_recovery_days]
 }
 
 run "dns_and_backend_service" {

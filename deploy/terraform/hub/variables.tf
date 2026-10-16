@@ -64,6 +64,54 @@ variable "database_version" {
   default     = "POSTGRES_16"
 }
 
+variable "backup_start_time" {
+  description = "When, in UTC (HH:MM), the daily automated backup of the database starts."
+  type        = string
+  default     = "03:00"
+  validation {
+    condition     = can(regex("^([01][0-9]|2[0-3]):[0-5][0-9]$", var.backup_start_time))
+    error_message = "backup_start_time must be HH:MM in UTC."
+  }
+}
+
+variable "backups_retained" {
+  description = "How many daily automated backups to keep."
+  type        = number
+  default     = 14
+  validation {
+    condition     = var.backups_retained >= 7 && var.backups_retained <= 365
+    error_message = "backups_retained must be from 7 to 365."
+  }
+}
+
+variable "point_in_time_recovery_days" {
+  description = "How many days of write-ahead log to keep for point-in-time recovery; at most backups_retained, and at most 7 (Cloud SQL's limit for this edition)."
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.point_in_time_recovery_days >= 1 && var.point_in_time_recovery_days <= 7
+    error_message = "point_in_time_recovery_days must be from 1 to 7."
+  }
+}
+
+variable "backup_location" {
+  description = "Where backups are stored, a region or multi-region (\"us\"); null keeps them in the multi-region nearest the instance, Cloud SQL's default."
+  type        = string
+  default     = null
+}
+
+variable "alert_notification_channels" {
+  description = "Cloud Monitoring notification channels (projects/PROJECT/notificationChannels/ID) the hub's alert policies notify. With none, the policies still open incidents in the console."
+  type        = list(string)
+  default     = []
+}
+
+variable "monitoring" {
+  description = "Whether to create the hub's alert policies and dashboard (monitoring.tf). They need Managed Service for Prometheus on the cluster and the PodMonitoring in deploy/kubernetes/hub."
+  type        = bool
+  default     = true
+}
+
 variable "deletion_protection" {
   description = "Whether the Cloud SQL instance is protected from terraform destroy."
   type        = bool

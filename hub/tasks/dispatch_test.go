@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +28,9 @@ type harness struct {
 	url   string
 }
 
-func newHarness(t *testing.T) *harness {
+// newHarness starts the harness's dispatcher, after each of opts has
+// set it up.
+func newHarness(t *testing.T, opts ...func(*Dispatcher)) *harness {
 	t.Helper()
 	ctx := context.Background()
 	dir, err := directory.Open(ctx, "sqlite::memory:")
@@ -72,6 +75,9 @@ func newHarness(t *testing.T) *harness {
 		OfferTimeout: 3 * time.Second,
 		Retry:        300 * time.Millisecond,
 		Logf:         logf,
+	}
+	for _, o := range opts {
+		o(d)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	stopped := make(chan struct{})
@@ -331,6 +337,103 @@ func TestLostWhileRunning(t *testing.T) {
 	if got.Reason != "tests failed" {
 		t.Errorf("failed: %+v", got)
 	}
+}
+
+// clock is a test clock that moves only when it is told to.
+type clock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// TestLostRequeuedAfterGrace is a team that has turned on requeueing
+// lost tasks (docs/hub.md §6.3): its lost task stays with its node for
+// the grace, and then goes to another node.
+func TestLostRequeuedAfterGrace(t *testing.T) {
+	clk := &clock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	var events []Event
+	var mu sync.Mutex
+	h := newHarness(t, func(d *Dispatcher) {
+		d.Store.Now = clk.Now
+		d.LostRequeueAfter = func(_ context.Context, team string) (time.Duration, error) {
+			if team == "infra" {
+				return 10 * time.Minute, nil
+			}
+			return 0, nil
+		}
+		d.Observe = func(ev Event, _ Task) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		}
+	})
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
+	n.next(t, TypeOffer).send(t, Message{Type: TypeAccept, NodeTask: "local-1"})
+	h.await(t, task.ID, "running", inState(Running))
+	other := h.node(t, "alice@example.com", silo("ws-2", 1))
+
+	n.conn.Close()
+	h.await(t, task.ID, "lost", inState(Lost))
+	// Within the grace it stays with its node.
+	clk.advance(9 * time.Minute)
+	h.d.Wake()
+	other.none(t, time.Second)
+	if got, _ := h.store.Get(context.Background(), task.ID); got.State != Lost || got.Node != "ws-1" {
+		t.Fatalf("within the grace: %+v", got)
+	}
+
+	clk.advance(2 * time.Minute)
+	h.d.Wake()
+	s := other.next(t, TypeOffer)
+	if s.first.Task == nil || s.first.Task.ID != task.ID {
+		t.Fatalf("offer %+v", s.first)
+	}
+	s.send(t, Message{Type: TypeAccept, NodeTask: "local-2"})
+	got := h.await(t, task.ID, "running on ws-2", inState(Running))
+	if got.Node != "ws-2" || got.NodeTask != "local-2" {
+		t.Errorf("requeued and placed: %+v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[Event]bool{EventAccepted: true, EventLost: true, EventLostRequeued: true}
+	for _, ev := range events {
+		delete(want, ev)
+	}
+	if len(want) > 0 {
+		t.Errorf("events %v: missing %v", events, want)
+	}
+}
+
+// TestLostKeptWithGraceOff is a team that has not turned requeueing on:
+// however long the task is lost, it is not placed elsewhere.
+func TestLostKeptWithGraceOff(t *testing.T) {
+	clk := &clock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	h := newHarness(t, func(d *Dispatcher) {
+		d.Store.Now = clk.Now
+		d.LostRequeueAfter = func(context.Context, string) (time.Duration, error) { return 0, nil }
+	})
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
+	n.next(t, TypeOffer).send(t, Message{Type: TypeAccept})
+	h.await(t, task.ID, "running", inState(Running))
+	other := h.node(t, "alice@example.com", silo("ws-2", 1))
+	n.conn.Close()
+	h.await(t, task.ID, "lost", inState(Lost))
+	clk.advance(24 * time.Hour)
+	h.d.Wake()
+	other.none(t, time.Second)
 }
 
 func TestResumeRefusedRequeues(t *testing.T) {
