@@ -248,11 +248,18 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	h.Rendezvous = &rendezvous.Server{
 		Registry:     h.Registry,
 		Authenticate: h.Directory.Authenticate,
-		Admit:        h.Directory.Admit,
-		Visible:      dirAPI.Visible,
-		Heartbeat:    hb,
-		Logf:         cfg.Logf,
-		Observe:      h.metrics.observeRendezvous,
+		Admit: func(owner string, n registry.Node) error {
+			err := h.Directory.Admit(owner, n)
+			if err != nil && !errors.Is(err, directory.ErrNotAdmitted) {
+				// The directory could not be read: not a refusal.
+				err = fmt.Errorf("%w: %w", rendezvous.ErrUnavailable, err)
+			}
+			return err
+		},
+		Visible:   dirAPI.Visible,
+		Heartbeat: hb,
+		Logf:      cfg.Logf,
+		Observe:   h.metrics.observeRendezvous,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
 	h.Dispatcher = &tasks.Dispatcher{
