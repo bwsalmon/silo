@@ -120,7 +120,8 @@ func drainRaw(conn net.Conn) {
 }
 
 // A peer that predates flow control is not throttled by windows it never
-// grants, but it cannot make a stream buffer without limit either.
+// grants, but it gets no more buffering than the window either: opting out of
+// flow control must not buy a peer more of our memory.
 func TestFlowControlLegacyPeer(t *testing.T) {
 	c1, c2 := pipeNetConn()
 	defer c1.Close()
@@ -152,9 +153,9 @@ func TestFlowControlLegacyPeer(t *testing.T) {
 		t.Fatal("write to legacy peer blocked on flow control")
 	}
 
-	// Data beyond legacyMaxBuffer on an unread stream resets that stream.
+	// Data beyond the window on an unread stream resets that stream.
 	chunk := make([]byte, maxPayloadLen)
-	for sent := 0; sent <= legacyMaxBuffer; sent += len(chunk) {
+	for sent := 0; sent <= initialWindow; sent += len(chunk) {
 		writeRawFrame(t, c2, FrameData, 2, chunk)
 	}
 	in, err := m.AcceptStream()

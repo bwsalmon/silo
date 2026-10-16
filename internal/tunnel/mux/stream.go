@@ -75,6 +75,7 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 				s.buf[0] = chunk[copied:]
 			}
 			s.bufLen -= copied
+			s.mux.buffered.Add(-int64(copied))
 			var credit int
 			if s.mux.peerFlowControl.Load() && !s.readClosed && !s.closed {
 				s.recvUnacked += copied
@@ -264,8 +265,7 @@ func (s *Stream) Close() error {
 		s.readClosed = true
 		s.writeClosed = true
 		s.closeErr = ErrStreamClosed
-		s.buf = nil
-		s.bufLen = 0
+		s.dropBufLocked()
 		s.mu.Unlock()
 
 		if !wasWriteClosed {
@@ -285,45 +285,59 @@ func (s *Stream) Reset() error {
 }
 
 func (s *Stream) resetWithError(err error) {
+	s.abort(err, func() { _ = s.mux.writeFrame(FrameReset, s.id, nil) })
+}
+
+// abort closes the stream with err, calling sendReset to tell the peer.
+func (s *Stream) abort(err error, sendReset func()) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
 		s.writeClosed = true
 		s.readClosed = true
 		s.closeErr = err
-		s.buf = nil
-		s.bufLen = 0
+		s.dropBufLocked()
 		s.mu.Unlock()
 
-		_ = s.mux.writeFrame(FrameReset, s.id, nil)
+		sendReset()
 		s.mux.removeStream(s.id)
 		close(s.done)
 		s.notify()
 	})
 }
 
+// dropBufLocked discards the unread data. Callers hold s.mu.
+func (s *Stream) dropBufLocked() {
+	s.mux.buffered.Add(-int64(s.bufLen))
+	s.buf = nil
+	s.bufLen = 0
+}
+
 // receiveData queues payload for Read. It never blocks: a stream whose unread
-// data would exceed its limit (the window a flow-controlled peer must respect,
-// or legacyMaxBuffer for a peer that cannot be throttled) is reset instead, so
-// one stalled reader can neither stall the session nor grow without bound.
+// data would exceed the window, or take the session past its cap on unread
+// data, is reset instead, so one stalled reader can neither stall the session
+// nor grow without bound. The window applies whether or not the peer speaks
+// flow control: one that does not cannot be throttled, so it gets no more.
 func (s *Stream) receiveData(payload []byte) {
 	s.mu.Lock()
 	if s.readClosed || s.closed {
 		s.mu.Unlock()
 		return
 	}
-	if s.bufLen+len(payload) > s.mux.recvLimit() {
+	n := len(payload)
+	if s.bufLen+n > initialWindow || s.mux.buffered.Load()+int64(n) > s.mux.maxBuffered {
 		s.mu.Unlock()
-		// Reset from a goroutine: this runs on the read loop, which must not
-		// block writing to the peer.
-		go s.resetWithError(ErrBufferFull)
+		// This runs on the read loop, which must not block writing to the
+		// peer, so the reset goes through the control writer.
+		s.abort(ErrBufferFull, func() { s.mux.queueReset(s.id) })
 		return
 	}
-	if len(payload) > 0 {
-		chunk := make([]byte, len(payload))
+	if n > 0 {
+		chunk := make([]byte, n)
 		copy(chunk, payload)
 		s.buf = append(s.buf, chunk)
-		s.bufLen += len(chunk)
+		s.bufLen += n
+		s.mux.buffered.Add(int64(n))
 	}
 	s.mu.Unlock()
 	s.notify()
@@ -350,8 +364,7 @@ func (s *Stream) receiveReset() {
 		s.writeClosed = true
 		s.readClosed = true
 		s.closeErr = ErrStreamReset
-		s.buf = nil
-		s.bufLen = 0
+		s.dropBufLocked()
 		s.mu.Unlock()
 
 		s.mux.removeStream(s.id)
@@ -370,8 +383,7 @@ func (s *Stream) closeWithError(err error) {
 		s.writeClosed = true
 		s.readClosed = true
 		s.closeErr = err
-		s.buf = nil
-		s.bufLen = 0
+		s.dropBufLocked()
 		s.mu.Unlock()
 
 		close(s.done)

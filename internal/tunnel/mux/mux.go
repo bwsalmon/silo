@@ -39,12 +39,23 @@ const (
 
 	// initialWindow is the per-stream receive window both sides of a
 	// flow-controlled session start with: a sender never has more than this many
-	// bytes outstanding that the receiver has not yet read.
+	// bytes outstanding that the receiver has not yet read. It is also the most
+	// a stream buffers for a peer that does not speak flow control: such a peer
+	// cannot be told to stop, so a stream that exceeds it is reset instead.
 	initialWindow = 1 << 20
-	// legacyMaxBuffer bounds the per-stream receive buffer when the peer does not
-	// speak flow control and so cannot be told to stop sending. A stream that
-	// exceeds it is reset rather than buffered without limit.
-	legacyMaxBuffer = 16 << 20
+
+	// defaultMaxStreams and defaultMaxBuffered are the per-session caps on open
+	// streams and on received bytes not yet read, across all streams.
+	defaultMaxStreams  = 1024
+	defaultMaxBuffered = 16 << 20
+
+	// ctrlQueueLen bounds the control frames (resets) the read loop may queue
+	// for the writer; a peer that provokes more than this before they drain
+	// has its session closed.
+	ctrlQueueLen = 1024
+
+	// maxOutstandingPings is how many of our recent pings a pong may answer.
+	maxOutstandingPings = 4
 
 	// maxUnseenPeerIDs bounds how many peer stream ids below the highest one
 	// seen are remembered as not yet seen; see Mux.claimPeerID.
@@ -71,7 +82,23 @@ type Config struct {
 	PingInterval time.Duration
 
 	// PingTimeout is how long to wait for a pong before closing the session. Defaults to 10s if <= 0.
+	// It is also the write deadline: a frame the transport cannot take within it closes the session.
 	PingTimeout time.Duration
+
+	// MaxStreams caps the streams open on the session at once; a peer stream
+	// beyond it is reset. Defaults to 1024 if <= 0.
+	MaxStreams int
+
+	// MaxBufferedBytes caps the received bytes not yet read across all of the
+	// session's streams; the stream whose data would exceed it is reset.
+	// Defaults to 16 MiB if <= 0.
+	MaxBufferedBytes int
+}
+
+// ctrlFrame is a payload-free control frame queued for the control writer.
+type ctrlFrame struct {
+	frameType byte
+	streamID  uint32
 }
 
 // Mux manages multiplexed bidirectional streams over a single transport connection.
@@ -110,6 +137,23 @@ type Mux struct {
 	pingTimeout  time.Duration
 	lastPongTime atomic.Int64 // Unix nano
 
+	// pings holds the payloads of our pings not yet answered, oldest first;
+	// only a pong echoing one of them counts as the peer being alive.
+	pingsMu sync.Mutex
+	pings   []uint64
+
+	// Frames the read loop must send go through one control writer
+	// (controlLoop) rather than a goroutine each. A pong owed to the peer is
+	// held in pongPending, the latest ping's payload replacing any earlier one
+	// not yet answered; resets are queued on ctrlCh.
+	pongPending atomic.Pointer[[]byte]
+	pongWake    chan struct{}
+	ctrlCh      chan ctrlFrame
+
+	maxStreams  int
+	maxBuffered int64
+	buffered    atomic.Int64 // received bytes not yet read, across streams
+
 	// negotiated is closed once the peer's first frame has been read, at which
 	// point peerFlowControl says whether the peer announced flow control.
 	negotiated      chan struct{}
@@ -125,6 +169,15 @@ func NewMux(rwc io.ReadWriteCloser, cfg Config) *Mux {
 	pingTimeout := cfg.PingTimeout
 	if pingTimeout <= 0 {
 		pingTimeout = 10 * time.Second
+	}
+
+	maxStreams := cfg.MaxStreams
+	if maxStreams <= 0 {
+		maxStreams = defaultMaxStreams
+	}
+	maxBuffered := cfg.MaxBufferedBytes
+	if maxBuffered <= 0 {
+		maxBuffered = defaultMaxBuffered
 	}
 
 	startID, peerStartID := uint32(2), uint32(1)
@@ -144,6 +197,10 @@ func NewMux(rwc io.ReadWriteCloser, cfg Config) *Mux {
 		pingInterval: pingInterval,
 		pingTimeout:  pingTimeout,
 		negotiated:   make(chan struct{}),
+		pongWake:     make(chan struct{}, 1),
+		ctrlCh:       make(chan ctrlFrame, ctrlQueueLen),
+		maxStreams:   maxStreams,
+		maxBuffered:  int64(maxBuffered),
 	}
 	m.lastPongTime.Store(time.Now().UnixNano())
 
@@ -156,16 +213,14 @@ func NewMux(rwc io.ReadWriteCloser, cfg Config) *Mux {
 	m.writeMu.Lock()
 	go func() {
 		defer m.writeMu.Unlock()
-		var ping [8]byte
-		binary.BigEndian.PutUint64(ping[:], uint64(time.Now().UnixNano()))
+		ping := m.newPing()
 		buf := append(encodeFrame(FrameWindowUpdate, 0, nil), encodeFrame(FramePing, 0, ping[:])...)
-		if _, err := m.rwc.Write(buf); err != nil {
-			go m.CloseWithError(fmt.Errorf("write error: %w", err))
-		}
+		_ = m.writeLocked(buf)
 	}()
 
 	go m.readLoop()
 	go m.pingLoop()
+	go m.controlLoop()
 
 	return m
 }
@@ -276,12 +331,95 @@ func (m *Mux) writeFrame(frameType byte, streamID uint32, payload []byte) error 
 		return m.getCloseErr()
 	}
 
-	_, err := m.rwc.Write(buf)
-	if err != nil {
+	return m.writeLocked(buf)
+}
+
+// writeLocked writes buf to the transport, giving it until the ping timeout
+// to take it, and closes the session if it does not. A peer that stops
+// reading therefore holds the session's writers for at most that long.
+// Callers hold writeMu.
+func (m *Mux) writeLocked(buf []byte) error {
+	if d, ok := m.rwc.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = d.SetWriteDeadline(time.Now().Add(m.pingTimeout))
+	}
+	if _, err := m.rwc.Write(buf); err != nil {
 		go m.CloseWithError(fmt.Errorf("write error: %w", err))
 		return err
 	}
 	return nil
+}
+
+// queueReset hands a reset for streamID to the control writer. The read loop
+// calls it and so must not block: if the queue is full the peer is provoking
+// resets faster than it reads them, and the session is closed.
+func (m *Mux) queueReset(streamID uint32) {
+	select {
+	case m.ctrlCh <- ctrlFrame{FrameReset, streamID}:
+	default:
+		m.CloseWithError(errors.New("tunnel mux: control queue overflow"))
+	}
+}
+
+// queuePong records that the peer is owed a pong echoing payload. Pings that
+// arrive while one is owed replace it, so a ping flood holds one payload.
+func (m *Mux) queuePong(payload []byte) {
+	m.pongPending.Store(&payload)
+	select {
+	case m.pongWake <- struct{}{}:
+	default:
+	}
+}
+
+// controlLoop writes the frames the read loop queues, one at a time.
+func (m *Mux) controlLoop() {
+	for {
+		select {
+		case <-m.doneCh:
+			return
+		case <-m.pongWake:
+			if p := m.pongPending.Swap(nil); p != nil {
+				if err := m.writeFrame(FramePong, 0, *p); err != nil {
+					return
+				}
+			}
+		case f := <-m.ctrlCh:
+			if err := m.writeFrame(f.frameType, f.streamID, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// newPing returns the payload for a ping and records it as outstanding.
+func (m *Mux) newPing() [8]byte {
+	var payload [8]byte
+	v := uint64(time.Now().UnixNano())
+	binary.BigEndian.PutUint64(payload[:], v)
+	m.pingsMu.Lock()
+	m.pings = append(m.pings, v)
+	if n := len(m.pings); n > maxOutstandingPings {
+		m.pings = append([]uint64(nil), m.pings[n-maxOutstandingPings:]...)
+	}
+	m.pingsMu.Unlock()
+	return payload
+}
+
+// answersPing reports whether payload echoes an outstanding ping, retiring
+// it and every older one if so. An unsolicited pong answers nothing.
+func (m *Mux) answersPing(payload []byte) bool {
+	if len(payload) != 8 {
+		return false
+	}
+	v := binary.BigEndian.Uint64(payload)
+	m.pingsMu.Lock()
+	defer m.pingsMu.Unlock()
+	for i, p := range m.pings {
+		if p == v {
+			m.pings = append([]uint64(nil), m.pings[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 func encodeFrame(frameType byte, streamID uint32, payload []byte) []byte {
@@ -291,14 +429,6 @@ func encodeFrame(frameType byte, streamID uint32, payload []byte) []byte {
 	binary.BigEndian.PutUint32(buf[5:9], streamID)
 	copy(buf[9:], payload)
 	return buf
-}
-
-// recvLimit is the most a stream may buffer before it is reset.
-func (m *Mux) recvLimit() int {
-	if m.peerFlowControl.Load() {
-		return initialWindow
-	}
-	return legacyMaxBuffer
 }
 
 // negotiatedChan returns the channel to wait on for negotiation, or nil once
@@ -413,9 +543,11 @@ func (m *Mux) handleFrame(frameType byte, streamID uint32, payload []byte) {
 		case FramePing:
 			// Reply off the read loop so a peer that is itself blocked writing
 			// to us cannot deadlock the session.
-			go func() { _ = m.writeFrame(FramePong, 0, payload) }()
+			m.queuePong(payload)
 		case FramePong:
-			m.lastPongTime.Store(time.Now().UnixNano())
+			if m.answersPing(payload) {
+				m.lastPongTime.Store(time.Now().UnixNano())
+			}
 		}
 		return
 	}
@@ -432,6 +564,11 @@ func (m *Mux) handleFrame(frameType byte, streamID uint32, payload []byte) {
 				m.streamsMu.Unlock()
 				return
 			}
+			if len(m.streams) >= m.maxStreams {
+				m.streamsMu.Unlock()
+				m.queueReset(streamID)
+				return
+			}
 			stream = newStream(m, streamID, false)
 			m.streams[streamID] = stream
 			m.streamsMu.Unlock()
@@ -442,7 +579,7 @@ func (m *Mux) handleFrame(frameType byte, streamID uint32, payload []byte) {
 				// Accept queue full; reset stream
 				stream.closeWithError(errors.New("accept queue full"))
 				m.removeStream(streamID)
-				go func() { _ = m.writeFrame(FrameReset, streamID, nil) }()
+				m.queueReset(streamID)
 				return
 			}
 		} else {
@@ -483,8 +620,7 @@ func (m *Mux) pingLoop() {
 				return
 			}
 
-			var payload [8]byte
-			binary.BigEndian.PutUint64(payload[:], uint64(time.Now().UnixNano()))
+			payload := m.newPing()
 			if err := m.writeFrame(FramePing, 0, payload[:]); err != nil {
 				return
 			}

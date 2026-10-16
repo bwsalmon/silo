@@ -394,15 +394,31 @@ uncapped slots are open (O-5).
 
 **T-TB2-7 (D) A node exhausting the hub.** *Mitigation:* each line is
 bounded (1 MiB control, task and event lines; 64 KiB node UI answers);
-the mux has per-stream flow control (`internal/tunnel/mux`); the hello
-must come within 30s; the token ring is bounded (1024 events or 1 MiB
-per task, `TestRingBound`); a node is admitted only with a valid token.
-*Residual:* a node may open unlimited streams, each a goroutine
+the hello must come within 30s; the token ring is bounded (1024 events
+or 1 MiB per task, `TestRingBound`); a node is admitted only with a
+valid token. The mux (`internal/tunnel/mux`) bounds what one session
+can hold, whatever the peer does (SA1-H2): a stream buffers at most its
+1 MiB window, also for a peer that does not announce flow control; a
+session buffers at most 16 MiB unread across its streams and holds at
+most 1024 open streams, a stream past either cap being reset; pings are
+answered by one control writer that owes at most one pong (later pings
+replace it) and resets go through a bounded queue whose overflow closes
+the session; only a pong echoing one of our outstanding pings counts as
+alive; every write has the ping timeout (10s) as its deadline, so a
+node that stops reading loses its session (`abuse_test.go`
+`TestPingFloodFromNonReadingPeerIsBounded`,
+`TestNonReadingPeerHitsWriteDeadline`,
+`TestUnsolicitedPongsDoNotKeepSessionAlive`,
+`TestLegacyPeerBuffersNoMoreThanWindow`, `TestSessionCapsBufferedBytes`,
+`TestSessionCapsStreams`, `TestControlQueueOverflowClosesSession`).
+*Residual:* each of a node's up to 1024 streams is a goroutine
 (`rendezvous.Server.acceptNodeStreams`), and an event stream that never
 writes its first line is held for the connection's life
-(`NodeStream` has no first-line deadline); the event store has no
-per-task or per-node quota; one connection's bandwidth through the one
-replica is unbounded. *Status:* open, medium (O-5). INV-19.
+(`NodeStream` has no first-line deadline); the number of nodes, and so
+of sessions each with its own caps, is not bounded per user; the event
+store has no per-task or per-node quota; one connection's bandwidth
+through the one replica is unbounded. *Status:* open, medium (O-5).
+INV-19.
 
 ### TB3: hub → Grain (offers, cancels, views, the node UI, planned messages)
 
@@ -673,7 +689,9 @@ verify the published image.
 
 **T-TB9-3 (T) Copied code drifting.** `internal/tunnel/mux` is copied
 from grain's `pkg/tunnel/mux`, and `events` from `old/events`.
-*Residual:* a security fix on one side is not on the other. *Status:*
+*Residual:* a security fix on one side is not on the other; the SA1-H2
+bounds (one control writer, matched pongs, write deadline, window for
+legacy peers, session caps) are in silo's copy and not yet in grain's. *Status:*
 accepted; the per-stage audit compares them (§8.2).
 
 ## 6. Security invariants
@@ -704,7 +722,7 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-16 | The hub refuses a state-changing request (`POST`, `PUT`, `DELETE`) sent cross-site by a browser. | gap: not built (O-1) |
 | INV-17 | Only a human signed in to the hub can be a task's `approved_by`, never its requester, a node or an agent; a task filed by a node or an agent is `proposed` until such an approval; a Grain does not treat a hub task as approved unless it carries `approved_by`. | gap: not built (O-4) |
 | INV-18 | The hub never logs a prompt, an event payload, artifact or node UI bytes, a token, a cookie or an IAP assertion; node-supplied strings it logs are truncated and quoted. | `internal/logsafe` `TestQuote`; `hub/tasks` `TestNodeStringsLogged` (the dispatcher's log) |
-| INV-19 | Everything a node sends is bounded: a control, task or event line ≤ 1 MiB, a node UI answer line ≤ 64 KiB, a ref ≤ 512 printable bytes, a kind by pattern, the token ring ≤ 1024 events or 1 MiB per task; and (open) streams per node, slots, repositories and stored events per task. | `hub/live` `TestRingBound`, `TestClassify`; `hub/faulttest` `TestLoad`; gap: the open bounds (O-5) |
+| INV-19 | Everything a node sends is bounded: a control, task or event line ≤ 1 MiB, a node UI answer line ≤ 64 KiB, a ref ≤ 512 printable bytes, a kind by pattern, the token ring ≤ 1024 events or 1 MiB per task; a mux session ≤ 1024 open streams, 1 MiB unread per stream and 16 MiB unread in all, one owed pong, 1024 queued resets, and a write that waits ≤ the ping timeout; and (open) nodes per user, slots, repositories and stored events per task. | `hub/live` `TestRingBound`, `TestClassify`; `hub/faulttest` `TestLoad`; `internal/tunnel/mux` `abuse_test.go`; gap: the open bounds (O-5) |
 | INV-20 | A deployed hub has exactly one human sign-on, and it is IAP or OIDC, never `-dev-user-header`; the IAP-off backend serves exactly `/v1/nodes/connect`; node UI hosts route only to the IAP backend; containers run nonroot with a read-only root filesystem. | `hub/server` `TestConfigSignOn`; `deploy/kubernetes/hub/validate.sh` (node UI route, metrics, NetworkPolicy, numeric user); gap: dev sign-on and the exact match (O-12) |
 | INV-21 | A Grain passes the operator's ambient credentials only to host-directory sandboxes, only for names its operator listed, never `HOME`, and runs host sandboxes on a reachable daemon only with `-allow-unisolated-host-sandboxes`. | grain `pkg/daemon/host_sandbox_env_test.go`, `pkg/agent/sandbox_env_args_test.go`; gap: hub-placed tasks (O-8) |
 | INV-22 | silo's CI workflows declare no write-scoped capability, and each read capability names a repository the workflow's own comment justifies. | gap: a check over `.grain/workflows` |
@@ -723,7 +741,7 @@ a candidate task; none is fixed by this document.
 | O-8 | Hub-placed tasks reach host sandboxes with ambient credentials. | high | T-TB7-1 | grain (policy rule; register as unisolated) |
 | O-2 | The node UI forwards the viewer's IAP assertion, and possibly IAP's cookie, to the node. | medium | T-TB3-3, T-TB3-4 | silo (`nodeui.rewrite`), before grain's side ships |
 | O-6 | The hub UI must render node and agent content safely (§5 TB4). | medium, blocks U1 | T-TB4-1 | silo, tasks 4222–4227 |
-| O-5 | No caps on a node's slots, repositories, streams, first-line wait, or stored events; no per-user rate limits. | medium | T-TB1-8, T-TB2-6, T-TB2-7 | silo |
+| O-5 | No caps on a node's slots, repositories, first-line wait, or stored events, or on a user's nodes; no per-user rate limits. (Streams per node are capped by the mux, SA1-H2.) | medium | T-TB1-8, T-TB2-6, T-TB2-7 | silo |
 | O-13 | Images pinned by tag, not digest; the published image is not signed. | medium | T-TB9-2 | silo `Dockerfile`, `deploy/` |
 | O-10 | No audit log of directory changes. | medium | T-TB1-9, T-TB5-2 | silo |
 | O-12 | `validate.sh` does not check that the dev sign-on is unset and the IAP-off route is an exact match. | low | T-TB1-1, T-TB5-4 | silo `deploy/` |
