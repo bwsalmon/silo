@@ -7,8 +7,8 @@ Turn what is new or changed in it into implementation and test tasks.
 
 ## Report
 
-Finish with a summary of what you planned. It becomes this task's
-`closed.summary`.
+Finish with a summary of what you planned. It becomes the
+`closed.summary` of this run's execution record.
 
 Before you report, confirm each of these:
 

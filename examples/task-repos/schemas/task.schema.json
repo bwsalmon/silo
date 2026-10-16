@@ -1,29 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/task-repos/task.schema.json",
-  "title": "grain/task@v1: one task; its body is the prompt (docs/task-repos.md §5)",
+  "title": "grain/task@v1: one task, where its author wrote it; its body is the prompt, and how it ran is in its execution records (docs/task-repos.md §5)",
   "type": "object",
   "properties": {
     "kind": {"const": "task"},
     "schema": {"const": "grain/task@v1"},
-    "id": {"$ref": "common.schema.json#/$defs/id"},
     "aka": {"$ref": "common.schema.json#/$defs/aka"},
+    "moved_from": {"$ref": "common.schema.json#/$defs/movedFrom"},
     "title": {"type": "string", "minLength": 1},
     "team": {"type": "string"},
     "repo": {"type": "string", "description": "The code repo the work lands in, as a git URL; absent for a team-targeted task"},
     "base": {"type": "string"},
-    "state": {"enum": ["proposed", "rejected", "approved", "placed", "running", "refused", "done", "failed", "cancelled", "moved"]},
+    "state": {"enum": ["proposed", "rejected", "approved", "cancelled"], "description": "Only what the author and Silo decide (§5.1); progress is derived from execution records"},
     "submitter": {"$ref": "common.schema.json#/$defs/principal"},
     "submitted_via": {"enum": ["git", "api", "ui", "cli", "schedule", "planning", "agent"]},
     "approved_by": {"$ref": "common.schema.json#/$defs/principal"},
     "approved_at": {"$ref": "common.schema.json#/$defs/time"},
     "rejection": {"type": "object", "properties": {"by": {"type": "string"}, "at": {"type": "string"}, "reason": {"type": "string"}}},
+    "cancel": {"type": "object", "properties": {"by": {"type": "string"}, "at": {"type": "string"}, "reason": {"type": "string"}}, "required": ["by", "at"], "description": "Silo's, honoured by every Grain holding a reference to the task (§8.7)"},
     "origin": {"type": "string", "description": "What this work comes from: a ref, or an existing Origin: value (task 4193, owner/repo#N)"},
     "filed_by": {
       "type": "object",
       "properties": {
         "grain": {"type": "string"},
-        "task": {"$ref": "common.schema.json#/$defs/ref"},
+        "run": {"$ref": "common.schema.json#/$defs/refString"},
         "principal": {"$ref": "common.schema.json#/$defs/principal"}
       }
     },
@@ -47,8 +48,8 @@
       "allOf": [{"$ref": "common.schema.json#/$defs/ref"}],
       "properties": {"fired_at": {"$ref": "common.schema.json#/$defs/time"}}
     },
-    "depends_on": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/ref"}},
-    "supersedes": {"$ref": "common.schema.json#/$defs/ref"},
+    "depends_on": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/refString"}},
+    "supersedes": {"$ref": "common.schema.json#/$defs/refString"},
     "implements": {
       "type": "array",
       "items": {
@@ -60,52 +61,14 @@
         "required": ["rev", "hash"]
       }
     },
-    "placement": {
-      "type": "object",
-      "properties": {
-        "grain": {"type": "string"},
-        "ref": {"$ref": "common.schema.json#/$defs/refString"},
-        "generation": {"type": "integer", "minimum": 1},
-        "at": {"$ref": "common.schema.json#/$defs/time"},
-        "intake": {"$ref": "common.schema.json#/$defs/ref"},
-        "previous": {"$ref": "common.schema.json#/$defs/ref"}
-      },
-      "required": ["grain", "generation", "at"]
-    },
-    "attestation": {"type": "string", "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*$", "description": "The hub's signed claims JWT (hub.md §6.4)"},
-    "refusal": {"type": "object", "properties": {"reason": {"type": "string"}, "at": {"type": "string"}}, "required": ["reason"]},
-    "cancel": {"type": "object", "properties": {"by": {"type": "string"}, "at": {"type": "string"}, "reason": {"type": "string"}}, "required": ["by", "at"]},
-    "moved_to": {"$ref": "common.schema.json#/$defs/ref"},
-    "closed": {
-      "description": "The final-state snapshot, written once by the Grain (§1.2, §8.5)",
-      "type": "object",
-      "properties": {
-        "outcome": {"enum": ["done", "failed", "cancelled", "nothing_needed"]},
-        "at": {"$ref": "common.schema.json#/$defs/time"},
-        "summary": {"type": "string"},
-        "change": {
-          "type": "object",
-          "properties": {
-            "url": {"type": "string"},
-            "branch": {"type": "string"},
-            "merge_commit": {"$ref": "common.schema.json#/$defs/sha"},
-            "commits": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/sha"}}
-          }
-        },
-        "design_revs": {
-          "type": "array",
-          "items": {"type": "object", "properties": {"item": {"type": "string"}, "rev": {"$ref": "common.schema.json#/$defs/sha"}, "hash": {"type": "string"}}, "required": ["item", "rev"]}
-        },
-        "follow_ups": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/ref"}}
-      },
-      "required": ["outcome", "at"]
-    }
+    "id": false,
+    "placement": false,
+    "moved_to": false,
+    "closed": false
   },
-  "required": ["kind", "schema", "id", "title", "state", "submitter", "created_at"],
+  "required": ["kind", "schema", "title", "state", "submitter", "created_at"],
   "allOf": [
     {"if": {"properties": {"state": {"const": "approved"}}}, "then": {"required": ["approved_by", "approved_at"]}},
-    {"if": {"properties": {"state": {"enum": ["placed", "running", "refused", "done", "failed", "cancelled"]}}}, "then": {"required": ["placement"]}},
-    {"if": {"properties": {"state": {"const": "moved"}}}, "then": {"required": ["moved_to"]}},
-    {"if": {"properties": {"state": {"enum": ["done", "failed", "cancelled"]}}}, "then": {"required": ["closed"]}}
+    {"if": {"properties": {"state": {"const": "cancelled"}}}, "then": {"required": ["cancel"]}}
   ]
 }

@@ -66,10 +66,10 @@ Contents:
 identity, directory, backlog and dispatcher, live events and the
 view-through, `silo hub serve` and its GKE deployment (not applied to
 any project), the node UI's `http` stream and per-node hosts (task
-4228's hub side, `hub/nodeui`, hub.md §11), and the dispatcher lease
-(R1). Built in grain: the node client (`pkg/hubnode`), offers, resumes
-and cancels, and local policy. **Planned, not built:** the hub UI
-([ui.md](ui.md), tasks 4222–4227); grain's end of the node UI stream
+4228's hub side, `hub/nodeui`, hub.md §11), the dispatcher lease
+(R1), and the hub UI's read-only stage U1 (`hub/ui`, `ui/`, ui.md §7). Built in grain: the node client (`pkg/hubnode`), offers, resumes
+and cancels, and local policy. **Planned, not built:** the rest of
+the hub UI ([ui.md](ui.md) U2–U5, tasks 4223–4227); grain's end of the node UI stream
 (hub.md §11.3); interactive sessions (tasks 4229, 4230: `message` and
 `approve` from hub to Grain); upward task filing and cross-Grain
 dependencies (tasks 4233, 4235); the conformance kit (task 4236);
@@ -567,8 +567,16 @@ or `data:` URLs, and no remote images by default; render diffs as text;
 fetch artifacts and show them in memory, never navigate to them; ship a
 strict CSP (`default-src 'self'`, no `unsafe-inline`, no `unsafe-eval`,
 `frame-ancestors 'none'`) with `nosniff`; never use
-`dangerouslySetInnerHTML` or its equivalent on node content. *Status:*
-mitigated for the API; **open for the hub UI** (O-6). INV-15.
+`dangerouslySetInnerHTML` or its equivalent on node content. *As built
+in U1 (ui.md §7):* text is React text; markdown drops raw HTML, keeps
+only `http`, `https`, `mailto` and relative links, and shows images as
+links; diffs render through `react-diff-view` as text; artifacts are
+fetched into memory; the page's CSP is `default-src 'self'`,
+`script-src 'self'`, styles only from the hub's files or a per-load
+nonce, `img-src 'self'`, `worker-src 'none'`, `frame-ancestors 'none'`,
+with `nosniff` (`hub/ui`). *Status:* mitigated for the API; built for
+the hub UI's U1, **open until U1's per-stage audit** (§8.2, O-6).
+INV-15.
 
 **T-TB4-2 (I) Content cached in browsers or intermediaries.**
 *Mitigation:* artifacts, SSE and minted tokens are `no-store`; ui.md
@@ -766,7 +774,7 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-12 | A Grain refuses, and never runs, a task its local policy does not allow, whatever claims the task carries; a Grain connected to a hub runs with a local policy. | `scripts/grain-interop.sh` (a task outside grain's policy is refused); grain `pkg/policy` tests; gap: the second clause (O-3) |
 | INV-13 | A node's UI is served only on that node's own host, only to the node's owner (not hub admins), never with the hub's `Authorization` header or session cookies, never setting a cookie with a `Domain`, and accepts WebSocket upgrades only from its own origin. | `hub/nodeui` `TestNode`, `TestAccess`, `TestWebSocket`, `TestViewThrough`; `hub/server` `TestNodeUIHosts`; gap: IAP's own cookies (O-2) |
 | INV-14 | A browser's WebSocket subscription to task events is accepted only from the hub's own origin. | `hub/live` `TestWebSocket` |
-| INV-15 | No text a node, an agent or a submitter supplied is ever interpreted as HTML or script in the hub's origin. | gap: the hub UI's tests (tasks 4222–4227) and a security suite case with a script-bearing title, prompt, conversation event, reason, kind and artifact |
+| INV-15 | No text a node, an agent or a submitter supplied is ever interpreted as HTML or script in the hub's origin. | `ui/src/content.test.tsx` (a script-bearing title, prompt, reason, status, conversation event, result, kind and artifact, rendered inert); `hub/ui` `TestHandler` (the CSP); gap: a security suite case through a fake Grain into a browser |
 | INV-16 | The hub refuses a state-changing request (`POST`, `PUT`, `DELETE`) a browser sent from any origin but the hub's own, a node UI host on the hub's site included, and one whose body is not `application/json`. | `hub/identity` `TestSameOrigin`, `TestOIDCSignIn`; `hub/tasks` `TestAPISameOrigin`; `hub/directory` `TestAPISameOrigin` |
 | INV-17 | Only a human signed in to the hub can be a task's `approved_by`, never its requester, a node or an agent; a task filed by a node or an agent is `proposed` until such an approval; a Grain does not treat a hub task as approved unless it carries `approved_by`. | `hub/tasks` `TestCreate` (never the submitter), `TestAPISubmit` (a submission cannot set it), `TestOfferApprovedBy` (offered and signed); gap: the hub's approval flow and `proposed` (O-4) |
 | INV-18 | The hub never logs a prompt, an event payload, artifact or node UI bytes, a token, a cookie or an IAP assertion; node-supplied strings it logs are truncated and quoted. | `internal/logsafe` `TestQuote`; `hub/tasks` `TestNodeStringsLogged` (the dispatcher's log) |
@@ -787,7 +795,7 @@ a candidate task; none is fixed by this document.
 | O-4 | No hub approval flow to record `approved_by` (carried and signed since task 4406; grain files offers without one for local approval); no design yet for agent-filed tasks, `approve` or `message`. | high, before 4229/4230/4233/4235 | T-TB1-7, T-TB3-5, T-TB7-3 | silo (`proposed`, an approval flow), grain (`hubTasks.Start`) |
 | O-8 | Hub-placed tasks reach host sandboxes with ambient credentials. | high | T-TB7-1 | grain (policy rule; register as unisolated) |
 | O-2 | The node UI forwards the viewer's IAP assertion, and possibly IAP's cookie, to the node. | medium | T-TB3-3, T-TB3-4 | silo (`nodeui.rewrite`), before grain's side ships |
-| O-6 | The hub UI must render node and agent content safely (§5 TB4). | medium, blocks U1 | T-TB4-1 | silo, tasks 4222–4227 |
+| O-6 | The hub UI must render node and agent content safely (§5 TB4). Built in U1 (T-TB4-1's "as built"), awaiting U1's per-stage audit. | medium, blocks U1 | T-TB4-1 | silo, tasks 4222–4227 |
 | O-5 | No caps on a node's slots, repositories, first-line wait, or stored events, or on a user's nodes; no per-user rate limits. (Streams per node are capped by the mux, SA1-H2.) | medium | T-TB1-8, T-TB2-6, T-TB2-7 | silo |
 | O-13 | Images pinned by tag, not digest; the published image is not signed. | medium | T-TB9-2 | silo `Dockerfile`, `deploy/` |
 | O-10 | No audit log of directory changes (repository assignments, releases and team deletions are logged lines only). | medium | T-TB1-9, T-TB5-2 | silo |

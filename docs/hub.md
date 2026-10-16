@@ -1298,7 +1298,7 @@ audit plan. This section is the hub's part of it in brief.
 | 2.3 | The backlog and its store, the intake API, the dispatcher (per-team ordering, constraints, admission rechecked, refusal, lost nodes, resume, cancel) and the task-stream protocol (`hub/tasks`). `registry.ClaimFor`. | here, built |
 | 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
 | 2.5 | `silo hub serve` (`hub/server`, `cmd/silo`): every part above as one server, health and readiness, graceful shutdown with `goodbye`. Its image, GKE manifests and terraform for GKE behind IAP (§2.1, §5.2.1, `deploy/`, [deploy.md](deploy.md)). | here, built (not applied to any project) |
-| 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
+| 2.6 | The hub's human web UI for filing, approving and watching tasks across teams: a new UI in silo, [ui.md](ui.md) option (a), in stages U1-U6 (ui.md §6). U1 is built: `silo hub serve` serves the read-only backlog, task (live events and the view-through) and node pages at `/` (`hub/ui`, `ui/`, ui.md §7). U2-U6 are not. | here; U5 and part of U6 in bwsalmon/grain |
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the recovery time of each failure (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
 | 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods (`hub/notify`); R5, the rolling Deployment. | here, built (not applied to any project) |
@@ -1306,6 +1306,7 @@ audit plan. This section is the hub's part of it in brief.
 | — | Grain accepting a hub offer: verifying `requester_attestation` with `policy.ApplySiloClaims` and recording it with `Store.SetSiloAttestation` (§6.4) | bwsalmon/grain |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
+| 2.11 | Future, designed, not filed: a Grain's UI opened from the hub UI by its owner or its owning team's admins, read-only by default at the Grain, with a capability in `hello`, a separate IAP backend and audience for node hosts, and audit ([grain-ui-proxy.md](grain-ui-proxy.md), stages S1–S5 here and G1–G4 in grain). It amends §11.2–§11.3: the IAP assertion and cookies are no longer passed to the node. | silo, then bwsalmon/grain |
 
 ## 10. Open questions
 
@@ -1316,6 +1317,9 @@ audit plan. This section is the hub's part of it in brief.
   to be grain's decision: the hub passing `viewer` and the IAP
   assertion, and the Grain serving that viewer as its own access list
   says. Until grain has a read-only role to map them to, owners only.
+  [grain-ui-proxy.md](grain-ui-proxy.md) proposes the answer for team
+  admins: the hub passes the viewer's role, and the Grain serves hub
+  sessions read-only unless its owner opts in.
 
 Two questions that were here are decided: lost running tasks are
 requeued only after a grace a team turns on (§6.3), and the hub runs
@@ -1323,6 +1327,9 @@ several replicas, built in stages, with each failure's recovery time
 written down (§2.2).
 
 ## 11. A node's UI through the hub (built: `hub/nodeui`; grain's side to come)
+
+(Extended for team admins, read-only at the Grain, and the hub UI's
+button by [grain-ui-proxy.md](grain-ui-proxy.md), a design under review.)
 
 ### 11.1 What grain's relay carries
 
