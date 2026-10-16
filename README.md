@@ -49,7 +49,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 ## Building and testing
 
 ```sh
-gofmt -l hub internal events
+gofmt -l cmd hub internal events
 go build ./... && go vet ./... && go test -race ./...
 ```
 

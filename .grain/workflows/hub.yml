@@ -50,7 +50,7 @@ jobs:
       # given only the hub module's own directories.
       - name: Format
         run: |
-          unformatted="$(gofmt -l hub internal events)"
+          unformatted="$(gofmt -l cmd hub internal events)"
           if [ -n "$unformatted" ]; then
             echo "gofmt needed on:"; echo "$unformatted"
             exit 1

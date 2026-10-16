@@ -360,3 +360,31 @@ func TestRunReconnects(t *testing.T) {
 		return e.Status == registry.Offline
 	})
 }
+
+func TestShutdownSaysGoodbye(t *testing.T) {
+	s, ts := hub(t)
+	c, err := client(ts.URL, "alice-tok", registry.Node{ID: "ws-1", Repos: []string{"o/r"}, Slots: 1}).Connect(ctx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	eventually(t, "ws-1 online", func() bool { e, _ := s.Registry.Get("ws-1"); return e.Status == registry.Online })
+
+	if err := s.Shutdown(ctx(t), "the hub is restarting"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node's connection outlived the hub's shutdown")
+	}
+	if got := c.Goodbye(); got != "the hub is restarting" {
+		t.Errorf("goodbye %q, want the hub's reason", got)
+	}
+	eventually(t, "ws-1 offline", func() bool { e, _ := s.Registry.Get("ws-1"); return e.Status == registry.Offline })
+
+	_, err = client(ts.URL, "alice-tok", registry.Node{ID: "ws-1", Repos: []string{"o/r"}, Slots: 1}).Connect(ctx(t))
+	if err == nil || errors.Is(err, ErrRefused) {
+		t.Errorf("connecting to a hub that is shutting down: %v, want the handshake to fail (503)", err)
+	}
+}

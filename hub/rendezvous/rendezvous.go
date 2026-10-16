@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/bwsalmon/silo/hub/registry"
 )
@@ -53,6 +54,10 @@ const (
 	TypeWelcome   = "welcome"   // hub → node, the answer to hello
 	TypeError     = "error"     // hub → node, a refusal; the hub then closes
 	TypeHeartbeat = "heartbeat" // node → hub
+	// TypeGoodbye is the hub ending a welcomed node's connection, Error
+	// saying why (it is shutting down): the node reconnects, to this
+	// hub's replacement, as it would after any drop.
+	TypeGoodbye = "goodbye" // hub → node
 )
 
 // Message is one line on the control stream.
@@ -75,10 +80,12 @@ type Message struct {
 // maxLine bounds one control message.
 const maxLine = 1 << 20
 
-// lines reads and writes control messages on one stream.
+// lines reads and writes control messages on one stream. Writes may
+// come from more than one goroutine (the hub's goodbye); reads may not.
 type lines struct {
-	c net.Conn
-	r *bufio.Reader
+	c  net.Conn
+	r  *bufio.Reader
+	mu sync.Mutex
 }
 
 func newLines(c net.Conn) *lines {
@@ -112,6 +119,8 @@ func (l *lines) write(m Message) error {
 	if err != nil {
 		return err
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	_, err = l.c.Write(append(b, '\n'))
 	return err
 }
