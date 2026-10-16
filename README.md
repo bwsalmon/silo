@@ -44,6 +44,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `events` | The schema of the events a node streams to the hub for each task (hub.md §7.1), copied from the retired runner's `old/events`. |
 | `internal/tunnel/mux` | The stream multiplexer the rendezvous carries, copied from grain's `pkg/tunnel/mux`. |
 | `internal/pgtest` | Throwaway PostgreSQL servers for tests. |
+| `internal/fakeoidc`, `scripts/` | The `grain-interop` CI job (below): `scripts/grain-interop.sh` runs this hub against a real grain, with a fake OIDC provider and a fake GitHub API. |
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
 | `docs/deploy.md` | How to deploy the hub on GKE behind IAP, in `bsalmon-gke-dev`. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
@@ -67,6 +68,37 @@ failure.
 manifests on a kind cluster (`deploy/kubernetes/hub/validate.sh`) and
 runs `terraform validate` and `terraform test` (mock providers) in
 `deploy/terraform/hub`. Nothing is applied anywhere.
+
+`.grain/workflows/grain-interop.yml` tests this commit's hub against
+**real grain**, which the fake Grains in `hub/*`'s own tests can't
+stand in for. The job reads bwsalmon/grain through the git proxy
+(`capabilities: ["repo-read:bwsalmon/grain"]`) and builds grain's
+`main` twice: once as it is, with the silo client it pins, and once
+against this commit's hub packages. It runs on every push and pull
+request, and takes about two and a half minutes.
+`scripts/grain-interop.sh` does the work. It starts `silo hub serve`
+on SQLite, signing a test user in through a fake OIDC provider
+(`internal/fakeoidc`), and starts a grain daemon pointed at it. The
+daemon runs with a local policy and a fake GitHub API
+(`scripts/fake-github.py`), and with no sandboxes and no CI, so no
+agent or model runs. It then checks the task interface
+([`docs/hub-interface.md`](docs/hub-interface.md)) as far as grain
+supports it:
+
+- grain builds, and its hub tests pass, against this commit;
+- `grain hub login` mints the node token;
+- grain shows `online` in `GET /v1/nodes`;
+- a task filed through `POST /v1/tasks` is accepted;
+- a task for a repository outside grain's policy is refused;
+- a cancel on the hub closes the task on grain;
+- a task ended on grain reaches the hub as its result.
+
+Stages grain doesn't support yet (events, view-through, merge) are
+skipped, and the log says so. A red job is a real mismatch. On a
+failure the script reruns the same check against silo's base commit,
+and its last lines say which side changed, by both commits' short
+SHAs. To run it by hand:
+`GRAIN_SRC=/path/to/grain scripts/grain-interop.sh`.
 
 To run a hub locally:
 

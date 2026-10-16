@@ -1,0 +1,53 @@
+# This commit's hub against real grain (scripts/grain-interop.sh): grain's
+# main is fetched through the git proxy (repo-read, below) and built
+# twice -- as it is, with the silo client it pins, and against this
+# commit's hub packages -- and each grain daemon logs in to a hub built
+# from this commit (`grain hub login`), registers, accepts a task filed
+# through POST /v1/tasks, refuses one its local policy does not allow,
+# and carries a cancel down and a result up. Stages grain does not
+# support yet are skipped and say so. A red job is a mismatch between
+# silo's interface and grain's, and its last lines say which side
+# changed, by both commits' short SHAs. The fake Grains in hub/*'s own
+# tests (hub.yml) do not catch a change grain does not follow; this does.
+#
+# TODO(task 4203): call grain's own round-trip harness once it lands.
+# TODO(task 4236): run the conformance kit against this grain too.
+name: grain-interop
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  grain-interop:
+    name: grain-interop
+    # The retired runner and the documentation, which neither side reads.
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    capabilities: ["repo-read:bwsalmon/grain"]
+    timeout-minutes: 25
+    steps:
+      # grain's main, cloned through the git proxy the way this
+      # checkout's own origin is. If this is refused, the team's GitHub
+      # credential (Team settings -> Git identity) cannot read
+      # bwsalmon/grain; this file is not the cause.
+      - name: Fetch grain
+        run: |
+          set -e
+          origin="$(git remote get-url origin)"
+          base="${origin%/${GRAIN_CI_REPO}.git}"
+          base="${base%/${GRAIN_CI_REPO}}"
+          git clone -q --depth 1 --branch main "$base/bwsalmon/grain.git" /tmp/grain
+          git -C /tmp/grain log -1 --format='grain main is %h: %s'
+
+      - name: Round trip
+        env:
+          GRAIN_SRC: /tmp/grain
+        run: scripts/grain-interop.sh
