@@ -97,9 +97,10 @@ func readJSON(r *http.Request, v any) error {
 }
 
 // sees is whether the caller may see t: a member of its team, or, for a
-// repository's task, of the team that owns the repository now.
+// repository's task, of the team a hub admin transferred the repository
+// to with its history (directory.Access.SeesTask).
 func sees(acc *directory.Access, t Task) bool {
-	return acc.SeesTeam(t.Team) || (t.Repo != "" && acc.SeesRepo(t.Repo))
+	return acc.SeesTask(t.Team, t.Repo)
 }
 
 // manages is whether the caller may cancel or requeue t.

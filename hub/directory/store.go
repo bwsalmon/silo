@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS team_members (
 CREATE INDEX IF NOT EXISTS team_members_principal ON team_members (principal);
 CREATE TABLE IF NOT EXISTS team_repos (
 	repo TEXT PRIMARY KEY,
-	team TEXT NOT NULL REFERENCES teams (id) ON DELETE CASCADE
+	team TEXT NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
+	history INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS team_repos_team ON team_repos (team);
 CREATE TABLE IF NOT EXISTS node_tokens (
@@ -188,8 +189,13 @@ const legacyPrincipals = `UPDATE team_members SET principal = 'user:' || princip
 // were first made. node_tokens.released_at (SA1-H1) is null on every
 // token minted before it, so each node ID stays bound to every owner
 // that ever had a token for it until it is released.
+// team_repos.history (SA1-M2) is 0 on every assignment made before it,
+// so a repository's tasks filed under an earlier team stop showing to
+// the team that owns it now until a hub admin transfers it again with
+// its history.
 var added = []dbaccess.Column{
 	{Table: "node_tokens", Name: "released_at", Add: `ALTER TABLE node_tokens ADD COLUMN released_at BIGINT`},
+	{Table: "team_repos", Name: "history", Add: `ALTER TABLE team_repos ADD COLUMN history INTEGER NOT NULL DEFAULT 0`},
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -339,8 +345,10 @@ func (s *Store) CreateTeam(ctx context.Context, id, name string) error {
 }
 
 // DeleteTeam deletes a team, its memberships and its repositories,
-// which are left with no owner, so no node serves them until another
-// team takes them.
+// which are left with no owner, so no node serves them until a hub
+// admin assigns them to another team. Their tasks stay filed under the
+// deleted team: they go to the next owner only if it is given them
+// with TransferRepo.
 func (s *Store) DeleteTeam(ctx context.Context, id string) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		for _, q := range []string{`DELETE FROM team_members WHERE team = ?`, `DELETE FROM team_repos WHERE team = ?`, `DELETE FROM team_settings WHERE team = ?`} {
@@ -469,13 +477,34 @@ func (s *Store) RemoveMember(ctx context.Context, team, principal string) error 
 	return nil
 }
 
-// AssignRepo makes team the owner of repo. A repository another team
-// owns is refused (ErrOwned): it has to be released first, so one
-// team's admin cannot take another team's repository.
+// AssignRepo makes team the owner of repo, from now on: the team's
+// members' nodes may serve it and the team files tasks in it, but the
+// tasks earlier teams filed in it stay visible only to those teams
+// (Access.SeesTask). A repository another team owns is refused
+// (ErrOwned): it has to be released first, so no team can take another
+// team's repository. Only a hub admin assigns repositories through the
+// API (SA1-M2): a team admin could otherwise claim any repository no
+// team owned at that moment.
 func (s *Store) AssignRepo(ctx context.Context, team, repo string) error {
+	return s.assignRepo(ctx, team, repo, false)
+}
+
+// TransferRepo is AssignRepo carrying the repository's history with
+// it: team's members also see the tasks earlier teams filed in repo.
+// It is a hub admin's explicit decision (T-TB1-2), never a side effect
+// of a release or of deleting a team.
+func (s *Store) TransferRepo(ctx context.Context, team, repo string) error {
+	return s.assignRepo(ctx, team, repo, true)
+}
+
+func (s *Store) assignRepo(ctx context.Context, team, repo string, history bool) error {
 	r, err := normRepo(repo)
 	if err != nil {
 		return err
+	}
+	h := 0
+	if history {
+		h = 1
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		if err := s.teamExists(ctx, tx, team); err != nil {
@@ -485,13 +514,16 @@ func (s *Store) AssignRepo(ctx context.Context, team, repo string) error {
 		err := tx.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&owner)
 		switch {
 		case err == nil && owner == team:
-			return nil
+			// Already its own: only whether it carries the history
+			// changes.
+			_, err = tx.ExecContext(ctx, s.q(`UPDATE team_repos SET history = ? WHERE repo = ?`), h, r)
+			return err
 		case err == nil:
 			return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, r, owner)
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO team_repos (repo, team) VALUES (?, ?)`), r, team)
+		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO team_repos (repo, team, history) VALUES (?, ?, ?)`), r, team, h)
 		if isUnique(err) {
 			return fmt.Errorf("%w: %s", ErrOwned, r)
 		}
@@ -639,9 +671,9 @@ func (s *Store) repoOwners(ctx context.Context, repos []string, out map[string]s
 	return nil
 }
 
-// reposOf maps each repository the teams own to its team.
-func (s *Store) reposOf(ctx context.Context, teams map[string]Role) (map[string]string, error) {
-	out := map[string]string{}
+// reposOf maps each repository the teams own to its ownership.
+func (s *Store) reposOf(ctx context.Context, teams map[string]Role) (map[string]ownership, error) {
+	out := map[string]ownership{}
 	if len(teams) == 0 {
 		return out, nil
 	}
@@ -649,17 +681,20 @@ func (s *Store) reposOf(ctx context.Context, teams map[string]Role) (map[string]
 	for t := range teams {
 		args = append(args, t)
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team FROM team_repos WHERE team IN (?`+strings.Repeat(", ?", len(args)-1)+`)`), args...)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team, history FROM team_repos WHERE team IN (?`+strings.Repeat(", ?", len(args)-1)+`)`), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var repo, team string
-		if err := rows.Scan(&repo, &team); err != nil {
+		var (
+			repo, team string
+			history    int64
+		)
+		if err := rows.Scan(&repo, &team, &history); err != nil {
 			return nil, err
 		}
-		out[repo] = team
+		out[repo] = ownership{team: team, history: history != 0}
 	}
 	return out, rows.Err()
 }
