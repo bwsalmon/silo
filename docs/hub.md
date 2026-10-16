@@ -1387,6 +1387,21 @@ traffic over it. As built (`hub/nodeui`), with `silo hub serve
   cannot set cookies on its siblings or on the hub. A WebSocket
   upgrade must come from the node's own origin (or none, which is not
   a browser).
+- **Same site, other origin.** A node's host is its own origin, but
+  under the hub's domain it is the hub's *site*, so the browser sends
+  the hub's `SameSite=Lax` cookies (its OIDC session, and IAP's) on a
+  node UI page's requests to the hub, and `Sec-Fetch-Site` says
+  `same-site`, not `cross-site`. A Grain's UI could otherwise file,
+  cancel and requeue tasks, mint node tokens and administer teams as
+  its owner (audit SA1-M1). So every `POST`, `PUT` and `DELETE` of
+  the directory's and the backlog's APIs, and the OIDC sign-out, is
+  refused unless `Sec-Fetch-Site` is absent (not a browser) or
+  `same-origin`, any `Origin` is the hub's own scheme and host, and a
+  body is `Content-Type: application/json` (`identity.SameOrigin`;
+  415 for the last). Clients of the API send that content type. Where
+  it can, a deployment puts the node UI domain on a different
+  registrable domain from the hub's (deploy.md §8), so that the hub's
+  cookies are not sent at all.
 - **Sign-on.** The node hosts need IAP: an OIDC session cookie is the
   hub host's alone, so behind OIDC a node host signs nobody in. The
   same IAP backend serves both, so a node verifying the assertion uses
