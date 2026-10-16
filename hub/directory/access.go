@@ -153,8 +153,16 @@ type Access struct {
 	// group:<name> for any of its groups, with the higher role where
 	// both match.
 	Teams map[string]Role
-	// repos maps each repository the principal's teams own to its team.
-	repos map[string]string
+	// repos maps each repository the principal's teams own to its
+	// ownership.
+	repos map[string]ownership
+}
+
+// ownership is one team_repos row: the team that owns a repository, and
+// whether it was given the repository's history (Store.TransferRepo).
+type ownership struct {
+	team    string
+	history bool
 }
 
 // Access loads p's teams. hubAdmin is the hub's own configuration's
@@ -191,14 +199,33 @@ func (a *Access) AdminOf(team string) bool {
 	return a.HubAdmin || a.Teams[team] == Admin
 }
 
-// SeesRepo is whether the principal may see repo's tasks and events:
-// it is one of their teams' repositories.
+// SeesRepo is whether repo is one of the principal's teams'
+// repositories: they may file tasks in it, and see the nodes serving
+// it.
 func (a *Access) SeesRepo(repo string) bool {
 	if a.HubAdmin {
 		return true
 	}
 	_, ok := a.repos[strings.ToLower(repo)]
 	return ok
+}
+
+// SeesTask is whether the principal may see a task, its events and its
+// artifacts, given the team it was filed under and its repository, ""
+// for none: they are in that team, or their team owns the repository
+// and was given its history by a hub admin (Store.TransferRepo).
+// Owning a repository is not enough on its own, so a team that is
+// assigned one after a release or a team's deletion does not inherit
+// the tasks filed in it before (SA1-M2).
+func (a *Access) SeesTask(team, repo string) bool {
+	if a.SeesTeam(team) {
+		return true
+	}
+	if repo == "" {
+		return false
+	}
+	o, ok := a.repos[strings.ToLower(repo)]
+	return ok && o.history
 }
 
 // SeesNode is whether the principal may see a node in the directory:

@@ -101,8 +101,8 @@ authenticated but not trusted; **T3** unauthenticated.
 | --- | --- | --- | --- | --- |
 | ACT-1 | **Team member** (signed in, in `team_members`) | T1 for their teams | File, list, watch tasks of their teams; cancel/requeue their own; mint node tokens for their own nodes; view their teams' artifacts; open their own node's UI | See another team's tasks, events, artifacts or nodes' details; act as another person; get a task past a Grain's policy |
 | ACT-2 | **Non-member** (signed in to IAP/OIDC, in no team) | T2 | `/v1/me`; mint node tokens (useless without admission) | Anything team-scoped: every team resource answers 404 |
-| ACT-3 | **Team admin** | T1 for their team | Manage members and repositories of their team, team settings, cancel/requeue any of its tasks | Take another team's repository (`AssignRepo` refuses), create or delete teams, see other teams |
-| ACT-4 | **Hub admin** (`API.HubAdmins`, configuration) | T0 for the directory | Create/delete teams, see everything, revoke any node token | Open a node's UI (`hub/nodeui`: owners only); bypass a Grain's policy |
+| ACT-3 | **Team admin** | T1 for their team | Manage members of their team, team settings, release its repositories, cancel/requeue any of its tasks | Assign any repository to a team, so take another team's or an unowned one (SA1-M2: hub admin only), create or delete teams, see other teams |
+| ACT-4 | **Hub admin** (`API.HubAdmins`, configuration) | T0 for the directory | Create/delete teams, assign repositories (with or without their history), see everything, revoke any node token | Open a node's UI (`hub/nodeui`: owners only); bypass a Grain's policy |
 | ACT-5 | **Another team** (its members, admins and nodes) | T2 relative to this team | Its own work | Read this team's tasks, or have its nodes offered this team's tasks |
 | ACT-6 | **External contributor**: a person outside the company whose content reaches the system (a pull request, an issue, a comment, a dependency) | T3 | Nothing directly: they have no IAP identity | Have their content treated as instructions with a member's authority (prompt injection, ACT-9b) |
 | ACT-7 | **Stock Grain** (bwsalmon/grain, unmodified, owner's policy) | T1 for its owner's work | Register for repositories its owner's teams own; accept, run, report its tasks; stream events | Register as another node; touch other tasks; be driven outside the task interface |
@@ -154,7 +154,7 @@ authenticated but not trusted; **T3** unauthenticated.
 | Flow | From → to | What crosses | Authenticated by | Authorised by (code) |
 | --- | --- | --- | --- | --- |
 | F-1 | Browser → Google LB/IAP | Every human request | IAP sign-in (Google identity) | IAP's access list (`deploy/terraform/hub/main.tf`, `google_iap_web_backend_service_iam_member`) |
-| F-2 | IAP → hub | The request with IAP's signed assertion | `identity.IAP.Principal` (`hub/identity/iap.go`): ES256 signature against IAP's keys, issuer, audience = the backend service, expiry. Or `identity.OIDC` (session cookie HMAC, or bearer ID token). Never `x-goog-authenticated-user-email`. | `directory.Store.Access` (`hub/directory/access.go`): `SeesTeam`, `SeesRepo`, `SeesNode`, `AdminOf`, hub admin from configuration |
+| F-2 | IAP → hub | The request with IAP's signed assertion | `identity.IAP.Principal` (`hub/identity/iap.go`): ES256 signature against IAP's keys, issuer, audience = the backend service, expiry. Or `identity.OIDC` (session cookie HMAC, or bearer ID token). Never `x-goog-authenticated-user-email`. | `directory.Store.Access` (`hub/directory/access.go`): `SeesTeam`, `SeesTask`, `SeesRepo`, `SeesNode`, `AdminOf`, hub admin from configuration |
 | F-3 | Grain → hub, `GET /v1/nodes/connect` (IAP off, exact path, hub.md §5.2.1) | WebSocket + mux: hello (id, repos, slots, labels), heartbeats, node-opened event streams (§7.1) | Node token as bearer, checked before upgrade (`rendezvous.Server.serveConnect` → `directory.Store.Authenticate`); token bound to one node ID (`serveNode`) | `directory.Store.Admit` at hello; registry ownership of node IDs (`registry.Register`, `ErrOwner`); event stream bound to a task placed on that node (`live.Hub.NodeStream`) |
 | F-4 | Hub → Grain, task stream | `offer`/`resume` with `tasks.Spec` (id, team, repo, title, prompt, submitter, constraints); `cancel`; Grain answers `accept`/`refuse`/`result` | The hub is the far end of the Grain's own TLS connection to the hub's URL; no per-message signature | The hub: dispatcher + `Admit` rechecked (`tasks.Dispatcher.place`, `admit`). The Grain: its local policy (`pkg/policy`), and grain's own team/repo rules (`pkg/daemon/hub.go`, `hubTasks.Start`) |
 | F-5 | Hub → Grain, view stream | `{"type":"view","task","node_task","ref"}`, then artifact bytes back | As F-4 | The hub: viewer sees the task (`live.Hub.task`), and asks only for a ref the node listed (`Log.HasRef`, SA1-M3). The Grain: serves only refs it listed (hub-interface.md); grain does not serve views yet (`hubnode.Serve` closes them) |
@@ -221,10 +221,16 @@ for the node directory, team routes by membership. A resource the
 caller may not see answers 404 like one that does not exist, so IDs
 cannot be probed (`TestAPIVisibility`, `live` `TestAccess`, `directory`
 `TestAPI`, `TestAccess`). Access is checked at every subscription.
-*Residual:* (a) visibility of a repository's tasks follows the team
-that owns the repository **now** (`sees`), so transferring a
-repository shows its whole history to the new team, while the old team
-keeps seeing tasks recorded under its team; (b) a node's directory entry
+A task is shown to the team recorded on it, and to the team that owns
+its repository now only if a hub admin gave that team the repository's
+history (`Access.SeesTask`, `Store.TransferRepo`); only a hub admin
+assigns a repository at all, so no team admin can claim an unowned one
+and read what was filed in it (SA1-M2, `hub/tasks`
+`TestRepoSquatting`, `hub/directory` `TestSeesTask`).
+*Residual:* (a) a hub admin who transfers a repository with
+`{"history": true}` shows its whole history to the new team, while the
+old team keeps seeing tasks recorded under its team; a team recreated
+with a deleted team's ID sees that team's tasks; (b) a node's directory entry
 lists all its repositories, so a member of team A sees the names of
 team B's repositories served by a node whose owner is in both
 (`Access.SeesNode`); (c) a subscription already open when a member is
@@ -268,7 +274,8 @@ session table); IAP sessions are governed by IAP. The node UI hands the
 viewer's IAP assertion to the node (T-TB3-4). *Status:* accepted (12h
 OIDC sessions) and open for the node UI (O-2).
 
-**T-TB1-6 (E) A team admin escalating.** *Mitigation:* `AssignRepo`
+**T-TB1-6 (E) A team admin escalating.** *Mitigation:* assigning a
+repository to a team is hub-admin only (SA1-M2), and `AssignRepo`
 refuses a repository another team owns (it must be released first);
 hub-admin is configuration, not a row a team admin can write
 (`API.HubAdmins`); team creation and deletion are hub-admin only.
@@ -314,9 +321,12 @@ the database grows with every task. *Status:* open, medium (O-5).
 **T-TB1-9 (R) Denying an action.** *Mitigation:* tasks record their
 submitter and every state change with its reason; the dispatcher logs
 offers, refusals and results (`tasks.Dispatcher`). *Residual:* there is
-no audit log of directory changes (who added a member, assigned a
-repository, minted or revoked a token) beyond the token's own row and
-request logs at the load balancer. *Status:* open, medium (O-10).
+no audit log of directory changes (who added a member, minted or
+revoked a token) beyond the token's own row and request logs at the
+load balancer. Deleting a team and assigning or releasing a repository
+are logged as `directory: audit:` lines with the caller (SA1-M2), in
+the hub's ordinary log, which nothing protects from the hub itself.
+*Status:* open, medium (O-10).
 
 ### TB2: Grain → hub (the rendezvous)
 
@@ -738,7 +748,7 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-6 | Node tokens are stored only as SHA-256 hashes; each node ID has at most one live token; revoking a token ends its node's connection at once and refuses its reconnect. | `hub/directory` `TestNodeTokens`; gap: the disconnect-on-revoke path through `directory.API` |
 | INV-7 | A node is admitted, and a task offered to it or resumed on it, only if its owner is a member of the team that owns every repository the node lists (at registration) and the task's repositories (at every offer and resume). | `hub/directory` `TestAdmit`; `hub/tasks` `TestAdmissionCheckedAgain`, `TestResumeChecksAdmission` |
 | INV-8 | A node's event stream is accepted only for a task the hub has placed on that same node, registered by the same owner, and carries one task only. | `hub/live` `TestStreamForAnotherNode`, `TestAnotherOwnersNode` |
-| INV-9 | A caller sees a task, its events and its artifacts only as a member of its team or of the team owning its repository (or as a hub admin), and a node only as its owner, a member of a team owning one of its repositories, or a hub admin; anything else answers 404 exactly as a missing resource does. | `hub/tasks` `TestAPIVisibility`; `hub/live` `TestAccess`; `hub/directory` `TestAccess`, `TestAPI`; `hub/rendezvous` `TestVisibleDirectory` |
+| INV-9 | A caller sees a task, its events and its artifacts only as a member of its team or of the team a hub admin gave its repository with its history (or as a hub admin), and a node only as its owner, a member of a team owning one of its repositories, or a hub admin; anything else answers 404 exactly as a missing resource does. | `hub/tasks` `TestAPIVisibility`, `TestRepoSquatting`; `hub/live` `TestAccess`; `hub/directory` `TestAccess`, `TestAPI`, `TestSeesTask`; `hub/rendezvous` `TestVisibleDirectory` |
 | INV-10 | A task's `submitter` is the signed-in caller; a request body naming one is refused. | `hub/tasks` `TestAPISubmit` |
 | INV-11 | The hub opens only `offer`, `resume`, `cancel`, `view` and `http` streams to a node, and a `view` only of a ref the node listed in the task's artifact events; a conforming Grain closes any other stream unread, serves a view only of a ref it listed, and an `http` stream only when its owner turned it on. | `hub/live` `TestViewOnlyListedRefs`, `TestViewListedBeforeRestart` (the hub's side, SA1-M3); grain `pkg/hubnode` tests (offer, resume, cancel); task 4236 (conformance kit: a Grain refuses an unlisted and a `..` ref); gap: view and http on grain's side |
 | INV-12 | A Grain refuses, and never runs, a task its local policy does not allow, whatever claims the task carries; a Grain connected to a hub runs with a local policy. | `scripts/grain-interop.sh` (a task outside grain's policy is refused); grain `pkg/policy` tests; gap: the second clause (O-3) |
@@ -769,7 +779,7 @@ a candidate task; none is fixed by this document.
 | O-6 | The hub UI must render node and agent content safely (§5 TB4). | medium, blocks U1 | T-TB4-1 | silo, tasks 4222–4227 |
 | O-5 | No caps on a node's slots, repositories, first-line wait, or stored events, or on a user's nodes; no per-user rate limits. (Streams per node are capped by the mux, SA1-H2.) | medium | T-TB1-8, T-TB2-6, T-TB2-7 | silo |
 | O-13 | Images pinned by tag, not digest; the published image is not signed. | medium | T-TB9-2 | silo `Dockerfile`, `deploy/` |
-| O-10 | No audit log of directory changes. | medium | T-TB1-9, T-TB5-2 | silo |
+| O-10 | No audit log of directory changes (repository assignments, releases and team deletions are logged lines only). | medium | T-TB1-9, T-TB5-2 | silo |
 | O-12 | `validate.sh` does not check that the dev sign-on is unset and the IAP-off route is an exact match. | low | T-TB1-1, T-TB5-4 | silo `deploy/` |
 | O-9 | The node directory shows a node's repositories of other teams. | low | T-TB1-2 | silo (`SeesNode` filtering the entry) |
 | O-11 | Node tokens never expire. | low | T-TB2-5 | silo `hub/directory` |
@@ -787,8 +797,8 @@ schema: SA1-L8; `hub/server` `TestMigrateThenServeLeastPrivileged`).
 
 The accepted risks, for the record: forged claims from a compromised hub
 (T-TB3-1, T-TB6-2), a Grain's account of its own work (T-TB2-6), text a
-node chose to put in conversation (T-TB2-4), visibility following the
-repository's current team (T-TB1-2), 12-hour OIDC sessions (T-TB1-5),
+node chose to put in conversation (T-TB2-4), visibility following a
+repository a hub admin transferred with its history (T-TB1-2), 12-hour OIDC sessions (T-TB1-5),
 the operator (T-TB5-1, T-TB5-2), the model provider (T-TB8-1), the
 dispatcher's two-second window (T-TB5-5), and silo CI's read access to
 grain (T-TB9-1).
