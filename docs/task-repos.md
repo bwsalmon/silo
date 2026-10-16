@@ -76,7 +76,7 @@ rules keep the split clean:
 
 - **State lives in front matter, never in file location.** A file is
   written once, at a stable path, and never moves to change state.
-- **Each git-backed field has one writer** (§3.2). The databases may
+- **Each git-backed field has one writer** (§3, §5.1). The databases may
   mirror a field for queries, but they never compete with git for it.
 
 | Git-backed (task front matter) | Runtime only (database) |
@@ -165,7 +165,7 @@ writers:                           # write ownership; whatever is not allowed is
     may: create
     kinds: [task]
     where: {state: proposed}
-    fields: [kind, schema, id, title, team, repo, base, submitter, origin, filed_by, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
+    fields: [kind, schema, id, title, team, repo, base, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
     bind: {submitter: $pusher}
   - who: [team:hub#approver]
     may: update
@@ -860,7 +860,7 @@ The contract becomes:
 - the `pull` notification.
 
 A customised Grain conforms by reading and writing those files. Until
-stage 4 of §15, both paths run, and the WebSocket messages are derived
+stage 4 of §16, both paths run, and the WebSocket messages are derived
 from the commits.
 
 ## 10. Schemas and versioning
