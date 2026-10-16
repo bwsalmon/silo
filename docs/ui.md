@@ -175,3 +175,4 @@ Each stage is a candidate task, to be filed once the owner chooses.
 | U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
 | U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. | silo |
 | U5 | A Grain's local UI shows the hub task ID and links to the hub page for tasks the hub placed. | bwsalmon/grain |
+| U6 | Future: "Open Grain UI" for team admins, a Grain's own UI proxied by the hub on its own origin, read-only unless the Grain's owner opts in. Designed in [grain-ui-proxy.md](grain-ui-proxy.md), with its own silo (S1–S5) and grain (G1–G4) stages. | silo, then bwsalmon/grain |

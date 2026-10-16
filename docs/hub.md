@@ -1306,6 +1306,7 @@ audit plan. This section is the hub's part of it in brief.
 | — | Grain accepting a hub offer: verifying `requester_attestation` with `policy.ApplySiloClaims` and recording it with `Store.SetSiloAttestation` (§6.4) | bwsalmon/grain |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
+| 2.11 | Future, designed, not filed: a Grain's UI opened from the hub UI by its owner or its owning team's admins, read-only by default at the Grain, with a capability in `hello`, a separate IAP backend and audience for node hosts, and audit ([grain-ui-proxy.md](grain-ui-proxy.md), stages S1–S5 here and G1–G4 in grain). It amends §11.2–§11.3: the IAP assertion and cookies are no longer passed to the node. | silo, then bwsalmon/grain |
 
 ## 10. Open questions
 
@@ -1316,6 +1317,9 @@ audit plan. This section is the hub's part of it in brief.
   to be grain's decision: the hub passing `viewer` and the IAP
   assertion, and the Grain serving that viewer as its own access list
   says. Until grain has a read-only role to map them to, owners only.
+  [grain-ui-proxy.md](grain-ui-proxy.md) proposes the answer for team
+  admins: the hub passes the viewer's role, and the Grain serves hub
+  sessions read-only unless its owner opts in.
 
 Two questions that were here are decided: lost running tasks are
 requeued only after a grace a team turns on (§6.3), and the hub runs
@@ -1323,6 +1327,9 @@ several replicas, built in stages, with each failure's recovery time
 written down (§2.2).
 
 ## 11. A node's UI through the hub (built: `hub/nodeui`; grain's side to come)
+
+(Extended for team admins, read-only at the Grain, and the hub UI's
+button by [grain-ui-proxy.md](grain-ui-proxy.md), a design under review.)
 
 ### 11.1 What grain's relay carries
 
