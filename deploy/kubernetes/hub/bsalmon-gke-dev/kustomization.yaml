@@ -16,6 +16,9 @@ configMapGenerator:
       # SET: /projects/<project number>/global/backendServices/<the silo-hub backend's ID>
       - SILO_HUB_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
       - SILO_HUB_ADMINS=bsalmon@google.com
+      # Empty: no node UIs. To serve them, terraform output -raw
+      # node_ui_domain (nodes.<domain>), with the HTTPRoute below.
+      - SILO_HUB_NODE_UI_DOMAIN=
       # terraform output -raw sql_connection_name
       - CLOUD_SQL_INSTANCE=bsalmon-gke-dev:us-central1:silo-hub
 patches:
@@ -33,6 +36,13 @@ patches:
       - op: replace
         path: /spec/hostnames/0
         value: silo-hub.example.com # SET: terraform's domain
+  - target:
+      kind: HTTPRoute
+      name: silo-hub-node-ui
+    patch: |-
+      - op: replace
+        path: /spec/hostnames/0
+        value: "*.nodes.silo-hub.example.com" # SET: *. and terraform output -raw node_ui_domain
   - target:
       kind: GCPBackendPolicy
       name: silo-hub

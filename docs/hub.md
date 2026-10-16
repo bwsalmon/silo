@@ -955,7 +955,9 @@ traffic over it. As built (`hub/nodeui`), with `silo hub serve
 - **Deployment.** The hub's Gateway needs the wildcard hostname, its
   Certificate Manager certificate a `*.nodes.<domain>` name (DNS
   authorization allows wildcards) and the DNS zone a wildcard record to
-  the hub's address. `deploy/` does not have these yet.
+  the hub's address. `deploy/` has them (`node_ui_domain` in
+  `deploy/terraform/hub`, the HTTPRoute `silo-hub-node-ui`); deploy.md
+  §8 turns them on.
 
 What it costs: the hub carries every UI byte, so its bandwidth and the
 one replica's capacity matter (§2.2); a hub outage takes the UIs with
