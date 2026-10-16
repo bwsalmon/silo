@@ -627,7 +627,11 @@ func TestStreamForAnotherNode(t *testing.T) {
 
 	// A stream bound to t-1 cannot carry t-2's events either.
 	st2 := upstream(t, h.connect(t, "ws-1"))
-	send(t, st2, status(1, "mine"), strings.Replace(status(2, "theirs"), "t-1", "t-2", 1), status(3, "late"))
+	send(t, st2, status(1, "mine"), strings.Replace(status(2, "theirs"), "t-1", "t-2", 1))
+	// The hub may have reset the stream already, having read t-2's
+	// event: then the late event is refused before it is read, which is
+	// as good as read and dropped.
+	io.WriteString(st2, status(3, "late")+"\n")
 	h.waitLast(t, "t-1", 1)
 	st2.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if _, err := st2.Read(make([]byte, 1)); err == nil || errors.Is(err, mux.ErrTimeout) {
