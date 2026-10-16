@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/notify"
 	"github.com/bwsalmon/silo/hub/registry"
@@ -90,6 +91,10 @@ type Dispatcher struct {
 	// Finished, when set, is told of each task the dispatcher records as
 	// over: done, failed or cancelled. live.Hub.Finished.
 	Finished func(t Task)
+	// Claims, when set, signs the attestation each offer and resume
+	// carries (docs/hub.md §6.4), which a node's local policy may
+	// require before it runs the task. Without it they carry none.
+	Claims *claims.Signer
 	// Bus, when set, carries Wake and Cancel to the dispatcher of
 	// whichever pod holds the lease (docs/hub.md §2.2.4), which hears
 	// them through Notice. Without one they stay in this process.
@@ -707,7 +712,14 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	st := NewStream(conn)
 	defer st.Close()
 	spec := t.Spec
-	if err := st.Write(Message{Type: kind, Task: &spec}); err != nil {
+	msg := Message{Type: kind, Task: &spec}
+	if d.Claims != nil {
+		if msg.Attestation, err = d.Claims.Sign(Attest(spec, t.Node)); err != nil {
+			unanswered("could not sign the "+kind+"'s attestation: "+err.Error(), false)
+			return
+		}
+	}
+	if err := st.Write(msg); err != nil {
 		d.observe(EventUnreachable, t)
 		unanswered("could not write the "+kind+": "+err.Error(), false)
 		return

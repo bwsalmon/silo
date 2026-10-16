@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/server"
@@ -179,8 +180,20 @@ func serve(args []string) error {
 		"address to serve the internal listener on, which only the hub's other pods may reach (docs/hub.md §2.2.3); empty serves none [SILO_HUB_INTERNAL_ADDR]")
 	internalKey := fs.String("internal-key-file", env("SILO_HUB_INTERNAL_KEY_FILE", ""),
 		"the file holding the key the hub's pods share for their internal listeners, at least 32 bytes [SILO_HUB_INTERNAL_KEY_FILE]")
+	claimsIssuer := fs.String("claims-issuer", env("SILO_HUB_CLAIMS_ISSUER", ""),
+		"sign the claims each task offer carries as this issuer, the silo_issuer of nodes' policies: the hub's URL (docs/hub.md §6.4) [SILO_HUB_CLAIMS_ISSUER]")
+	claimsKeys := fs.String("claims-key-file", env("SILO_HUB_CLAIMS_KEY_FILE", ""),
+		"comma-separated files holding the PEM private keys (EC P-256 or RSA) task claims are signed with: the first signs, all are published at "+claims.KeysPath+" [SILO_HUB_CLAIMS_KEY_FILE]")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	var pems [][]byte
+	for _, f := range list(*claimsKeys) {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("a claims key: %w", err)
+		}
+		pems = append(pems, b)
 	}
 	var key []byte
 	if *internalKey != "" {
@@ -212,6 +225,8 @@ func serve(args []string) error {
 		PodAddr:          *podAddr,
 		InternalAddr:     *internalAddr,
 		InternalKey:      key,
+		ClaimsIssuer:     *claimsIssuer,
+		ClaimsKeys:       pems,
 		Logf:             log.Printf,
 	}
 	l, err := net.Listen("tcp", *addr)
