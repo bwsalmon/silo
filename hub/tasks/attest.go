@@ -12,10 +12,16 @@ import "github.com/bwsalmon/silo/hub/claims"
 // chooses the repository, and its own policy decides whether this
 // task may run there. approved_by is the task's approver, empty for a
 // task nobody approved at the hub; the digest does not cover it, as
-// grain's does not.
+// grain's does not. hub_task_id is the task's hub ID, s.ID.
+//
+// The digest's body is the prompt exactly as offered, and the node
+// files the task with exactly that body (§6.4): what links the task
+// to the hub is the signed hub_task_id, not anything added to the
+// body, so the node can recompute the digest from the task it filed.
 func Attest(s Spec, node string) claims.Claims {
 	return claims.Claims{
 		Audience:   node,
+		HubTaskID:  s.ID,
 		Requester:  s.Submitter,
 		Team:       s.Team,
 		ApprovedBy: s.ApprovedBy,

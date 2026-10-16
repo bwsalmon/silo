@@ -69,10 +69,14 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 An offer or resume from a hub with a signing key also carries
 `requester_attestation`: a JWT, signed for this Grain's node ID, of the
 claims grain's local policy checks (`iss`, `aud`, `iat`, `exp`,
-`requester`, `team`, `approved_by`, `granted_capabilities`,
-`spec_digest`), with the hub's keys at `/v1/claims/keys` (hub.md
-§6.4). A Grain whose policy names `silo_issuer` verifies it and refuses
-an offer without one; any other Grain may ignore it.
+`hub_task_id`, `requester`, `team`, `approved_by`,
+`granted_capabilities`, `spec_digest`), with the hub's keys at
+`/v1/claims/keys` (hub.md §6.4). A Grain whose policy names
+`silo_issuer` verifies it and refuses an offer without one; any other
+Grain may ignore it. `spec_digest` is over the task's `repo`, `title`
+and `prompt` exactly as offered, so a Grain that checks it files the
+task's body as the prompt, unchanged, and links the task to the hub by
+`hub_task_id` rather than by anything added to the body.
 
 The Grain takes these claims on trust and holds the task to its own
 local policy, refusing what that policy does not allow (hub.md §1.2).
