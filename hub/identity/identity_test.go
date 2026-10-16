@@ -183,6 +183,8 @@ func TestAudienceArray(t *testing.T) {
 func TestLocalReturn(t *testing.T) {
 	for in, want := range map[string]string{
 		"/tasks?x=1": "/tasks?x=1", "": "/", "https://evil.example": "/", "//evil.example": "/", "/\\evil.example": "/",
+		"/\t/x": "/", "/%09/x": "/", "/\n/x": "/", "/\\x": "/", "/%5Cx": "/", "/%2F/x": "/", "/x\x7f": "/",
+		"/a/b#frag": "/a/b#frag", "/%20x": "/%20x",
 	} {
 		if got := localReturn(in); got != want {
 			t.Errorf("localReturn(%q) = %q, want %q", in, got, want)

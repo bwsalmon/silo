@@ -360,14 +360,15 @@ carry pasted code or a secret if the node or its agent puts it there.
 Credential redaction runs on the node (hub.md §7.2), which a customised
 Grain may skip. *Status:* accepted: the no-code-at-rest guarantee is
 by class, and a node's text is that node's responsibility; INV-3 is
-written to be testable on that basis. Bounding the reason fields is
-open (O-7).
+written to be testable on that basis. A refusal or result reason is
+cut to 1024 characters before it is stored (O-7, closed by SA1-L3).
 
 **T-TB2-5 (S/I) Node token theft and replay.** *Mitigation:* 256 bits
 of secret; only its SHA-256 is stored, so a database leak proves nobody
 (`hashToken`); bound to one node ID; minting again revokes the earlier
-token; revoking ends the live connection at once (`Server.Disconnect`,
-`directory.API.revokeToken`) and refuses its reconnect (`TestNodeTokens`).
+token; revoking, or minting again, ends the live connection at once
+(`Server.Disconnect`, `directory.API.revokeToken` and `mintToken`,
+SA1-L2) and refuses its reconnect (`TestNodeTokens`, `TestAPI`).
 *Residual:* the token is a bearer secret in a file on the Grain's host,
 readable by anything running as the Grain's user, including a host
 sandbox's agent (T-TB7-2). It has no expiry. A thief gets the owner's
@@ -536,25 +537,28 @@ logs IDs, owners, states and errors, not prompts or payloads: the
 dispatcher logs task and node IDs (`tasks.Dispatcher.logf` calls), the
 rendezvous owner, node ID and repositories, `live` the rejection reason
 of an event (a field name or a JSON error, not the payload), `nodeui`
-the method and path. *Residual:* the dispatcher logs a node's refusal
-and result `reason` verbatim (`dispatch.go`, "node %s refused %s: %s"),
-which a node or an agent controls and is unbounded below the 1 MiB
-line; a node UI or artifact path may carry tokens in a query string at
-the load balancer's request log. Grain's own logs (its agent
-transcripts, CI logs, `grainlog`) hold code and are the Grain's: out of
-the hub's scope, in the Grain's audit. *Status:* open, low (O-7):
-truncate and quote node-supplied reasons in logs and in the task row.
-INV-18.
+the method and path. Every node-supplied string the hub logs (a reason, a task ID, a
+message type, a node task, an error carrying them) goes through
+`internal/logsafe.Quote`, which quotes it and cuts it to 200 bytes, so
+a node can neither forge a log line nor flood the log
+(`hub/tasks` `TestNodeStringsLogged`); a reason is cut to 1024
+characters in the task row. *Residual:* a node UI or artifact path may
+carry tokens in a query string at the load balancer's request log.
+Grain's own logs (its agent transcripts, CI logs, `grainlog`) hold code
+and are the Grain's: out of the hub's scope, in the Grain's audit.
+*Status:* mitigated (O-7 closed by SA1-L3). INV-18.
 
 **T-TB5-4 (E) A pod reached without IAP.** *Mitigation:* every path but
 `ConnectPath` verifies the IAP assertion itself; the IAP-off backend is
 an exact match on `/v1/nodes/connect` (`deploy/kubernetes/hub/base/
 gateway.yaml`), and the node-UI hosts route only to the IAP backend
 (checked by `validate.sh`); metrics are on their own listener that no
-Service names (checked by `validate.sh`); the containers run nonroot
-with a read-only root filesystem. The planned internal listener (R3)
-uses an HMAC bound to the target pod and the minute, and a
-NetworkPolicy (hub.md §2.2.3). *Residual:* `validate.sh` does not check
+Service names (checked by `validate.sh`); the containers run as the numeric user 65532
+with a read-only root filesystem (checked by `validate.sh`, SA1-L9); a
+default-deny NetworkPolicy admits 8080 only from Google's load balancer
+and health-check ranges and 9091 only from the Prometheus collectors
+(checked by `validate.sh`, SA1-L5). The planned internal listener (R3)
+uses an HMAC bound to the target pod and the minute (hub.md §2.2.3). *Residual:* `validate.sh` does not check
 that the IAP-off route stays an exact match or that the dev sign-on is
 never set (O-12). *Status:* mitigated; checks open. INV-2, INV-20.
 
@@ -690,9 +694,9 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-15 | No text a node, an agent or a submitter supplied is ever interpreted as HTML or script in the hub's origin. | gap: the hub UI's tests (tasks 4222–4227) and a security suite case with a script-bearing title, prompt, conversation event, reason, kind and artifact |
 | INV-16 | The hub refuses a state-changing request (`POST`, `PUT`, `DELETE`) sent cross-site by a browser. | gap: not built (O-1) |
 | INV-17 | Only a human signed in to the hub can be a task's `approved_by`, never its requester, a node or an agent; a task filed by a node or an agent is `proposed` until such an approval; a Grain does not treat a hub task as approved unless it carries `approved_by`. | gap: not built (O-4) |
-| INV-18 | The hub never logs a prompt, an event payload, artifact or node UI bytes, a token, a cookie or an IAP assertion; node-supplied strings it logs are truncated and quoted. | gap: a log-capture case in a security suite (O-7) |
+| INV-18 | The hub never logs a prompt, an event payload, artifact or node UI bytes, a token, a cookie or an IAP assertion; node-supplied strings it logs are truncated and quoted. | `internal/logsafe` `TestQuote`; `hub/tasks` `TestNodeStringsLogged` (the dispatcher's log) |
 | INV-19 | Everything a node sends is bounded: a control, task or event line ≤ 1 MiB, a node UI answer line ≤ 64 KiB, a ref ≤ 512 printable bytes, a kind by pattern, the token ring ≤ 1024 events or 1 MiB per task; and (open) streams per node, slots, repositories and stored events per task. | `hub/live` `TestRingBound`, `TestClassify`; `hub/faulttest` `TestLoad`; gap: the open bounds (O-5) |
-| INV-20 | A deployed hub has exactly one human sign-on, and it is IAP or OIDC, never `-dev-user-header`; the IAP-off backend serves exactly `/v1/nodes/connect`; node UI hosts route only to the IAP backend; containers run nonroot with a read-only root filesystem. | `hub/server` `TestConfigSignOn`; `deploy/kubernetes/hub/validate.sh` (node UI route, metrics); gap: dev sign-on and the exact match (O-12) |
+| INV-20 | A deployed hub has exactly one human sign-on, and it is IAP or OIDC, never `-dev-user-header`; the IAP-off backend serves exactly `/v1/nodes/connect`; node UI hosts route only to the IAP backend; containers run nonroot with a read-only root filesystem. | `hub/server` `TestConfigSignOn`; `deploy/kubernetes/hub/validate.sh` (node UI route, metrics, NetworkPolicy, numeric user); gap: dev sign-on and the exact match (O-12) |
 | INV-21 | A Grain passes the operator's ambient credentials only to host-directory sandboxes, only for names its operator listed, never `HOME`, and runs host sandboxes on a reachable daemon only with `-allow-unisolated-host-sandboxes`. | grain `pkg/daemon/host_sandbox_env_test.go`, `pkg/agent/sandbox_env_args_test.go`; gap: hub-placed tasks (O-8) |
 | INV-22 | silo's CI workflows declare no write-scoped capability, and each read capability names a repository the workflow's own comment justifies. | gap: a check over `.grain/workflows` |
 | INV-23 | The hub's store holds a node token's secret in no form but its hash, and a minted token is returned once with `Cache-Control: no-store`. | `hub/directory` `TestNodeTokens`; gap: the header |
@@ -714,9 +718,13 @@ a candidate task; none is fixed by this document.
 | O-13 | Images pinned by tag, not digest; the published image is not signed. | medium | T-TB9-2 | silo `Dockerfile`, `deploy/` |
 | O-10 | No audit log of directory changes. | medium | T-TB1-9, T-TB5-2 | silo |
 | O-12 | `validate.sh` does not check that the dev sign-on is unset and the IAP-off route is an exact match. | low | T-TB1-1, T-TB5-4 | silo `deploy/` |
-| O-7 | Node-supplied reasons are unbounded in the task row and logged verbatim. | low | T-TB2-4, T-TB5-3 | silo `hub/tasks` |
 | O-9 | The node directory shows a node's repositories of other teams. | low | T-TB1-2 | silo (`SeesNode` filtering the entry) |
 | O-11 | Node tokens never expire. | low | T-TB2-5 | silo `hub/directory` |
+| O-14 | Group and email principals share one namespace in `team_members` and `HubAdmins`; an identity provider whose groups users can name grants membership or hub admin (SA1-L6). | low | T-TB1-1 | silo `hub/directory` |
+| O-15 | The hub's database user is in `cloudsqlsuperuser`; migrations and serving share it (SA1-L8). | low | T-TB5-1 | silo `deploy/terraform/hub`, `hub` |
+
+Closed by security audit 1's low findings: O-7 (node-supplied strings
+are quoted and cut in logs, reasons cut in the task row: SA1-L3).
 
 The accepted risks, for the record: forged claims from a compromised hub
 (T-TB3-1, T-TB6-2), a Grain's account of its own work (T-TB2-6), text a

@@ -7,7 +7,7 @@ toolchain go1.26.9
 require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus/client_golang v1.25.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/oauth2 v0.37.0
 	modernc.org/sqlite v1.57.0
 )

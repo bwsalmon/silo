@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/hub/registry"
+	"github.com/bwsalmon/silo/internal/logsafe"
 )
 
 // Directory is what the dispatcher asks the team directory
@@ -572,7 +573,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					continue
 				}
 				answered, unansweredC = true, nil
-				d.logf("tasks: node %s accepted %s as %q", t.Node, t.ID, r.m.NodeTask)
+				d.logf("tasks: node %s accepted %s as %s", t.Node, t.ID, logsafe.Quote(r.m.NodeTask))
 				if kind == TypeOffer {
 					d.observe(EventAccepted, t)
 				} else {
@@ -585,11 +586,11 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					continue
 				}
 				release()
-				d.logf("tasks: node %s refused %s: %s", t.Node, t.ID, r.m.Reason)
+				d.logf("tasks: node %s refused %s: %s", t.Node, t.ID, logsafe.Quote(r.m.Reason))
 				d.observe(EventRefused, t)
 				reason := "refused by node " + t.Node
 				if r.m.Reason != "" {
-					reason += ": " + r.m.Reason
+					reason += ": " + truncate(r.m.Reason, maxReason)
 				}
 				exclude := t.Node
 				if kind == TypeResume {
@@ -601,14 +602,14 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 				return
 			case TypeResult:
 				if r.m.State != Done && r.m.State != Failed {
-					d.logf("tasks: node %s reported %s %q; ignored", t.Node, t.ID, r.m.State)
+					d.logf("tasks: node %s reported %s %s; ignored", t.Node, t.ID, logsafe.Quote(string(r.m.State)))
 					continue
 				}
 				d.logf("tasks: %s %s on node %s", t.ID, r.m.State, t.Node)
-				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Finish(ctx, t.ID, r.m.State, r.m.Reason) })
+				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Finish(ctx, t.ID, r.m.State, truncate(r.m.Reason, maxReason)) })
 				return
 			default:
-				d.logf("tasks: node %s sent an unknown %q message for %s", t.Node, r.m.Type, t.ID)
+				d.logf("tasks: node %s sent an unknown %s message for %s", t.Node, logsafe.Quote(r.m.Type), t.ID)
 			}
 		}
 	}

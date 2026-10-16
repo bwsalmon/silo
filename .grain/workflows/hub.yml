@@ -16,6 +16,10 @@ env:
   # should fail saying the module is missing rather than hanging on a
   # proxy it will never reach.
   GOFLAGS: -mod=readonly
+  # The sandboxes' Go may be older than go.mod's toolchain line, which
+  # GOTOOLCHAIN=local would ignore: build, test and scan with the Go the
+  # hub ships with (SA1-L4).
+  GOTOOLCHAIN: auto
 
 jobs:
   hub:
@@ -61,6 +65,11 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # Known vulnerabilities reachable from the hub, in its modules and
+      # in the standard library of the Go it is built with.
+      - name: Vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       - name: Test
         env:

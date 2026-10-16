@@ -147,9 +147,12 @@ gcloud compute backend-services list --global --project bsalmon-gke-dev \
 The backend for the `silo-hub` Service (not `silo-hub-nodes`) is the
 one; set `SILO_HUB_IAP_AUDIENCE` in the overlay to
 `$(terraform output -raw iap_audience_prefix)<its id>` and apply
-again. The pod is restarted with the new config. Optionally, set
-terraform's `iap_backend_service` to that backend's name and apply, to
-narrow IAP access from the whole project to this backend.
+again. The pod is restarted with the new config. Set terraform's
+`iap_backend_service` to that backend's name and apply too: that is
+what grants `iap_members` access through IAP, on this backend alone.
+(`iap_project_wide = true` grants it on every IAP resource in the
+project before the backend exists, which reaches every other
+IAP-protected app there too; it is off by default.)
 
 **Checking it.**
 
@@ -230,6 +233,20 @@ alerts. In short:
 - **Database availability:** `ZONAL` by default; set
   `database_availability_type = "REGIONAL"` for a standby in another
   zone (hub.md §2.2).
+- **Network policy:** `networkpolicy.yaml` denies ingress to the
+  namespace by default and allows the hub's port 8080 only from
+  Google's load balancer and health-check ranges (`35.191.0.0/16`,
+  `130.211.0.0/22`), and its metrics only from the Prometheus
+  collectors. The cluster needs network policy enforcement (GKE
+  Dataplane V2, or `--enable-network-policy`) for it to apply.
+- **Rate limiting the nodes' backend (recommended):** the
+  `silo-hub-nodes` backend is reachable from the internet without
+  IAP. The hub refuses a bearer that is not shaped like a node token
+  before touching the database, but every well-shaped one costs a
+  query. Attach a Cloud Armor security policy with a per-IP
+  `rate_based_ban` (for example 60 requests a minute) to that backend
+  through its `GCPBackendPolicy` (`securityPolicy`); nodes connect
+  once and hold the connection, so a real node never comes near it.
 - **Removing it:** `kubectl delete -k deploy/kubernetes/hub/bsalmon-gke-dev`,
   then `terraform destroy` (after setting `deletion_protection = false`
   for the database).

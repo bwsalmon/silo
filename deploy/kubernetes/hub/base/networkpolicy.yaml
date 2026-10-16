@@ -1,0 +1,57 @@
+# Ingress to the hub's pods (SA1-L5). Nothing in the namespace is
+# reachable unless a policy below allows it, so another pod in the
+# cluster cannot reach the hub without the load balancer and IAP, its
+# metrics, or the Cloud SQL proxy's health server (9090). The kubelet's
+# probes come from the node and are not subject to these policies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# The hub's port, from Google's load balancer proxies and health checks
+# alone: the Gateway's (gke-l7-global-external-managed) traffic and
+# both backends' health checks come from these ranges.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: silo-hub-from-load-balancer
+spec:
+  podSelector:
+    matchLabels:
+      app: silo-hub
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 35.191.0.0/16
+        - ipBlock:
+            cidr: 130.211.0.0/22
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# The metrics port, from Managed Service for Prometheus's collectors
+# alone (monitoring.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: silo-hub-metrics-from-prometheus
+spec:
+  podSelector:
+    matchLabels:
+      app: silo-hub
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gmp-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: collector
+      ports:
+        - protocol: TCP
+          port: 9091

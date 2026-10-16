@@ -13,6 +13,7 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/bwsalmon/silo/hub/registry"
+	"github.com/bwsalmon/silo/internal/logsafe"
 	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
 
@@ -193,13 +194,13 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	hello, err := l.read()
 	ctl.SetReadDeadline(time.Time{})
 	if err != nil || hello.Type != TypeHello || hello.Node == nil {
-		s.logf("rendezvous: no hello from %s: %v", owner, err)
+		s.logf("rendezvous: no hello from %s: %s", owner, logsafe.Quote(err.Error()))
 		l.write(Message{Type: TypeError, Error: "expected hello"})
 		return
 	}
 	refuse := func(err error) {
 		s.observe(EventRefused)
-		s.logf("rendezvous: refused node %q of %s: %v", hello.Node.ID, owner, err)
+		s.logf("rendezvous: refused node %s of %s: %s", logsafe.Quote(hello.Node.ID), owner, logsafe.Quote(err.Error()))
 		l.write(Message{Type: TypeError, Error: err.Error()})
 		ctl.CloseWrite()
 		// Let the refusal reach the node before the connection goes.
@@ -216,7 +217,7 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		err = s.Admit(owner, node)
 	}
 	if errors.Is(err, ErrUnavailable) {
-		s.logf("rendezvous: could not admit node %q of %s: %v", hello.Node.ID, owner, err)
+		s.logf("rendezvous: could not admit node %q of %s: %s", hello.Node.ID, owner, logsafe.Quote(err.Error()))
 		return
 	}
 	if err != nil {
@@ -292,7 +293,7 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 				return
 			}
 		default:
-			s.logf("rendezvous: node %q sent an unknown %q message", node.ID, msg.Type)
+			s.logf("rendezvous: node %q sent an unknown %s message", node.ID, logsafe.Quote(msg.Type))
 		}
 	}
 }
@@ -376,12 +377,18 @@ func (s *Server) Shutdown(ctx context.Context, reason string) error {
 	}
 	s.mu.Unlock()
 
+	// All at once, each with a deadline, so a node that has stopped
+	// reading delays nobody's goodbye but its own (SA1-L7).
+	var wg sync.WaitGroup
 	for _, nc := range conns {
-		nc.ctl.c.SetWriteDeadline(time.Now().Add(time.Second))
-		if err := nc.ctl.write(Message{Type: TypeGoodbye, Error: reason}); err != nil {
-			nc.m.Close()
-		}
+		wg.Go(func() {
+			nc.ctl.c.SetWriteDeadline(time.Now().Add(time.Second))
+			if err := nc.ctl.write(Message{Type: TypeGoodbye, Error: reason}); err != nil {
+				nc.m.Close()
+			}
+		})
 	}
+	wg.Wait()
 	var err error
 	for _, nc := range conns {
 		select {

@@ -56,8 +56,8 @@ run "defaults" {
   }
 
   assert {
-    condition     = length(google_iap_web_iam_member.access) == 2 && length(google_iap_web_backend_service_iam_member.access) == 0
-    error_message = "before the backend service is known, access is granted project-wide"
+    condition     = length(google_iap_web_iam_member.access) == 0 && length(google_iap_web_backend_service_iam_member.access) == 0
+    error_message = "before the backend service is known, access is granted nowhere"
   }
   assert {
     condition     = google_service_account_iam_member.workload_identity.member == "serviceAccount:bsalmon-gke-dev.svc.id.goog[silo-hub/silo-hub]"
@@ -66,6 +66,10 @@ run "defaults" {
   assert {
     condition     = google_project_iam_member.cloudsql_client.role == "roles/cloudsql.client"
     error_message = "the GSA can connect to Cloud SQL"
+  }
+  assert {
+    condition     = strcontains(google_project_iam_member.cloudsql_client.condition[0].expression, "resource.name == \"projects/bsalmon-gke-dev/instances/silo-hub\"")
+    error_message = "the GSA can connect to the hub's instance alone"
   }
   assert {
     condition     = google_sql_database_instance.hub.database_version == "POSTGRES_16" && google_sql_database.hub.name == "silo"
@@ -179,6 +183,19 @@ run "bad_backup_settings" {
   }
 
   expect_failures = [var.backup_start_time, var.point_in_time_recovery_days]
+}
+
+run "iap_project_wide" {
+  command = apply
+
+  variables {
+    iap_project_wide = true
+  }
+
+  assert {
+    condition     = length(google_iap_web_iam_member.access) == 2 && length(google_iap_web_backend_service_iam_member.access) == 0
+    error_message = "asked for, access is granted project-wide until the backend service is known"
+  }
 }
 
 run "dns_and_backend_service" {

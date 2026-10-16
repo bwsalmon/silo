@@ -71,5 +71,22 @@ for o in "${overlays[@]}"; do
 	if awk '/^kind: Service$/,/^---$/' "$f" | grep -qE 'metrics|9091'; then
 		echo "$o: a Service exposes the metrics port"; exit 1
 	fi
+	# Ingress is denied by default, and allowed to the hub's port only
+	# from Google's load balancer and health-check ranges, and to its
+	# metrics only from the Prometheus collectors (SA1-L5).
+	np() { awk -v n="$1" 'BEGIN { RS = "\n---\n" } /kind: NetworkPolicy/ && $0 ~ "\n  name: " n "\n"' "$f"; }
+	deny="$(np default-deny-ingress)"
+	{ grep -q 'podSelector: {}' <<<"$deny" && ! grep -q 'ingress:' <<<"$deny"; } || { echo "$o: ingress must be denied by default"; exit 1; }
+	lb="$(np silo-hub-from-load-balancer)"
+	{ [ "$(grep -c 'cidr:' <<<"$lb")" = 2 ] && grep -q 'cidr: 35.191.0.0/16$' <<<"$lb" && grep -q 'cidr: 130.211.0.0/22$' <<<"$lb" &&
+		[ "$(grep -c 'port:' <<<"$lb")" = 1 ] && grep -q 'port: 8080$' <<<"$lb"; } || { echo "$o: 8080 must be open to the load balancer's ranges alone"; exit 1; }
+	prom="$(np silo-hub-metrics-from-prometheus)"
+	{ grep -q 'kubernetes.io/metadata.name: gmp-system$' <<<"$prom" && [ "$(grep -c 'port:' <<<"$prom")" = 1 ] && grep -q 'port: 9091$' <<<"$prom"; } || { echo "$o: 9091 must be open to the Prometheus collectors alone"; exit 1; }
+	[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 3 ] || { echo "$o: a NetworkPolicy beyond the three checked here"; exit 1; }
+	# The pod runs as a numeric non-root user, which runAsNonRoot can
+	# check: a named USER makes the kubelet refuse to start it (SA1-L9).
+	grep -q 'runAsUser: 65532$' "$f" || { echo "$o: the pod must run as user 65532"; exit 1; }
 done
+# The image's USER is numeric too.
+grep -qE '^USER [0-9]+:[0-9]+$' "$here/../../../Dockerfile" || { echo "Dockerfile: USER must be numeric"; exit 1; }
 echo "manifests valid"

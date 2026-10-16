@@ -23,8 +23,12 @@ spec:
       serviceAccountName: silo-hub
       # The hub's own shutdown grace (20s) and the proxy's, inside it.
       terminationGracePeriodSeconds: 40
+      # Numeric, so runAsNonRoot can check it whatever USER each image
+      # names (distroless's nonroot is 65532).
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -38,6 +42,10 @@ spec:
             - --port=5432
             - --structured-logs
             - --health-check
+            # Its health server must answer the kubelet's startup
+            # probe on the pod's address, so it cannot be bound to
+            # 127.0.0.1; networkpolicy.yaml keeps every other pod from
+            # reaching it.
             - --http-address=0.0.0.0
             - --exit-zero-on-sigterm
             - $(CLOUD_SQL_INSTANCE)

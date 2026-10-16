@@ -127,6 +127,14 @@ var (
 const (
 	maxTitle  = 200
 	maxPrompt = 256 << 10
+	// maxReason is the longest reason a human's cancel may give, and
+	// what a node's refusal or result reason is cut to before it is
+	// stored and shown (threat model O-7).
+	maxReason = 1 << 10
+	// Label constraints, Kubernetes-sized.
+	maxLabels     = 32
+	maxLabelKey   = 63
+	maxLabelValue = 255
 )
 
 var (
@@ -165,9 +173,15 @@ func normalize(s Spec) (Spec, error) {
 	if n := s.Constraints.Node; n != "" && !nodeID.MatchString(n) {
 		return s, fmt.Errorf("%w node %q", ErrInvalid, n)
 	}
-	for k := range s.Constraints.Labels {
+	if len(s.Constraints.Labels) > maxLabels {
+		return s, fmt.Errorf("%w: over %d labels", ErrInvalid, maxLabels)
+	}
+	for k, v := range s.Constraints.Labels {
 		if k == "" {
 			return s, fmt.Errorf("%w: an empty label", ErrInvalid)
+		}
+		if len(k) > maxLabelKey || len(v) > maxLabelValue {
+			return s, fmt.Errorf("%w: a label over %d bytes or a value over %d", ErrInvalid, maxLabelKey, maxLabelValue)
 		}
 	}
 	return s, nil

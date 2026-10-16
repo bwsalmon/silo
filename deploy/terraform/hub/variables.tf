@@ -145,9 +145,15 @@ variable "iap_members" {
 }
 
 variable "iap_backend_service" {
-  description = "The name of the IAP-enabled backend service the Gateway made for the silo-hub Service. When set, iap_members are granted on it alone; until then (it exists only after the first kubectl apply), on every IAP web resource in the project."
+  description = "The name of the IAP-enabled backend service the Gateway made for the silo-hub Service. iap_members are granted on it alone; until it is set (it exists only after the first kubectl apply), nobody passes IAP unless iap_project_wide says otherwise."
   type        = string
   default     = ""
+}
+
+variable "iap_project_wide" {
+  description = "Whether, until iap_backend_service is set, iap_members are granted on every IAP web resource in the project. Off by default: that grant reaches every other IAP-protected app in the project."
+  type        = bool
+  default     = false
 }
 
 variable "create_image_repository" {
