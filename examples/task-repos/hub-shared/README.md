@@ -18,9 +18,12 @@ aliases:
   silo-code: https://github.com/bwsalmon/silo.git
 writers:
   - who: ["team:hub#maintainer"]
-    may: [create, update, delete]
+    may: [create, update, move]
     kinds: [template, schedule, design]
     fields: "*"
+    note: >-
+      Definitions are never deleted: a rename or reorganisation leaves a
+      kind: moved tombstone at the old path (docs/task-repos.md §2.1).
   - who: ["team:hub#member"]
     may: [create, update]
     kinds: [template, schedule, design]
@@ -29,7 +32,7 @@ writers:
     note: >-
       Members propose definition changes on review branches. main takes
       them only as a merge commit pushed by an approver who is not the
-      branch's author (docs/task-repos.md §8.9).
+      branch's author (docs/task-repos.md §8.11).
   - who: ["team:hub#approver"]
     may: update
     kinds: [template, schedule, design]
@@ -53,7 +56,9 @@ Tasks reference them across repos by URL, or by an alias declared in the
 referring repo's README.
 
 - `templates/` holds task templates. Their bodies use the strict Jinja2
-  subset (§6.1). `templates/partials/` holds include-only pieces.
+  subset (§6.1). `templates/partials/` holds include-only pieces, and
+  `templates/ghcr/` the GHCR ones. `templates/prune-packages.md` is the
+  tombstone the move to `ghcr/` left.
 - `schedules/` holds cadences that fire templates. They fire in Silo and
   land in the hub intake.
 - `designs/` holds design docs with `{#HS-n}` requirement anchors. Silo

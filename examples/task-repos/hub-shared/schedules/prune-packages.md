@@ -1,10 +1,9 @@
 ---
 kind: schedule
 schema: grain/schedule@v1
-id: sch-7tpkw2psymx2
 aka: ["repo:schedule:bwsalmon:grain:prune-packages"]
 title: Prune GHCR packages
-template: {ref: ../templates/prune-packages.md, id: tmpl-7txvezb4bfz9}
+template: ../templates/ghcr/prune-packages.md
 inputs: {}
 weekly: {day: sunday, at: "04:00"}
 overlap: skip
@@ -26,4 +25,6 @@ in bwsalmon/grain `.grain/schedules/prune-packages.yml`.
 The export drops `next-run-at` and `last-run-at`. They are runtime state,
 and the scheduler recomputes them from the cadence. Each firing records
 `schedule.fired_at` on the task it files, as
-`grain-eu/tasks/task-m0jpyjbjz6p3-prune-ghcr/task.md` does.
+`hub-intake/tasks/scheduled/prune-packages/20261011T0400Z/task.md` does.
+The template moved to `templates/ghcr/` on 2026-10-16, so the schedule
+names its new path. The old path is a tombstone (docs/task-repos.md §2.1).

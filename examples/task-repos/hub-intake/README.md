@@ -12,6 +12,7 @@ ref_policy:
   protected: [main]
   fast_forward_only: true
   review_prefix: review/
+backlog: [backlog/]
 aliases:
   shared: https://silo.example.com/git/hub/shared.git
   eu: https://silo.example.com/git/grains/eu.git
@@ -21,20 +22,11 @@ writers:
   - who: [authenticated]
     may: create
     kinds: [task]
+    paths: ["tasks/**"]
     where: {state: proposed}
-    fields: [kind, schema, id, title, team, repo, base, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
+    fields: [kind, schema, title, team, repo, base, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
     bind: {submitter: $pusher}
     note: Anyone signed in may add a new proposal, and nothing else.
-  - who: ["grain:*"]
-    may: create
-    kinds: [task]
-    where: {state: proposed, submitted_via: agent}
-    fields: [kind, schema, id, title, team, repo, base, state, submitter, submitted_via, origin, filed_by, depends_on, capabilities, labels, created_at, body]
-    bind: {filed_by.grain: $pusher}
-    note: >-
-      An agent's upward filing (propose_task). submitter must be the human
-      who submitted filed_by.task, which the hook reads from the pushing
-      Grain's own repo.
   - who: ["team:hub#approver"]
     may: update
     kinds: [task]
@@ -49,13 +41,53 @@ writers:
     fields: [state, rejection]
     bind: {rejection.by: $pusher}
   - who: [silo]
-    may: [create, update]
+    may: create
     kinds: [task]
+    paths: ["tasks/**"]
     fields: "*"
     note: >-
       Proposals made through the API and UI (submitted_via api|ui|cli),
-      firings of approved schedules, planning proposals, and placement
-      records. Silo never sets approved_by to a human who did not push it.
+      agents' upward filings (submitted_via agent, with filed_by naming an
+      open run in the asking Grain's repo), planning proposals, and
+      firings of approved schedules. Silo never sets approved_by to a
+      human who did not push it.
+  - who: [silo]
+    may: update
+    kinds: [task]
+    transition: {field: state, from: [proposed, approved], to: [cancelled]}
+    fields: [state, cancel]
+    note: A cancel; every Grain whose backlog references the task honours it.
+  - who: ["team:hub#member"]
+    may: update
+    kinds: [ref]
+    paths: ["backlog/**"]
+    fields: [rank, priority, ranked_by, ranked_at]
+    bind: {ranked_by: $pusher}
+    note: The team's ordering of its unplaced work.
+  - who: [silo]
+    may: [create, update, delete]
+    kinds: [ref]
+    paths: ["backlog/**"]
+    fields: "*"
+    note: >-
+      Silo adds and removes the team's references, and reorders them for
+      members who use the UI, with ranked_by set to that member.
+  - who: [authenticated]
+    may: create
+    kinds: [comment]
+    paths: ["tasks/**/comments/**"]
+    fields: "*"
+    bind: {author: $pusher}
+  - who: [silo]
+    may: create
+    kinds: [comment]
+    paths: ["tasks/**/comments/**"]
+    where: {via: silo}
+    fields: "*"
+  - who: ["team:hub#admin", silo]
+    may: move
+    kinds: [task]
+    note: A task moved to another team's intake, or reorganised, leaves a tombstone.
   - who: ["team:hub#admin"]
     may: update
     kinds: [repo]
@@ -64,16 +96,22 @@ writers:
 
 # Hub team intake
 
-This is where work for the **hub** team starts. It holds new proposals,
-their approvals, and a record of where each approved task was placed.
-After placement, the copy in the Grain's repo is the authoritative one.
-The `placement.ref` here links to it.
+This is where work for the **hub** team starts, and where its tasks stay.
+It holds proposals, approvals and cancels, discussion of tasks, and the
+team's ordering of its unplaced work in `backlog/`.
 
-- **To propose:** add `tasks/<id>-<slug>/task.md` with `state: proposed`
-  and `submitter: user:<you>`, then push. You can also use
-  `silo task propose` or the UI, which make the same commit.
+A task is never copied or moved to the Grain that runs it. Placement adds
+a reference to it in that Grain's own `backlog/`, and the Grain records
+what it did in its own `runs/`. How a task is going is read from those
+records (docs/task-repos.md §5.1).
+
+- **To propose:** add `tasks/<yyyy-mm-dd>-<slug>/task.md` with
+  `state: proposed` and `submitter: user:<you>`, then push. You can also
+  use `silo task propose` or the UI, which make the same commit.
 - **To approve** (approvers only, and never your own proposal): set
   `state: approved`, `approved_by: user:<you>` and `approved_at`, then push.
+- **To reorder unplaced work** (members): edit `rank` in a reference in
+  `backlog/`, or drag it in Silo's UI.
 
 The rules above are enforced by Silo's pre-receive hook
-(`docs/task-repos.md` §8).
+(docs/task-repos.md §8).
