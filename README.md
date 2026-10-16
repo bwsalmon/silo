@@ -10,7 +10,8 @@ Policy Enforcement Point: it checks the claims on each incoming task
 against its own local policy.
 
 **Silo** is the multi-tenant coordination plane above the nodes, and
-the Policy Decision Point that signs task claims. It handles:
+the Policy Decision Point that puts claims on each task (it does not
+sign them yet: hub.md §1.2). It handles:
 
 - **Identity:** who a human (IAP or OIDC sign-on) or a node (a node
   token) is.
@@ -49,6 +50,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `docs/deploy.md` | How to deploy the hub on GKE behind IAP, in `bsalmon-gke-dev`. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
 | `docs/ui.md` | A proposal, not decided: the hub's human web UI (hub.md §9, stage 2.6). |
+| [`docs/threat-model.md`](docs/threat-model.md) | The threat model of the Grain + Silo system: assets, actors, trust boundaries, threats, the numbered security invariants (`INV-`) that audits and security tests cite, and the audit plan. |
 | `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |
 
 ## Building and testing
