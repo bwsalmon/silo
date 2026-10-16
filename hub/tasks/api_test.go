@@ -27,12 +27,14 @@ func (headerAuth) Principal(r *http.Request) (identity.Principal, error) {
 
 type apiHub struct {
 	store *Store
+	dir   *directory.Store
 	url   string
 }
 
-// newAPIHub serves the backlog's API over the harness's directory:
-// alice admins infra (bwsalmon/silo, bwsalmon/grain), dave is a member
-// of it, and bob is in web (bwsalmon/web).
+// newAPIHub serves the backlog's API, and the directory's, over the
+// harness's directory: alice admins infra (bwsalmon/silo,
+// bwsalmon/grain), dave is a member of it, bob is in web
+// (bwsalmon/web), and root is the hub admin.
 func newAPIHub(t *testing.T) *apiHub {
 	ctx := context.Background()
 	dir, err := directory.Open(ctx, "sqlite::memory:")
@@ -49,10 +51,15 @@ func newAPIHub(t *testing.T) *apiHub {
 	check(t, err)
 	t.Cleanup(func() { store.Close() })
 	store.Now = ticking()
-	api := &API{Store: store, Directory: &directory.API{Store: dir, Auth: headerAuth{}, HubAdmins: []string{"root@example.com"}}}
-	ts := httptest.NewServer(api.Handler())
+	dirAPI := &directory.API{Store: dir, Auth: headerAuth{}, HubAdmins: []string{"root@example.com"}}
+	api := &API{Store: store, Directory: dirAPI}
+	m := http.NewServeMux()
+	m.Handle(TasksPath, api.Handler())
+	m.Handle(TasksPath+"/", api.Handler())
+	m.Handle("/", dirAPI.Handler())
+	ts := httptest.NewServer(m)
 	t.Cleanup(ts.Close)
-	return &apiHub{store: store, url: ts.URL}
+	return &apiHub{store: store, dir: dir, url: ts.URL}
 }
 
 func (h *apiHub) do(t *testing.T, user, method, path string, body any) (int, []byte) {
@@ -166,6 +173,78 @@ func TestAPIVisibility(t *testing.T) {
 	}
 	if code, _ := h.do(t, "alice@example.com", "GET", TasksPath+"/"+theirs.ID, nil); code != http.StatusNotFound {
 		t.Errorf("alice reading web's task: %d, want 404", code)
+	}
+}
+
+// TestRepoSquatting was audit SA1-M2's exploit: once infra released
+// bwsalmon/silo, or was deleted, any team admin could claim it first
+// and so see every task infra had filed in it. Only a hub admin assigns
+// a repository now, and its earlier tasks go to the new team only when
+// the hub admin transfers them with it.
+func TestRepoSquatting(t *testing.T) {
+	ctx := context.Background()
+	h := newAPIHub(t)
+	check(t, h.dir.CreateTeam(ctx, "squat", ""))
+	check(t, h.dir.SetMember(ctx, "squat", "user:mallory@example.com", directory.Admin))
+	old := h.submit(t, "alice@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "secret"})
+	want := func(code int, user, method, path string, body any) {
+		t.Helper()
+		if got, b := h.do(t, user, method, path, body); got != code {
+			t.Fatalf("%s %s as %s: %d %s, want %d", method, path, user, got, b, code)
+		}
+	}
+	sees := func(user string, task Task) bool {
+		t.Helper()
+		code, _ := h.do(t, user, "GET", TasksPath+"/"+task.ID, nil)
+		return code == http.StatusOK
+	}
+	repo := "/v1/teams/%s/repos/bwsalmon/silo"
+	at := func(team string) string { return strings.Replace(repo, "%s", team, 1) }
+
+	// infra releases it, for a transfer to web.
+	want(http.StatusNoContent, "alice@example.com", "DELETE", at("infra"), nil)
+	// Mallory, an admin of an unrelated team, cannot claim it, nor can
+	// infra's or web's own admins.
+	want(http.StatusForbidden, "mallory@example.com", "PUT", at("squat"), nil)
+	want(http.StatusForbidden, "mallory@example.com", "PUT", at("squat"), map[string]bool{"history": true})
+	want(http.StatusForbidden, "alice@example.com", "PUT", at("infra"), nil)
+	if owner, _ := h.dir.RepoOwner(ctx, "bwsalmon/silo"); owner != "" {
+		t.Fatalf("bwsalmon/silo was claimed by %s", owner)
+	}
+	if sees("mallory@example.com", old) {
+		t.Errorf("mallory sees infra's task")
+	}
+
+	// The hub admin assigns it to web: web files tasks in it from now
+	// on, but infra's tasks stay infra's.
+	want(http.StatusNoContent, "root@example.com", "PUT", at("web"), nil)
+	want(http.StatusConflict, "root@example.com", "PUT", at("squat"), nil)
+	mine := h.submit(t, "bob@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "b"})
+	if mine.Team != "web" || !sees("bob@example.com", mine) {
+		t.Errorf("web's own task %+v", mine)
+	}
+	if sees("bob@example.com", old) {
+		t.Errorf("assigning bwsalmon/silo to web showed it infra's task")
+	}
+	if !sees("alice@example.com", old) || sees("alice@example.com", mine) {
+		t.Errorf("infra sees its own task: %t; web's: %t", sees("alice@example.com", old), sees("alice@example.com", mine))
+	}
+	if code, _ := h.do(t, "bob@example.com", "POST", TasksPath+"/"+old.ID+"/cancel", nil); code != http.StatusNotFound {
+		t.Errorf("bob cancelling infra's task: %d, want 404", code)
+	}
+
+	// Transferred with its history, explicitly, web sees infra's task.
+	want(http.StatusNoContent, "root@example.com", "PUT", at("web"), map[string]bool{"history": true})
+	if !sees("bob@example.com", old) {
+		t.Errorf("a transfer with history did not show web infra's task")
+	}
+
+	// A deleted team's repositories go to the next owner without their
+	// history too.
+	want(http.StatusNoContent, "root@example.com", "DELETE", "/v1/teams/web", nil)
+	want(http.StatusNoContent, "root@example.com", "PUT", at("squat"), nil)
+	if sees("mallory@example.com", mine) || sees("mallory@example.com", old) {
+		t.Errorf("squat inherited a deleted team's tasks")
 	}
 }
 

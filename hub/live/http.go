@@ -78,9 +78,10 @@ func (h *Hub) task(w http.ResponseWriter, r *http.Request) (tasks.Task, bool) {
 }
 
 // sees is the backlog's rule: a member of the task's team, or, for a
-// repository's task, of the team that owns the repository now.
+// repository's task, of the team a hub admin transferred the repository
+// to with its history (directory.Access.SeesTask).
 func sees(acc *directory.Access, t tasks.Task) bool {
-	return acc.SeesTeam(t.Team) || (t.Repo != "" && acc.SeesRepo(t.Repo))
+	return acc.SeesTask(t.Team, t.Repo)
 }
 
 // endMessage is the last message of a subscription whose task's events

@@ -31,7 +31,7 @@ const (
 //	DELETE /v1/teams/{team}                           hub admin
 //	PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin
 //	DELETE /v1/teams/{team}/members/{principal}       team admin
-//	PUT    /v1/teams/{team}/repos/{owner}/{name}      team admin
+//	PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history"}]   hub admin
 //	DELETE /v1/teams/{team}/repos/{owner}/{name}      team admin
 //	GET    /v1/teams/{team}/settings                  its members
 //	PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds"}   team admin
@@ -56,6 +56,17 @@ type API struct {
 	// that the node registry forgets the owner it bound the ID to:
 	// registry.Registry.Unbind.
 	Unbind func(nodeID string) error
+	// Logf, when set, receives the audit lines of changes to which team
+	// owns what: deleting a team, assigning and releasing a repository.
+	Logf func(format string, args ...any)
+}
+
+// audit logs one change to the directory, with the principal who made
+// it (O-10).
+func (a *API) audit(acc *Access, format string, args ...any) {
+	if a.Logf != nil {
+		a.Logf("directory: audit: %s "+format, append([]any{acc.Email}, args...)...)
+	}
 }
 
 // Access authenticates r and loads what its caller may see.
@@ -236,6 +247,7 @@ func (a *API) deleteTeam(w http.ResponseWriter, r *http.Request, acc *Access) er
 	if err := a.Store.DeleteTeam(r.Context(), r.PathValue("team")); err != nil {
 		return err
 	}
+	a.audit(acc, "deleted team %s, leaving its repositories unowned", r.PathValue("team"))
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -297,14 +309,37 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request, acc *Access) 
 	return nil
 }
 
+// assignRepo is a hub admin's: a team admin who could assign
+// repositories could claim any one no team owned at that moment, one
+// released for a transfer or left by a deleted team, and with it the
+// work of its nodes and the rightful team's 409 (SA1-M2). {"history":
+// true} also gives the team the tasks earlier teams filed in it
+// (Store.TransferRepo); without it, they stay with those teams.
 func (a *API) assignRepo(w http.ResponseWriter, r *http.Request, acc *Access) error {
-	team, err := teamAdmin(r, acc)
-	if err != nil {
+	team := r.PathValue("team")
+	if !acc.HubAdmin {
+		if acc.SeesTeam(team) {
+			return errForbidden
+		}
+		return errNoTeam
+	}
+	var req struct {
+		History bool `json:"history"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			return err
+		}
+	}
+	repo := r.PathValue("owner") + "/" + r.PathValue("name")
+	assign := a.Store.AssignRepo
+	if req.History {
+		assign = a.Store.TransferRepo
+	}
+	if err := assign(r.Context(), team, repo); err != nil {
 		return err
 	}
-	if err := a.Store.AssignRepo(r.Context(), team, r.PathValue("owner")+"/"+r.PathValue("name")); err != nil {
-		return err
-	}
+	a.audit(acc, "assigned repository %s to team %s (history: %t)", strings.ToLower(repo), team, req.History)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -314,9 +349,11 @@ func (a *API) releaseRepo(w http.ResponseWriter, r *http.Request, acc *Access) e
 	if err != nil {
 		return err
 	}
-	if err := a.Store.ReleaseRepo(r.Context(), team, r.PathValue("owner")+"/"+r.PathValue("name")); err != nil {
+	repo := r.PathValue("owner") + "/" + r.PathValue("name")
+	if err := a.Store.ReleaseRepo(r.Context(), team, repo); err != nil {
 		return err
 	}
+	a.audit(acc, "released repository %s from team %s", strings.ToLower(repo), team)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

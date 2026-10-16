@@ -117,14 +117,22 @@ func TestAPI(t *testing.T) {
 	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
 	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/user:"+bob, map[string]string{"role": "admin"}, admins)
 
+	// Only a hub admin assigns repositories (SA1-M2).
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", map[string]bool{"history": true}, admins)
+	h.want(t, 409, root, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil, admins) // infra's
+	h.want(t, 400, root, "PUT", TeamsPath+"/web/repos/bwsalmon/x", map[string]any{"transfer": true}, admins)
+	h.want(t, 404, root, "PUT", TeamsPath+"/nope/repos/bwsalmon/x", nil, admins)
+
 	// Alice administers infra, and only infra.
-	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil)
 	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/user:carol@example.com", map[string]string{"role": "member"})
+	h.want(t, 403, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/x", nil)
 	h.want(t, 404, alice, "PUT", TeamsPath+"/web/repos/bwsalmon/x", nil)
 	h.want(t, 403, "carol@example.com", "PUT", TeamsPath+"/infra/repos/bwsalmon/x", nil)
 	h.want(t, 403, alice, "DELETE", TeamsPath+"/infra", nil)
-	h.want(t, 204, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/web", nil)
-	h.want(t, 409, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil) // infra's
+	if owner, _ := h.store.RepoOwner(context.Background(), "bwsalmon/x"); owner != "" {
+		t.Errorf("a team admin assigned bwsalmon/x to %q", owner)
+	}
 
 	var teams struct{ Teams []Team }
 	json.Unmarshal(h.want(t, 200, alice, "GET", TeamsPath, nil), &teams)

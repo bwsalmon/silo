@@ -385,6 +385,76 @@ func TestReleasedColumn(t *testing.T) {
 	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
 }
 
+// TestHistoryColumn: team_repos from before history gain it, unset, so
+// a repository's earlier teams' tasks stop following it until a hub
+// admin transfers it with them (SA1-M2); OpenExisting refuses a table
+// without it.
+func TestHistoryColumn(t *testing.T) {
+	run := func(t *testing.T, url string) {
+		ctx := context.Background()
+		s, err := Open(ctx, url)
+		check(t, err)
+		check(t, s.CreateTeam(ctx, "web", ""))
+		check(t, s.SetMember(ctx, "web", "user:bob@example.com", Member))
+		_, err = s.db.ExecContext(ctx, `DROP TABLE team_repos`)
+		check(t, err)
+		_, err = s.db.ExecContext(ctx, `CREATE TABLE team_repos (repo TEXT PRIMARY KEY, team TEXT NOT NULL REFERENCES teams (id) ON DELETE CASCADE)`)
+		check(t, err)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO team_repos (repo, team) VALUES ('bwsalmon/web', 'web')`)
+		check(t, err)
+		s.Close()
+		if _, err := OpenExisting(ctx, url); err == nil || !strings.Contains(err.Error(), "history") {
+			t.Errorf("OpenExisting on the old table: %v", err)
+		}
+		s, err = Open(ctx, url)
+		check(t, err)
+		defer s.Close()
+		bob, err := s.Access(ctx, identity.Principal{Email: "bob@example.com"}, false)
+		check(t, err)
+		if !bob.SeesRepo("bwsalmon/web") || !bob.SeesTask("web", "bwsalmon/web") || bob.SeesTask("old", "bwsalmon/web") {
+			t.Errorf("bob after the migration: %+v", bob)
+		}
+	}
+	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
+	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
+}
+
+// TestSeesTask: a repository's tasks filed under another team show to
+// the team that owns it now only once a hub admin has transferred it
+// with its history (SA1-M2).
+func TestSeesTask(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seed(t, s)
+		bob := func() *Access {
+			a, err := s.Access(ctx, identity.Principal{Email: "bob@example.com"}, false)
+			check(t, err)
+			return a
+		}
+		check(t, s.ReleaseRepo(ctx, "infra", "bwsalmon/silo"))
+		check(t, s.AssignRepo(ctx, "web", "bwsalmon/silo"))
+		if b := bob(); !b.SeesRepo("bwsalmon/silo") || b.SeesTask("infra", "bwsalmon/silo") || !b.SeesTask("web", "bwsalmon/silo") || b.SeesTask("infra", "") {
+			t.Errorf("assigned without history: %+v", b)
+		}
+		check(t, s.TransferRepo(ctx, "web", "bwsalmon/silo"))
+		if b := bob(); !b.SeesTask("infra", "bwsalmon/silo") || b.SeesTask("infra", "bwsalmon/other") {
+			t.Errorf("transferred with history: %+v", b)
+		}
+		// Assigning it again, without, takes the history back.
+		check(t, s.AssignRepo(ctx, "web", "bwsalmon/silo"))
+		if b := bob(); b.SeesTask("infra", "bwsalmon/silo") {
+			t.Errorf("reassigned without history: %+v", b)
+		}
+		// Released and assigned anew, it starts without.
+		check(t, s.TransferRepo(ctx, "web", "bwsalmon/silo"))
+		check(t, s.ReleaseRepo(ctx, "web", "bwsalmon/silo"))
+		check(t, s.AssignRepo(ctx, "web", "bwsalmon/silo"))
+		if b := bob(); b.SeesTask("infra", "bwsalmon/silo") {
+			t.Errorf("released, then assigned without history: %+v", b)
+		}
+	})
+}
+
 func TestAccess(t *testing.T) {
 	eachStore(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
