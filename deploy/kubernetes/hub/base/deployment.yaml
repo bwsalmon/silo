@@ -33,13 +33,16 @@ spec:
           type: RuntimeDefault
       initContainers:
         # The Cloud SQL Auth Proxy as a native sidecar: it starts before
-        # the hub and stops after it, so the hub's shutdown can still
-        # write to the database.
+        # the migration and the hub and stops after the hub, so the
+        # hub's shutdown can still write to the database. It listens
+        # twice on the one instance (SA1-L8): on 5432 it logs the hub's
+        # IAM database user in with the pod's Workload Identity, the
+        # least-privileged role the hub serves as; on 5433 it takes a
+        # password, for the migrate container's schema owner.
         - name: cloud-sql-proxy
           image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
           restartPolicy: Always
           args:
-            - --port=5432
             - --structured-logs
             - --health-check
             # Its health server must answer the kubelet's startup
@@ -48,7 +51,8 @@ spec:
             # reaching it.
             - --http-address=0.0.0.0
             - --exit-zero-on-sigterm
-            - $(CLOUD_SQL_INSTANCE)
+            - $(CLOUD_SQL_INSTANCE)?port=5432&auto-iam-authn=true
+            - $(CLOUD_SQL_INSTANCE)?port=5433
           env:
             - name: CLOUD_SQL_INSTANCE
               valueFrom:
@@ -71,6 +75,38 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+        # The hub's tables, created or changed as the role that owns
+        # the schema, before the hub starts; and the hub's own role
+        # granted their rows and nothing more. Only this container has
+        # the owner's password.
+        - name: migrate
+          image: silo-hub
+          args: ["hub", "migrate"]
+          env:
+            # postgres://silo-hub:PASSWORD@127.0.0.1:5433/silo?sslmode=disable
+            # (docs/deploy.md).
+            - name: SILO_HUB_MIGRATE_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: silo-hub-db
+                  key: migrate-url
+            - name: SILO_HUB_RUNTIME_ROLE
+              valueFrom:
+                configMapKeyRef:
+                  name: silo-hub-config
+                  key: SILO_HUB_RUNTIME_ROLE
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       containers:
         - name: hub
           image: silo-hub
@@ -82,13 +118,19 @@ spec:
             - configMapRef:
                 name: silo-hub-config
           env:
-            # postgres://silo-hub:PASSWORD@127.0.0.1:5432/silo?sslmode=disable,
-            # through the proxy (docs/deploy.md).
+            # postgres://silo-hub%40PROJECT.iam@127.0.0.1:5432/silo?sslmode=disable,
+            # the hub's IAM database user through the proxy
+            # (docs/deploy.md).
             - name: SILO_HUB_DATABASE
               valueFrom:
                 secretKeyRef:
                   name: silo-hub-db
                   key: url
+            # The migrate init container made the tables; this role may
+            # only read and write their rows (as may `silo hub team` and
+            # `silo hub token`, exec'd here).
+            - name: SILO_HUB_MIGRATE
+              value: "false"
           ports:
             - name: http
               containerPort: 8080

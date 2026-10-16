@@ -69,6 +69,12 @@ type Config struct {
 	// "sqlite::memory:") for local development only, since SQLite
 	// holds one process's data on one disk.
 	Database string
+	// NoMigrate opens the stores without creating their tables: they
+	// were made by Migrate, as the schema's owner, and Database's role
+	// need only read and write their rows (docs/deploy.md). False, the
+	// development default, creates any that are missing as Database's
+	// role.
+	NoMigrate bool
 
 	// IAPAudience, when set, signs humans in from Google Cloud IAP's
 	// assertion, checked against this audience: the IAP-enabled
@@ -206,8 +212,9 @@ type Hub struct {
 	draining atomic.Bool
 }
 
-// New opens the stores, creating their tables if they are missing, and
-// wires the hub's parts. Close closes the stores.
+// New opens the stores, creating their tables if they are missing
+// (unless cfg.NoMigrate), and wires the hub's parts. Close closes the
+// stores.
 func New(ctx context.Context, cfg Config) (*Hub, error) {
 	if cfg.Database == "" {
 		return nil, errors.New("server: no database configured")
@@ -225,16 +232,20 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		h.Close()
 		return nil, err
 	}
-	if h.Directory, err = directory.Open(ctx, cfg.Database); err != nil {
+	openDirectory, openBacklog, openEvents, openLeases := directory.Open, tasks.Open, live.Open, lease.Open
+	if cfg.NoMigrate {
+		openDirectory, openBacklog, openEvents, openLeases = directory.OpenExisting, tasks.OpenExisting, live.OpenExisting, lease.OpenExisting
+	}
+	if h.Directory, err = openDirectory(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the team directory: %w", err))
 	}
-	if h.Backlog, err = tasks.Open(ctx, cfg.Database); err != nil {
+	if h.Backlog, err = openBacklog(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the backlog: %w", err))
 	}
-	if h.Events, err = live.Open(ctx, cfg.Database); err != nil {
+	if h.Events, err = openEvents(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the event store: %w", err))
 	}
-	if h.Leases, err = lease.Open(ctx, cfg.Database); err != nil {
+	if h.Leases, err = openLeases(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the leases: %w", err))
 	}
 

@@ -35,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/dbaccess"
 	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
 	_ "modernc.org/sqlite"             // "sqlite"
@@ -89,7 +90,15 @@ type Store struct {
 // Open opens the lease store at url, as the hub's other stores take it:
 // "postgres://..." (or "postgresql://...") for PostgreSQL, "sqlite:PATH"
 // or a bare path for SQLite. It creates hub_leases if it is missing.
-func Open(ctx context.Context, url string) (*Store, error) {
+func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, true) }
+
+// OpenExisting opens the lease store at url as Open does, but creates
+// nothing: hub_leases was made by Open or `silo hub migrate` as a role
+// that may create it, and url's role need only read and write its rows
+// (docs/deploy.md). It fails if the table is missing.
+func OpenExisting(ctx context.Context, url string) (*Store, error) { return open(ctx, url, false) }
+
+func open(ctx context.Context, url string, create bool) (*Store, error) {
 	s := &Store{sems: map[string]chan struct{}{}}
 	s.postgres = strings.HasPrefix(url, "postgres://") || strings.HasPrefix(url, "postgresql://")
 	var err error
@@ -115,7 +124,12 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hub_leases (
+	if !create {
+		if err := dbaccess.Check(ctx, s.db, "lease", "hub_leases"); err != nil {
+			s.db.Close()
+			return nil, err
+		}
+	} else if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hub_leases (
 	name TEXT PRIMARY KEY,
 	epoch BIGINT NOT NULL,
 	holder TEXT NOT NULL,

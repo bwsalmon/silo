@@ -76,8 +76,24 @@ run "defaults" {
     error_message = "the database is PostgreSQL"
   }
   assert {
-    condition     = startswith(nonsensitive(output.database_url), "postgres://silo-hub:") && endswith(nonsensitive(output.database_url), "@127.0.0.1:5432/silo?sslmode=disable")
-    error_message = "the database URL goes through the proxy"
+    condition     = output.database_url == "postgres://silo-hub%40bsalmon-gke-dev.iam@127.0.0.1:5432/silo?sslmode=disable"
+    error_message = "the hub serves as its IAM database user, with no password, through the proxy's IAM port"
+  }
+  assert {
+    condition     = startswith(nonsensitive(output.migrate_database_url), "postgres://silo-hub:") && endswith(nonsensitive(output.migrate_database_url), "@127.0.0.1:5433/silo?sslmode=disable")
+    error_message = "migrations run as the built-in user, through the proxy's password port"
+  }
+  assert {
+    condition     = google_sql_user.runtime.type == "CLOUD_IAM_SERVICE_ACCOUNT" && google_sql_user.runtime.name == "silo-hub@bsalmon-gke-dev.iam" && output.runtime_role == google_sql_user.runtime.name
+    error_message = "the runtime role is the GSA's IAM database user"
+  }
+  assert {
+    condition     = one([for f in google_sql_database_instance.hub.settings[0].database_flags : f.value if f.name == "cloudsql.iam_authentication"]) == "on"
+    error_message = "the instance takes IAM database logins"
+  }
+  assert {
+    condition     = google_project_iam_member.cloudsql_instance_user.role == "roles/cloudsql.instanceUser" && strcontains(google_project_iam_member.cloudsql_instance_user.condition[0].expression, "resource.name == \"projects/bsalmon-gke-dev/instances/silo-hub\"")
+    error_message = "the GSA can log in to the hub's instance alone"
   }
   assert {
     condition     = output.iap_audience_prefix == "/projects/123456789/global/backendServices/"

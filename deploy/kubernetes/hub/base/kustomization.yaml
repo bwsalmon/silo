@@ -30,3 +30,6 @@ configMapGenerator:
       - SILO_HUB_ADMINS=
       # The Cloud SQL instance, PROJECT:REGION:INSTANCE.
       - CLOUD_SQL_INSTANCE=PROJECT:REGION:INSTANCE
+      # The PostgreSQL role the hub serves as, its service account's
+      # IAM database user: terraform output -raw runtime_role.
+      - SILO_HUB_RUNTIME_ROLE=SERVICE_ACCOUNT@PROJECT.iam

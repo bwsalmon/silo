@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/dbaccess"
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
 	_ "modernc.org/sqlite"             // "sqlite"
 )
@@ -78,7 +79,18 @@ type Store struct {
 // "postgresql://...") for PostgreSQL, "sqlite:PATH" or a bare path for
 // SQLite (":memory:" for a throwaway one). It creates the tables if
 // they are missing.
-func Open(ctx context.Context, url string) (*Store, error) {
+func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, true) }
+
+// OpenExisting opens the directory at url as Open does, but creates
+// nothing: its tables were made by Open or `silo hub migrate` as a role
+// that may create them, and url's role need only read and write their
+// rows (docs/deploy.md). It fails if a table is missing.
+func OpenExisting(ctx context.Context, url string) (*Store, error) { return open(ctx, url, false) }
+
+// Tables are the directory's tables.
+var Tables = []string{"teams", "team_members", "team_repos", "node_tokens", "team_settings"}
+
+func open(ctx context.Context, url string, create bool) (*Store, error) {
 	var (
 		db       *sql.DB
 		err      error
@@ -97,7 +109,12 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db, postgres: postgres}
-	if err := s.migrate(ctx); err != nil {
+	if create {
+		err = s.migrate(ctx)
+	} else {
+		err = dbaccess.Check(ctx, db, "directory", Tables...)
+	}
+	if err != nil {
 		db.Close()
 		return nil, err
 	}

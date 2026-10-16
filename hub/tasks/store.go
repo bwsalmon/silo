@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/dbaccess"
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
 	_ "modernc.org/sqlite"             // "sqlite"
 )
@@ -30,7 +31,15 @@ type Store struct {
 // for PostgreSQL, "sqlite:PATH" or a bare path for SQLite (":memory:" for
 // a throwaway one). It creates its table if it is missing; it may share
 // a database with the team directory.
-func Open(ctx context.Context, url string) (*Store, error) {
+func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, true) }
+
+// OpenExisting opens the backlog at url as Open does, but creates
+// nothing: its table was made by Open or `silo hub migrate` as a role
+// that may create it, and url's role need only read and write its rows
+// (docs/deploy.md). It fails if the table is missing.
+func OpenExisting(ctx context.Context, url string) (*Store, error) { return open(ctx, url, false) }
+
+func open(ctx context.Context, url string, create bool) (*Store, error) {
 	var (
 		db       *sql.DB
 		err      error
@@ -49,7 +58,12 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db, postgres: postgres}
-	if err := s.migrate(ctx); err != nil {
+	if create {
+		err = s.migrate(ctx)
+	} else {
+		err = dbaccess.Check(ctx, db, "tasks", "tasks")
+	}
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
