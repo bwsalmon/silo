@@ -12,6 +12,7 @@ import (
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
+	"github.com/bwsalmon/silo/internal/testlog"
 )
 
 // harness is a hub: the team directory, the rendezvous, the backlog and
@@ -45,6 +46,7 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(func() { store.Close() })
 	store.Now = ticking()
 
+	logf := testlog.Logf(t)
 	rv := &rendezvous.Server{
 		Registry: registry.New(),
 		// The bearer token is the owner's email.
@@ -57,7 +59,7 @@ func newHarness(t *testing.T) *harness {
 		},
 		Admit:     dir.Admit,
 		Heartbeat: time.Second,
-		Logf:      t.Logf,
+		Logf:      logf,
 	}
 	ts := httptest.NewServer(rv.Handler())
 	t.Cleanup(ts.Close)
@@ -69,7 +71,7 @@ func newHarness(t *testing.T) *harness {
 		Directory:    dir,
 		OfferTimeout: 3 * time.Second,
 		Retry:        300 * time.Millisecond,
-		Logf:         t.Logf,
+		Logf:         logf,
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	stopped := make(chan struct{})

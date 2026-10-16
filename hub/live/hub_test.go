@@ -22,6 +22,7 @@ import (
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
+	"github.com/bwsalmon/silo/internal/testlog"
 	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
 
@@ -113,11 +114,12 @@ func newHarness(t *testing.T) *harness {
 	ft := &fakeTasks{m: map[string]tasks.Task{}}
 	ft.put(tasks.Task{Spec: tasks.Spec{ID: "t-1", Team: "infra", Repo: "bwsalmon/silo"}, State: tasks.Running, Node: "ws-1", NodeTask: "local-1"})
 
+	logf := testlog.Logf(t)
 	h := &Hub{
 		Log:       log,
 		Tasks:     ft,
 		Directory: &directory.API{Store: dir, Auth: headerAuth{}},
-		Logf:      t.Logf,
+		Logf:      logf,
 	}
 	rv := &rendezvous.Server{
 		Registry: registry.New(),
@@ -130,7 +132,7 @@ func newHarness(t *testing.T) *harness {
 		},
 		NodeStream: h.NodeStream,
 		Heartbeat:  time.Second,
-		Logf:       t.Logf,
+		Logf:       logf,
 	}
 	h.Open = rv.Open
 	rvs := httptest.NewServer(rv.Handler())

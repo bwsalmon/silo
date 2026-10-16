@@ -11,12 +11,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bwsalmon/silo/hub/registry"
+	"github.com/bwsalmon/silo/internal/testlog"
 )
 
 // tokens is a static node credential table, token to owner. A token
@@ -38,34 +38,11 @@ func hub(t *testing.T) (*Server, *httptest.Server) {
 		Registry:     registry.New(),
 		Authenticate: tokens(map[string]string{"alice-tok": "alice@example.com", "bob-tok": "bob@example.com", "alice-tok@ws-9": "alice@example.com"}),
 		Heartbeat:    time.Second,
-		Logf:         testLogf(t),
+		Logf:         testlog.Logf(t),
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return s, ts
-}
-
-// testLogf is t.Logf until the test's cleanups run, and a no-op after.
-// ts.Close does not wait for hijacked WebSocket connections, so a
-// serveNode goroutine can still log once its test has returned, which
-// the testing package reports as a race (or a panic).
-func testLogf(t *testing.T) func(string, ...any) {
-	var (
-		mu   sync.Mutex
-		done bool
-	)
-	t.Cleanup(func() {
-		mu.Lock()
-		defer mu.Unlock()
-		done = true
-	})
-	return func(format string, args ...any) {
-		mu.Lock()
-		defer mu.Unlock()
-		if !done {
-			t.Logf(format, args...)
-		}
-	}
 }
 
 func client(url, tok string, n registry.Node) *Client {
