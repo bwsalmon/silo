@@ -1,6 +1,7 @@
 // Command silo runs the Silo hub (docs/hub.md):
 //
 //	silo hub serve     run the hub: the rendezvous nodes connect to, the directory, the backlog and its dispatcher, live events
+//	silo hub migrate   create the hub's tables as the schema's owner, and grant the role the hub serves as its rows
 //	silo hub team      create a team, or add admins and repositories to one, straight in the database
 //	silo hub token     mint a node token, straight in the database
 //
@@ -19,6 +20,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +44,7 @@ func main() {
 
 const usage = `usage:
   silo hub serve [flags]   run the hub
+  silo hub migrate [flags] create the hub's tables, and grant the hub's runtime role its rows
   silo hub team [flags]    create a team, or add admins and repositories to one
   silo hub token [flags]   mint a node token
 Run a command with -h for its flags.`
@@ -54,6 +57,8 @@ func run(args []string) error {
 	switch args[1] {
 	case "serve":
 		return serve(args[2:])
+	case "migrate":
+		return migrate(args[2:])
 	case "team":
 		return team(args[2:])
 	case "token":
@@ -94,10 +99,62 @@ func databaseFlag(fs *flag.FlagSet) *string {
 		"the hub's database: postgres://... (sqlite:PATH for local development only) [SILO_HUB_DATABASE]")
 }
 
+// migrateFlag is whether a command creates the hub's tables that are
+// missing, as its own database role: true for development, false where
+// `silo hub migrate` made them as the schema's owner and the hub serves
+// as a role that cannot (docs/deploy.md).
+func migrateFlag(fs *flag.FlagSet) *bool {
+	def := true
+	if v, ok := os.LookupEnv("SILO_HUB_MIGRATE"); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			def = b
+		} else {
+			fmt.Fprintf(os.Stderr, "silo: SILO_HUB_MIGRATE=%q is not a boolean; creating tables\n", v)
+		}
+	}
+	return fs.Bool("migrate", def,
+		"create the hub's tables if they are missing, as -database's role; false when `silo hub migrate` made them and -database's role may only read and write rows [SILO_HUB_MIGRATE]")
+}
+
+// openDirectory opens the directory for team and token, creating its
+// tables only if create.
+func openDirectory(ctx context.Context, url string, create bool) (*directory.Store, error) {
+	if create {
+		return directory.Open(ctx, url)
+	}
+	return directory.OpenExisting(ctx, url)
+}
+
+func migrate(args []string) error {
+	fs := flag.NewFlagSet("silo hub migrate", flag.ContinueOnError)
+	db := fs.String("database", env("SILO_HUB_MIGRATE_DATABASE", env("SILO_HUB_DATABASE", "")),
+		"the hub's database, as the role that owns its schema: postgres://... (sqlite:PATH for local development only) [SILO_HUB_MIGRATE_DATABASE, else SILO_HUB_DATABASE]")
+	role := fs.String("runtime-role", env("SILO_HUB_RUNTIME_ROLE", ""),
+		"the PostgreSQL role `silo hub serve -migrate=false` connects as: granted read and write on the hub's tables, now and as later migrations add them, and refused if it could change the schema; empty grants nothing [SILO_HUB_RUNTIME_ROLE]")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *db == "" {
+		return errors.New("silo hub migrate: -database is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := server.Migrate(ctx, *db, *role); err != nil {
+		return err
+	}
+	if *role != "" {
+		log.Printf("hub: tables migrated; %s may read and write them", *role)
+	} else {
+		log.Printf("hub: tables migrated")
+	}
+	return nil
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("silo hub serve", flag.ContinueOnError)
 	addr := fs.String("addr", env("SILO_HUB_ADDR", ":8080"), "address to listen on [SILO_HUB_ADDR]")
 	db := databaseFlag(fs)
+	doMigrate := migrateFlag(fs)
 	iap := fs.String("iap-audience", env("SILO_HUB_IAP_AUDIENCE", ""),
 		"sign humans in behind IAP: the backend service's audience, /projects/NUMBER/global/backendServices/ID [SILO_HUB_IAP_AUDIENCE]")
 	issuer := fs.String("oidc-issuer", env("SILO_HUB_OIDC_ISSUER", ""), "sign humans in with OIDC: the provider's issuer URL [SILO_HUB_OIDC_ISSUER]")
@@ -118,6 +175,7 @@ func serve(args []string) error {
 	}
 	cfg := server.Config{
 		Database:     *db,
+		NoMigrate:    !*doMigrate,
 		IAPAudience:  *iap,
 		OIDCIssuer:   *issuer,
 		OIDCClientID: *clientID,
@@ -149,6 +207,7 @@ func serve(args []string) error {
 func team(args []string) error {
 	fs := flag.NewFlagSet("silo hub team", flag.ContinueOnError)
 	db := databaseFlag(fs)
+	doMigrate := migrateFlag(fs)
 	id := fs.String("id", "", "the team's ID, lower-case: created if it does not exist")
 	name := fs.String("name", "", "the team's display name, when it is created")
 	var admins, members, repos multi
@@ -165,7 +224,7 @@ func team(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	s, err := directory.Open(ctx, *db)
+	s, err := openDirectory(ctx, *db, *doMigrate)
 	if err != nil {
 		return err
 	}
@@ -205,6 +264,7 @@ func team(args []string) error {
 func token(args []string) error {
 	fs := flag.NewFlagSet("silo hub token", flag.ContinueOnError)
 	db := databaseFlag(fs)
+	doMigrate := migrateFlag(fs)
 	owner := fs.String("owner", "", "the node's owner, the email its tasks are admitted under")
 	node := fs.String("node", "", "the node's ID: the only ID the token may register")
 	if err := fs.Parse(args); err != nil {
@@ -215,7 +275,7 @@ func token(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	s, err := directory.Open(ctx, *db)
+	s, err := openDirectory(ctx, *db, *doMigrate)
 	if err != nil {
 		return err
 	}

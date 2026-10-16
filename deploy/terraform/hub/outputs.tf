@@ -9,9 +9,19 @@ output "sql_connection_name" {
 }
 
 output "database_url" {
-  description = "SILO_HUB_DATABASE, through the Cloud SQL Auth Proxy beside the hub: the silo-hub-db Secret's url."
-  value       = "postgres://${local.db_user}:${random_password.db.result}@127.0.0.1:5432/${local.db_name}?sslmode=disable"
+  description = "SILO_HUB_DATABASE: the hub serves as its IAM database user, through the Cloud SQL Auth Proxy's IAM-authenticated port beside it. No password; the silo-hub-db Secret's url."
+  value       = "postgres://${urlencode(local.db_runtime_user)}@127.0.0.1:5432/${local.db_name}?sslmode=disable"
+}
+
+output "migrate_database_url" {
+  description = "SILO_HUB_MIGRATE_DATABASE: `silo hub migrate` runs as the schema's owner, the built-in user, through the proxy's password port. The silo-hub-db Secret's migrate-url."
+  value       = "postgres://${local.db_user}:${random_password.db.result}@127.0.0.1:5433/${local.db_name}?sslmode=disable"
   sensitive   = true
+}
+
+output "runtime_role" {
+  description = "SILO_HUB_RUNTIME_ROLE: the PostgreSQL role the hub serves as, which `silo hub migrate` grants the hub's rows."
+  value       = local.db_runtime_user
 }
 
 output "ip_address" {

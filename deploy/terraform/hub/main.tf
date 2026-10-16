@@ -43,6 +43,9 @@ locals {
   workload_identity = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/${var.service_account}]"
   db_user           = "silo-hub"
   db_name           = "silo"
+  # The hub's Google service account's IAM database user, as Cloud SQL
+  # names it: the role the hub serves as.
+  db_runtime_user = trimsuffix(google_service_account.hub.email, ".gserviceaccount.com")
   # SILO_HUB_NODE_UI_DOMAIN: node ws-1's UI is at ws-1.<it>
   # (docs/hub.md §11.2). Empty when node_ui_domain is "".
   node_ui_domain = var.node_ui_domain == null ? "nodes.${var.domain}" : var.node_ui_domain
@@ -77,6 +80,12 @@ resource "google_sql_database_instance" "hub" {
       ipv4_enabled = true
       ssl_mode     = "ENCRYPTED_ONLY"
     }
+    # The hub serves as its service account's IAM database user, which
+    # the proxy logs in with a token rather than a password.
+    database_flags {
+      name  = "cloudsql.iam_authentication"
+      value = "on"
+    }
     # Daily backups and point-in-time recovery from the write-ahead
     # log: the hub can be put back to any second in the last
     # point_in_time_recovery_days (docs/hub-operations.md, "Restoring
@@ -103,9 +112,10 @@ resource "google_sql_database" "hub" {
   instance = google_sql_database_instance.hub.name
 }
 
-# A built-in user: Cloud SQL makes it a member of cloudsqlsuperuser, so
-# it can create the hub's tables, which an IAM database user could not
-# without a grant run by hand.
+# Two roles (SA1-L8). The built-in user owns the hub's schema and is the
+# only one that changes it: `silo hub migrate`, in the pod's migrate
+# init container, runs as it. Cloud SQL makes it a member of
+# cloudsqlsuperuser, so it is only ever used for that.
 resource "random_password" "db" {
   length  = 32
   special = false
@@ -116,6 +126,19 @@ resource "google_sql_user" "hub" {
   project  = var.project
   instance = google_sql_database_instance.hub.name
   password = random_password.db.result
+}
+
+# The hub serves as its service account's IAM database user, which
+# Cloud SQL puts in no role: it has no privileges until `silo hub
+# migrate -runtime-role` grants it SELECT, INSERT, UPDATE and DELETE on
+# the hub's tables, and by default privileges on those later
+# migrations add (hub/dbaccess). It has no password: the proxy logs it
+# in with the pod's Workload Identity.
+resource "google_sql_user" "runtime" {
+  name     = local.db_runtime_user
+  project  = var.project
+  instance = google_sql_database_instance.hub.name
+  type     = "CLOUD_IAM_SERVICE_ACCOUNT"
 }
 
 # --- The hub's identity ----------------------------------------------
@@ -132,6 +155,18 @@ resource "google_service_account" "hub" {
 resource "google_project_iam_member" "cloudsql_client" {
   project = var.project
   role    = "roles/cloudsql.client"
+  member  = google_service_account.hub.member
+  condition {
+    title       = "${var.name}-instance"
+    description = "The hub's Cloud SQL instance only."
+    expression  = "resource.service == \"sqladmin.googleapis.com\" && resource.name == \"projects/${var.project}/instances/${google_sql_database_instance.hub.name}\""
+  }
+}
+
+# Logging in as its IAM database user, on the hub's instance alone.
+resource "google_project_iam_member" "cloudsql_instance_user" {
+  project = var.project
+  role    = "roles/cloudsql.instanceUser"
   member  = google_service_account.hub.member
   condition {
     title       = "${var.name}-instance"

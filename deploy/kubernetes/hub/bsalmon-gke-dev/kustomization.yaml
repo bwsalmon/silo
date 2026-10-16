@@ -21,6 +21,8 @@ configMapGenerator:
       - SILO_HUB_NODE_UI_DOMAIN=
       # terraform output -raw sql_connection_name
       - CLOUD_SQL_INSTANCE=bsalmon-gke-dev:us-central1:silo-hub
+      # terraform output -raw runtime_role
+      - SILO_HUB_RUNTIME_ROLE=silo-hub@bsalmon-gke-dev.iam
 patches:
   - target:
       kind: ServiceAccount

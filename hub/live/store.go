@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bwsalmon/silo/hub/dbaccess"
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
 	_ "modernc.org/sqlite"             // "sqlite"
 )
@@ -39,7 +40,15 @@ type Store struct {
 // SQLite (":memory:" for a throwaway one). It creates its table if it is
 // missing; it may share a database with the backlog and the team
 // directory.
-func Open(ctx context.Context, url string) (*Store, error) {
+func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, url, true) }
+
+// OpenExisting opens the event store at url as Open does, but creates
+// nothing: its table was made by Open or `silo hub migrate` as a role
+// that may create it, and url's role need only read and write its rows
+// (docs/deploy.md). It fails if the table is missing.
+func OpenExisting(ctx context.Context, url string) (*Store, error) { return open(ctx, url, false) }
+
+func open(ctx context.Context, url string, create bool) (*Store, error) {
 	var (
 		db       *sql.DB
 		err      error
@@ -58,6 +67,13 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db, postgres: postgres}
+	if !create {
+		if err := dbaccess.Check(ctx, db, "live", "task_events"); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return s, nil
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS task_events (
 	task TEXT NOT NULL,
 	seq BIGINT NOT NULL,

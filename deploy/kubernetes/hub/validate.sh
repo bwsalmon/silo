@@ -83,6 +83,11 @@ for o in "${overlays[@]}"; do
 	prom="$(np silo-hub-metrics-from-prometheus)"
 	{ grep -q 'kubernetes.io/metadata.name: gmp-system$' <<<"$prom" && [ "$(grep -c 'port:' <<<"$prom")" = 1 ] && grep -q 'port: 9091$' <<<"$prom"; } || { echo "$o: 9091 must be open to the Prometheus collectors alone"; exit 1; }
 	[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 3 ] || { echo "$o: a NetworkPolicy beyond the three checked here"; exit 1; }
+	# The hub serves as its least-privileged role and only the migrate
+	# init container has the schema owner's password (SA1-L8).
+	grep -q 'auto-iam-authn=true$' "$f" || { echo "$o: the proxy must log the hub in as its IAM database user"; exit 1; }
+	[ "$(grep -c 'key: migrate-url$' "$f")" = 1 ] || { echo "$o: only the migrate container may have the migrate URL"; exit 1; }
+	grep -A1 'name: SILO_HUB_MIGRATE$' "$f" | grep -q "value: \"false\"$" || { echo "$o: the hub must serve with SILO_HUB_MIGRATE=false"; exit 1; }
 	# The pod runs as a numeric non-root user, which runAsNonRoot can
 	# check: a named USER makes the kubelet refuse to start it (SA1-L9).
 	grep -q 'runAsUser: 65532$' "$f" || { echo "$o: the pod must run as user 65532"; exit 1; }
