@@ -8,7 +8,9 @@
 // (dev@example.com by default), to every request, the event streams
 // included, since a browser's EventSource cannot set a header itself.
 // The built app never sets it: behind IAP the browser's own cookie
-// signs the caller in.
+// signs the caller in. The proxy also gives each request the hub's own
+// Origin, since the hub accepts a write only from its own origin
+// (identity.SameOrigin) and the browser's is the dev server's.
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -26,7 +28,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/v1': { target: hub, changeOrigin: true, headers: { [header]: user } },
+      '/v1': { target: hub, changeOrigin: true, headers: { [header]: user, Origin: new URL(hub).origin } },
     },
   },
   test: {

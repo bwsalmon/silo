@@ -28,6 +28,7 @@ const (
 //	GET    /v1/me
 //	GET    /v1/teams                                  the caller's teams; every team for a hub admin
 //	POST   /v1/teams {"id","name"}                    hub admin
+//	GET    /v1/teams/{team}                           its members, and a hub admin
 //	DELETE /v1/teams/{team}                           hub admin
 //	PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin
 //	DELETE /v1/teams/{team}/members/{principal}       team admin
@@ -125,6 +126,7 @@ func (a *API) Handler() http.Handler {
 	h("GET "+MePath, a.me)
 	h("GET "+TeamsPath, a.listTeams)
 	h("POST "+TeamsPath, a.createTeam)
+	h("GET "+TeamsPath+"/{team}", a.getTeam)
 	h("DELETE "+TeamsPath+"/{team}", a.deleteTeam)
 	h("PUT "+TeamsPath+"/{team}/members/{principal}", a.setMember)
 	h("DELETE "+TeamsPath+"/{team}/members/{principal}", a.removeMember)
@@ -217,6 +219,25 @@ func (a *API) listTeams(w http.ResponseWriter, r *http.Request, acc *Access) err
 	return writeJSON(w, http.StatusOK, struct {
 		Teams []Team `json:"teams"`
 	}{teams})
+}
+
+// getTeam answers one team, as listTeams would: its members, roles and
+// repositories, to anyone who sees it.
+func (a *API) getTeam(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	id := r.PathValue("team")
+	if !acc.SeesTeam(id) {
+		return errNoTeam
+	}
+	all, err := a.Store.Teams(r.Context())
+	if err != nil {
+		return err
+	}
+	for _, t := range all {
+		if t.ID == id {
+			return writeJSON(w, http.StatusOK, t)
+		}
+	}
+	return errNoTeam
 }
 
 func (a *API) createTeam(w http.ResponseWriter, r *http.Request, acc *Access) error {

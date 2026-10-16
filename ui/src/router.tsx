@@ -1,4 +1,4 @@
-// A small path router over the History API: the UI has three pages,
+// A small path router over the History API: the UI has a few pages,
 // which do not need a routing library. The hub serves index.html for
 // every path that is not its API's (hub/ui), so each route below is a
 // URL a person can reload or share.
@@ -9,12 +9,19 @@ export type Route =
   | { page: 'backlog'; team?: string }
   | { page: 'task'; id: string }
   | { page: 'nodes' }
+  | { page: 'file'; team?: string }
+  | { page: 'teams' }
+  | { page: 'team'; team: string }
   | { page: 'notfound'; path: string };
 
 export function parseRoute(path: string): Route {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   if (parts.length === 0) return { page: 'backlog' };
+  if (parts[0] === 'teams' && parts.length === 1) return { page: 'teams' };
   if (parts[0] === 'teams' && parts.length === 2) return { page: 'backlog', team: parts[1] };
+  if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'members') return { page: 'team', team: parts[1] };
+  if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'file') return { page: 'file', team: parts[1] };
+  if (parts[0] === 'file' && parts.length === 1) return { page: 'file' };
   if (parts[0] === 'tasks' && parts.length === 2) return { page: 'task', id: parts[1] };
   if (parts[0] === 'nodes' && parts.length === 1) return { page: 'nodes' };
   return { page: 'notfound', path };
@@ -28,6 +35,12 @@ export function routePath(r: Route): string {
       return `/tasks/${encodeURIComponent(r.id)}`;
     case 'nodes':
       return '/nodes';
+    case 'file':
+      return r.team ? `/teams/${encodeURIComponent(r.team)}/file` : '/file';
+    case 'teams':
+      return '/teams';
+    case 'team':
+      return `/teams/${encodeURIComponent(r.team)}/members`;
     case 'notfound':
       return r.path;
   }

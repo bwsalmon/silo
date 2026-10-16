@@ -143,6 +143,16 @@ func TestAPI(t *testing.T) {
 	if len(teams.Teams) != 2 {
 		t.Errorf("hub admin's teams %+v", teams)
 	}
+	// One team, to its members and a hub admin; to anyone else it does
+	// not exist.
+	var one Team
+	json.Unmarshal(h.want(t, 200, "carol@example.com", "GET", TeamsPath+"/infra", nil), &one)
+	if one.ID != "infra" || one.Members["user:"+alice] != Admin || len(one.Repos) != 1 || one.Repos[0] != "bwsalmon/silo" {
+		t.Errorf("infra as carol %+v", one)
+	}
+	h.want(t, 200, root, "GET", TeamsPath+"/web", nil, admins)
+	h.want(t, 404, alice, "GET", TeamsPath+"/web", nil)
+	h.want(t, 404, root, "GET", TeamsPath+"/nope", nil, admins)
 	var me struct {
 		Email    string
 		HubAdmin bool `json:"hub_admin"`

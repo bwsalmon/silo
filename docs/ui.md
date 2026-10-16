@@ -1,7 +1,8 @@
 # The hub's human UI: a new UI in silo, or grain's UI pointed at the hub
 
 Part of the [hub design](hub.md). Status: **option (a) chosen by the
-owner; stage U1 built** (`hub/ui`, `ui/`; §6, and §7 for running it).
+owner; stages U1 and U2 built** (`hub/ui`, `ui/`; §6, §7 for running
+it, and §8 for U2's writes).
 
 People need a page where they file, approve and watch tasks across
 teams. The hub (hub.md) has the APIs for it: intake (§6), the directory
@@ -170,7 +171,7 @@ Each stage is a candidate task, to be filed once the owner chooses.
 | Stage | What | Where |
 | --- | --- | --- |
 | U1 | `silo hub serve` serves an embedded SPA at `/`. Read-only pages: backlog, task with live events and the view-through, nodes. The frontend build in silo CI, or a committed bundle (the owner's choice). **Built:** `hub/ui` and `ui/`, built in silo CI (`.grain/workflows/ui.yml` and the image's Dockerfile); §7. | silo |
-| U2 | Filing, cancel and requeue. Team admin. Minting and revoking node tokens. | silo |
+| U2 | Filing, cancel and requeue. Team admin. Minting and revoking node tokens. **Built:** `ui/src/pages/FileTask.tsx`, `Teams.tsx`, `TeamPage.tsx`, the task page's actions and `ui/src/components/NodeTokens.tsx`, with `GET /v1/teams/{team}` added to the public API (hub.md §5.3); §8. | silo |
 | U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
 | U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. | silo |
 | U5 | A Grain's local UI shows the hub task ID and links to the hub page for tasks the hub placed. | bwsalmon/grain |
@@ -282,3 +283,66 @@ real sign-on.
 `npm test` runs vitest and `npm run typecheck` runs tsc. The trust
 boundary's bundle test runs after `npm run build`, and is skipped
 without a bundle unless `SILO_UI_REQUIRE_BUNDLE` is set, as CI sets it.
+
+## 8. As built: U2
+
+**Pages and actions.** Each is a call to the public API (`ui/src/api.ts`)
+and nothing else:
+
+- *File a task* at `/file` and `/teams/{team}/file`: a team, and either
+  one of its repositories or "any of the team's", a title, the prompt
+  and an optional node, posted to `POST /v1/tasks` as `{repo}` or
+  `{team}`. The teams and their repositories come from `GET /v1/teams`,
+  which lists only the caller's (every team, for a hub admin). The new
+  task's page opens on success.
+- *Cancel* (with an optional reason) and *requeue* on the task page,
+  `POST /v1/tasks/{id}/cancel` and `/requeue`, shown to the task's
+  submitter, a team admin or a hub admin. They are shown in every state:
+  whether a state allows one is the API's to say, with a 409.
+- *Teams* at `/teams`: the caller's teams, with a hub admin's
+  create-team form (`POST /v1/teams`). *A team* at
+  `/teams/{team}/members` (`GET /v1/teams/{team}`, added for it; hub.md
+  §5.3): its members and roles, its repositories and its settings. A
+  team admin changes roles, adds and removes members, releases
+  repositories and edits the settings; a hub admin also assigns a
+  repository, with or without its history, and deletes the team.
+- *Node tokens* on `/nodes`: the caller's tokens (every owner's, for a
+  hub admin), minted with `POST /v1/node-tokens` and revoked with
+  `DELETE /v1/node-tokens/{id}`.
+
+**Who sees which button.** `/v1/me` decides only what is shown
+(`ui/src/may.ts`): edit actions for a team admin of that team or a hub
+admin, a hub admin's own actions for a hub admin. It is a mirror of
+the API's rules, not a check: every action is sent, and the API allows
+or refuses it.
+
+**Refusals.** A write's refusal is shown beside the button that sent it,
+as the API's status and its own words ("Not allowed (403): forbidden",
+"Conflict (409): ..."), by `useAction` (`ui/src/action.ts`). The UI
+checks nothing in advance beyond a form's required fields: no state,
+role or ownership check of its own stands in for the API's.
+
+**A minted token** is answered once, uncached (`cache: 'no-store'`, as
+the hub's own `Cache-Control: no-store`), and held only in the node
+tokens component's state. It is shown with a copy button
+(`navigator.clipboard`, or select-and-copy where a browser gives the
+page no clipboard) until the caller dismisses it, and then dropped.
+The token list shows each token's ID and record, never the token,
+and the hub keeps only its hash, so nothing shows it again.
+
+**Writes and the same-origin check.** Each write is a same-origin
+`fetch` with the browser's own credentials and, for a body,
+`Content-Type: application/json`, which is what the hub's
+`identity.SameOrigin` admits. Under `npm run dev` the Vite proxy sets
+the hub's own `Origin` on each request, since the browser's is the dev
+server's.
+
+**Tests.** `ui/src/actions.test.tsx` (vitest) checks that each API call
+sends the right method, path and body with same-origin credentials and
+no `Authorization`, and that each form and button sends it, is shown
+only where `/v1/me` allows, and shows the API's refusal; and that a
+minted token is copied, dropped on dismiss and never stored.
+`hub/server`'s `TestWebUIActions` sends each of those writes, as a
+browser sends it, to a whole hub, and checks each reaches its endpoint
+and is allowed or refused there by the caller's role; and that a write
+signed out (401), or from another origin or site (403), never does.

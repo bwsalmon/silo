@@ -6,6 +6,12 @@
 // Every request is same-origin and carries only the browser's own
 // credentials (IAP's cookie, or the OIDC session's): no token is read,
 // stored or forwarded.
+//
+// A write is a fetch the browser marks same-origin itself (Origin and
+// Sec-Fetch-Site), with a JSON body, as the hub's identity.SameOrigin
+// requires. The UI decides nothing about who may write: a refusal (401,
+// 403, 404, 409) is the API's, and comes back as an ApiError carrying
+// the API's own words.
 
 export type TaskState = 'queued' | 'offered' | 'running' | 'done' | 'failed' | 'cancelled' | 'lost';
 
@@ -95,6 +101,19 @@ async function check(r: Response): Promise<Response> {
   return r;
 }
 
+// write sends one state-changing request, with body as JSON when given,
+// and answers the response's JSON, or undefined for an empty one.
+async function write<T>(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = { method, credentials: 'same-origin', headers: { Accept: 'application/json' } };
+  if (body !== undefined) {
+    init.headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(body);
+  }
+  const r = await check(await fetch(path, init));
+  const text = await r.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
 async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin', headers: { Accept: 'application/json' }, signal });
   return (await check(r)).json() as Promise<T>;
@@ -121,6 +140,133 @@ export function getTask(id: string, signal?: AbortSignal): Promise<Task> {
 export async function listNodes(signal?: AbortSignal): Promise<NodeEntry[]> {
   const r = await getJSON<{ nodes: NodeEntry[] }>('/v1/nodes', signal);
   return r.nodes ?? [];
+}
+
+// Filing, cancelling and requeueing (docs/hub.md §6.1).
+
+// NewTask is what POST /v1/tasks takes: exactly one of repo and team.
+export interface NewTask {
+  repo?: string;
+  team?: string;
+  title: string;
+  prompt: string;
+  constraints?: { labels?: Record<string, string>; node?: string; node_owner?: string };
+}
+
+export function submitTask(t: NewTask): Promise<Task> {
+  return write<Task>('POST', '/v1/tasks', t);
+}
+
+export function cancelTask(id: string, reason?: string): Promise<Task> {
+  return write<Task>('POST', `/v1/tasks/${encodeURIComponent(id)}/cancel`, reason ? { reason } : undefined);
+}
+
+export function requeueTask(id: string): Promise<Task> {
+  return write<Task>('POST', `/v1/tasks/${encodeURIComponent(id)}/requeue`);
+}
+
+// The team directory (docs/hub.md §5.3).
+
+// Team is a team the caller may see, with its members (principals,
+// user:EMAIL or group:NAME) and the repositories it owns.
+export interface Team {
+  id: string;
+  name: string;
+  members: Record<string, Role> | null;
+  repos: string[] | null;
+}
+
+export interface TeamSettings {
+  lost_requeue_after_seconds?: number;
+}
+
+export async function listTeams(signal?: AbortSignal): Promise<Team[]> {
+  const r = await getJSON<{ teams: Team[] }>('/v1/teams', signal);
+  return r.teams ?? [];
+}
+
+const teamPath = (team: string) => `/v1/teams/${encodeURIComponent(team)}`;
+
+// repoPath keeps the slash between a repository's owner and name: the
+// API's route is /repos/{owner}/{name}.
+const repoPath = (team: string, repo: string) => `${teamPath(team)}/repos/${repo.split('/').map(encodeURIComponent).join('/')}`;
+
+export function getTeam(team: string, signal?: AbortSignal): Promise<Team> {
+  return getJSON<Team>(teamPath(team), signal);
+}
+
+export function createTeam(id: string, name: string): Promise<void> {
+  return write('POST', '/v1/teams', { id, name });
+}
+
+export function deleteTeam(team: string): Promise<void> {
+  return write('DELETE', teamPath(team));
+}
+
+export function setMember(team: string, principal: string, role: Role): Promise<void> {
+  return write('PUT', `${teamPath(team)}/members/${encodeURIComponent(principal)}`, { role });
+}
+
+export function removeMember(team: string, principal: string): Promise<void> {
+  return write('DELETE', `${teamPath(team)}/members/${encodeURIComponent(principal)}`);
+}
+
+export function assignRepo(team: string, repo: string, history: boolean): Promise<void> {
+  return write('PUT', repoPath(team, repo), history ? { history } : undefined);
+}
+
+export function releaseRepo(team: string, repo: string): Promise<void> {
+  return write('DELETE', repoPath(team, repo));
+}
+
+export function getTeamSettings(team: string, signal?: AbortSignal): Promise<TeamSettings> {
+  return getJSON<TeamSettings>(`${teamPath(team)}/settings`, signal);
+}
+
+export function setTeamSettings(team: string, s: TeamSettings): Promise<TeamSettings> {
+  return write<TeamSettings>('PUT', `${teamPath(team)}/settings`, s);
+}
+
+// Node tokens (docs/hub.md §5.2).
+
+export interface NodeToken {
+  id: string;
+  owner: string;
+  node: string;
+  created: string;
+  revoked?: string;
+  released?: string;
+}
+
+// MintedToken is POST /v1/node-tokens's answer: the token itself, which
+// the hub keeps only a hash of, and its record.
+export interface MintedToken {
+  token: string;
+  node_token: NodeToken;
+}
+
+export async function listNodeTokens(signal?: AbortSignal): Promise<NodeToken[]> {
+  const r = await getJSON<{ node_tokens: NodeToken[] }>('/v1/node-tokens', signal);
+  return r.node_tokens ?? [];
+}
+
+// mintNodeToken's answer is uncached (the hub says no-store, and the
+// fetch asks for none) and is the caller's to show once and drop.
+export async function mintNodeToken(node: string): Promise<MintedToken> {
+  const r = await check(
+    await fetch('/v1/node-tokens', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node }),
+    }),
+  );
+  return r.json() as Promise<MintedToken>;
+}
+
+export function revokeNodeToken(id: string): Promise<void> {
+  return write('DELETE', `/v1/node-tokens/${encodeURIComponent(id)}`);
 }
 
 // ArtifactResult is a view of a node-only artifact: its text, held only
