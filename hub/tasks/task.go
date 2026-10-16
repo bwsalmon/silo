@@ -67,6 +67,11 @@ type Constraints struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Node is the one node the task may run on.
 	Node string `json:"node,omitempty"`
+	// NodeOwner is the owner Node was registered by when it was offered
+	// the task. Only a node registered by that owner is asked to resume
+	// the task, told of its cancel, or heard on its events and artifacts:
+	// a node ID alone may later be registered by someone else.
+	NodeOwner string `json:"node_owner,omitempty"`
 }
 
 // Spec is a task as it was submitted: what a node is offered.
@@ -94,6 +99,11 @@ type Task struct {
 	// Node is the node the task is offered to or runs on; for a lost or
 	// finished task, the node it last ran on.
 	Node string `json:"node,omitempty"`
+	// NodeOwner is the owner Node was registered by when it was offered
+	// the task. Only a node registered by that owner is asked to resume
+	// the task, told of its cancel, or heard on its events and artifacts:
+	// a node ID alone may later be registered by someone else.
+	NodeOwner string `json:"node_owner,omitempty"`
 	// NodeTask is the node's own ID for the task, from its accept.
 	NodeTask string `json:"node_task,omitempty"`
 	// Reason says why the task is in its state: a refusal, a failure, a

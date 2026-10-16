@@ -608,9 +608,15 @@ A node cannot do an interactive sign-in for every connection. Instead:
    (`silo-node_<id>_<secret>`, 256 bits of secret). It is shown once.
    The store keeps only its SHA-256, so a leaked database proves
    nobody. Minting again for the same node revokes the owner's earlier
-   token. A node ID that another owner holds a live token for is
-   refused, so node IDs stay bound to their owner across hub restarts,
-   which the in-memory registry alone would forget.
+   token. **A node ID belongs to the first owner to mint a token for
+   it, for good** (SA1-H1): another owner's mint is refused while any
+   token of the first's for it, live or revoked, is unreleased. So node
+   IDs stay bound to their owner across hub restarts, which the
+   in-memory registry alone would forget, and across revocation, which
+   would otherwise hand a stranger the ID's lost tasks (§6.2). The
+   owner, or a hub admin, gives the ID up with `DELETE
+   /v1/node-tokens/nodes/{node}`, which revokes the owner's tokens for
+   it (every owner's, for a hub admin) and marks them released.
 3. The node presents the token as a bearer token at the handshake.
    `Store.Authenticate` returns its owner and node ID, and the
    rendezvous refuses a hello for any other ID (§4.2).
@@ -675,8 +681,9 @@ more) holds:
   has at most one owning team. Assigning a repository that another team
   owns is refused: it has to be released first, so one team's admin
   cannot take another team's repository.
-- `node_tokens(id, hash, owner, node, created_at, revoked_at)`, with at
-  most one live token per node ID.
+- `node_tokens(id, hash, owner, node, created_at, revoked_at,
+  released_at)`, with at most one live token per node ID, and an ID's
+  unreleased rows all of one owner (§5.2).
 
 These rules follow:
 
@@ -848,7 +855,23 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 
 When the dispatcher starts, it has no streams. A task that was
 `offered` is requeued, and a task that was `running` is `lost` until
-its node resumes it. Only one dispatcher runs at a time: each pod
+its node resumes it.
+
+**A task is bound to its node's owner, not just its node ID.** A task
+records, at its offer, the owner its node was registered by
+(`tasks.node_owner`). The dispatcher asks a node to resume a lost task,
+or tells it of a pending cancel, only if that owner registers it now;
+the live hub takes its event stream for the task, and sends it the
+task's artifact views, on the same condition (§7). A node another owner
+has registered on the ID is passed over as if it were away, so a lost
+task goes back to the queue after its team's grace (§6.3). Before a
+resume, the node's owner is admitted again for the task's repositories,
+as before an offer; a node whose owner may no longer serve them, or
+that lists none of them, is not asked, and the task is requeued for any
+node. A task lost before `node_owner` existed has none, and is never
+resumed (SA1-H1).
+
+Only one dispatcher runs at a time: each pod
 runs it only while holding the database lease `dispatcher`, and a new
 holder recovers the backlog as above (§2.2.1).
 

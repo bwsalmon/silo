@@ -457,6 +457,126 @@ func TestResumeRefusedRequeues(t *testing.T) {
 	}
 }
 
+// forget waits for the registry to forget node id once it is offline:
+// a hub restart, after which the ID is bound to no owner in memory.
+func (h *harness) forget(t *testing.T, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !h.rv.Registry.Forget(id) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the registry did not forget %s", id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestResumeOnlyToOwner was audit SA1-H1's exploit: after a hub restart,
+// another owner's node registering a lost task's node ID was handed the
+// task to resume, prompt and all, and could finish it. A lost task is
+// resumed only by a node its own owner registers; anyone else's is
+// passed over, and the task goes back to the queue after its team's
+// grace.
+func TestResumeOnlyToOwner(t *testing.T) {
+	clk := &clock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	h := newHarness(t, func(d *Dispatcher) {
+		d.Store.Now = clk.Now
+		d.LostRequeueAfter = func(context.Context, string) (time.Duration, error) { return 10 * time.Minute, nil }
+	})
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo", Prompt: "SECRET infra prompt"})
+	n.next(t, TypeOffer).send(t, Message{Type: TypeAccept, NodeTask: "local-1"})
+	if got := h.await(t, task.ID, "running", inState(Running)); got.NodeOwner != "alice@example.com" {
+		t.Errorf("running: %+v, want it bound to alice", got)
+	}
+	n.conn.Close()
+	h.await(t, task.ID, "lost", inState(Lost))
+	h.forget(t, "ws-1")
+
+	// Mallory's node takes the ID: though she is in the team, it is not
+	// asked to resume the task.
+	check(t, h.dir.SetMember(context.Background(), "infra", "user:mallory@example.com", directory.Member))
+	m := h.node(t, "mallory@example.com", silo("ws-1", 1))
+	m.none(t, time.Second)
+	m.conn.Close()
+	h.forget(t, "ws-1")
+
+	// Alice's node, after the hub restarted, is.
+	n.connect(t)
+	s := n.next(t, TypeResume)
+	if s.first.Task == nil || s.first.Task.ID != task.ID {
+		t.Fatalf("resume %+v", s.first)
+	}
+	s.send(t, Message{Type: TypeAccept})
+	h.await(t, task.ID, "running again", inState(Running))
+	n.conn.Close()
+	h.await(t, task.ID, "lost again", inState(Lost))
+	h.forget(t, "ws-1")
+
+	// With mallory's node on the ID for longer than the grace, the task
+	// goes to another of the team's nodes. (Hers lists no repositories,
+	// so as not to be offered it itself.)
+	m.cl.Node = registry.Node{ID: "ws-1", Slots: 1}
+	m.connect(t)
+	other := h.node(t, "alice@example.com", silo("ws-2", 1))
+	m.none(t, 500*time.Millisecond)
+	clk.advance(11 * time.Minute)
+	h.d.Wake()
+	o := other.next(t, TypeOffer)
+	if o.first.Task == nil || o.first.Task.ID != task.ID {
+		t.Fatalf("offer %+v", o.first)
+	}
+	m.none(t, 500*time.Millisecond)
+}
+
+// TestResumeChecksAdmission was audit SA1-H1's second exploit: a resume
+// skipped the admission check an offer makes, so a node whose owner had
+// left the team while it was away was still handed the task. It is not:
+// the task goes back to the queue.
+func TestResumeChecksAdmission(t *testing.T) {
+	h := newHarness(t)
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
+	n.next(t, TypeOffer).send(t, Message{Type: TypeAccept})
+	h.await(t, task.ID, "running", inState(Running))
+	n.conn.Close()
+	h.await(t, task.ID, "lost", inState(Lost))
+	check(t, h.dir.RemoveMember(context.Background(), "infra", "user:alice@example.com"))
+	// Listing no repositories, the node is still admitted to connect.
+	n.cl.Node = registry.Node{ID: "ws-1", Slots: 1}
+	n.connect(t)
+	got := h.await(t, task.ID, "requeued", inState(Queued))
+	if got.Node != "" || got.NodeOwner != "" {
+		t.Errorf("requeued: %+v", got)
+	}
+	n.none(t, time.Second)
+}
+
+// TestCancelOnlyToOwner: a pending cancel is delivered only to a node
+// the task's own owner registers, not to another owner's on its ID.
+func TestCancelOnlyToOwner(t *testing.T) {
+	h := newHarness(t)
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
+	n.next(t, TypeOffer).send(t, Message{Type: TypeAccept})
+	h.await(t, task.ID, "running", inState(Running))
+	n.conn.Close()
+	h.await(t, task.ID, "lost", inState(Lost))
+	_, err := h.d.Cancel(context.Background(), task.ID, "")
+	check(t, err)
+	h.forget(t, "ws-1")
+
+	m := h.node(t, "mallory@example.com", registry.Node{ID: "ws-1", Slots: 1})
+	m.none(t, time.Second)
+	if got, _ := h.store.Get(context.Background(), task.ID); !got.CancelPending {
+		t.Errorf("after mallory's node: %+v, want the cancel still pending", got)
+	}
+	m.conn.Close()
+	h.forget(t, "ws-1")
+	n.connect(t)
+	n.next(t, TypeCancel)
+	h.await(t, task.ID, "the cancel delivered", func(t Task) bool { return !t.CancelPending })
+}
+
 func TestCancelDownTheStream(t *testing.T) {
 	h := newHarness(t)
 	n := h.node(t, "alice@example.com", silo("ws-1", 1))
@@ -561,11 +681,11 @@ func TestRecoverOnStart(t *testing.T) {
 	defer store.Close()
 	offered, err := store.Create(ctx, spec("infra", "bwsalmon/silo", "offered"))
 	check(t, err)
-	_, err = store.Offer(ctx, offered.ID, "ws-1")
+	_, err = store.Offer(ctx, offered.ID, "ws-1", "alice@example.com")
 	check(t, err)
 	running, err := store.Create(ctx, spec("infra", "bwsalmon/silo", "running"))
 	check(t, err)
-	_, err = store.Offer(ctx, running.ID, "ws-1")
+	_, err = store.Offer(ctx, running.ID, "ws-1", "alice@example.com")
 	check(t, err)
 	_, err = store.Accept(ctx, running.ID, "")
 	check(t, err)

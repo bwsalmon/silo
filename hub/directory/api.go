@@ -38,6 +38,7 @@ const (
 //	GET    /v1/node-tokens                            the caller's; every owner's for a hub admin
 //	POST   /v1/node-tokens {"node"}                   mint one for the caller: grain hub login
 //	DELETE /v1/node-tokens/{id}                       its owner, or a hub admin
+//	DELETE /v1/node-tokens/nodes/{node}               release the node ID: the caller's claim, or every owner's for a hub admin
 //
 // A team the caller is not in answers 404, as one that does not exist.
 type API struct {
@@ -117,6 +118,7 @@ func (a *API) Handler() http.Handler {
 	h("GET "+NodeTokensPath, a.listTokens)
 	h("POST "+NodeTokensPath, a.mintToken)
 	h("DELETE "+NodeTokensPath+"/{id}", a.revokeToken)
+	h("DELETE "+NodeTokensPath+"/nodes/{node}", a.releaseNodeID)
 	return m
 }
 
@@ -363,6 +365,24 @@ func (a *API) revokeToken(w http.ResponseWriter, r *http.Request, acc *Access) e
 	}
 	if a.Disconnect != nil {
 		a.Disconnect(t.Node)
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// releaseNodeID gives up a node ID, so that another owner may mint a
+// token for it (Store.ReleaseNodeID). The node, if connected with one of
+// the tokens it revokes, is disconnected.
+func (a *API) releaseNodeID(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	owner, node := acc.Email, r.PathValue("node")
+	if acc.HubAdmin {
+		owner = ""
+	}
+	if err := a.Store.ReleaseNodeID(r.Context(), owner, node); err != nil {
+		return err
+	}
+	if a.Disconnect != nil {
+		a.Disconnect(node)
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil

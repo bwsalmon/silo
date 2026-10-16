@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
 
@@ -48,7 +49,7 @@ func TestMetrics(t *testing.T) {
 	var queued, offered tasks.Task
 	call(t, "POST", srv.URL+tasks.TasksPath, "alice@example.com", map[string]string{"repo": "bwsalmon/silo", "prompt": "one"}, &queued)
 	call(t, "POST", srv.URL+tasks.TasksPath, "alice@example.com", map[string]string{"repo": "bwsalmon/silo", "prompt": "two"}, &offered)
-	if _, err := h.Backlog.Offer(ctx, offered.ID, "ws-1"); err != nil {
+	if _, err := h.Backlog.Offer(ctx, offered.ID, "ws-1", "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,7 +70,13 @@ func TestMetrics(t *testing.T) {
 	}
 
 	// Events streamed up by the node the task was offered to: one kept,
-	// one rejected by its schema.
+	// one rejected by its schema. The node is registered by alice, as it
+	// was when it was offered the task, and offline by the scrape.
+	lease, err := h.Registry.Register(registry.Node{ID: "ws-1", Repos: []string{"bwsalmon/silo"}, Slots: 1}, "alice@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
 	hubEnd, nodeEnd := net.Pipe()
 	done := make(chan struct{})
 	go func() {
@@ -80,6 +87,7 @@ func TestMetrics(t *testing.T) {
 	io.WriteString(nodeEnd, `{"v":1,"seq":2,"type":"status","task":"`+offered.ID+`","status":{"phase":"setup","state":"done"},"diff":"package main"}`+"\n")
 	nodeEnd.Close()
 	<-done
+	lease.Close()
 
 	// Not on the hub's own routes, signed in or not.
 	for _, user := range []string{"", "admin@example.com"} {

@@ -235,14 +235,85 @@ func TestNodeTokens(t *testing.T) {
 		if got, err := s.NodeToken(ctx, rec2.ID); err != nil || got.Revoked == nil {
 			t.Errorf("revoked record %+v %v", got, err)
 		}
-		// With every token for it revoked, the node ID is free again.
+		// With every token for it revoked, the node ID is still alice's
+		// (SA1-H1): a task lost on it must not be resumed by bob's node.
+		if _, _, err := s.MintNodeToken(ctx, "bob@example.com", "ws-1"); !errors.Is(err, ErrNodeOwner) {
+			t.Errorf("bob minting alice's revoked node ID: %v, want ErrNodeOwner", err)
+		}
+		// Bob cannot release it; alice can, and then bob may have it.
+		if err := s.ReleaseNodeID(ctx, "bob@example.com", "ws-1"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("bob releasing alice's node ID: %v, want ErrNotFound", err)
+		}
+		check(t, s.ReleaseNodeID(ctx, "alice@example.com", "ws-1"))
+		if got, err := s.NodeToken(ctx, rec2.ID); err != nil || got.Released == nil {
+			t.Errorf("released record %+v %v", got, err)
+		}
 		if _, _, err := s.MintNodeToken(ctx, "bob@example.com", "ws-1"); err != nil {
 			t.Errorf("bob minting a released node ID: %v", err)
+		}
+		if _, _, err := s.MintNodeToken(ctx, "alice@example.com", "ws-1"); !errors.Is(err, ErrNodeOwner) {
+			t.Errorf("alice minting the node ID she released to bob: %v, want ErrNodeOwner", err)
 		}
 		if all, _ := s.NodeTokens(ctx, ""); len(all) != 3 {
 			t.Errorf("all tokens %+v", all)
 		}
+		// A hub admin releases it from every owner, live tokens included.
+		check(t, s.ReleaseNodeID(ctx, "", "ws-1"))
+		if _, _, err := s.MintNodeToken(ctx, "alice@example.com", "ws-1"); err != nil {
+			t.Errorf("alice minting a node ID a hub admin released: %v", err)
+		}
 	})
+}
+
+// TestNodeIDReusableAfterRevoke was audit SA1-H1's exploit: once its
+// owner's tokens were revoked, anyone could mint a token for a node ID
+// and be handed the lost tasks on it. The ID stays its owner's.
+func TestNodeIDReusableAfterRevoke(t *testing.T) {
+	ctx := context.Background()
+	dir, err := Open(ctx, "sqlite::memory:")
+	check(t, err)
+	defer dir.Close()
+	_, rec, err := dir.MintNodeToken(ctx, "alice@example.com", "ws-1")
+	check(t, err)
+	check(t, dir.RevokeNodeToken(ctx, rec.ID))
+	if _, _, err := dir.MintNodeToken(ctx, "mallory@example.com", "ws-1"); !errors.Is(err, ErrNodeOwner) {
+		t.Fatalf("mallory minting alice's revoked node ID: %v, want ErrNodeOwner", err)
+	}
+}
+
+// TestReleasedColumn: node_tokens from before released_at gain it, and
+// their node IDs stay their owners'; OpenExisting refuses a table
+// without it.
+func TestReleasedColumn(t *testing.T) {
+	run := func(t *testing.T, url string) {
+		ctx := context.Background()
+		s, err := Open(ctx, url)
+		check(t, err)
+		_, err = s.db.ExecContext(ctx, `DROP TABLE node_tokens`)
+		check(t, err)
+		_, err = s.db.ExecContext(ctx, `CREATE TABLE node_tokens (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, owner TEXT NOT NULL,
+			node TEXT NOT NULL, created_at BIGINT NOT NULL, revoked_at BIGINT)`)
+		check(t, err)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO node_tokens (id, hash, owner, node, created_at, revoked_at) VALUES ('t1', 'h1', 'alice@example.com', 'ws-1', 1, 2)`)
+		check(t, err)
+		s.Close()
+		if _, err := OpenExisting(ctx, url); err == nil || !strings.Contains(err.Error(), "released_at") {
+			t.Errorf("OpenExisting on the old table: %v", err)
+		}
+		for range 2 {
+			s, err = Open(ctx, url)
+			check(t, err)
+			if _, _, err := s.MintNodeToken(ctx, "bob@example.com", "ws-1"); !errors.Is(err, ErrNodeOwner) {
+				t.Errorf("bob minting alice's node ID: %v, want ErrNodeOwner", err)
+			}
+			s.Close()
+		}
+		s, err = OpenExisting(ctx, url)
+		check(t, err)
+		s.Close()
+	}
+	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
+	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
 }
 
 func TestAccess(t *testing.T) {

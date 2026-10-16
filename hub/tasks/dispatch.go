@@ -9,13 +9,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/internal/logsafe"
 )
 
 // Directory is what the dispatcher asks the team directory
 // (directory.Store): a team's repositories, for a task that targets the
-// team, and whether a node's owner may still serve a repository.
+// team, and whether a node's owner may still serve a repository. A
+// refusal wraps directory.ErrNotAdmitted; any other error is the
+// directory not answering.
 type Directory interface {
 	TeamRepos(ctx context.Context, team string) ([]string, error)
 	AdmitContext(ctx context.Context, owner string, n registry.Node) error
@@ -222,6 +225,7 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 		return err
 	}
 	var queued []Task
+	teamRepos := map[string][]string{}
 	for _, t := range ts {
 		if d.isLive(t.ID) {
 			continue
@@ -229,23 +233,73 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 		switch {
 		case t.State == Queued:
 			queued = append(queued, t)
-		case t.State == Lost && d.reachable(t.ID, t.Node):
-			d.start(ctx, t, nil, TypeResume)
+		case t.State == Lost && d.reachable(t.ID, t.Node) && d.bound(t):
+			if q, ok := d.resume(ctx, t, teamRepos); ok {
+				queued = append(queued, q)
+			}
 		case t.State == Lost:
 			if q, ok := d.requeueLost(ctx, t); ok {
 				queued = append(queued, q)
 			}
-		case t.State == Cancelled && d.reachable(t.ID, t.Node):
+		case t.State == Cancelled && d.reachable(t.ID, t.Node) && d.bound(t):
 			d.start(ctx, t, nil, TypeCancel)
 		}
 	}
-	teamRepos := map[string][]string{}
 	for _, t := range fair(queued) {
 		if err := d.place(ctx, t, teamRepos); err != nil {
 			d.logf("tasks: placing %s: %v", t.ID, err)
 		}
 	}
 	return nil
+}
+
+// bound is whether t's node is registered now by the owner it was
+// offered to (SA1-H1). A node ID is bound to its owner only while a token
+// of theirs is live, and the registry forgets it on every hub restart, so
+// the ID alone does not say the node is the one that ran the task. A
+// node registered by anyone else is not asked to resume the task or told
+// of its cancel; it is passed over as if it were away, and a lost task
+// goes back to the queue after its team's grace.
+func (d *Dispatcher) bound(t Task) bool {
+	e, ok := d.Registry.Get(t.Node)
+	if ok && t.NodeOwner != "" && e.Owner == t.NodeOwner {
+		return true
+	}
+	if ok {
+		d.logf("tasks: not telling node %s of %s: it was registered by %s, not %s", t.Node, t.ID, logsafe.Quote(e.Owner), logsafe.Quote(t.NodeOwner))
+		d.holdNode(t.ID, t.Node)
+	}
+	return false
+}
+
+// resume asks a lost task's node, back online, to resume it, once its
+// owner is checked again as an offer's is (docs/hub.md §5.3): the owner
+// may have left the team while the node was away. A node whose owner may
+// no longer serve the task's repositories, or which no longer lists any
+// of them, is not asked: the task goes back to the queue for any node,
+// and is returned, queued.
+func (d *Dispatcher) resume(ctx context.Context, t Task, teamRepos map[string][]string) (Task, bool) {
+	repos := d.repos(ctx, t, teamRepos)
+	_, err := d.admit(ctx, t.Node, repos)
+	if err == nil {
+		d.start(ctx, t, nil, TypeResume)
+		return Task{}, false
+	}
+	if !errors.Is(err, errNotAdmitted) && !errors.Is(err, directory.ErrNotAdmitted) {
+		// The directory could not be read: not a refusal. Try again later.
+		d.logf("tasks: checking node %s for resuming %s: %v", t.Node, t.ID, err)
+		d.holdNode(t.ID, t.Node)
+		return Task{}, false
+	}
+	reason := fmt.Sprintf("requeued: node %s may no longer resume it: %v", t.Node, err)
+	q, err := d.Store.Requeue(ctx, t.ID, truncate(reason, maxReason), "")
+	if err != nil {
+		d.transition(ctx, t.ID)(q, err)
+		return Task{}, false
+	}
+	d.logf("tasks: %s: %s", t.ID, reason)
+	d.observe(EventLostRequeued, t)
+	return q, true
 }
 
 // requeueLost puts a lost task whose node is away back in the queue,
@@ -318,21 +372,9 @@ func (c Constraints) match(e registry.Entry) bool {
 // place offers a queued task to a node, if one can take it; otherwise
 // the task waits for the next pass.
 func (d *Dispatcher) place(ctx context.Context, t Task, teamRepos map[string][]string) error {
-	repos := []string{t.Repo}
-	if t.Repo == "" {
-		var ok bool
-		if repos, ok = teamRepos[t.Team]; !ok {
-			if d.Directory != nil {
-				var err error
-				if repos, err = d.Directory.TeamRepos(ctx, t.Team); err != nil {
-					d.logf("tasks: team %s's repositories: %v", t.Team, err)
-				}
-			}
-			teamRepos[t.Team] = repos
-		}
-		if len(repos) == 0 {
-			return nil
-		}
+	repos := d.repos(ctx, t, teamRepos)
+	if len(repos) == 0 {
+		return nil
 	}
 	for {
 		c, err := d.Registry.ClaimFor(repos, func(e registry.Entry) bool {
@@ -343,13 +385,14 @@ func (d *Dispatcher) place(ctx context.Context, t Task, teamRepos map[string][]s
 		} else if err != nil {
 			return err
 		}
-		if err := d.admit(ctx, c.NodeID, repos); err != nil {
+		owner, err := d.admit(ctx, c.NodeID, repos)
+		if err != nil {
 			c.Release()
 			d.logf("tasks: not offering %s to node %s: %v", t.ID, c.NodeID, err)
 			d.holdNode(t.ID, c.NodeID)
 			continue
 		}
-		ot, err := d.Store.Offer(ctx, t.ID, c.NodeID)
+		ot, err := d.Store.Offer(ctx, t.ID, c.NodeID, owner)
 		if err != nil {
 			c.Release()
 			if errors.Is(err, ErrState) {
@@ -363,16 +406,38 @@ func (d *Dispatcher) place(ctx context.Context, t Task, teamRepos map[string][]s
 	}
 }
 
+// repos are the repositories t may run in: its own, or its team's. A
+// team's are read once per pass, into teamRepos.
+func (d *Dispatcher) repos(ctx context.Context, t Task, teamRepos map[string][]string) []string {
+	if t.Repo != "" {
+		return []string{t.Repo}
+	}
+	repos, ok := teamRepos[t.Team]
+	if !ok {
+		if d.Directory != nil {
+			var err error
+			if repos, err = d.Directory.TeamRepos(ctx, t.Team); err != nil {
+				d.logf("tasks: team %s's repositories: %v", t.Team, err)
+			}
+		}
+		teamRepos[t.Team] = repos
+	}
+	return repos
+}
+
+// errNotAdmitted is a node the dispatcher refuses itself: unregistered,
+// or listing none of the task's repositories.
+var errNotAdmitted = errors.New("not admitted")
+
 // admit checks again that a node's owner may serve the repositories the
 // task may run in (docs/hub.md §5.3): its owner may have left the team
-// since the node connected.
-func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string) error {
-	if d.Directory == nil {
-		return nil
-	}
+// since the node connected. It returns the owner the node is registered
+// by. A node that lists none of repos is refused: the directory would
+// admit it, serving nothing, but it cannot run the task.
+func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string) (string, error) {
 	e, ok := d.Registry.Get(nodeID)
 	if !ok {
-		return errors.New("not registered")
+		return "", fmt.Errorf("%w: not registered", errNotAdmitted)
 	}
 	n := registry.Node{ID: e.ID}
 	for _, r := range e.Repos {
@@ -380,7 +445,13 @@ func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string) e
 			n.Repos = append(n.Repos, r)
 		}
 	}
-	return d.Directory.AdmitContext(ctx, e.Owner, n)
+	if len(n.Repos) == 0 {
+		return "", fmt.Errorf("%w: node %s serves none of %v", errNotAdmitted, nodeID, repos)
+	}
+	if d.Directory == nil {
+		return e.Owner, nil
+	}
+	return e.Owner, d.Directory.AdmitContext(ctx, e.Owner, n)
 }
 
 // holdNode passes over node for task until Retry has gone by: the node

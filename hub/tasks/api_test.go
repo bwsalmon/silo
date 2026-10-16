@@ -187,7 +187,7 @@ func TestAPICancelAndRequeue(t *testing.T) {
 	}
 
 	// A lost task, requeued by a human.
-	_, err := h.store.Offer(ctx, byAlice.ID, "ws-1")
+	_, err := h.store.Offer(ctx, byAlice.ID, "ws-1", "alice@example.com")
 	check(t, err)
 	_, err = h.store.Accept(ctx, byAlice.ID, "")
 	check(t, err)

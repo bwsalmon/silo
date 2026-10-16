@@ -35,6 +35,10 @@ type NodeToken struct {
 	Node    string     `json:"node"`
 	Created time.Time  `json:"created"`
 	Revoked *time.Time `json:"revoked,omitempty"`
+	// Released is when the token's owner, or a hub admin, gave up the
+	// node ID it was for, so that another owner may mint one for it
+	// (ReleaseNodeID).
+	Released *time.Time `json:"released,omitempty"`
 }
 
 func hashToken(tok string) string {
@@ -45,10 +49,16 @@ func hashToken(tok string) string {
 // MintNodeToken mints a token that proves owner, for the node ID node
 // alone (docs/hub.md §5.2), and returns it: the only time it is ever
 // shown. It revokes owner's earlier tokens for the same node, so
-// signing a node in again retires the credential it had. A node ID
-// another owner holds a live token for is refused (ErrNodeOwner): node
-// IDs stay bound to their owner across hub restarts, which the
-// in-memory registry alone would forget.
+// signing a node in again retires the credential it had.
+//
+// A node ID belongs to the first owner to mint a token for it, for
+// good: another owner's mint is refused (ErrNodeOwner) while any token
+// of the first's for it, live or revoked, is unreleased, until they or
+// a hub admin release the ID (ReleaseNodeID). A task records only the
+// node ID and owner it ran on, and the registry forgets which owner an
+// ID was on every hub restart, so an ID that changed hands with its
+// owner's tokens revoked would be handed that owner's lost tasks
+// (SA1-H1).
 func (s *Store) MintNodeToken(ctx context.Context, owner, node string) (string, NodeToken, error) {
 	tok, t, _, err := s.mintNodeToken(ctx, owner, node)
 	return tok, t, err
@@ -73,7 +83,7 @@ func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, 
 	tok := tokenPrefix + t.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var other string
-		err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND revoked_at IS NULL LIMIT 1`), node, o).Scan(&other)
+		err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND released_at IS NULL LIMIT 1`), node, o).Scan(&other)
 		if err == nil {
 			return fmt.Errorf("%w: %s", ErrNodeOwner, node)
 		}
@@ -130,7 +140,7 @@ func (s *Store) Authenticate(r *http.Request) (rendezvous.Identity, error) {
 // NodeTokens lists the tokens minted for owner, or every owner's when
 // owner is "", newest first, revoked ones included.
 func (s *Store) NodeTokens(ctx context.Context, owner string) ([]NodeToken, error) {
-	q := `SELECT id, owner, node, created_at, revoked_at FROM node_tokens`
+	q := `SELECT id, owner, node, created_at, revoked_at, released_at FROM node_tokens`
 	var args []any
 	if owner != "" {
 		o, _ := normEmail(owner)
@@ -144,18 +154,9 @@ func (s *Store) NodeTokens(ctx context.Context, owner string) ([]NodeToken, erro
 	defer rows.Close()
 	out := []NodeToken{}
 	for rows.Next() {
-		var (
-			t       NodeToken
-			created int64
-			revoked sql.NullInt64
-		)
-		if err := rows.Scan(&t.ID, &t.Owner, &t.Node, &created, &revoked); err != nil {
+		t, err := scanToken(rows)
+		if err != nil {
 			return nil, err
-		}
-		t.Created = time.UnixMilli(created).UTC()
-		if revoked.Valid {
-			r := time.UnixMilli(revoked.Int64).UTC()
-			t.Revoked = &r
 		}
 		out = append(out, t)
 	}
@@ -164,22 +165,33 @@ func (s *Store) NodeTokens(ctx context.Context, owner string) ([]NodeToken, erro
 
 // NodeToken is the record of the token id.
 func (s *Store) NodeToken(ctx context.Context, id string) (NodeToken, error) {
-	var (
-		t       NodeToken
-		created int64
-		revoked sql.NullInt64
-	)
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id, owner, node, created_at, revoked_at FROM node_tokens WHERE id = ?`), id).
-		Scan(&t.ID, &t.Owner, &t.Node, &created, &revoked)
+	t, err := scanToken(s.db.QueryRowContext(ctx, s.q(`SELECT id, owner, node, created_at, revoked_at, released_at FROM node_tokens WHERE id = ?`), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, fmt.Errorf("%w: node token %s", ErrNotFound, id)
 	}
-	t.Created = time.UnixMilli(created).UTC()
-	if revoked.Valid {
-		r := time.UnixMilli(revoked.Int64).UTC()
-		t.Revoked = &r
-	}
 	return t, err
+}
+
+func scanToken(r interface{ Scan(...any) error }) (NodeToken, error) {
+	var (
+		t                 NodeToken
+		created           int64
+		revoked, released sql.NullInt64
+	)
+	if err := r.Scan(&t.ID, &t.Owner, &t.Node, &created, &revoked, &released); err != nil {
+		return NodeToken{}, err
+	}
+	t.Created = time.UnixMilli(created).UTC()
+	for _, f := range []struct {
+		v  sql.NullInt64
+		to **time.Time
+	}{{revoked, &t.Revoked}, {released, &t.Released}} {
+		if f.v.Valid {
+			at := time.UnixMilli(f.v.Int64).UTC()
+			*f.to = &at
+		}
+	}
+	return t, nil
 }
 
 // RevokeNodeToken revokes the token id: the next handshake that
@@ -192,6 +204,32 @@ func (s *Store) RevokeNodeToken(ctx context.Context, id string) error {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: live node token %s", ErrNotFound, id)
+	}
+	return nil
+}
+
+// ReleaseNodeID gives up owner's claim to node, so that another owner
+// may mint a token for it: owner's tokens for it are revoked and marked
+// released. An owner of "" is a hub admin releasing the ID from every
+// owner. It is ErrNotFound if there was nothing to release.
+func (s *Store) ReleaseNodeID(ctx context.Context, owner, node string) error {
+	now := s.now().UnixMilli()
+	q := `UPDATE node_tokens SET revoked_at = COALESCE(revoked_at, ?), released_at = ? WHERE node = ? AND released_at IS NULL`
+	args := []any{now, now, node}
+	if owner != "" {
+		o, err := normEmail(owner)
+		if err != nil {
+			return err
+		}
+		q += ` AND owner = ?`
+		args = append(args, o)
+	}
+	res, err := s.db.ExecContext(ctx, s.q(q), args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: a node ID %s to release", ErrNotFound, node)
 	}
 	return nil
 }

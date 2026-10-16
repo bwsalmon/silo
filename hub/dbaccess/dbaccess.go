@@ -30,6 +30,45 @@ func Check(ctx context.Context, db *sql.DB, store string, tables ...string) erro
 	return nil
 }
 
+// Column is a column added to a table after the table was first made,
+// with the statement that adds it to a table made before it.
+type Column struct {
+	Table, Name string
+	// Add is the ALTER TABLE ... ADD COLUMN that adds it, on both SQLite
+	// and PostgreSQL.
+	Add string
+}
+
+func (c Column) exists(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, "SELECT "+c.Name+" FROM "+c.Table+" WHERE 1 = 0")
+	return err
+}
+
+// AddColumns adds each of cols its table lacks, as the schema's owner.
+// SQLite has no ADD COLUMN IF NOT EXISTS, so each is looked for first.
+func AddColumns(ctx context.Context, db *sql.DB, store string, cols ...Column) error {
+	for _, c := range cols {
+		if c.exists(ctx, db) == nil {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.Add); err != nil {
+			return fmt.Errorf("%s: adding column %s.%s: %w", store, c.Table, c.Name, err)
+		}
+	}
+	return nil
+}
+
+// CheckColumns fails unless each of cols exists and db's role may read
+// it: the tables were made by an older `silo hub migrate`.
+func CheckColumns(ctx context.Context, db *sql.DB, store string, cols ...Column) error {
+	for _, c := range cols {
+		if err := c.exists(ctx, db); err != nil {
+			return fmt.Errorf("%s: column %s.%s is missing or unreadable; add it with `silo hub migrate` as the schema's owner: %w", store, c.Table, c.Name, err)
+		}
+	}
+	return nil
+}
+
 // Grant gives role, on PostgreSQL, exactly what the hub needs to
 // serve: USAGE on the current schema, SELECT, INSERT, UPDATE and DELETE
 // on every table in it and use of its sequences, and the same by

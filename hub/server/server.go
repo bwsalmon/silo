@@ -295,8 +295,12 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Tasks:     h.Backlog,
 		Directory: dirAPI,
 		Open:      h.Rendezvous.Open,
-		Logf:      cfg.Logf,
-		Ingested:  h.metrics.observeIngest,
+		NodeOwner: func(id string) (string, bool) {
+			e, ok := h.Registry.Get(id)
+			return e.Owner, ok
+		},
+		Logf:     cfg.Logf,
+		Ingested: h.metrics.observeIngest,
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
