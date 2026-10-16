@@ -1,0 +1,10 @@
+# Path trigger protecting repository declarations (copied from
+# bwsalmon/grain's own). .grain/ declares what CI and tasks may reach --
+# a workflow's or template's `capabilities:` grant repository access --
+# so any pull request modifying .grain/** is security-reviewed and then
+# waits for a human's Submit.
+on: pull_request
+paths: [".grain/**"]
+gate: true
+human: required
+sensitive: true

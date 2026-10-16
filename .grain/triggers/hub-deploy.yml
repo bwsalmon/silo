@@ -1,0 +1,14 @@
+# How the hub is built and deployed: its image (Dockerfile, and
+# .dockerignore, which decides what goes into the build context) and the
+# GKE manifests and Terraform under deploy/. A change here changes what
+# runs in production and with which privileges, so it is
+# security-reviewed; a clean review releases it.
+on: pull_request
+paths:
+  - deploy/**
+  - "**/*.tf"
+  - "**/Dockerfile*"
+  - .dockerignore
+gate: true
+human: on-findings
+sensitive: true
