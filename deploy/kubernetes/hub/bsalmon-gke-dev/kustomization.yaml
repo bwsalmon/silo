@@ -1,0 +1,42 @@
+# The hub in GCP project bsalmon-gke-dev (docs/deploy.md). The values
+# marked SET come from `terraform output` in deploy/terraform/hub after
+# its apply, or from the Gateway once it has made the backend service.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+images:
+  - name: silo-hub
+    newName: us-central1-docker.pkg.dev/bsalmon-gke-dev/silo/silo-hub
+    newTag: latest # SET: the tag pushed (docs/deploy.md)
+configMapGenerator:
+  - name: silo-hub-config
+    behavior: replace
+    literals:
+      # SET: /projects/<project number>/global/backendServices/<the silo-hub backend's ID>
+      - SILO_HUB_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
+      - SILO_HUB_ADMINS=bsalmon@google.com
+      # terraform output -raw sql_connection_name
+      - CLOUD_SQL_INSTANCE=bsalmon-gke-dev:us-central1:silo-hub
+patches:
+  - target:
+      kind: ServiceAccount
+      name: silo-hub
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/iam.gke.io~1gcp-service-account
+        value: silo-hub@bsalmon-gke-dev.iam.gserviceaccount.com
+  - target:
+      kind: HTTPRoute
+      name: silo-hub
+    patch: |-
+      - op: replace
+        path: /spec/hostnames/0
+        value: silo-hub.example.com # SET: terraform's domain
+  - target:
+      kind: GCPBackendPolicy
+      name: silo-hub
+    patch: |-
+      - op: replace
+        path: /spec/default/iap/clientID
+        value: IAP_CLIENT_ID # SET: terraform output -raw iap_client_id

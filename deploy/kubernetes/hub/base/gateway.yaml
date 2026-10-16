@@ -1,0 +1,50 @@
+# Google's global external Application Load Balancer, on the static IP
+# and with the Certificate Manager map terraform makes
+# (deploy/terraform/hub). The cluster needs the Gateway API enabled.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: silo-hub
+  annotations:
+    networking.gke.io/certmap: silo-hub
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: silo-hub
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Only the node WebSocket goes to the backend without IAP: an exact
+# match, so no other path is reachable there. Everything else is behind
+# IAP. The hub checks a node token on the one and an IAP assertion on
+# the rest, whichever backend a request came through.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: silo-hub
+spec:
+  parentRefs:
+    - name: silo-hub
+  hostnames:
+    - hub.example.com
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /v1/nodes/connect
+      backendRefs:
+        - name: silo-hub-nodes
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: silo-hub
+          port: 80
