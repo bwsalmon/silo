@@ -68,7 +68,8 @@ is placed (§6.2). It puts **claims** on each task it dispatches. As
 built, the offered task (`tasks.Spec`) carries the requester
 (`submitter`, from the caller's sign-on) and the `team`. The other
 claims of this model, `approved_by` and the `capabilities` the task is
-granted, are not in `tasks.Spec` yet.
+granted, are not in `tasks.Spec` yet. With a signing key the hub also
+signs these claims for the node it offers the task to (§6.4).
 
 Each Grain is a **Policy Enforcement Point (PEP)**. It **takes the hub's
 identity claims on trust**: it does not independently verify who
@@ -81,10 +82,12 @@ not name is refused too: the Grain fails closed.
 **The trust limit.** A compromised hub could forge a task's claims, for
 example its requester or its approval. It could not get a task past a
 Grain's local policy, so what a forged task can do is bounded by what
-that Grain's owner has already allowed. Signed claims that a Grain
-could verify independently of the hub are possible future work; the
-status quo, trusted claims bounded by local policy, is the design for
-now.
+that Grain's owner has already allowed. The hub signs its claims
+(§6.4), and a Grain whose policy names the hub as `silo_issuer` checks
+the signature, so the rendezvous and anything else between them cannot
+alter them; but the hub holds the key, so signed claims are only as
+true as the hub that signs them. Trusted claims bounded by local
+policy remain the design.
 
 ### 1.3 The task interface is the contract
 
@@ -740,7 +743,10 @@ to another header. With (a) the only cost is the routing: one more
 Service, `GCPBackendPolicy` and `HealthCheckPolicy`, and an exact path
 match, which the Gateway API expresses directly.
 
-What stays protected: the node backend serves only that one exact path,
+The hub's public claims keys (§6.4), `/v1/claims/keys`, take the same
+route, so that nodes can fetch them without a human's sign-in.
+
+What stays protected: the node backend serves only those exact paths,
 so no human API is reachable without IAP; the hub refuses an
 unauthenticated handshake with 401 before any WebSocket exists; and on
 every other path the hub still verifies `X-Goog-IAP-JWT-Assertion`
@@ -945,8 +951,8 @@ stream of its own, `{"type":"cancel","task":{"id":...}}`.
 The whole stream protocol, one JSON message per line:
 
 ```
-hub → node  {"type":"offer","task":{...}}
-            {"type":"resume","task":{...}}
+hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}
+            {"type":"resume","task":{...},"requester_attestation":"<JWT>"}
             {"type":"cancel","task":{"id":...}}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
@@ -1031,6 +1037,63 @@ task, and events it streams for it are refused (§7.1), because the
 task is no longer placed on it. Telling a returning node to drop a
 task that was requeued from it (a cancel owed to the old node) is the
 refinement that would make the duplicate stop early; it is not built.
+
+### 6.4 Signed claims on each offer (built: `hub/claims`)
+
+A Grain checks the hub's claims on a task before it runs it when its
+`grain_policy.yml` names `silo_issuer` and `silo_keys_url` (grain's
+`docs/local-policy.md`, "Signed claims"; `policy.ApplySiloClaims`).
+The hub signs them when it is given a key: `silo hub serve
+-claims-issuer https://<domain> -claims-key-file key.pem`
+(`SILO_HUB_CLAIMS_ISSUER`, `SILO_HUB_CLAIMS_KEY_FILE`). Without one,
+offers carry no claims and a Grain that requires them refuses every
+offer; one flag without the other is an error at start-up.
+
+**What is signed.** Every offer and resume carries
+`requester_attestation`, a JWT signed for the node it is written to,
+afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
+
+| Claim | Value |
+| --- | --- |
+| header `alg`, `kid` | `ES256` for an EC P-256 key, `RS256` for RSA of 2048 bits or more; `kid` is the key's RFC 7638 thumbprint, the same on every pod |
+| `iss` | `-claims-issuer`: what nodes name as `silo_issuer` |
+| `aud` | the node's ID, checked by a node whose policy sets `silo_audience` |
+| `iat`, `exp` | when it was signed, and an hour later |
+| `requester` | the task's `submitter`; the Grain records them as the task's creator |
+| `team` | the task's team |
+| `approved_by` | empty: every hub task is a direct submission |
+| `granted_capabilities` | `[]`: the hub grants none |
+| `network_access` | absent: left to the Grain |
+| `spec_digest` | `sha256:` and the hex SHA-256 of `{"target":repo,"base":"","reads":[],"writes":[],"title":title,"body":prompt}`, compact, in that key order (`claims.SpecDigest`, as grain's `policy.SpecDigest`) |
+
+The digest binds the claims to the task the node was given: a
+different repository, title or prompt has a different digest. A
+team-targeted task's target is empty, because the node chooses its
+repository; the node's own policy decides whether it may run there.
+When the hub gains approvals, capabilities, a base branch or
+cross-repository reads and writes, they go into the claims and the
+digest as grain defines them.
+
+**The keys.** The hub publishes every configured key as a JWK set,
+`{"keys":[...]}`, at `GET /v1/claims/keys` (`claims.KeysPath`): no
+sign-in, cached for five minutes. On GKE the Gateway routes that exact
+path to the nodes' backend, past IAP, as it does `/v1/nodes/connect`
+(§5.2.1), so a node fetches it as `silo_keys_url =
+https://<domain>/v1/claims/keys` without a human's sign-in. To rotate,
+give the new key first and the old second (`-claims-key-file
+new.pem,old.pem`): the new one signs, both are published, and the old
+one can go once nothing it signed is still good, an hour later.
+
+**Grain's design.** grain's `docs/design/grain-hub-silo.md` §4.4.1
+describes `Requester` and `Approval` attestations on `RunTaskRequest`.
+This is that attestation in the JWT form grain's local policy verifies:
+`requester` and `team` are the requester attestation, `approved_by`
+the approval (empty until the hub has approvals), carried on the offer
+(§6.2), which is the hub's `RunTaskRequest`, as
+`requester_attestation`. grain's node client (`pkg/hubnode`) still
+refuses every offer; accepting one, by passing the attestation to
+`policy.ApplySiloClaims` and recording it with
+`Store.SetSiloAttestation`, is grain's follow-up.
 
 
 ## 7. Live events and privacy (built: `hub/live`)
@@ -1146,7 +1209,8 @@ audit plan. This section is the hub's part of it in brief.
 - **The hub decides, each Grain enforces** (§1.2). The hub is the PDP
   and puts claims on each task; the Grain is the PEP, takes those
   claims on trust and holds every task to its owner's local policy,
-  failing closed.
+  failing closed. The hub signs its claims for each node (§6.4), so a
+  Grain that requires them knows they came from the hub unaltered.
 - **The hub can reach a node only through the streams the protocol
   defines:** offer, resume, cancel, view and, where the node's owner
   has turned it on, http ([the contract](hub-interface.md)). A node
@@ -1154,8 +1218,9 @@ audit plan. This section is the hub's part of it in brief.
   but cannot read the node's files beyond the artifacts that node has
   itself listed, and what its own UI shows a signed-in user (§11). It
   could forge a task's claims (requester, approval), but it cannot get
-  a task past the Grain's local policy. Claims a Grain verifies
-  independently are future work, not built.
+  a task past the Grain's local policy. Signing them (§6.4) stops
+  anything between the hub and the Grain from forging them, not the
+  hub itself, which holds the key.
 - **No code at rest on the hub** (§7.2). The hub's store holds
   metadata and conversation text only.
 
@@ -1172,6 +1237,8 @@ audit plan. This section is the hub's part of it in brief.
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the recovery time of each failure (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
 | 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods (`hub/notify`); R5, the rolling Deployment. | here, built (not applied to any project) |
+| 2.10 | Signed claims on each offer and resume, and their published keys (`hub/claims`, §6.4). | here, built |
+| — | Grain accepting a hub offer: verifying `requester_attestation` with `policy.ApplySiloClaims` and recording it with `Store.SetSiloAttestation` (§6.4) | bwsalmon/grain |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 

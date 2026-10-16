@@ -165,6 +165,11 @@ spec:
             # (docs/deploy.md).
             - name: SILO_HUB_INTERNAL_KEY_FILE
               value: /var/run/secrets/silo-hub-internal/key
+            # The key the hub signs task claims with (docs/hub.md
+            # §6.4, docs/deploy.md). Its issuer is
+            # SILO_HUB_CLAIMS_ISSUER, from the config map.
+            - name: SILO_HUB_CLAIMS_KEY_FILE
+              value: /var/run/secrets/silo-hub-claims/key
             # This pod's name in the shared registry, and the address
             # the hub's other pods reach its internal listener at
             # (docs/hub.md §2.2.2), from the downward API.
@@ -181,6 +186,9 @@ spec:
           volumeMounts:
             - name: internal-key
               mountPath: /var/run/secrets/silo-hub-internal
+              readOnly: true
+            - name: claims-key
+              mountPath: /var/run/secrets/silo-hub-claims
               readOnly: true
           ports:
             - name: http
@@ -216,3 +224,6 @@ spec:
         - name: internal-key
           secret:
             secretName: silo-hub-internal
+        - name: claims-key
+          secret:
+            secretName: silo-hub-claims

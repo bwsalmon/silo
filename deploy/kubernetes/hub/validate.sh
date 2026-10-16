@@ -98,6 +98,15 @@ for o in "${overlays[@]}"; do
 	fi
 	grep -q 'secretName: silo-hub-internal$' "$f" && grep -q 'value: /var/run/secrets/silo-hub-internal/key$' "$f" ||
 		{ echo "$o: the hub must read its internal key from the silo-hub-internal Secret"; exit 1; }
+	# Task claims are signed with the key from its Secret, as an
+	# issuer, and their keys are published past IAP (docs/hub.md §6.4).
+	grep -q 'secretName: silo-hub-claims$' "$f" && grep -A1 'name: SILO_HUB_CLAIMS_KEY_FILE$' <<<"$dep" | grep -q 'value: /var/run/secrets/silo-hub-claims/key$' ||
+		{ echo "$o: the hub must read its claims key from the silo-hub-claims Secret"; exit 1; }
+	grep -q 'SILO_HUB_CLAIMS_ISSUER: https://' "$f" || { echo "$o: the hub must sign claims as an https:// issuer"; exit 1; }
+	route="$(awk 'BEGIN { RS = "\n---\n" } /kind: HTTPRoute/ && /\n  name: silo-hub\n/' "$f")"
+	# kustomize writes a rule's backendRefs before its matches.
+	grep -B1 'value: /v1/claims/keys$' <<<"$route" | grep -q 'type: Exact$' && grep -B6 'value: /v1/claims/keys$' <<<"$route" | grep -q 'name: silo-hub-nodes$' ||
+		{ echo "$o: the claims keys must reach the nodes' backend, as an exact path"; exit 1; }
 	# Ingress is denied by default, and allowed to the hub's port only
 	# from Google's load balancer and health-check ranges, and to its
 	# metrics only from the Prometheus collectors (SA1-L5), and to its

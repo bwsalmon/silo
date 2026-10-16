@@ -27,6 +27,9 @@ configMapGenerator:
       # (docs/deploy.md): terraform output -raw node_ui_domain. Empty
       # serves none.
       - SILO_HUB_NODE_UI_DOMAIN=
+      # The issuer of the task claims the hub signs, which nodes'
+      # policies name as silo_issuer: the hub's URL, https://<domain>.
+      - SILO_HUB_CLAIMS_ISSUER=https://hub.example.com
       # Hub admins, comma-separated emails or groups.
       - SILO_HUB_ADMINS=
       # The Cloud SQL instance, PROJECT:REGION:INSTANCE.

@@ -24,7 +24,8 @@ grain nodes ──WSS───>  (static IP,  Exact /v1/nodes/connect > Service 
 ```
 
 The node path is outside IAP and the hub checks each node's token
-itself; every other path is behind IAP, and the hub checks IAP's
+itself, as is `/v1/claims/keys`, the public keys nodes check the hub's
+task claims with (hub.md §6.4), which go to the same Service; every other path is behind IAP, and the hub checks IAP's
 signed assertion too (hub.md §5.2.1). The nodes' UI hosts
 (`<node>.nodes.<domain>`, §8) have a route of their own, every path on
 them to the `silo-hub` Service and so behind the same IAP.
@@ -154,7 +155,10 @@ database URLs: `url`, the hub's (its IAM user, no password), and
 `migrate-url`, the schema owner's (with its password), which only the
 `migrate` init container is given. `silo-hub-internal` holds the key the
 hub's pods share for their internal listeners (hub.md §2.2.3), random
-and at least 32 bytes; the pod does not start without it:
+and at least 32 bytes. `silo-hub-claims` holds the private key the hub
+signs task claims with (hub.md §6.4), an EC P-256 key in PEM; set
+`SILO_HUB_CLAIMS_ISSUER` in the overlay to `https://<domain>`, which
+nodes name as `silo_issuer`. The pod does not start without either:
 
 ```sh
 eval "$(terraform -chdir=deploy/terraform/hub output -raw get_credentials)"
@@ -164,6 +168,8 @@ kubectl -n silo-hub create secret generic silo-hub-db \
   --from-literal=migrate-url="$(terraform -chdir=deploy/terraform/hub output -raw migrate_database_url)"
 kubectl -n silo-hub create secret generic silo-hub-iap --from-literal=key=<the OAuth client's secret>
 kubectl -n silo-hub create secret generic silo-hub-internal --from-literal=key="$(openssl rand -hex 32)"
+(umask 077; openssl ecparam -name prime256v1 -genkey -noout -out claims.pem)
+kubectl -n silo-hub create secret generic silo-hub-claims --from-file=key=claims.pem && rm claims.pem
 kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev
 kubectl -n silo-hub rollout status deploy/silo-hub
 kubectl -n silo-hub get gateway silo-hub   # PROGRAMMED True, with the static IP, after a few minutes
@@ -194,6 +200,7 @@ IAP-protected app there too; it is off by default.)
 ```sh
 curl -sI https://<domain>/v1/me              # 302 to Google sign-in: IAP is on
 curl -s  https://<domain>/v1/nodes/connect   # 401 unauthenticated: the node path reaches the hub, past IAP
+curl -s  https://<domain>/v1/claims/keys     # {"keys":[...]}: the claims keys, past IAP, for nodes' silo_keys_url
 ```
 
 In a browser, `https://<domain>/v1/me` shows the signed-in principal.
@@ -319,6 +326,20 @@ order, with the image built from this change or later:
 
 Create `silo-hub-internal` (the `kubectl create secret` above) before
 applying a change that mounts it, or the new pod waits for the Secret.
+
+### A hub deployed before signed claims
+
+Create `silo-hub-claims` (the `openssl ecparam` above) and set
+`SILO_HUB_CLAIMS_ISSUER` in the overlay before applying a change that
+mounts it, or the new pod waits for the Secret. A node then verifies
+the hub's claims with, in its `grain_policy.yml`, `silo_issuer:
+https://<domain>`, `silo_keys_url: https://<domain>/v1/claims/keys`
+and, to check that each claim is for it, `silo_audience` (grain's
+`docs/local-policy.md`). To rotate the key, put the new one in the
+Secret as `key` and the old as `previous`, set
+`SILO_HUB_CLAIMS_KEY_FILE` to
+`/var/run/secrets/silo-hub-claims/key,/var/run/secrets/silo-hub-claims/previous`,
+and drop `previous` an hour after the roll.
 
 ## 8. The nodes' UIs
 
