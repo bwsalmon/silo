@@ -67,6 +67,11 @@ type Team struct {
 	Repos   []string        `json:"repos"`
 }
 
+// maxConns caps the directory's PostgreSQL connections, all of which it
+// keeps open once made, as the backlog's and the event store's are
+// (docs/test-runs/2026-10-16-hub-load.md).
+const maxConns = 8
+
 // Store is the team directory.
 type Store struct {
 	db       *sql.DB
@@ -98,6 +103,10 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	)
 	if postgres {
 		db, err = sql.Open("pgx", url)
+		if err == nil {
+			db.SetMaxOpenConns(maxConns)
+			db.SetMaxIdleConns(maxConns)
+		}
 	} else {
 		path := strings.TrimPrefix(url, "sqlite:")
 		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")

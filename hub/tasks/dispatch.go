@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,11 +32,18 @@ const (
 	DefaultRetry        = 30 * time.Second
 )
 
+// maxOfferWrites is how many offers the dispatcher writes to the store at
+// once. A pass claims its slots without waiting on the store, and each
+// offer is written by the task's own stream; this keeps a long backlog
+// from taking a database connection per task.
+const maxOfferWrites = 16
+
 // Dispatcher places queued tasks on nodes (docs/hub.md §6.2). It wakes
-// on a new task (Wake) and on every change to the registry, and takes
-// the queue oldest first per team: each pass goes round the teams, one
-// task from each in turn, so a team with a long queue does not hold
-// back another team's first task.
+// on a new task (Wake) and on a change to the registry that may let it
+// place one: a node newly online, or with more slots available than
+// before. It takes the queue oldest first per team: each pass goes round
+// the teams, one task from each in turn, so a team with a long queue
+// does not hold back another team's first task.
 //
 // For each task it claims a slot on a node that serves the task's
 // repository (or one of its team's) and meets its constraints, checks
@@ -87,9 +95,10 @@ type Dispatcher struct {
 	// them through Notice. Without one they stay in this process.
 	Bus *notify.Bus
 
-	once sync.Once
-	wake chan struct{}
-	wg   sync.WaitGroup
+	once   sync.Once
+	wake   chan struct{}
+	offers chan struct{} // a slot for each offer being written
+	wg     sync.WaitGroup
 
 	mu   sync.Mutex
 	live map[string]*live // tasks with a stream open, by ID
@@ -138,6 +147,7 @@ func (l *live) signal() { l.once.Do(func() { close(l.cancel) }) }
 func (d *Dispatcher) init() {
 	d.once.Do(func() {
 		d.wake = make(chan struct{}, 1)
+		d.offers = make(chan struct{}, maxOfferWrites)
 		d.live = map[string]*live{}
 		d.hold = map[[2]string]time.Time{}
 	})
@@ -206,18 +216,39 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	defer tick.Stop()
 	defer d.wg.Wait()
 	for {
+		seen := d.Registry.Available()
 		if err := d.pass(ctx); err != nil && ctx.Err() == nil {
 			d.logf("tasks: dispatching: %v", err)
 			d.observe(EventStoreError, Task{})
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-changes:
-		case <-d.wake:
-		case <-tick.C:
+		for woken := false; !woken; {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-changes:
+				// Most changes are heartbeats, a few a second for each
+				// node, and claims; neither lets a waiting task be placed
+				// unless it gave a node more slots than it had.
+				now := d.Registry.Available()
+				woken, seen = grew(seen, now), now
+			case <-d.wake:
+				woken = true
+			case <-tick.C:
+				woken = true
+			}
 		}
 	}
+}
+
+// grew is whether a node is online in now that was not in was, or has
+// more slots available than it had.
+func grew(was, now map[string]int) bool {
+	for id, n := range now {
+		if w, ok := was[id]; !ok || n > w {
+			return true
+		}
+	}
+	return false
 }
 
 // Cancel cancels a task, and tells its node if it has one: down the
@@ -273,6 +304,14 @@ func (d *Dispatcher) Notice(m notify.Message) {
 	}
 }
 
+// passCache is what one pass reads from the directory at most once:
+// each team's repositories, and whether an owner may serve a set of
+// repositories.
+type passCache struct {
+	teamRepos map[string][]string
+	admitted  map[string]error
+}
+
 // pass looks at every task the dispatcher has something to do for.
 func (d *Dispatcher) pass(ctx context.Context) error {
 	ts, err := d.Store.Dispatchable(ctx)
@@ -280,7 +319,7 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 		return err
 	}
 	var queued []Task
-	teamRepos := map[string][]string{}
+	pc := &passCache{teamRepos: map[string][]string{}, admitted: map[string]error{}}
 	for _, t := range ts {
 		if d.isLive(t.ID) {
 			continue
@@ -289,7 +328,7 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 		case t.State == Queued:
 			queued = append(queued, t)
 		case t.State == Lost && d.reachable(t.ID, t.Node) && d.bound(t):
-			if q, ok := d.resume(ctx, t, teamRepos); ok {
+			if q, ok := d.resume(ctx, t, pc); ok {
 				queued = append(queued, q)
 			}
 		case t.State == Lost:
@@ -297,11 +336,11 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 				queued = append(queued, q)
 			}
 		case t.State == Cancelled && d.reachable(t.ID, t.Node) && d.bound(t):
-			d.start(ctx, t, nil, TypeCancel)
+			d.start(ctx, t, nil, TypeCancel, "")
 		}
 	}
 	for _, t := range fair(queued) {
-		if err := d.place(ctx, t, teamRepos); err != nil {
+		if err := d.place(ctx, t, pc); err != nil {
 			d.logf("tasks: placing %s: %v", t.ID, err)
 		}
 	}
@@ -333,11 +372,11 @@ func (d *Dispatcher) bound(t Task) bool {
 // no longer serve the task's repositories, or which no longer lists any
 // of them, is not asked: the task goes back to the queue for any node,
 // and is returned, queued.
-func (d *Dispatcher) resume(ctx context.Context, t Task, teamRepos map[string][]string) (Task, bool) {
-	repos := d.repos(ctx, t, teamRepos)
-	_, err := d.admit(ctx, t.Node, repos)
+func (d *Dispatcher) resume(ctx context.Context, t Task, pc *passCache) (Task, bool) {
+	repos := d.repos(ctx, t, pc)
+	_, err := d.admit(ctx, t.Node, repos, pc)
 	if err == nil {
-		d.start(ctx, t, nil, TypeResume)
+		d.start(ctx, t, nil, TypeResume, "")
 		return Task{}, false
 	}
 	if !errors.Is(err, errNotAdmitted) && !errors.Is(err, directory.ErrNotAdmitted) {
@@ -424,10 +463,12 @@ func (c Constraints) match(e registry.Entry) bool {
 	return true
 }
 
-// place offers a queued task to a node, if one can take it; otherwise
-// the task waits for the next pass.
-func (d *Dispatcher) place(ctx context.Context, t Task, teamRepos map[string][]string) error {
-	repos := d.repos(ctx, t, teamRepos)
+// place claims a slot for a queued task on a node that can take it, and
+// starts its offer there; otherwise the task waits for the next pass.
+// The offer is written to the store, and made, by the task's stream, so
+// that a pass does not wait on the store for each task it places.
+func (d *Dispatcher) place(ctx context.Context, t Task, pc *passCache) error {
+	repos := d.repos(ctx, t, pc)
 	if len(repos) == 0 {
 		return nil
 	}
@@ -440,34 +481,50 @@ func (d *Dispatcher) place(ctx context.Context, t Task, teamRepos map[string][]s
 		} else if err != nil {
 			return err
 		}
-		owner, err := d.admit(ctx, c.NodeID, repos)
+		owner, err := d.admit(ctx, c.NodeID, repos, pc)
 		if err != nil {
 			c.Release()
 			d.logf("tasks: not offering %s to node %s: %v", t.ID, c.NodeID, err)
 			d.holdNode(t.ID, c.NodeID)
 			continue
 		}
-		ot, err := d.Store.Offer(ctx, t.ID, c.NodeID, owner)
-		if err != nil {
-			c.Release()
-			if errors.Is(err, ErrState) {
-				return nil // cancelled meanwhile
-			}
-			return err
-		}
-		d.logf("tasks: offering %s to node %s (attempt %d)", t.ID, c.NodeID, ot.Attempts)
-		d.start(ctx, ot, c, TypeOffer)
+		d.start(ctx, t, c, TypeOffer, owner)
 		return nil
 	}
 }
 
+// offer marks t, queued as the pass read it, offered to its claim's
+// node. It reports false, with the claim released, if the task was
+// cancelled meanwhile or the store failed: the task is still queued, for
+// the next pass.
+func (d *Dispatcher) offer(ctx context.Context, t Task, c *registry.Claim, owner string) (Task, bool) {
+	select {
+	case d.offers <- struct{}{}:
+	case <-ctx.Done():
+		c.Release()
+		return Task{}, false
+	}
+	ot, err := d.Store.offerRead(ctx, t, c.NodeID, owner)
+	<-d.offers
+	if err != nil {
+		c.Release()
+		if !errors.Is(err, ErrState) && ctx.Err() == nil { // not cancelled meanwhile
+			d.logf("tasks: offering %s to node %s: %v", t.ID, c.NodeID, err)
+			d.observe(EventStoreError, t)
+		}
+		return Task{}, false
+	}
+	d.logf("tasks: offering %s to node %s (attempt %d)", t.ID, c.NodeID, ot.Attempts)
+	return ot, true
+}
+
 // repos are the repositories t may run in: its own, or its team's. A
-// team's are read once per pass, into teamRepos.
-func (d *Dispatcher) repos(ctx context.Context, t Task, teamRepos map[string][]string) []string {
+// team's are read once per pass.
+func (d *Dispatcher) repos(ctx context.Context, t Task, pc *passCache) []string {
 	if t.Repo != "" {
 		return []string{t.Repo}
 	}
-	repos, ok := teamRepos[t.Team]
+	repos, ok := pc.teamRepos[t.Team]
 	if !ok {
 		if d.Directory != nil {
 			var err error
@@ -475,7 +532,7 @@ func (d *Dispatcher) repos(ctx context.Context, t Task, teamRepos map[string][]s
 				d.logf("tasks: team %s's repositories: %v", t.Team, err)
 			}
 		}
-		teamRepos[t.Team] = repos
+		pc.teamRepos[t.Team] = repos
 	}
 	return repos
 }
@@ -488,8 +545,10 @@ var errNotAdmitted = errors.New("not admitted")
 // task may run in (docs/hub.md §5.3): its owner may have left the team
 // since the node connected. It returns the owner the node is registered
 // by. A node that lists none of repos is refused: the directory would
-// admit it, serving nothing, but it cannot run the task.
-func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string) (string, error) {
+// admit it, serving nothing, but it cannot run the task. The directory's
+// answer for an owner and a set of repositories is asked once per pass,
+// and kept unless it was an error other than a refusal.
+func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string, pc *passCache) (string, error) {
 	e, ok := d.Registry.Get(nodeID)
 	if !ok {
 		return "", fmt.Errorf("%w: not registered", errNotAdmitted)
@@ -506,7 +565,15 @@ func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string) (
 	if d.Directory == nil {
 		return e.Owner, nil
 	}
-	return e.Owner, d.Directory.AdmitContext(ctx, e.Owner, n)
+	key := e.Owner + "\x00" + strings.Join(n.Repos, "\x00")
+	if err, ok := pc.admitted[key]; ok {
+		return e.Owner, err
+	}
+	err := d.Directory.AdmitContext(ctx, e.Owner, n)
+	if err == nil || errors.Is(err, directory.ErrNotAdmitted) {
+		pc.admitted[key] = err
+	}
+	return e.Owner, err
 }
 
 // holdNode passes over node for task until Retry has gone by: the node
@@ -547,8 +614,9 @@ func (d *Dispatcher) isLive(id string) bool {
 }
 
 // start opens a stream to t's node, in the background, and writes kind
-// on it: an offer (holding claim c), a resume, or a cancel.
-func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind string) {
+// on it: an offer (holding claim c, to the node registered by owner,
+// which it first writes to the store), a resume, or a cancel.
+func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind, owner string) {
 	d.mu.Lock()
 	if d.live[t.ID] != nil {
 		d.mu.Unlock()
@@ -569,6 +637,13 @@ func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind 
 		if kind == TypeCancel {
 			d.deliverCancel(ctx, t)
 			return
+		}
+		if kind == TypeOffer {
+			ot, ok := d.offer(ctx, t, c, owner)
+			if !ok {
+				return
+			}
+			t = ot
 		}
 		d.follow(ctx, t, c, l, kind)
 	}()
