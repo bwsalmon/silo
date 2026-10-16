@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -160,6 +161,74 @@ func TestAdmit(t *testing.T) {
 			t.Errorf("carol, in no team: %v", err)
 		}
 		_ = ctx
+	})
+}
+
+// TestAdmission checks that one read for many owners and repositories
+// answers each check as AdmitContext does, refusals and their messages
+// included, and that it does not answer for what it was not read for.
+func TestAdmission(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seed(t, s)
+		node := func(repos ...string) registry.Node {
+			n, err := registry.Validate(registry.Node{ID: "ws-1", Repos: repos, Slots: 1})
+			check(t, err)
+			return n
+		}
+		a, err := s.Admission(ctx,
+			[]string{"Alice@example.com", "bob@example.com", "carol@example.com", "alice@example.com"},
+			[]string{"bwsalmon/silo", "BWSALMON/WEB", "bwsalmon/orphan", "not a repo"})
+		check(t, err)
+		for _, c := range []struct {
+			owner string
+			n     registry.Node
+			want  string // "" for admitted
+		}{
+			{"alice@example.com", node("bwsalmon/silo"), ""},
+			{"ALICE@example.com", node("BWSALMON/SILO"), ""},
+			{"bob@example.com", node("bwsalmon/web"), ""},
+			{"carol@example.com", node(), ""},
+			{"alice@example.com", node("bwsalmon/silo", "bwsalmon/web", "bwsalmon/orphan"),
+				"directory: node not admitted: alice@example.com may not serve bwsalmon/orphan (no team owns it), bwsalmon/web (owned by team web, which alice@example.com is not in)"},
+			{"carol@example.com", node("bwsalmon/silo"),
+				"directory: node not admitted: carol@example.com may not serve bwsalmon/silo (owned by team infra, which carol@example.com is not in)"},
+		} {
+			err := a.Admit(c.owner, c.n)
+			if want := s.AdmitContext(ctx, c.owner, c.n); fmt.Sprint(err) != fmt.Sprint(want) {
+				t.Errorf("%s %v: Admission says %v, AdmitContext %v", c.owner, c.n.Repos, err, want)
+			}
+			switch {
+			case c.want == "" && err != nil:
+				t.Errorf("%s %v: %v, want admitted", c.owner, c.n.Repos, err)
+			case c.want != "" && (!errors.Is(err, ErrNotAdmitted) || err.Error() != c.want):
+				t.Errorf("%s %v: %v, want %q", c.owner, c.n.Repos, err, c.want)
+			}
+		}
+		// An invalid repository is the error AdmitContext gives, not a
+		// refusal.
+		bad := registry.Node{ID: "ws-1", Repos: []string{"not a repo"}}
+		if err, want := a.Admit("alice@example.com", bad), s.AdmitContext(ctx, "alice@example.com", bad); !errors.Is(err, ErrInvalid) || err.Error() != want.Error() {
+			t.Errorf("invalid repository: %v, want %v", err, want)
+		}
+		// An owner or a repository it was not read for has no answer.
+		if err := a.Admit("dave@example.com", node("bwsalmon/silo")); !errors.Is(err, ErrNotRead) || errors.Is(err, ErrNotAdmitted) {
+			t.Errorf("owner not read: %v, want ErrNotRead", err)
+		}
+		if err := a.Admit("alice@example.com", node("bwsalmon/grain")); !errors.Is(err, ErrNotRead) || errors.Is(err, ErrNotAdmitted) {
+			t.Errorf("repository not read: %v, want ErrNotRead", err)
+		}
+		// It is what the store said when it was read: a later change is
+		// seen by the next read, not by this one.
+		check(t, s.RemoveMember(ctx, "infra", "user:alice@example.com"))
+		if err := a.Admit("alice@example.com", node("bwsalmon/silo")); err != nil {
+			t.Errorf("the read made before alice left: %v", err)
+		}
+		b, err := s.Admission(ctx, []string{"alice@example.com"}, []string{"bwsalmon/silo"})
+		check(t, err)
+		if err := b.Admit("alice@example.com", node("bwsalmon/silo")); !errors.Is(err, ErrNotAdmitted) {
+			t.Errorf("a read after alice left: %v, want ErrNotAdmitted", err)
+		}
 	})
 }
 

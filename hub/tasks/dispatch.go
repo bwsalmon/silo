@@ -19,12 +19,14 @@ import (
 
 // Directory is what the dispatcher asks the team directory
 // (directory.Store): a team's repositories, for a task that targets the
-// team, and whether a node's owner may still serve a repository. A
-// refusal wraps directory.ErrNotAdmitted; any other error is the
-// directory not answering.
+// team, and whether a node's owner may still serve a repository: an
+// Admission read for the owners and repositories a pass may need, in a
+// couple of round trips however many there are. A refusal from it
+// wraps directory.ErrNotAdmitted; any other error is the directory not
+// answering.
 type Directory interface {
 	TeamRepos(ctx context.Context, team string) ([]string, error)
-	AdmitContext(ctx context.Context, owner string, n registry.Node) error
+	Admission(ctx context.Context, owners, repos []string) (*directory.Admission, error)
 }
 
 // Defaults for the Dispatcher's durations.
@@ -307,9 +309,13 @@ func (d *Dispatcher) Notice(m notify.Message) {
 
 // passCache is what one pass reads from the directory at most once:
 // each team's repositories, and whether an owner may serve a set of
-// repositories.
+// repositories. The admission is read for the whole pass the first time
+// a node is to be checked, for every node's owner and every repository
+// one of the pass's tasks may run in.
 type passCache struct {
+	tasks     []Task
 	teamRepos map[string][]string
+	admission *directory.Admission
 	admitted  map[string]error
 }
 
@@ -320,7 +326,7 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 		return err
 	}
 	var queued []Task
-	pc := &passCache{teamRepos: map[string][]string{}, admitted: map[string]error{}}
+	pc := &passCache{tasks: ts, teamRepos: map[string][]string{}, admitted: map[string]error{}}
 	for _, t := range ts {
 		if d.isLive(t.ID) {
 			continue
@@ -547,8 +553,9 @@ var errNotAdmitted = errors.New("not admitted")
 // since the node connected. It returns the owner the node is registered
 // by. A node that lists none of repos is refused: the directory would
 // admit it, serving nothing, but it cannot run the task. The directory's
-// answer for an owner and a set of repositories is asked once per pass,
-// and kept unless it was an error other than a refusal.
+// answer for an owner and a set of repositories is read fresh each pass
+// (passAdmission), and kept unless it was an error other than a
+// refusal.
 func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string, pc *passCache) (string, error) {
 	e, ok := d.Registry.Get(nodeID)
 	if !ok {
@@ -570,11 +577,56 @@ func (d *Dispatcher) admit(ctx context.Context, nodeID string, repos []string, p
 	if err, ok := pc.admitted[key]; ok {
 		return e.Owner, err
 	}
-	err := d.Directory.AdmitContext(ctx, e.Owner, n)
+	a, err := d.passAdmission(ctx, pc)
+	if err == nil {
+		err = a.Admit(e.Owner, n)
+		if errors.Is(err, directory.ErrNotRead) {
+			// Registered since the pass read its admission.
+			if a, err = d.Directory.Admission(ctx, []string{e.Owner}, n.Repos); err == nil {
+				err = a.Admit(e.Owner, n)
+			}
+		}
+	}
 	if err == nil || errors.Is(err, directory.ErrNotAdmitted) {
 		pc.admitted[key] = err
 	}
 	return e.Owner, err
+}
+
+// passAdmission is the pass's admission, read the first time it is
+// needed: for the owner of every node registered, and every repository
+// a queued or lost task of the pass may run in. A read that failed is
+// tried again at the next check.
+func (d *Dispatcher) passAdmission(ctx context.Context, pc *passCache) (*directory.Admission, error) {
+	if pc.admission != nil {
+		return pc.admission, nil
+	}
+	var owners, repos []string
+	seen := map[string]bool{}
+	for _, e := range d.Registry.List() {
+		if !seen[e.Owner] {
+			seen[e.Owner] = true
+			owners = append(owners, e.Owner)
+		}
+	}
+	clear(seen)
+	for _, t := range pc.tasks {
+		if t.State != Queued && t.State != Lost {
+			continue
+		}
+		for _, r := range d.repos(ctx, t, pc) {
+			if !seen[r] {
+				seen[r] = true
+				repos = append(repos, r)
+			}
+		}
+	}
+	a, err := d.Directory.Admission(ctx, owners, repos)
+	if err != nil {
+		return nil, err
+	}
+	pc.admission = a
+	return a, nil
 }
 
 // holdNode passes over node for task until Retry has gone by: the node
