@@ -66,6 +66,9 @@ func (h *apiHub) do(t *testing.T, user, method, path string, body any) (int, []b
 	if user != "" {
 		req.Header.Set("X-User", user)
 	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := http.DefaultClient.Do(req)
 	check(t, err)
 	defer resp.Body.Close()
@@ -211,5 +214,56 @@ func TestAPICancelAndRequeue(t *testing.T) {
 	check(t, json.Unmarshal(b, &got))
 	if code != http.StatusOK || got.State != Cancelled || got.Reason != "cancelled by alice@example.com: changed my mind" {
 		t.Errorf("cancelled: %d %+v", code, got)
+	}
+}
+
+// TestAPISameOrigin: a page on a node's UI host, which is the same site
+// as the hub, cannot file, cancel or requeue tasks as its viewer
+// (SA1-M1), nor can another site, nor a no-cors text/plain body.
+func TestAPISameOrigin(t *testing.T) {
+	h := newAPIHub(t)
+	task := h.submit(t, "alice@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "one"})
+	host := strings.TrimPrefix(h.url, "http://")
+	send := func(path, contentType, body string, header ...string) int {
+		t.Helper()
+		req, _ := http.NewRequest("POST", h.url+path, strings.NewReader(body))
+		req.Header.Set("X-User", "alice@example.com")
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		for i := 0; i < len(header); i += 2 {
+			req.Header.Set(header[i], header[i+1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		check(t, err)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	submit := `{"repo":"bwsalmon/silo","prompt":"forged"}`
+	nodeUI := "http://ws-1.nodes." + host
+	for _, c := range []struct {
+		path, ctype, body string
+		header            []string
+		want              int
+	}{
+		{TasksPath, "text/plain;charset=UTF-8", submit, []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+		{TasksPath, "application/json", submit, []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+		{TasksPath, "application/json", submit, []string{"Origin", nodeUI}, 403},
+		{TasksPath, "application/json", submit, []string{"Sec-Fetch-Site", "cross-site", "Origin", "https://evil.example"}, 403},
+		{TasksPath, "text/plain", submit, nil, 415},
+		{TasksPath + "/" + task.ID + "/cancel", "text/plain", `{"reason":"forged"}`, nil, 415},
+		{TasksPath + "/" + task.ID + "/cancel", "", "", []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+		{TasksPath + "/" + task.ID + "/requeue", "", "", []string{"Sec-Fetch-Site", "same-site", "Origin", nodeUI}, 403},
+	} {
+		if got := send(c.path, c.ctype, c.body, c.header...); got != c.want {
+			t.Errorf("POST %s %s %v: %d, want %d", c.path, c.ctype, c.header, got, c.want)
+		}
+	}
+	if got := h.list(t, "alice@example.com", ""); len(got) != 1 || got[0].State != task.State {
+		t.Errorf("after refused writes: %+v, want only %s, %s", got, task.ID, task.State)
+	}
+	// The hub's own page is let through.
+	if got := send(TasksPath, "application/json", submit, "Sec-Fetch-Site", "same-origin", "Origin", h.url); got != http.StatusCreated {
+		t.Errorf("same-origin submit: %d, want 201", got)
 	}
 }

@@ -152,9 +152,28 @@ func TestOIDCSignIn(t *testing.T) {
 		}
 	}
 
-	// Signing out drops the session.
+	// Another origin on the hub's site, a node's UI, cannot sign the
+	// viewer out (SA1-M1).
 	req, _ := http.NewRequest("POST", hub.URL+LogoutPath, nil)
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Origin", "http://ws-1.nodes."+u.Host)
 	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("sign-out from a node UI host: %d, want 403", resp.StatusCode)
+	}
+	if code, _ := get(t, c, hub.URL+"/whoami"); code != http.StatusOK {
+		t.Errorf("after a refused sign-out: %d, want 200", code)
+	}
+
+	// Signing out drops the session.
+	req, _ = http.NewRequest("POST", hub.URL+LogoutPath, nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Origin", hub.URL)
+	resp, err = c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

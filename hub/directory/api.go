@@ -94,7 +94,9 @@ func (a *API) Visible(r *http.Request) (func(registry.Entry) bool, error) {
 	return acc.SeesNode, nil
 }
 
-// Handler serves the API's paths.
+// Handler serves the API's paths. A write a browser sent from anywhere
+// but the hub's own origin, or with a body that is not JSON, is refused
+// before it is signed in (identity.SameOrigin).
 func (a *API) Handler() http.Handler {
 	m := http.NewServeMux()
 	h := func(pattern string, f func(http.ResponseWriter, *http.Request, *Access) error) {
@@ -123,7 +125,7 @@ func (a *API) Handler() http.Handler {
 	h("POST "+NodeTokensPath, a.mintToken)
 	h("DELETE "+NodeTokensPath+"/{id}", a.revokeToken)
 	h("DELETE "+NodeTokensPath+"/nodes/{node}", a.releaseNodeID)
-	return m
+	return identity.SameOrigin(m)
 }
 
 // httpError is an error with its status.
