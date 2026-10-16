@@ -1,0 +1,481 @@
+{
+  "displayName": "Silo hub",
+  "mosaicLayout": {
+    "columns": 48,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 24,
+        "height": 8,
+        "widget": {
+          "title": "Hub ready",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "prometheusQuery": "max(silo_hub_ready{${selector}})"
+            },
+            "thresholds": [
+              {
+                "value": 0.5,
+                "direction": "BELOW",
+                "color": "RED"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 0,
+        "width": 24,
+        "height": 8,
+        "widget": {
+          "title": "Database up",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "prometheusQuery": "max(silo_hub_database_up{${selector}})"
+            },
+            "thresholds": [
+              {
+                "value": 0.5,
+                "direction": "BELOW",
+                "color": "RED"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 8,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Nodes by status",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${status}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (status) (silo_hub_nodes{${selector}})"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 8,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Online nodes and free slots by team",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${team} online",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (team) (silo_hub_team_nodes{${selector},status=\"online\"})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${team} free slots",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (team) (silo_hub_team_free_slots{${selector}})"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 24,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Node connects, disconnects and refusals (per minute)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "connects",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum(rate(silo_hub_node_connects_total{${selector}}[5m]))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "disconnects",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum(rate(silo_hub_node_disconnects_total{${selector}}[5m]))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "refusals",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum(rate(silo_hub_node_refusals_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 24,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Backlog by team and state",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${team} $${state}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (team, state) (silo_hub_backlog_tasks{${selector}})"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 40,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Oldest queued task by team (seconds)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${team}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "max by (team) (silo_hub_backlog_oldest_queued_seconds{${selector}})"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 40,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Dispatch latency, submission to accept (seconds)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le) (rate(silo_hub_dispatch_latency_seconds_bucket{${selector}}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate(silo_hub_dispatch_latency_seconds_bucket{${selector}}[15m])))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 56,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Dispatch events (per minute)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${event}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum by (event) (rate(silo_hub_dispatch_events_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 56,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Events ingested (per second)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${class} $${result}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (class, result) (rate(silo_hub_events_ingested_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 72,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Event store size",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "events",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "max(silo_hub_event_store_events{${selector}})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "MiB",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "max(silo_hub_event_store_bytes{${selector}}) / 1048576"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 72,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Live subscribers",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "subscribers",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(silo_hub_subscribers{${selector}})"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 88,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "View-through latency (seconds) and errors (per minute)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 latency",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le) (rate(silo_hub_view_latency_seconds_bucket{${selector}}[5m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${code} per minute",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum by (code) (rate(silo_hub_view_requests_total{${selector},code!=\"200\"}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 88,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "HTTP requests by route and code (per second)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${route} $${code}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (route, code) (rate(silo_hub_http_requests_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 104,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "HTTP 5xx ratio",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "5xx / all",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum(rate(silo_hub_http_requests_total{${selector},code=~\"5..\"}[5m])) / sum(rate(silo_hub_http_requests_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 104,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Store errors (per minute)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${store}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum by (store) (rate(silo_hub_store_errors_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 120,
+        "width": 24,
+        "height": 16,
+        "widget": {
+          "title": "Database connections by store",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${store} open",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (store) (silo_hub_db_open_connections{${selector}})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "$${store} waits/s",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (store) (rate(silo_hub_db_wait_count_total{${selector}}[5m]))"
+                }
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "scale": "LINEAR"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

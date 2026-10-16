@@ -1,0 +1,19 @@
+# The hub's metrics, scraped by GKE's Managed Service for Prometheus
+# from the pod's metrics port (9091), which no Service names, so the
+# load balancer and IAP never see it. The scraped series carry
+# namespace="silo-hub" and job="silo-hub" (this PodMonitoring's name),
+# which the alert policies and the dashboard in
+# deploy/terraform/hub/monitoring.tf select on.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: silo-hub
+spec:
+  selector:
+    matchLabels:
+      app: silo-hub
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      timeout: 10s
