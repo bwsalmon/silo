@@ -11,7 +11,7 @@ import (
 // offline the rows naming this pod whose connections it does not hold
 // (an earlier process's under the same name, or a close that failed to
 // reach the database), and refills the mirror of every other pod's
-// nodes (Refill). When ctx ends it deletes the pod's lease, which takes
+// nodes (Refill), as it does at once on each change notice (Notice). When ctx ends it deletes the pod's lease, which takes
 // any of its nodes still named in the database offline at once. Without
 // a Store it only waits for ctx. It returns ctx's error.
 func (r *Registry) Run(ctx context.Context) error {
@@ -28,15 +28,23 @@ func (r *Registry) Run(ctx context.Context) error {
 		if err := r.Refill(ctx); err != nil && ctx.Err() == nil {
 			r.logf("registry: refilling from the database: %v", err)
 		}
-		select {
-		case <-ctx.Done():
-			dctx, cancel := storeContext()
-			if err := r.Store.deletePod(dctx, r.Pod); err != nil {
-				r.logf("registry: deleting pod %s's lease: %v", r.Pod, err)
+		// A change notice refills the mirror at once, between renewals.
+		for renew := false; !renew; {
+			select {
+			case <-r.kick:
+				if err := r.Refill(ctx); err != nil && ctx.Err() == nil {
+					r.logf("registry: refilling from the database: %v", err)
+				}
+			case <-ctx.Done():
+				dctx, cancel := storeContext()
+				if err := r.Store.deletePod(dctx, r.Pod); err != nil {
+					r.logf("registry: deleting pod %s's lease: %v", r.Pod, err)
+				}
+				cancel()
+				return ctx.Err()
+			case <-t.C:
+				renew = true
 			}
-			cancel()
-			return ctx.Err()
-		case <-t.C:
 		}
 	}
 }

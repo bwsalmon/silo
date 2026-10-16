@@ -253,3 +253,83 @@ func (s *Server) forward(ctx context.Context, pod, addr, nodeID string) (net.Con
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	return fail(fmt.Errorf("answered %s: %s", resp.Status, strings.TrimSpace(string(msg))))
 }
+
+// Internal wraps a handler for another of the internal listener's
+// routes (docs/hub.md §2.2.4) in the same check InternalOpenPath makes:
+// a token from InternalKey for this pod.
+func (s *Server) Internal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.internalAuthorized(r) {
+			s.logf("rendezvous: refused an internal request from %s: bad token", r.RemoteAddr)
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Forwards is whether Get can reach other pods: there is an internal
+// key and a shared registry to find them in.
+func (s *Server) Forwards() bool { return len(s.InternalKey) > 0 && s.Registry.Store != nil }
+
+// Get asks the pod holding nodeID, as the shared registry names it, for
+// path on its internal listener, and returns its 200 answer, whose body
+// the caller reads and closes; ctx bounds the whole of it. A pod that
+// answers 404 (it no longer holds the node) is asked once more after a
+// fresh read, and then, as when no other pod holds the node, Get fails
+// with ErrOffline.
+func (s *Server) Get(ctx context.Context, nodeID, path string) (*http.Response, error) {
+	if !s.Forwards() {
+		return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
+	}
+	for attempt := 0; ; attempt++ {
+		pod, addr, ok, err := s.Registry.Holder(ctx, nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("rendezvous: finding the pod holding node %s: %w", nodeID, err)
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
+		}
+		resp, err := s.get(ctx, pod, addr, path)
+		if errors.Is(err, errNotHeld) {
+			if attempt == 0 {
+				continue
+			}
+			return nil, fmt.Errorf("%w: %s (pod %s no longer holds it)", ErrOffline, nodeID, pod)
+		}
+		return resp, err
+	}
+}
+
+func (s *Server) get(ctx context.Context, pod, addr, path string) (*http.Response, error) {
+	s.clientOnce.Do(func() {
+		dial := s.DialInternal
+		if dial == nil {
+			d := net.Dialer{Timeout: forwardTimeout}
+			dial = d.DialContext
+		}
+		s.client = &http.Client{Transport: &http.Transport{
+			DialContext:           dial,
+			ResponseHeaderTimeout: forwardTimeout,
+			MaxIdleConnsPerHost:   4,
+		}}
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+InternalToken(s.InternalKey, pod, time.Now()))
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rendezvous: pod %s (%s): %w", pod, addr, err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errNotHeld
+	}
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return nil, fmt.Errorf("rendezvous: pod %s (%s) answered %s: %s", pod, addr, resp.Status, strings.TrimSpace(string(msg)))
+}
