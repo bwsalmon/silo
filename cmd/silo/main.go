@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -174,8 +175,20 @@ func serve(args []string) error {
 		"this pod's name in the shared node registry (docs/hub.md §2.2.2); the host's name when empty [SILO_HUB_POD]")
 	podAddr := fs.String("pod-addr", env("SILO_HUB_POD_ADDR", ""),
 		"the address the hub's other pods reach this one at; the host's name when empty [SILO_HUB_POD_ADDR]")
+	internalAddr := fs.String("internal-addr", env("SILO_HUB_INTERNAL_ADDR", ""),
+		"address to serve the internal listener on, which only the hub's other pods may reach (docs/hub.md §2.2.3); empty serves none [SILO_HUB_INTERNAL_ADDR]")
+	internalKey := fs.String("internal-key-file", env("SILO_HUB_INTERNAL_KEY_FILE", ""),
+		"the file holding the key the hub's pods share for their internal listeners, at least 32 bytes [SILO_HUB_INTERNAL_KEY_FILE]")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	var key []byte
+	if *internalKey != "" {
+		b, err := os.ReadFile(*internalKey)
+		if err != nil {
+			return fmt.Errorf("the internal key: %w", err)
+		}
+		key = bytes.TrimSpace(b)
 	}
 	cfg := server.Config{
 		Database:     *db,
@@ -197,6 +210,8 @@ func serve(args []string) error {
 		MetricsAddr:      *metricsAddr,
 		Pod:              *pod,
 		PodAddr:          *podAddr,
+		InternalAddr:     *internalAddr,
+		InternalKey:      key,
 		Logf:             log.Printf,
 	}
 	l, err := net.Listen("tcp", *addr)

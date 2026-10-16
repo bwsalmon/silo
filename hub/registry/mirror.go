@@ -113,3 +113,18 @@ func (r *Registry) Refill(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Holder reads afresh, from the shared registry, which other pod holds
+// the node's connection and the address it is reached at (docs/hub.md
+// §2.2.3): what Server.Open forwards a stream to. ok is false when no
+// live pod but this one holds it, or without a Store.
+func (r *Registry) Holder(ctx context.Context, id string) (pod, addr string, ok bool, err error) {
+	if r.Store == nil {
+		return "", "", false, nil
+	}
+	pod, addr, until, err := r.Store.holder(ctx, id)
+	if err != nil || pod == "" || pod == r.Pod || !r.now().Before(until) {
+		return "", "", false, err
+	}
+	return pod, addr, true, nil
+}
