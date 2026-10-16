@@ -321,8 +321,15 @@ otherwise, `TestUnauthenticated`); the owner is the credential's, never
 the hello's; a node token is bound to one node ID and a hello naming
 any other is refused (`serveNode`, `TestNodeBoundCredential`); a node
 ID belongs to its first owner (`registry.Register`, `ErrOwner`,
-`TestOwner`) and, across restarts, to the owner holding its live token
-(`MintNodeToken` refuses a node ID another owner holds). A same-owner
+`TestOwner`) and, across restarts and revocation, to the first owner
+to mint a token for it (`MintNodeToken` refuses a node ID another owner
+has any unreleased token for, live or revoked, until that owner or a
+hub admin releases it: `ReleaseNodeID`, `TestNodeIDReusableAfterRevoke`,
+SA1-H1). A task records its node's owner as well as its ID, and is
+resumed, told of a cancel, streamed into and asked for artifacts only
+through a node that owner registers (`Dispatcher.bound`,
+`live.Hub.holds`, `TestResumeOnlyToOwner`, `TestCancelOnlyToOwner`,
+`TestAnotherOwnersNode`). A same-owner
 reconnect supersedes the old connection (`TestSupersede`,
 `TestReconnectSupersedes`). *Residual:* a stolen node token is a full
 impersonation of that node until revoked (T-TB2-5); the same owner can
@@ -333,14 +340,16 @@ mitigated. INV-5, INV-6.
 not own.** *Mitigation:* `directory.Store.Admit` refuses the whole node
 if any repository it lists has no owning team or a team its owner is
 not in (`TestAdmit`); the dispatcher rechecks `Admit` before each offer
-(`Dispatcher.admit`, `TestAdmissionCheckedAgain`), so an owner who left
-the team is offered nothing. Admission is by email only, not by groups
+and each resume (`Dispatcher.admit`, `TestAdmissionCheckedAgain`,
+`TestResumeChecksAdmission`), so an owner who left the team is offered
+nothing and resumes nothing: their lost task is requeued (SA1-H1). Admission is by email only, not by groups
 an IdP asserted at sign-in. *Status:* mitigated. INV-7.
 
 **T-TB2-3 (T/S) A Grain injecting events into another task.**
 *Mitigation:* the first line of an event stream binds it to a task,
-which must be placed on that node (`live.Hub.NodeStream`: `task.Node !=
-nodeID` refuses); a later line naming another task closes the stream
+which must be placed on that node, registered by the owner it was
+offered to (`live.Hub.NodeStream`: `task.Node != nodeID` refuses, and
+`holds` refuses another owner's node on the ID, SA1-H1); a later line naming another task closes the stream
 (`TestStreamForAnotherNode`); events at or below the task's last `seq`
 are dropped. A task requeued away from a node no longer names it, so
 the old node's events are refused (hub.md §6.3). *Residual:* a node may
@@ -372,6 +381,9 @@ of secret; only its SHA-256 is stored, so a database leak proves nobody
 token; revoking, or minting again, ends the live connection at once
 (`Server.Disconnect`, `directory.API.revokeToken` and `mintToken`,
 SA1-L2) and refuses its reconnect (`TestNodeTokens`, `TestAPI`).
+Revoking does not free the node ID for another owner: it stays its
+first owner's until released (SA1-H1), so a revoked owner's lost tasks
+are not handed to whoever mints the ID next.
 *Residual:* the token is a bearer secret in a file on the Grain's host,
 readable by anything running as the Grain's user, including a host
 sandbox's agent (T-TB7-2). It has no expiry. A thief gets the owner's
@@ -708,10 +720,10 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-2 | The only route a request without human sign-on reaches is `/v1/nodes/connect` (plus `/healthz`, `/readyz`, and `/metrics` on its own listener), and it answers 401 before any WebSocket exists unless the bearer is a live node token. | `hub/rendezvous` `TestUnauthenticated`; `validate.sh` (metrics port on no Service); gap: a test that walks every registered route without credentials |
 | INV-3 | The hub's database never contains SILO_ONLY content: every stored event is of the lifecycle or conversation class and validates against its type's schema with no extra field; node-only events are stored as nothing and broadcast only as `{kind, ref, size}`; no result disk path is kept. | `hub/live` `TestNodeOnlyNeverStored`, `TestClassify`, `TestClassifyDropsNodePaths` |
 | INV-4 | Artifact bytes and node UI bytes are never written to the hub's disk or database and never cached; artifacts are answered `text/plain`, `nosniff`, `Content-Security-Policy: sandbox`, `Cache-Control: no-store`. | `hub/live` `TestViewThrough` (the bytes pass through); `hub/faulttest` `TestViewThroughDisconnect`; gap: an assertion on all four headers, and that nothing reaches the store |
-| INV-5 | A node is registered only under the owner its credential proves, under the node ID its token was minted for, and never under an ID another owner registered or holds a live token for. | `hub/rendezvous` `TestNodeBoundCredential`, `TestRefusals`; `hub/registry` `TestOwner`; `hub/directory` `TestNodeTokens` |
+| INV-5 | A node is registered only under the owner its credential proves, under the node ID its token was minted for, and never under an ID another owner registered or has had a token for that it has not released, live or revoked. A task is resumed, cancelled, streamed into and viewed only through a node registered by the owner it was offered to. | `hub/rendezvous` `TestNodeBoundCredential`, `TestRefusals`; `hub/registry` `TestOwner`; `hub/directory` `TestNodeTokens`, `TestNodeIDReusableAfterRevoke`; `hub/tasks` `TestResumeOnlyToOwner`, `TestCancelOnlyToOwner`; `hub/live` `TestAnotherOwnersNode` |
 | INV-6 | Node tokens are stored only as SHA-256 hashes; each node ID has at most one live token; revoking a token ends its node's connection at once and refuses its reconnect. | `hub/directory` `TestNodeTokens`; gap: the disconnect-on-revoke path through `directory.API` |
-| INV-7 | A node is admitted, and a task offered to it, only if its owner is a member of the team that owns every repository the node lists (at registration) and the task's repositories (at every offer). | `hub/directory` `TestAdmit`; `hub/tasks` `TestAdmissionCheckedAgain` |
-| INV-8 | A node's event stream is accepted only for a task the hub has placed on that same node, and carries one task only. | `hub/live` `TestStreamForAnotherNode` |
+| INV-7 | A node is admitted, and a task offered to it or resumed on it, only if its owner is a member of the team that owns every repository the node lists (at registration) and the task's repositories (at every offer and resume). | `hub/directory` `TestAdmit`; `hub/tasks` `TestAdmissionCheckedAgain`, `TestResumeChecksAdmission` |
+| INV-8 | A node's event stream is accepted only for a task the hub has placed on that same node, registered by the same owner, and carries one task only. | `hub/live` `TestStreamForAnotherNode`, `TestAnotherOwnersNode` |
 | INV-9 | A caller sees a task, its events and its artifacts only as a member of its team or of the team owning its repository (or as a hub admin), and a node only as its owner, a member of a team owning one of its repositories, or a hub admin; anything else answers 404 exactly as a missing resource does. | `hub/tasks` `TestAPIVisibility`; `hub/live` `TestAccess`; `hub/directory` `TestAccess`, `TestAPI`; `hub/rendezvous` `TestVisibleDirectory` |
 | INV-10 | A task's `submitter` is the signed-in caller; a request body naming one is refused. | `hub/tasks` `TestAPISubmit` |
 | INV-11 | The hub opens only `offer`, `resume`, `cancel`, `view` and `http` streams to a node; a conforming Grain closes any other stream unread, serves a view only of a ref it listed, and an `http` stream only when its owner turned it on. | grain `pkg/hubnode` tests (offer, resume, cancel); task 4236 (conformance kit); gap: view and http on grain's side |
