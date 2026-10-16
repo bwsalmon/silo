@@ -54,9 +54,9 @@ func seed(t *testing.T, s *Store) {
 	ctx := context.Background()
 	check(t, s.CreateTeam(ctx, "infra", "Infrastructure"))
 	check(t, s.CreateTeam(ctx, "web", ""))
-	check(t, s.SetMember(ctx, "infra", "Alice@Example.com", Admin))
-	check(t, s.SetMember(ctx, "infra", "eng@example.com", Member))
-	check(t, s.SetMember(ctx, "web", "bob@example.com", Member))
+	check(t, s.SetMember(ctx, "infra", "user:Alice@Example.com", Admin))
+	check(t, s.SetMember(ctx, "infra", "group:eng@example.com", Member))
+	check(t, s.SetMember(ctx, "web", "user:bob@example.com", Member))
 	check(t, s.AssignRepo(ctx, "infra", "Bwsalmon/Silo"))
 	check(t, s.AssignRepo(ctx, "web", "bwsalmon/web"))
 }
@@ -73,30 +73,39 @@ func TestTeams(t *testing.T) {
 				t.Errorf("team %q: %v, want ErrInvalid", id, err)
 			}
 		}
-		if err := s.SetMember(ctx, "nope", "x@example.com", Member); !errors.Is(err, ErrNotFound) {
+		if err := s.SetMember(ctx, "nope", "user:x@example.com", Member); !errors.Is(err, ErrNotFound) {
 			t.Errorf("member of a missing team: %v, want ErrNotFound", err)
 		}
-		if err := s.SetMember(ctx, "infra", "x@example.com", "owner"); !errors.Is(err, ErrInvalid) {
+		if err := s.SetMember(ctx, "infra", "user:x@example.com", "owner"); !errors.Is(err, ErrInvalid) {
 			t.Errorf("bad role: %v, want ErrInvalid", err)
+		}
+		// A principal says whether it is a user or a group (SA1-L6).
+		for _, p := range []string{"x@example.com", "eng", "robot:x@example.com", "user:", "user:no-at", "group:", "group:a b", "user:a/b@example.com"} {
+			if err := s.SetMember(ctx, "infra", p, Member); !errors.Is(err, ErrInvalid) {
+				t.Errorf("SetMember(%q): %v, want ErrInvalid", p, err)
+			}
+		}
+		if err := s.RemoveMember(ctx, "infra", "alice@example.com"); !errors.Is(err, ErrInvalid) {
+			t.Errorf("RemoveMember with no prefix: %v, want ErrInvalid", err)
 		}
 		if err := s.AssignRepo(ctx, "web", "bwsalmon/silo"); !errors.Is(err, ErrOwned) {
 			t.Errorf("another team's repo: %v, want ErrOwned", err)
 		}
 		check(t, s.AssignRepo(ctx, "infra", "bwsalmon/silo")) // already its own: no change
-		check(t, s.SetMember(ctx, "web", "bob@example.com", Admin))
+		check(t, s.SetMember(ctx, "web", "user:bob@example.com", Admin))
 
 		teams, err := s.Teams(ctx)
 		check(t, err)
 		if len(teams) != 2 || teams[0].ID != "infra" || teams[0].Name != "Infrastructure" || teams[1].Name != "web" {
 			t.Fatalf("teams %+v", teams)
 		}
-		if m := teams[0].Members; len(m) != 2 || m["alice@example.com"] != Admin || m["eng@example.com"] != Member {
+		if m := teams[0].Members; len(m) != 2 || m["user:alice@example.com"] != Admin || m["group:eng@example.com"] != Member {
 			t.Errorf("infra's members %v", m)
 		}
 		if r := teams[0].Repos; len(r) != 1 || r[0] != "bwsalmon/silo" {
 			t.Errorf("infra's repos %v", r)
 		}
-		if teams[1].Members["bob@example.com"] != Admin {
+		if teams[1].Members["user:bob@example.com"] != Admin {
 			t.Errorf("bob's role was not changed: %v", teams[1].Members)
 		}
 
@@ -105,8 +114,8 @@ func TestTeams(t *testing.T) {
 			t.Errorf("released repo still owned by %q", owner)
 		}
 		check(t, s.AssignRepo(ctx, "web", "bwsalmon/web"))
-		check(t, s.RemoveMember(ctx, "infra", "eng@example.com"))
-		if err := s.RemoveMember(ctx, "infra", "eng@example.com"); !errors.Is(err, ErrNotFound) {
+		check(t, s.RemoveMember(ctx, "infra", "group:eng@example.com"))
+		if err := s.RemoveMember(ctx, "infra", "group:eng@example.com"); !errors.Is(err, ErrNotFound) {
 			t.Errorf("removing twice: %v", err)
 		}
 		check(t, s.DeleteTeam(ctx, "web"))
@@ -248,6 +257,16 @@ func TestAccess(t *testing.T) {
 		check(t, err)
 		root, err := s.Access(ctx, identity.Principal{Email: "root@example.com"}, true)
 		check(t, err)
+		// A group named like a member's email is not that member, and
+		// a user whose email is a group's name is not in the group
+		// (SA1-L6).
+		mallory, err := s.Access(ctx, identity.Principal{Email: "mallory@example.com", Groups: []string{"alice@example.com"}}, false)
+		check(t, err)
+		eng, err := s.Access(ctx, identity.Principal{Email: "eng@example.com"}, false)
+		check(t, err)
+		if len(mallory.Teams) != 0 || len(eng.Teams) != 0 {
+			t.Errorf("a group as a user, or a user as a group: mallory %v, eng %v", mallory.Teams, eng.Teams)
+		}
 
 		if !alice.AdminOf("infra") || alice.AdminOf("web") || !alice.SeesTeam("infra") || alice.SeesTeam("web") {
 			t.Errorf("alice %+v", alice)
@@ -278,6 +297,34 @@ func TestAccess(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestLegacyPrincipals: rows from before principals had prefixes
+// become users when the tables are migrated, and stay put after.
+func TestLegacyPrincipals(t *testing.T) {
+	run := func(t *testing.T, url string) {
+		ctx := context.Background()
+		s, err := Open(ctx, url)
+		check(t, err)
+		check(t, s.CreateTeam(ctx, "infra", ""))
+		for _, p := range []string{"alice@example.com", "user:bob@example.com", "group:eng@example.com"} {
+			_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO team_members (team, principal, role) VALUES ('infra', ?, 'member')`), p)
+			check(t, err)
+		}
+		s.Close()
+		for range 2 {
+			s, err = Open(ctx, url)
+			check(t, err)
+			teams, err := s.Teams(ctx)
+			check(t, err)
+			s.Close()
+			if m := teams[0].Members; len(m) != 3 || m["user:alice@example.com"] != Member || m["user:bob@example.com"] != Member || m["group:eng@example.com"] != Member {
+				t.Fatalf("migrated members %v", m)
+			}
+		}
+	}
+	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
+	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
 }
 
 func TestTeamRepos(t *testing.T) {

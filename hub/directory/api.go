@@ -43,8 +43,10 @@ const (
 type API struct {
 	Store *Store
 	Auth  identity.Authenticator
-	// HubAdmins are the principals, emails or groups, who hold the
-	// hub-wide admin role: they create teams and see everything.
+	// HubAdmins are the principals, user:<email> or group:<name>, who
+	// hold the hub-wide admin role: they create teams and see
+	// everything. An entry with no prefix is a user
+	// (HubAdminPrincipal).
 	HubAdmins []string
 	// Disconnect, when set, ends a node's connection when its token is
 	// revoked: rendezvous.Server.Disconnect.
@@ -60,13 +62,16 @@ func (a *API) Access(r *http.Request) (*Access, error) {
 	return a.Store.Access(r.Context(), p, a.isHubAdmin(p))
 }
 
+// isHubAdmin matches each HubAdmins entry only against its own claim:
+// a user: entry against the email, a group: entry against the groups.
 func (a *API) isHubAdmin(p identity.Principal) bool {
 	for _, adm := range a.HubAdmins {
-		if strings.EqualFold(adm, p.Email) {
+		adm, _ = HubAdminPrincipal(adm)
+		if u, err := userPrincipal(p.Email); err == nil && adm == u {
 			return true
 		}
 		for _, g := range p.Groups {
-			if strings.EqualFold(adm, g) {
+			if adm == GroupPrefix+strings.ToLower(strings.TrimSpace(g)) {
 				return true
 			}
 		}

@@ -162,7 +162,7 @@ func serve(args []string) error {
 	redirect := fs.String("oidc-redirect-url", env("SILO_HUB_OIDC_REDIRECT_URL", ""), "the hub's OIDC callback URL [SILO_HUB_OIDC_REDIRECT_URL]")
 	devHeader := fs.String("dev-user-header", env("SILO_HUB_DEV_USER_HEADER", ""),
 		"INSECURE, local development only: take the caller's email from this header, unverified [SILO_HUB_DEV_USER_HEADER]")
-	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, emails or groups [SILO_HUB_ADMINS]")
+	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, user:EMAIL or group:NAME [SILO_HUB_ADMINS]")
 	metricsAddr := fs.String("metrics-addr", env("SILO_HUB_METRICS_ADDR", ""),
 		"address to serve Prometheus metrics on, at /metrics; keep it off the load balancer's routes [SILO_HUB_METRICS_ADDR]")
 	nodeUI := fs.String("node-ui-domain", env("SILO_HUB_NODE_UI_DOMAIN", ""),
@@ -211,8 +211,8 @@ func team(args []string) error {
 	id := fs.String("id", "", "the team's ID, lower-case: created if it does not exist")
 	name := fs.String("name", "", "the team's display name, when it is created")
 	var admins, members, repos multi
-	fs.Var(&admins, "admin", "an admin of the team, an email or group (repeatable)")
-	fs.Var(&members, "member", "a member of the team, an email or group (repeatable)")
+	fs.Var(&admins, "admin", "an admin of the team, user:EMAIL or group:NAME (repeatable)")
+	fs.Var(&members, "member", "a member of the team, user:EMAIL or group:NAME (repeatable)")
 	fs.Var(&repos, "repo", "a repository, owner/name, the team owns (repeatable)")
 	lostRequeue := fs.String("lost-requeue-after", "",
 		"requeue the team's lost running tasks after this long, at least 5m; 0 turns it off (docs/hub.md §6.3)")

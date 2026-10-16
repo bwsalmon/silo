@@ -241,7 +241,7 @@ func TestServeRestart(t *testing.T) {
 	}
 
 	call(t, "POST", hub.url+"/v1/teams", "admin@example.com", map[string]string{"id": "infra", "name": "Infra"}, &struct{}{})
-	call(t, "PUT", hub.url+"/v1/teams/infra/members/alice@example.com", "admin@example.com", map[string]string{"role": "member"}, &struct{}{})
+	call(t, "PUT", hub.url+"/v1/teams/infra/members/user:alice@example.com", "admin@example.com", map[string]string{"role": "member"}, &struct{}{})
 	call(t, "PUT", hub.url+"/v1/teams/infra/repos/bwsalmon/silo", "admin@example.com", nil, &struct{}{})
 	var minted struct {
 		Token string `json:"token"`

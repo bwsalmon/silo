@@ -55,7 +55,7 @@ func newTestHub(t *testing.T) *testHub {
 		Heartbeat:    time.Second,
 		Logf:         testlog.Logf(t),
 	}
-	api := &API{Store: s, Auth: headerAuth{}, HubAdmins: []string{"hub-admins@example.com"}, Disconnect: rv.Disconnect}
+	api := &API{Store: s, Auth: headerAuth{}, HubAdmins: []string{"group:hub-admins@example.com"}, Disconnect: rv.Disconnect}
 	rv.Visible = api.Visible
 	m := http.NewServeMux()
 	m.Handle(rendezvous.ConnectPath, rv.Handler())
@@ -111,12 +111,12 @@ func TestAPI(t *testing.T) {
 	h.want(t, 409, root, "POST", TeamsPath, map[string]string{"id": "web"}, admins)
 	h.want(t, 400, root, "POST", TeamsPath, map[string]string{"id": "Bad Team"}, admins)
 	h.want(t, 400, root, "POST", TeamsPath, map[string]any{"id": "x", "extra": 1}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/"+alice, map[string]string{"role": "admin"}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/"+bob, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/user:"+bob, map[string]string{"role": "admin"}, admins)
 
 	// Alice administers infra, and only infra.
 	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil)
-	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/carol@example.com", map[string]string{"role": "member"})
+	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/user:carol@example.com", map[string]string{"role": "member"})
 	h.want(t, 404, alice, "PUT", TeamsPath+"/web/repos/bwsalmon/x", nil)
 	h.want(t, 403, "carol@example.com", "PUT", TeamsPath+"/infra/repos/bwsalmon/x", nil)
 	h.want(t, 403, alice, "DELETE", TeamsPath+"/infra", nil)
@@ -248,4 +248,25 @@ func TestAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	cb2.Close()
+}
+
+// TestIsHubAdmin: each HubAdmins entry matches only its own claim
+// (SA1-L6), and one with no prefix is a user.
+func TestIsHubAdmin(t *testing.T) {
+	a := &API{HubAdmins: []string{"group:Admins@example.com", "user:root@example.com", "legacy@example.com"}}
+	for _, c := range []struct {
+		p    identity.Principal
+		want bool
+	}{
+		{identity.Principal{Email: "root@example.com"}, true},
+		{identity.Principal{Email: "legacy@example.com"}, true},
+		{identity.Principal{Email: "x@example.com", Groups: []string{"admins@example.com"}}, true},
+		{identity.Principal{Email: "admins@example.com"}, false},
+		{identity.Principal{Email: "x@example.com", Groups: []string{"root@example.com"}}, false},
+		{identity.Principal{Email: "x@example.com", Groups: []string{"legacy@example.com"}}, false},
+	} {
+		if got := a.isHubAdmin(c.p); got != c.want {
+			t.Errorf("isHubAdmin(%+v) = %v, want %v", c.p, got, c.want)
+		}
+	}
 }

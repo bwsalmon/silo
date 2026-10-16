@@ -88,7 +88,7 @@ func TestMigrateThenServeLeastPrivileged(t *testing.T) {
 		}
 	}
 	must(h.Directory.CreateTeam(ctx, "infra", "Infra"))
-	must(h.Directory.SetMember(ctx, "infra", "alice@example.com", directory.Admin))
+	must(h.Directory.SetMember(ctx, "infra", "user:alice@example.com", directory.Admin))
 	must(h.Directory.AssignRepo(ctx, "infra", "bwsalmon/silo"))
 	must(h.Directory.SetTeamSettings(ctx, "infra", directory.Settings{LostRequeueAfter: time.Hour}))
 	_, _, err = h.Directory.MintNodeToken(ctx, "alice@example.com", "ws-1")

@@ -45,7 +45,7 @@ func TestBackupRestore(t *testing.T) {
 		}
 	}
 	must(h.Directory.CreateTeam(ctx, "infra", "Infra"))
-	must(h.Directory.SetMember(ctx, "infra", "alice@example.com", directory.Admin))
+	must(h.Directory.SetMember(ctx, "infra", "user:alice@example.com", directory.Admin))
 	must(h.Directory.AssignRepo(ctx, "infra", "bwsalmon/silo"))
 	must(h.Directory.SetTeamSettings(ctx, "infra", directory.Settings{LostRequeueAfter: time.Hour}))
 	token, _, err := h.Directory.MintNodeToken(ctx, "alice@example.com", "ws-1")
@@ -80,7 +80,7 @@ func TestBackupRestore(t *testing.T) {
 	}
 	call(t, "GET", hub.url+directory.TeamsPath, "alice@example.com", nil, &teams)
 	if len(teams.Teams) != 1 || teams.Teams[0].ID != "infra" || len(teams.Teams[0].Repos) != 1 ||
-		teams.Teams[0].Members["alice@example.com"] != directory.Admin {
+		teams.Teams[0].Members["user:alice@example.com"] != directory.Admin {
 		t.Errorf("restored teams: %+v", teams.Teams)
 	}
 	var set struct {

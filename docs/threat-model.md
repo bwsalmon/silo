@@ -203,7 +203,10 @@ refused. Without IAP, OIDC with PKCE, state and nonce, verified ID
 token, `email_verified` required, HMAC-signed session cookie
 (`hub/identity/oidc.go`). Exactly one sign-on must be configured
 (`server.Config.auth`). A request that reaches a pod without the load
-balancer still needs a valid assertion. *Residual:* the development
+balancer still needs a valid assertion. A group claim never stands in for a user,
+nor an email for a group: directory principals and `HubAdmins` are
+`user:<email>` or `group:<name>`, each matched only against its own
+claim (SA1-L6, O-14 closed). *Residual:* the development
 sign-on `-dev-user-header` trusts a plain header; nothing in `deploy/`
 sets it and nothing checks that it stays so (O-12). *Status:* mitigated;
 the dev-header guard is open (O-12). INV-1, INV-2, INV-20.
@@ -726,11 +729,14 @@ a candidate task; none is fixed by this document.
 | O-12 | `validate.sh` does not check that the dev sign-on is unset and the IAP-off route is an exact match. | low | T-TB1-1, T-TB5-4 | silo `deploy/` |
 | O-9 | The node directory shows a node's repositories of other teams. | low | T-TB1-2 | silo (`SeesNode` filtering the entry) |
 | O-11 | Node tokens never expire. | low | T-TB2-5 | silo `hub/directory` |
-| O-14 | Group and email principals share one namespace in `team_members` and `HubAdmins`; an identity provider whose groups users can name grants membership or hub admin (SA1-L6). | low | T-TB1-1 | silo `hub/directory` |
 
 Closed by security audit 1's low findings: O-7 (node-supplied strings
-are quoted and cut in logs, reasons cut in the task row: SA1-L3) and
-O-15 (the hub serves as a least-privileged database role, its service
+are quoted and cut in logs, reasons cut in the task row: SA1-L3),
+O-14 (principals are `user:<email>` or `group:<name>`, in
+`team_members` and `HubAdmins` alike, and each is matched only against
+its own claim, so a group named like an email or like an admin group
+grants nothing it is not: SA1-L6; `hub/directory` `TestAccess`,
+`TestIsHubAdmin`, `TestLegacyPrincipals`) and O-15 (the hub serves as a least-privileged database role, its service
 account's IAM database user with DML on its own tables alone, and only
 the `migrate` init container, as the schema's owner, changes the
 schema: SA1-L8; `hub/server` `TestMigrateThenServeLeastPrivileged`).

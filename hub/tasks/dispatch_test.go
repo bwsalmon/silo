@@ -39,8 +39,8 @@ func newHarness(t *testing.T, opts ...func(*Dispatcher)) *harness {
 	t.Cleanup(func() { dir.Close() })
 	check(t, dir.CreateTeam(ctx, "infra", ""))
 	check(t, dir.CreateTeam(ctx, "web", ""))
-	check(t, dir.SetMember(ctx, "infra", "alice@example.com", directory.Admin))
-	check(t, dir.SetMember(ctx, "web", "bob@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:alice@example.com", directory.Admin))
+	check(t, dir.SetMember(ctx, "web", "user:bob@example.com", directory.Member))
 	check(t, dir.AssignRepo(ctx, "infra", "bwsalmon/silo"))
 	check(t, dir.AssignRepo(ctx, "infra", "bwsalmon/grain"))
 	check(t, dir.AssignRepo(ctx, "web", "bwsalmon/web"))
@@ -538,17 +538,17 @@ func TestTeamTargetAndConstraints(t *testing.T) {
 func TestAdmissionCheckedAgain(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
-	check(t, h.dir.SetMember(ctx, "infra", "carol@example.com", directory.Member))
+	check(t, h.dir.SetMember(ctx, "infra", "user:carol@example.com", directory.Member))
 	n := h.node(t, "carol@example.com", silo("ws-carol", 1))
 	// Carol leaves the team after her node connected.
-	check(t, h.dir.RemoveMember(ctx, "infra", "carol@example.com"))
+	check(t, h.dir.RemoveMember(ctx, "infra", "user:carol@example.com"))
 	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
 	n.none(t, time.Second)
 	if got, _ := h.store.Get(ctx, task.ID); got.State != Queued {
 		t.Errorf("task %+v, want it left queued", got)
 	}
 	// She rejoins: the node is offered the task once its hold is over.
-	check(t, h.dir.SetMember(ctx, "infra", "carol@example.com", directory.Member))
+	check(t, h.dir.SetMember(ctx, "infra", "user:carol@example.com", directory.Member))
 	n.next(t, TypeOffer)
 }
 

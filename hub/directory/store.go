@@ -164,13 +164,20 @@ CREATE TABLE IF NOT EXISTS team_settings (
 );
 `
 
+// legacyPrincipals makes every team_members row from before principals
+// had prefixes a user: the only deployment then was behind IAP, whose
+// tokens carry no groups, so a bare row could only have matched an
+// email. It changes nothing once every row has a prefix.
+const legacyPrincipals = `UPDATE team_members SET principal = 'user:' || principal
+	WHERE principal NOT LIKE 'user:%' AND principal NOT LIKE 'group:%'`
+
 func (s *Store) migrate(ctx context.Context) error {
-	for _, stmt := range strings.Split(schema, ";") {
+	for _, stmt := range append(strings.Split(schema, ";"), legacyPrincipals) {
 		if strings.TrimSpace(stmt) == "" {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("directory: creating tables: %w", err)
+			return fmt.Errorf("directory: migrating tables: %w", err)
 		}
 	}
 	return nil
@@ -228,14 +235,63 @@ func normRepo(repo string) (string, error) {
 	return r, nil
 }
 
-// normPrincipal is how principals are stored and compared: an email or
-// group address, lower-cased.
+// Principals are IAM-style, so a group can never be mistaken for a
+// user or the other way round (docs/hub.md §5.3): "user:<email>"
+// matches only a signed-in human's email and "group:<name>" only one
+// of the groups their identity provider put them in. A group named
+// like an email is still a group.
+const (
+	UserPrefix  = "user:"
+	GroupPrefix = "group:"
+)
+
+// normPrincipal is how principals are stored and compared:
+// "user:<email>" or "group:<name>", lower-cased. A principal with
+// neither prefix is refused rather than guessed at: Google groups look
+// like emails.
 func normPrincipal(p string) (string, error) {
 	p = strings.ToLower(strings.TrimSpace(p))
-	if p == "" || strings.ContainsAny(p, " \t\n/") {
+	kind, name, _ := strings.Cut(p, ":")
+	switch {
+	case kind+":" != UserPrefix && kind+":" != GroupPrefix:
+		return "", fmt.Errorf("%w principal %q: want user:EMAIL or group:NAME", ErrInvalid, p)
+	case name == "" || strings.ContainsAny(name, " \t\n/"),
+		kind+":" == UserPrefix && !strings.Contains(name, "@"):
 		return "", fmt.Errorf("%w principal %q", ErrInvalid, p)
 	}
 	return p, nil
+}
+
+// normEmail is how a node token's owner, a signed-in human's email, is
+// stored and compared: lower-cased, with no prefix.
+func normEmail(e string) (string, error) {
+	e = strings.ToLower(strings.TrimSpace(e))
+	if e == "" || strings.ContainsAny(e, " \t\n/") {
+		return "", fmt.Errorf("%w email %q", ErrInvalid, e)
+	}
+	return e, nil
+}
+
+// userPrincipal is the principal an email is a member as.
+func userPrincipal(email string) (string, error) {
+	e, err := normEmail(email)
+	if err != nil {
+		return "", err
+	}
+	return UserPrefix + e, nil
+}
+
+// HubAdminPrincipal is how one entry of API.HubAdmins is read: a
+// principal as normPrincipal has it. An entry with no prefix, as
+// SILO_HUB_ADMINS took before principals had them, is a user, and
+// legacy says so, so the hub can warn that it should be written
+// user:EMAIL (or group:NAME, if a group was meant).
+func HubAdminPrincipal(entry string) (p string, legacy bool) {
+	e := strings.ToLower(strings.TrimSpace(entry))
+	if strings.HasPrefix(e, UserPrefix) || strings.HasPrefix(e, GroupPrefix) {
+		return e, false
+	}
+	return UserPrefix + e, true
 }
 
 func isUnique(err error) bool {
@@ -355,8 +411,9 @@ func (s *Store) teamExists(ctx context.Context, q interface {
 	return err
 }
 
-// SetMember adds principal (an email, or a group the identity provider
-// reports) to team with role, or changes their role.
+// SetMember adds principal, "user:<email>" or "group:<name>" for a
+// group the identity provider reports, to team with role, or changes
+// their role.
 func (s *Store) SetMember(ctx context.Context, team, principal string, role Role) error {
 	p, err := normPrincipal(principal)
 	if err != nil {
@@ -377,7 +434,10 @@ func (s *Store) SetMember(ctx context.Context, team, principal string, role Role
 
 // RemoveMember removes principal from team.
 func (s *Store) RemoveMember(ctx context.Context, team, principal string) error {
-	p, _ := normPrincipal(principal)
+	p, err := normPrincipal(principal)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM team_members WHERE team = ? AND principal = ?`), team, p)
 	if err != nil {
 		return err

@@ -43,7 +43,7 @@ func TestMetrics(t *testing.T) {
 	defer srv.Close()
 
 	call(t, "POST", srv.URL+"/v1/teams", "admin@example.com", map[string]string{"id": "infra"}, &struct{}{})
-	call(t, "PUT", srv.URL+"/v1/teams/infra/members/alice@example.com", "admin@example.com", map[string]string{"role": "admin"}, &struct{}{})
+	call(t, "PUT", srv.URL+"/v1/teams/infra/members/user:alice@example.com", "admin@example.com", map[string]string{"role": "admin"}, &struct{}{})
 	call(t, "PUT", srv.URL+"/v1/teams/infra/repos/bwsalmon/silo", "admin@example.com", nil, &struct{}{})
 	var queued, offered tasks.Task
 	call(t, "POST", srv.URL+tasks.TasksPath, "alice@example.com", map[string]string{"repo": "bwsalmon/silo", "prompt": "one"}, &queued)
