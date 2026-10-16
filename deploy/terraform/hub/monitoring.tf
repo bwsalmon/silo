@@ -20,18 +20,32 @@ locals {
 
   alerts = {
     hub_down = {
-      name     = "Silo hub down or not ready"
+      name     = "Silo hub down: no pod ready"
       severity = "CRITICAL"
-      # No scrape at all (the pod is gone, or cannot start), a scrape
-      # that fails, or a hub that answers but says it is not ready.
-      query    = "absent_over_time(up{${local.hub_selector}}[5m]) or max(up{${local.hub_selector}}) == 0 or max(silo_hub_ready{${local.hub_selector}}) == 0"
+      # No pod serving: no scrape at all (every pod is gone, or none
+      # can start), every scrape failing, or every pod that answers
+      # saying it is not ready.
+      query    = "absent_over_time(up{${local.hub_selector}}[5m]) or sum(up{${local.hub_selector}}) == 0 or max(silo_hub_ready{${local.hub_selector}}) == 0"
       duration = "300s"
-      doc      = "The hub has been down or unready for 5 minutes: nodes cannot connect, and no task is placed. See \"Hub down or not ready\" in docs/hub-operations.md."
+      doc      = "No hub pod has been ready for 5 minutes: nodes cannot connect, and no task is placed. See \"Hub down or not ready\" in docs/hub-operations.md."
+    }
+    hub_pod_down = {
+      name     = "Silo hub pod down"
+      severity = "WARNING"
+      # Fewer pods ready than the Deployment's replicas while at least
+      # one serves (none ready is hub_down): a pod crashing, unready,
+      # failing its scrapes, or never scheduled. A roll's new pod is
+      # unready for seconds, well inside the duration.
+      query    = "count(silo_hub_ready{${local.hub_selector}} == 1) < ${var.hub_replicas}"
+      duration = "600s"
+      doc      = "Fewer than ${var.hub_replicas} hub pods have been ready for 10 minutes, while others serve: the hub runs on less than its replicas, and one more loss takes it down. See \"Hub pod down\" in docs/hub-operations.md."
     }
     no_online_nodes = {
       name     = "Silo team has queued work and no online node"
       severity = "WARNING"
-      query    = "sum by (team) (silo_hub_backlog_tasks{${local.hub_selector},state=\"queued\"}) > 0 and on (team) sum by (team) (silo_hub_team_nodes{${local.hub_selector},status=\"online\"}) == 0"
+      # Every pod reports the whole backlog and registry, so max, not
+      # sum, across pods.
+      query    = "max by (team) (silo_hub_backlog_tasks{${local.hub_selector},state=\"queued\"}) > 0 and on (team) max by (team) (silo_hub_team_nodes{${local.hub_selector},status=\"online\"}) == 0"
       duration = "900s"
       doc      = "A team has had queued tasks for 15 minutes and no online node serves any of its repositories. See \"No online nodes\" in docs/hub-operations.md."
     }
@@ -59,12 +73,13 @@ locals {
     no_dispatcher = {
       name     = "Silo hub not dispatching"
       severity = "CRITICAL"
-      # A hub that is up while no pod holds the dispatcher's lease
+      # A hub with a pod up while no pod holds the dispatcher's lease
       # (hub.md §2.2.1): its Recover keeps failing, or the lease is held
-      # by a session that is not dispatching.
+      # by a session that is not dispatching. A hub can be up, and every
+      # pod ready, and still not dispatch.
       query    = "max(up{${local.hub_selector}}) == 1 and sum(silo_hub_dispatcher_leader{${local.hub_selector}}) == 0"
       duration = "300s"
-      doc      = "The hub has been up for 5 minutes with no pod running the dispatcher: no task is placed, resumed or cancelled. See \"Not dispatching\" in docs/hub-operations.md."
+      doc      = "The hub has had a pod up for 5 minutes with none running the dispatcher: no task is placed, resumed or cancelled. See \"Not dispatching\" in docs/hub-operations.md."
     }
     database_errors = {
       name     = "Silo hub database errors"
@@ -113,7 +128,7 @@ resource "google_monitoring_dashboard" "hub" {
   count   = var.monitoring ? 1 : 0
   project = var.project
   # The selector goes inside JSON strings, so its quotes are escaped.
-  dashboard_json = templatefile("${path.module}/dashboards/hub.json", { selector = replace(local.hub_selector, "\"", "\\\"") })
+  dashboard_json = templatefile("${path.module}/dashboards/hub.json", { selector = replace(local.hub_selector, "\"", "\\\""), replicas = var.hub_replicas })
 
   depends_on = [google_project_service.apis]
 }

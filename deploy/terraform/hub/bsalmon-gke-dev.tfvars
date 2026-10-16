@@ -15,3 +15,8 @@ dns_zone = ""                     # or a Cloud DNS zone in the project that hold
 # Who may pass IAP; the hub's team directory then decides what each
 # sees. IAP's OAuth client is made in the console (docs/deploy.md).
 iap_members = ["user:bsalmon@google.com"]
+
+# The database has a standby in another zone by default (REGIONAL,
+# docs/hub.md §2.2). A development hub that can take a restore by hand
+# after a zone's failure can have none, at about half the cost:
+# database_availability_type = "ZONAL"

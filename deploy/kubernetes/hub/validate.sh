@@ -56,10 +56,29 @@ done
 # What the API server's schemas cannot say.
 for o in "${overlays[@]}"; do
 	f="$work/$o.yaml"
-	# One pod until docs/hub.md §2.2's stages R2 to R5 are built: a
-	# node's connection lives on the one pod holding it.
-	grep -q 'replicas: 1$' "$f" || { echo "$o: the hub must run one replica"; exit 1; }
-	grep -q 'type: Recreate' "$f" || { echo "$o: the hub must roll with Recreate"; exit 1; }
+	# Several pods, rolled without ever having fewer ready than the
+	# replicas, kept serving through drains, and spread over zones and
+	# GKE nodes (docs/hub.md §2.2.5).
+	dep="$(awk 'BEGIN { RS = "\n---\n" } /\nkind: Deployment\n/' "$f")"
+	grep -q '^  replicas: 2$' <<<"$dep" || { echo "$o: the hub must run two replicas"; exit 1; }
+	{ grep -q 'type: RollingUpdate$' <<<"$dep" && grep -q 'maxSurge: 1$' <<<"$dep" && grep -q 'maxUnavailable: 0$' <<<"$dep"; } ||
+		{ echo "$o: the hub must roll with RollingUpdate, maxSurge 1 and maxUnavailable 0"; exit 1; }
+	pdb="$(awk 'BEGIN { RS = "\n---\n" } /\nkind: PodDisruptionBudget\n/' "$f")"
+	{ grep -q 'minAvailable: 1$' <<<"$pdb" && grep -q 'app: silo-hub$' <<<"$pdb"; } || { echo "$o: a PodDisruptionBudget must keep one hub pod available"; exit 1; }
+	{ grep -q 'topologyKey: topology.kubernetes.io/zone$' <<<"$dep" && grep -q 'topologyKey: kubernetes.io/hostname$' <<<"$dep"; } ||
+		{ echo "$o: the hub's pods must spread over zones and nodes"; exit 1; }
+	# Each pod names itself, and its internal address, in the shared
+	# registry from the downward API.
+	{ grep -A3 'name: SILO_HUB_POD$' <<<"$dep" | grep -q 'fieldPath: metadata.name$' &&
+		grep -A3 'name: SILO_HUB_POD_IP$' <<<"$dep" | grep -q 'fieldPath: status.podIP$' &&
+		grep -A1 'name: SILO_HUB_POD_ADDR$' <<<"$dep" | grep -q 'value: $(SILO_HUB_POD_IP):9092$'; } ||
+		{ echo "$o: SILO_HUB_POD and SILO_HUB_POD_ADDR must come from the downward API"; exit 1; }
+	grep -q 'containerPort: 9092$' <<<"$dep" || { echo "$o: the hub container must declare its internal port"; exit 1; }
+	# Any pod serves any request: no session affinity, on the Services
+	# or the load balancer.
+	if grep -qiE 'sessionAffinity|consistentHash' "$f"; then
+		echo "$o: the hub's backends must not have session affinity"; exit 1
+	fi
 	[ "$(grep -c 'requestPath: /readyz' "$f")" = 2 ] || { echo "$o: both backends' health checks must be /readyz"; exit 1; }
 	# The node UI hosts are IAP's alone: their route goes to silo-hub
 	# and never to the nodes' backend.

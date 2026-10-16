@@ -69,9 +69,9 @@ variable "database_tier" {
 }
 
 variable "database_availability_type" {
-  description = "ZONAL (no standby: a zone's failure is a restore by hand) or REGIONAL (a standby in another zone, failover in about a minute, at about twice the cost). docs/hub.md §2.2."
+  description = "REGIONAL (a standby in another zone, failover in about a minute, at about twice the cost) or ZONAL (no standby: a zone's failure is a restore by hand, for a development hub). docs/hub.md §2.2."
   type        = string
-  default     = "ZONAL"
+  default     = "REGIONAL"
   validation {
     condition     = contains(["ZONAL", "REGIONAL"], var.database_availability_type)
     error_message = "database_availability_type must be ZONAL or REGIONAL."
@@ -124,6 +124,16 @@ variable "alert_notification_channels" {
   description = "Cloud Monitoring notification channels (projects/PROJECT/notificationChannels/ID) the hub's alert policies notify. With none, the policies still open incidents in the console."
   type        = list(string)
   default     = []
+}
+
+variable "hub_replicas" {
+  description = "The replicas deploy/kubernetes/hub's Deployment runs (2 as shipped). The pod-down warning fires when fewer are ready."
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.hub_replicas >= 1 && floor(var.hub_replicas) == var.hub_replicas
+    error_message = "hub_replicas must be a whole number, at least 1."
+  }
 }
 
 variable "monitoring" {

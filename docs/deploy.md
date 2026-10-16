@@ -182,7 +182,7 @@ gcloud compute backend-services list --global --project bsalmon-gke-dev \
 The backend for the `silo-hub` Service (not `silo-hub-nodes`) is the
 one; set `SILO_HUB_IAP_AUDIENCE` in the overlay to
 `$(terraform output -raw iap_audience_prefix)<its id>` and apply
-again. The pod is restarted with the new config. Set terraform's
+again. The pods are rolled with the new config. Set terraform's
 `iap_backend_service` to that backend's name and apply too: that is
 what grants `iap_members` access through IAP, on this backend alone.
 (`iap_project_wide = true` grants it on every IAP resource in the
@@ -255,24 +255,32 @@ database secrets, backups and restoring them, and the dashboard and
 alerts. In short:
 
 - **Upgrades:** push a new tag, set `newTag`, `kubectl apply -k`. The
-  Deployment is `Recreate`: the old pod says goodbye to its nodes and
-  stops, then the new one starts, so nodes are away for a few seconds
-  and running tasks resume when their node is back (hub.md §6.2).
+  Deployment rolls its two pods one at a time (`RollingUpdate`,
+  `maxSurge: 1`, `maxUnavailable: 0`): a new pod is ready before an old
+  one says goodbye to its nodes and stops, so nodes reconnect to a pod
+  that is serving within seconds, the dispatcher's lease moves to
+  another pod, and running tasks resume on their nodes (hub.md §2.2.5,
+  §6.2).
 - **Logs:** `kubectl -n silo-hub logs deploy/silo-hub -c hub` (and
   `-c migrate`, `-c cloud-sql-proxy`).
 - **Metrics:** Managed Service for Prometheus scrapes the pod's port
   9091 (the `PodMonitoring` `silo-hub`); the **Silo hub** dashboard and
-  six alert policies are terraform's (`monitoring.tf`), notifying
+  seven alert policies are terraform's (`monitoring.tf`), notifying
   `alert_notification_channels`.
 - **Backups:** daily, 14 kept, with 7 days of point-in-time recovery
   (terraform's `backup_*` and `point_in_time_recovery_days`).
-- **One replica only.** Do not scale the Deployment: the dispatcher
-  runs on one pod at a time, under a database lease, but a node's
-  connection and its streams live on the one pod holding it (hub.md
-  §2.2).
-- **Database availability:** `ZONAL` by default; set
-  `database_availability_type = "REGIONAL"` for a standby in another
-  zone (hub.md §2.2).
+- **Two replicas.** Any pod serves any request, with no session
+  affinity: the registry is shared through the database, streams and
+  live events reach a node's pod over the internal listener, and the
+  dispatcher runs on one pod at a time, under a database lease (hub.md
+  §2.2). A `PodDisruptionBudget` keeps one pod through GKE node
+  upgrades and drains, and the pods spread over zones and GKE nodes,
+  so the cluster needs at least two nodes. To run more, change
+  `replicas` and terraform's `hub_replicas` together
+  ([hub-operations.md](hub-operations.md) §2).
+- **Database availability:** `REGIONAL` by default, a standby in
+  another zone at about twice the instance's cost; a development hub
+  can set `database_availability_type = "ZONAL"` (hub.md §2.2).
 - **Network policy:** `networkpolicy.yaml` denies ingress to the
   namespace by default and allows the hub's port 8080 only from
   Google's load balancer and health-check ranges (`35.191.0.0/16`,
