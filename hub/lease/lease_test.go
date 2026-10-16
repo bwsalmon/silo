@@ -3,6 +3,7 @@ package lease
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -100,6 +101,7 @@ func TestSQLiteOneHolderAtATime(t *testing.T) {
 }
 
 func TestPostgresOneHolderAtATime(t *testing.T) {
+	pgtest.SkipOnSpanner(t, "the lease is a PostgreSQL advisory lock")
 	pg := pgtest.Start(t)
 	ctx := context.Background()
 	s1, err := Open(ctx, pg.URL)
@@ -118,6 +120,7 @@ func TestPostgresOneHolderAtATime(t *testing.T) {
 // A holder whose database session is killed gives the lease up at its
 // next ping, and the other pod takes it.
 func TestPostgresKilledSessionLosesTheLease(t *testing.T) {
+	pgtest.SkipOnSpanner(t, "the lease is a PostgreSQL advisory lock")
 	pg := pgtest.Start(t)
 	ctx := context.Background()
 	s1, err := Open(ctx, pg.URL)
@@ -150,6 +153,46 @@ func TestPostgresKilledSessionLosesTheLease(t *testing.T) {
 	eventually(t, "a to give it up", func() bool { return !a.holding.Load() })
 	if a.terms.Load() != 1 {
 		t.Fatalf("a took %d terms while b held the lease; want 1", a.terms.Load())
+	}
+}
+
+// Racing Takes each get an epoch of their own: one that the database
+// aborts for conflicting with another, as Spanner does, is run again.
+func TestConcurrentTakes(t *testing.T) {
+	pg := pgtest.Start(t)
+	ctx := context.Background()
+	s, err := Open(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const n = 10
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		epochs = map[int64]bool{}
+	)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			epoch, err := s.Take(ctx, "dispatcher", fmt.Sprint("pod-", i))
+			if err != nil {
+				t.Errorf("Take: %v", err)
+				return
+			}
+			mu.Lock()
+			epochs[epoch] = true
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	epoch, _, err := s.Holder(ctx, "dispatcher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(epochs) != n || epoch != n {
+		t.Fatalf("%d Takes got %d distinct epochs and left epoch %d; want %d and %d", n, len(epochs), epoch, n, n)
 	}
 }
 

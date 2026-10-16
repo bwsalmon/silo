@@ -13,6 +13,7 @@ import (
 // notices it receives.
 func listening(t *testing.T) (*Bus, func() []Message) {
 	t.Helper()
+	pgtest.SkipOnSpanner(t, "Spanner has no LISTEN or NOTIFY")
 	srv := pgtest.Start(t)
 	b, err := Open(srv.URL)
 	if err != nil {
@@ -105,6 +106,7 @@ func TestPostCoalesces(t *testing.T) {
 
 // Close sends what was posted before it.
 func TestCloseSendsPosted(t *testing.T) {
+	pgtest.SkipOnSpanner(t, "Spanner has no LISTEN or NOTIFY")
 	srv := pgtest.Start(t)
 	rx, err := Open(srv.URL)
 	if err != nil {

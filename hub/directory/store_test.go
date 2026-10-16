@@ -382,7 +382,10 @@ func TestReleasedColumn(t *testing.T) {
 		s.Close()
 	}
 	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
-	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
+	t.Run("postgres", func(t *testing.T) {
+		pgtest.SkipOnSpanner(t, "it makes a table as an old hub did, with an inline UNIQUE Spanner never had")
+		run(t, pgtest.Start(t).URL)
+	})
 }
 
 // TestHistoryColumn: team_repos from before history gain it, unset, so
@@ -416,7 +419,10 @@ func TestHistoryColumn(t *testing.T) {
 		}
 	}
 	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
-	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
+	t.Run("postgres", func(t *testing.T) {
+		pgtest.SkipOnSpanner(t, "no hub on Spanner had a team_repos without history")
+		run(t, pgtest.Start(t).URL)
+	})
 }
 
 // TestSeesTask: a repository's tasks filed under another team show to
@@ -534,7 +540,10 @@ func TestLegacyPrincipals(t *testing.T) {
 		}
 	}
 	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
-	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
+	t.Run("postgres", func(t *testing.T) {
+		pgtest.SkipOnSpanner(t, "no hub on Spanner had unprefixed principals, and Spanner cannot UPDATE a primary key column")
+		run(t, pgtest.Start(t).URL)
+	})
 }
 
 func TestTeamRepos(t *testing.T) {
