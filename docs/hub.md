@@ -285,8 +285,8 @@ or a newer connection superseded it.
 Either side opens further streams once the node is welcomed:
 
 - **The hub to a node:** `Server.Open(ctx, nodeID)`. This is how the
-  dispatcher offers a task (§6.2), and how a viewer reads a diff or log
-  through (§7.2).
+  dispatcher offers a task (§6.2), how a viewer reads a diff or log
+  through (§7.2), and how a node's owner reaches its UI (§11).
 - **A node to the hub:** handed to `Server.NodeStream`. These are the
   node's event streams (§7.1). With none set, they are reset.
 
@@ -690,10 +690,11 @@ anything leaves it.
   claims on trust and holds every task to its owner's local policy,
   failing closed.
 - **The hub can reach a node only through the streams the protocol
-  defines:** offer, resume, cancel and view ([the
-  contract](hub-interface.md)). A node serves only those, so a
-  compromised hub can ask a node to run a task but cannot read the
-  node's files beyond the artifacts that node has itself listed. It
+  defines:** offer, resume, cancel, view and, where the node's owner
+  has turned it on, http ([the contract](hub-interface.md)). A node
+  serves only those, so a compromised hub can ask a node to run a task
+  but cannot read the node's files beyond the artifacts that node has
+  itself listed, and what its own UI shows a signed-in user (§11). It
   could forge a task's claims (requester, approval), but it cannot get
   a task past the Grain's local policy. Claims a Grain verifies
   independently are future work, not built.
@@ -710,13 +711,22 @@ anything leaves it.
 | 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
 | 2.5 | `silo hub serve` (`hub/server`, `cmd/silo`): every part above as one server, health and readiness, graceful shutdown with `goodbye`. Its image, GKE manifests and terraform for GKE behind IAP (§2.1, §5.2.1, `deploy/`, [deploy.md](deploy.md)). | here, built (not applied to any project) |
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
+| 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
+| — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
 ## 10. Open questions
 
 - **Lost running tasks.** Should the hub requeue a `lost` running task
   automatically after a grace period? A second node would then redo
   work that the first may still be pushing.
+- **Team members' views of a node's UI.** §11 lets in a node's owner
+  only. A team member who `SeesNode` could later be given a read-only
+  view, but the hub cannot tell a read from a write in grain's UI (a
+  GET can be a long poll; a WebSocket carries both), so it would have
+  to be grain's decision: the hub passing `viewer` and the IAP
+  assertion, and the Grain serving that viewer as its own access list
+  says. Until grain has a read-only role to map them to, owners only.
 - **Several hubs.** Run one hub replica, or several? Several replicas
   need the registry to say which replica holds each node's connection,
   so that `Server.Open` can be routed. The leader or lease machinery in
@@ -724,44 +734,150 @@ anything leaves it.
   the obvious basis. As deployed (§2.1) the hub is one pod, rolled with
   `Recreate`.
 
-## 11. The relay and the hub
+## 11. A node's UI through the hub (built: `hub/nodeui`; grain's side to come)
+
+### 11.1 What grain's relay carries
 
 grain's UI can be reached from outside a node's machine through
-grain's relay (`grain-relay`, on Cloud Run): the node holds an outbound
-connection to the relay, and the relay carries a viewer's requests to
-the node's UI through it. Once a node also holds a rendezvous
-connection to the hub, it keeps two outbound tunnels that do the same
-thing: a reverse path from a cloud service to the node.
+grain's relay (`grain-relay`, `pkg/relay` and `cmd/grain-relay` in
+bwsalmon/grain, deployed by its `deploy/terraform/relay`). As built
+there:
 
-**The hub could carry the relay's traffic.** The rendezvous is
-already a multiplexed reverse tunnel. `Server.Open` opens a stream to
-any connected node, and the view-through (§7.2) is a request carried
-over such a stream to the node, whose bytes are copied to the viewer
-and never kept. A UI view-through is the same with HTTP inside: the
-hub opens a stream of a new kind, `{"type":"http"}`, writes the
-viewer's request, and copies the node's response back, WebSocket
-upgrades included. The node answers it only for its own UI, and only
-if it has turned the UI view-through on. That would give:
+- **The tunnel.** The daemon dials `/relay/daemon` (a WebSocket
+  upgrade carrying grain's `pkg/tunnel/mux`, the mux this repository
+  copied into `internal/tunnel/mux`) and holds it. Cloud Run ends every
+  request at the service's timeout, so the daemon rotates its tunnel
+  make-before-break every 240s, and checks `/relay/status` every ~20s
+  to re-attach after a redeploy. The service runs exactly one instance,
+  because the tunnel lives in that instance's memory.
+- **What rides it.** Every request to the relay's host that is not one
+  of its own paths (`/relay/*`, `/_grain/*`, `/healthz`) is the UI's:
+  the relay opens a mux stream, tags it `http`, writes the request on
+  it as HTTP/1.1 (one request per stream), reads the response back and
+  flushes each write, so SSE streams. A `101 Switching Protocols`
+  splices the browser's connection to the stream both ways, which is
+  how WebSockets pass. The relay also carries **remote executors**:
+  `/relay/executor` streams, tagged `executor`, to the daemon's
+  executor handler.
+- **No path prefix.** The UI is served at the relay host's root, and
+  it uses absolute paths (`/api/...`, `/grain-mark-light.png`). It
+  cannot be put under a prefix without changing grain's UI.
+- **Who the viewer is.** The relay decides nothing about it. IAP admits
+  identities to the whole Cloud Run service; the relay strips the
+  plaintext identity headers only a client could have set
+  (`X-Forwarded-User`, `X-User-LDAP`, `X-Grain-User`, `Grain-User`)
+  and passes the rest, IAP's `X-Goog-IAP-JWT-Assertion` and grain's own
+  session cookie or bearer token among them. The daemon verifies the
+  assertion against its own `GRAIN_IAP_AUDIENCE` (the relay's), or
+  takes its own sign-in, and applies its own teams and access list.
+  It marks each relayed request (`via.Relay`) so that it is not
+  mistaken for an in-process call, and `-ui-trust-relay` decides
+  whether such requests count as loopback. grain keeps the relay's IAP
+  binding in step with its teams (`docs/beyondcorp.md`).
+- **The hour.** The relay's request timeout is 3600s, so each browser
+  stream (an SSE subscription, a WebSocket) and each executor
+  connection through it ends at an hour. The tunnel itself does not
+  hit the cap; it rotates.
 
-- **One outbound connection per node**, one credential (the node
-  token) and one place to revoke it.
-- **One sign-on and one access check.** IAP and the team directory
-  decide who may open a node's UI (to begin with, its owner; §5.3's
-  `SeesNode` for read-only views later), instead of the relay's own
-  configuration.
-- **No 60-minute cap.** The relay on Cloud Run ends every request at an
-  hour, as §2.1 says of the hub; the hub on GKE does not.
+(§11 as first written, without access to grain, said the relay's own
+configuration decides who may open a UI, and that the relay caps the
+tunnel at an hour. Neither is so: grain decides, and the cap is per
+viewer stream. It did not know the relay carries executors, or that
+the UI cannot sit under a path prefix.)
+
+### 11.2 The hub's `http` stream
+
+Once a node holds a rendezvous connection, the hub carries the same
+traffic over it. As built (`hub/nodeui`), with `silo hub serve
+-node-ui-domain=nodes.hub.example.com` (`SILO_HUB_NODE_UI_DOMAIN`):
+
+- **Each node has its own host**, `<node>.nodes.hub.example.com`, and
+  every path on it is the node's UI, at its root as grain expects. A
+  node's host never reaches the hub's API. This, rather than a route
+  such as `/v1/nodes/{id}/ui/...`, is deliberate: grain's UI has no
+  base path, and a node's pages served from the hub's own origin could
+  script the hub's API (and every other node's UI) with the viewer's
+  sign-on. On its own host, a node's UI reaches only itself. A node
+  whose ID is not a DNS label (capitals, `.` or `_`) has no host.
+- **Access.** The viewer is signed in by the hub's sign-on and must be
+  the node's owner: any other caller, and a node the hub does not
+  know, gets 404. An offline node is 503. Hub admins are not let in:
+  a node's UI is its owner's grain, with everything it holds.
+  Team members (`SeesNode`) are §10's question.
+- **The stream.** The hub opens a stream with `Server.Open` and, like
+  the artifact view (§7.2), writes one line and reads one:
+
+  ```
+  hub → node  {"type":"http","node":"ws-1","viewer":"alice@example.com"}
+  node → hub  {"type":"ok"}, then the node reads one HTTP/1.1 request and writes its response
+              or {"type":"error","error":"..."}   (answered 403)
+  ```
+
+  After `ok` the stream is an HTTP/1.1 connection for one request, as
+  the relay's are: the hub writes the request, copies the response to
+  the viewer, flushing each write, and on a 101 splices the two
+  connections (WebSockets). Nothing is stored or cached. `viewer` is
+  the hub's claim; a node that wants proof verifies the IAP assertion
+  itself (below).
+- **What is passed on.** The request goes as the browser sent it, Host
+  included (the node's host), with `X-Forwarded-For`, `-Host` and
+  `-Proto` set, and IAP's assertion. The hub drops its own credentials,
+  `Authorization` and its OIDC cookies, which are not the node's to
+  see, and the plaintext identity headers the relay drops. From the
+  response it drops a `Set-Cookie` with a `Domain`, so one node's UI
+  cannot set cookies on its siblings or on the hub. A WebSocket
+  upgrade must come from the node's own origin (or none, which is not
+  a browser).
+- **Sign-on.** The node hosts need IAP: an OIDC session cookie is the
+  hub host's alone, so behind OIDC a node host signs nobody in. The
+  same IAP backend serves both, so a node verifying the assertion uses
+  the hub's audience.
+- **Deployment.** The hub's Gateway needs the wildcard hostname, its
+  Certificate Manager certificate a `*.nodes.<domain>` name (DNS
+  authorization allows wildcards) and the DNS zone a wildcard record to
+  the hub's address. `deploy/` does not have these yet.
 
 What it costs: the hub carries every UI byte, so its bandwidth and the
 one replica's capacity matter (§10); a hub outage takes the UIs with
-it, where today the relay and the hub fail separately; and the node
-side has to serve the UI over a mux stream, which is grain's change.
-The no-code-at-rest rule (§1) holds, since nothing is stored, but more
-code passes through the hub than the artifact view-through carries.
+it, where today the relay and the hub fail separately. The
+no-code-at-rest rule (§1) holds, since nothing is stored, but much more
+code passes through the hub than the artifact view carries.
 
-**Recommendation: fold the relay into the hub,** after Grain embeds the
-rendezvous client (§9), and retire `grain-relay` for nodes that use a
-hub, keeping it for nodes that do not. A follow-up proposal covers the
-hub side (the `http` stream, its access check and route) and the
-Grain side (answering it from the node's UI server); it is not built
-here.
+### 11.3 The node's end (bwsalmon/grain, after the rendezvous client)
+
+Grain answers a stream whose first line is `http` only if its owner has
+turned the UI view-through on; otherwise it refuses (`nodeui.Refuse`,
+which the viewer sees as 403). It serves the request with the same
+handler the relay client hands relayed requests (`pkg/ui`'s server),
+by `nodeui.Serve` or its own equivalent of the relay client's
+`serveHTTP`, and:
+
+- marks the request as coming through a public edge, as `via.Relay`
+  does (a new `via.Hub`), so it is never an in-process call, and does
+  not let `-ui-trust-relay` or loopback trust apply to it;
+- adds the hub's IAP audience (`/projects/NUMBER/global/backendServices/ID`)
+  to `GRAIN_IAP_AUDIENCE`, so that the viewer is whoever IAP signed,
+  checked by the node and not only by the hub (§1.2: the hub decides,
+  the Grain enforces); grain's own sign-in still works through it,
+  its cookie on the node's host;
+- accepts the node's host in its host guard, as it does the relay's.
+
+This waits for Grain to embed `rendezvous.Client` (§9).
+
+### 11.4 Retiring `grain-relay`
+
+- **A node that uses a hub** turns the UI view-through on, and its
+  owner opens `https://<node>.nodes.<hub domain>`. Once that works, it
+  stops dialling the relay (`-relay-url` unset) **unless it has remote
+  executors that reach it through `/relay/executor`**: the hub carries
+  no executor traffic, so such a node keeps the relay for its
+  executors until executors have another way in. A relay serving only
+  executors still needs its IAP and daemon allow-list, and no longer
+  its UI members.
+- **A node without a hub** keeps the relay exactly as it is.
+- **A deployment none of whose nodes still dials the relay** removes
+  `module "relay"` (`enable_cloudrun_relay = false`), with its load
+  balancer or Cloud Run IAP, its token secret and its image
+  repository.
+
+Nothing in the relay changes: it is retired by not being used.
