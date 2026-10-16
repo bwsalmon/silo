@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/server"
+	"github.com/bwsalmon/silo/hub/tasks"
 )
 
 func main() {
@@ -109,6 +111,8 @@ func serve(args []string) error {
 	nodeUI := fs.String("node-ui-domain", env("SILO_HUB_NODE_UI_DOMAIN", ""),
 		"serve each node's own UI, to its owner, at <node>.<this domain> (docs/hub.md §11); empty serves none [SILO_HUB_NODE_UI_DOMAIN]")
 	grace := fs.Duration("shutdown-grace", server.DefaultShutdownGrace, "how long shutdown waits for nodes and requests")
+	heartbeat := fs.Duration("heartbeat", rendezvous.DefaultHeartbeat, "the interval nodes heartbeat at; a node is stale after three missed")
+	retry := fs.Duration("dispatch-retry", tasks.DefaultRetry, "how often the dispatcher looks at the queue unprompted")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -126,6 +130,8 @@ func serve(args []string) error {
 		HubAdmins:        list(*admins),
 		NodeUIDomain:     *nodeUI,
 		ShutdownGrace:    *grace,
+		Heartbeat:        *heartbeat,
+		DispatchRetry:    *retry,
 		MetricsAddr:      *metricsAddr,
 		Logf:             log.Printf,
 	}
