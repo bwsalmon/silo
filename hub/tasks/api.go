@@ -3,6 +3,7 @@ package tasks
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -223,6 +224,9 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 		if err := readJSON(r, &req); err != nil {
 			return err
 		}
+	}
+	if len(req.Reason) > maxReason {
+		return &httpError{http.StatusBadRequest, fmt.Sprintf("the reason is over %d bytes", maxReason)}
 	}
 	reason := "cancelled by " + acc.Email
 	if req.Reason != "" {

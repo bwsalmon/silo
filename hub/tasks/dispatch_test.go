@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -588,5 +589,53 @@ func TestRecoverOnStart(t *testing.T) {
 	cancel()
 	if err := <-errc; !errors.Is(err, context.Canceled) {
 		t.Errorf("Run = %v", err)
+	}
+}
+
+// TestNodeStringsLogged is INV-18's log-capture case (SA1-L3): what a
+// node says is quoted and cut short in the hub's log, so it can neither
+// forge a line nor flood the log, and its reason is cut short in the
+// task row too (O-7).
+func TestNodeStringsLogged(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		lines []string
+	)
+	h := newHarness(t, func(d *Dispatcher) {
+		logf := d.Logf
+		d.Logf = func(format string, args ...any) {
+			mu.Lock()
+			lines = append(lines, fmt.Sprintf(format, args...))
+			mu.Unlock()
+			logf(format, args...)
+		}
+	})
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	forged := "x\n2026/10/16 00:00:00 tasks: t-1 done on node ws-2" + strings.Repeat("y", 512<<10)
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
+	s := n.next(t, TypeOffer)
+	s.send(t, Message{Type: forged})
+	s.send(t, Message{Type: TypeAccept, NodeTask: forged})
+	h.await(t, task.ID, "running", inState(Running))
+	s.send(t, Message{Type: TypeResult, State: State(forged)})
+	s.send(t, Message{Type: TypeResult, State: Failed, Reason: forged})
+	got := h.await(t, task.ID, "failed", inState(Failed))
+	if len(got.Reason) > 4*maxReason {
+		t.Errorf("the stored reason is %d bytes", len(got.Reason))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	seen := 0
+	for _, l := range lines {
+		if strings.Contains(l, "\n") || len(l) > 1<<10 {
+			t.Errorf("a log line of %d bytes, or with a newline: %.200q", len(l), l)
+		}
+		if strings.Contains(l, `"x\n2026`) {
+			seen++
+		}
+	}
+	if seen < 3 {
+		t.Errorf("%d of the node's strings were logged quoted, want at least 3: %q", seen, lines)
 	}
 }

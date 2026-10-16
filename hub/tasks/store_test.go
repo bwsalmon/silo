@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,9 @@ func TestCreate(t *testing.T) {
 			{Team: "infra", Prompt: "x"},
 			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Node: "has space"}},
 			{Team: "infra", Prompt: "x", Submitter: "a@b", Title: strings.Repeat("x", maxTitle+1)},
+			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Labels: manyLabels(maxLabels + 1)}},
+			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Labels: map[string]string{strings.Repeat("k", maxLabelKey+1): "v"}}},
+			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Labels: map[string]string{"k": strings.Repeat("v", maxLabelValue+1)}}},
 		} {
 			if _, err := s.Create(ctx, bad); !errors.Is(err, ErrInvalid) {
 				t.Errorf("Create(%+v) = %v, want ErrInvalid", bad, err)
@@ -263,4 +267,13 @@ func TestFair(t *testing.T) {
 	if strings.Join(got, " ") != "a1 b1 c1 a2 b2 a3" {
 		t.Errorf("fair = %v, want one from each team in turn, oldest first", got)
 	}
+}
+
+// manyLabels is n distinct label constraints.
+func manyLabels(n int) map[string]string {
+	l := make(map[string]string, n)
+	for i := range n {
+		l[fmt.Sprint("l", i)] = "v"
+	}
+	return l
 }

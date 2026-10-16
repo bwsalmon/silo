@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bwsalmon/silo/hub/directory"
@@ -200,6 +201,9 @@ func TestAPICancelAndRequeue(t *testing.T) {
 	check(t, json.Unmarshal(b, &got))
 	if got.State != Queued || got.Node != "" {
 		t.Errorf("requeued: %+v", got)
+	}
+	if code, _ := h.do(t, "alice@example.com", "POST", path+"/cancel", map[string]string{"reason": strings.Repeat("x", maxReason+1)}); code != http.StatusBadRequest {
+		t.Errorf("cancelling with a %d-byte reason: %d, want 400", maxReason+1, code)
 	}
 	code, b = h.do(t, "alice@example.com", "POST", path+"/cancel", map[string]string{"reason": "changed my mind"})
 	check(t, json.Unmarshal(b, &got))

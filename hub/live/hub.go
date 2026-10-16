@@ -13,6 +13,7 @@ import (
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/tasks"
+	"github.com/bwsalmon/silo/internal/logsafe"
 )
 
 // Defaults for the Hub's knobs.
@@ -293,27 +294,27 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		}
 		e, class, err := Classify(line)
 		if err != nil {
-			h.logf("live: node %q: %v", nodeID, err)
+			h.logf("live: node %q: %s", nodeID, logsafe.Quote(err.Error()))
 			h.ingested(class, err)
 			continue
 		}
 		if t == nil {
 			task, err := h.Tasks.Get(ctx, e.Task)
 			if err == nil && task.Node != nodeID {
-				err = fmt.Errorf("task %s is not on node %q", e.Task, nodeID)
+				err = fmt.Errorf("task %s is not on node %q", logsafe.Quote(e.Task), nodeID)
 			}
 			if err != nil {
-				h.logf("live: refused node %q's event stream: %v", nodeID, err)
+				h.logf("live: refused node %q's event stream: %s", nodeID, logsafe.Quote(err.Error()))
 				return
 			}
 			if t, err = h.acquire(ctx, e.Task); err != nil {
-				h.logf("live: task %s: %v", e.Task, err)
+				h.logf("live: task %s: %v", logsafe.Quote(e.Task), err)
 				return
 			}
 			t.upstream++
 			t.mu.Unlock()
 		} else if e.Task != t.id {
-			h.logf("live: node %q sent task %s's event on task %s's stream", nodeID, e.Task, t.id)
+			h.logf("live: node %q sent task %s's event on task %s's stream", nodeID, logsafe.Quote(e.Task), t.id)
 			return
 		}
 		stamp(&e, h.now())
