@@ -998,6 +998,11 @@ anything leaves it.
 
 ## 8. Security summary
 
+The system's threat model, which audits and the security test suites
+cite, is [threat-model.md](threat-model.md): its assets, actors, trust
+boundaries, threats per boundary, numbered invariants (`INV-`) and the
+audit plan. This section is the hub's part of it in brief.
+
 - **Nothing inbound to nodes.** Every connection is node → hub over
   TLS.
 - **Node identity comes from the credential.** The hello carries no
