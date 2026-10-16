@@ -377,3 +377,53 @@ func TestNodeUIHosts(t *testing.T) {
 		}
 	}
 }
+
+// The web UI answers / and its own routes, and leaves the API alone:
+// /v1/... still signs its caller in, and a path under /v1/ the API does
+// not have is a 404, not the UI's page.
+func TestWebUI(t *testing.T) {
+	h, err := New(context.Background(), Config{Database: "sqlite::memory:", DevUserHeader: userHeader, Logf: logf(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	get := func(path, user string) (*http.Response, string) {
+		req, _ := http.NewRequest("GET", srv.URL+path, nil)
+		if user != "" {
+			req.Header.Set(userHeader, user)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, string(b)
+	}
+	for _, p := range []string{"/", "/tasks/t-1", "/nodes"} {
+		resp, body := get(p, "")
+		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(body, "<html") {
+			t.Errorf("%s: %d %q, want the UI's page", p, resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+		if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "worker-src 'none'") {
+			t.Errorf("%s: CSP %q", p, csp)
+		}
+	}
+	if resp, _ := get("/v1/me", ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("/v1/me signed out: %d, want 401", resp.StatusCode)
+	}
+	if resp, body := get("/v1/me", "alice@example.com"); resp.StatusCode != http.StatusOK || !strings.Contains(body, `"email":"alice@example.com"`) {
+		t.Errorf("/v1/me: %d %q", resp.StatusCode, body)
+	}
+	if resp, body := get("/v1/tasks", "alice@example.com"); resp.StatusCode != http.StatusOK || !strings.Contains(body, `"tasks"`) {
+		t.Errorf("/v1/tasks: %d %q", resp.StatusCode, body)
+	}
+	if resp, body := get("/v1/no-such-api", "alice@example.com"); resp.StatusCode != http.StatusNotFound || strings.Contains(body, "<html") {
+		t.Errorf("/v1/no-such-api: %d %q, want a 404 that is not the UI", resp.StatusCode, body)
+	}
+	if resp, _ := get(HealthzPath, ""); resp.StatusCode != http.StatusOK {
+		t.Errorf("%s: %d", HealthzPath, resp.StatusCode)
+	}
+}

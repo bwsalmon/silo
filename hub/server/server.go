@@ -18,6 +18,7 @@
 //	     /v1/me, /v1/teams..., /v1/node-tokens...   the team directory's API (§5)
 //	     /v1/tasks...          the backlog's API (§6), its events and artifacts (§7)
 //	     /auth/...             the OIDC sign-in, when the hub is not behind IAP
+//	GET  /...                  any other path: the web UI (hub/ui, docs/ui.md), signing no one in
 //
 // and, on a listener of its own (Config.MetricsAddr) that the load
 // balancer never reaches, GET /metrics: its Prometheus metrics
@@ -27,8 +28,10 @@
 //	GET  /internal/v1/nodes/{id}/open   a stream to a node this pod holds, for the pod that asked (docs/hub.md §2.2.3)
 //	GET  /internal/v1/tasks/{id}/events a subscription to the events of a task whose node this pod holds (§2.2.4)
 //
-// Every path but the first three signs its caller in through the
-// configured sign-on: IAP's assertion behind Google Cloud IAP, or OIDC.
+// Every path but the first three and the web UI's page signs its caller
+// in through the configured sign-on: IAP's assertion behind Google
+// Cloud IAP, or OIDC. The page holds nothing of anyone's; what it shows
+// comes from the API, which decides what the caller may see.
 //
 // With NodeUIDomain set, a request to <node>.<NodeUIDomain>, on any
 // path, is none of the above: it is that node's own UI, carried through
@@ -59,6 +62,7 @@ import (
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
+	"github.com/bwsalmon/silo/hub/ui"
 )
 
 // Paths the server answers without signing anyone in: the kubelet's
@@ -415,6 +419,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	for _, p := range authPaths {
 		m.Handle(p, authHandler)
 	}
+	// The web UI, on every other path: a client of the API above, and
+	// of no other (hub/ui, docs/ui.md).
+	m.Handle("/", ui.Handler(ui.Bundle()))
 	h.handler = bodyDeadline(m, bodyTimeout)
 	if cfg.NodeUIDomain != "" {
 		h.NodeUI = &nodeui.Server{
