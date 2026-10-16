@@ -102,6 +102,11 @@ and its last lines say which side changed, by both commits' short
 SHAs. To run it by hand:
 `GRAIN_SRC=/path/to/grain scripts/grain-interop.sh`.
 
+The retired runner in `old/` is not tested by default: its workflow,
+`.grain/workflows/old.yml`, runs only when dispatched by hand
+(`workflow_dispatch`), and nothing on a push or pull request builds it
+([`old/README.md`](old/README.md)).
+
 To run a hub locally:
 
 ```sh
