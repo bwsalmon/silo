@@ -110,5 +110,5 @@ The retired runner in `old/` is not tested by default: its workflow,
 To run a hub locally:
 
 ```sh
-go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db -dev-user-header X-User -admins me@example.com
+go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db -dev-user-header X-User -admins user:me@example.com
 ```

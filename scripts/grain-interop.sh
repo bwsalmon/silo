@@ -209,10 +209,10 @@ round_trip() {
 	ID_TOKEN="$(cat "$d/id-token")"
 
 	local db="sqlite:$d/hub.db"
-	"$silo" hub team -database "$db" -id widgets -name Widgets -admin "$USER_EMAIL" -repo acme/widgets -repo acme/outside >/dev/null 2>"$d/setup.err" ||
+	"$silo" hub team -database "$db" -id widgets -name Widgets -admin "user:$USER_EMAIL" -repo acme/widgets -repo acme/outside >/dev/null 2>"$d/setup.err" ||
 		{ fail setup "silo hub team: $(cat "$d/setup.err")"; return 1; }
 	SILO_HUB_OIDC_SESSION_KEY=grain-interop-session-key-of-32-bytes-or-more \
-		"$silo" hub serve -addr "127.0.0.1:$HUB_PORT" -database "$db" -admins admin@interop.test \
+		"$silo" hub serve -addr "127.0.0.1:$HUB_PORT" -database "$db" -admins user:admin@interop.test \
 		-oidc-issuer "http://127.0.0.1:$OIDC_PORT" -oidc-client-id grain-interop \
 		-oidc-redirect-url "http://127.0.0.1:$HUB_PORT/auth/callback" >"$d/hub.log" 2>&1 &
 	PIDS+=($!)
