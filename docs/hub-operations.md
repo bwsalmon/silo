@@ -316,7 +316,7 @@ data-source credentials and an Alertmanager.
 | `silo_hub_event_store_events`, `_bytes` | gauges | the event store's size |
 | `silo_hub_subscribers` | gauge | live event subscriptions open |
 | `silo_hub_view_requests_total{code}`, `silo_hub_view_latency_seconds` | counter, histogram | artifact view-throughs by answer, and the time to the node's answer |
-| `silo_hub_http_requests_total{route,code}` | counter | every request, by its route pattern (`POST /v1/tasks`, `unmatched`) |
+| `silo_hub_http_requests_total{route,code}` | counter | every request, by its route pattern (`POST /v1/tasks`, `unmatched`; `node-ui` for every request to a node's own UI, hub.md §11) |
 | `silo_hub_store_errors_total{store}` | counter | database errors: `backlog` (the dispatcher), `events` (keeping events), `database` (pings and the scrape's reads) |
 | `silo_hub_db_open_connections{store}`, `silo_hub_db_wait_count_total{store}` | gauge, counter | each store's connection pool |
 
@@ -377,8 +377,9 @@ match no node, or the dispatcher is wedged (no `accepted` dispatch
 events at all while tasks are queued: restart the pod).
 
 **Hub error rate** (warning). Over 5% of requests answered 5xx (not
-counting `/readyz` while draining, or the view-through's 503 for an
-offline node) for 5 minutes. The dashboard's route breakdown says
+counting `/readyz` while draining, the view-through's 503 for an
+offline node, or requests to nodes' own UIs, route `node-ui`) for 5
+minutes. The dashboard's route breakdown says
 which API; the hub's logs say why. Usually it is the database.
 
 **Database errors** (critical). The database did not answer, or the

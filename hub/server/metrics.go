@@ -150,12 +150,16 @@ func (m *metrics) observeIngest(c live.Class, err error) {
 // that served it ("POST /v1/tasks", "GET /v1/tasks/{id}"; the
 // innermost mux's, where the parts' own muxes route further), which
 // keeps the label's values to the hub's own routes, whatever paths
-// callers ask for.
-func (m *metrics) instrument(next http.Handler) http.Handler {
+// callers ask for. routeOf, when it names a route, overrides the
+// pattern.
+func (m *metrics) instrument(next http.Handler, routeOf func(*http.Request) string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
-		route := r.Pattern
+		route := routeOf(r)
+		if route == "" {
+			route = r.Pattern
+		}
 		if route == "" {
 			route = "unmatched"
 		}

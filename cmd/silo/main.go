@@ -106,6 +106,8 @@ func serve(args []string) error {
 	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, emails or groups [SILO_HUB_ADMINS]")
 	metricsAddr := fs.String("metrics-addr", env("SILO_HUB_METRICS_ADDR", ""),
 		"address to serve Prometheus metrics on, at /metrics; keep it off the load balancer's routes [SILO_HUB_METRICS_ADDR]")
+	nodeUI := fs.String("node-ui-domain", env("SILO_HUB_NODE_UI_DOMAIN", ""),
+		"serve each node's own UI, to its owner, at <node>.<this domain> (docs/hub.md §11); empty serves none [SILO_HUB_NODE_UI_DOMAIN]")
 	grace := fs.Duration("shutdown-grace", server.DefaultShutdownGrace, "how long shutdown waits for nodes and requests")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -122,6 +124,7 @@ func serve(args []string) error {
 		OIDCSessionKey:   []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
 		DevUserHeader:    *devHeader,
 		HubAdmins:        list(*admins),
+		NodeUIDomain:     *nodeUI,
 		ShutdownGrace:    *grace,
 		MetricsAddr:      *metricsAddr,
 		Logf:             log.Printf,

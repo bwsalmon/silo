@@ -48,11 +48,11 @@ locals {
     error_rate = {
       name     = "Silo hub error rate"
       severity = "WARNING"
-      # 5xx answers, but not the readiness check's while the hub drains
-      # or the view-through's 503 for an offline node, which are by
-      # design. At least one a minute, so a quiet hub does not page on
+      # 5xx answers, but not the readiness check's while the hub drains,
+      # the view-through's 503 for an offline node, which are by
+      # design, or a node's own UI's (hub.md §11), which are the node's. At least one a minute, so a quiet hub does not page on
       # one error.
-      query    = "(sum(rate(silo_hub_http_requests_total{${local.hub_selector},code=~\"5..\",route!~\".*(readyz|artifacts)\"}[5m])) / sum(rate(silo_hub_http_requests_total{${local.hub_selector}}[5m]))) > 0.05 and sum(rate(silo_hub_http_requests_total{${local.hub_selector},code=~\"5..\",route!~\".*(readyz|artifacts)\"}[5m])) > 1/60"
+      query    = "(sum(rate(silo_hub_http_requests_total{${local.hub_selector},code=~\"5..\",route!~\".*(readyz|artifacts)|node-ui\"}[5m])) / sum(rate(silo_hub_http_requests_total{${local.hub_selector}}[5m]))) > 0.05 and sum(rate(silo_hub_http_requests_total{${local.hub_selector},code=~\"5..\",route!~\".*(readyz|artifacts)|node-ui\"}[5m])) > 1/60"
       duration = "300s"
       doc      = "Over 5% of the hub's requests have been answered 5xx for 5 minutes. See \"Error rate\" in docs/hub-operations.md."
     }

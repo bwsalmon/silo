@@ -345,3 +345,35 @@ func TestReadyzWhileDraining(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNodeUIHosts(t *testing.T) {
+	h, err := New(context.Background(), Config{Database: "sqlite::memory:", DevUserHeader: userHeader, NodeUIDomain: "Nodes.Hub.Test.", Logf: logf(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	get := func(host, path string) (int, string) {
+		req, _ := http.NewRequest("GET", srv.URL+path, nil)
+		req.Host = host
+		req.Header.Set(userHeader, "alice@example.com")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, body := get("hub.test", HealthzPath); code != http.StatusOK {
+		t.Fatalf("the hub's own host: %d %q", code, body)
+	}
+	// A node's host is that node's UI on every path, the hub's own
+	// included: none of the hub's API answers there.
+	for _, p := range []string{HealthzPath, "/v1/me", "/"} {
+		if code, body := get("ws-1.nodes.hub.test", p); code != http.StatusNotFound || !strings.Contains(body, "no such node") {
+			t.Fatalf("%s on a node's host: %d %q", p, code, body)
+		}
+	}
+}
