@@ -850,8 +850,12 @@ it clears the nodes that refused it, so they are offered it again.
 
 ### 6.2 The dispatcher
 
-The dispatcher (`tasks.Dispatcher`) wakes on a new task, on registry
-`Changes()`, and every `Retry` (30s). It takes queued tasks oldest
+The dispatcher (`tasks.Dispatcher`) wakes on a new task, on a registry
+change that may let it place one, and every `Retry` (30s). A registry
+change counts only if a node came online or has more slots available
+than before (`Registry.Available`): most changes are heartbeats, a few
+a second for each node, and claims, and neither frees a slot by itself.
+It takes queued tasks oldest
 first, going round the teams: one task from each team in turn, in the
 order of each team's oldest task. A team with a long queue therefore
 does not hold back another team's first task. For each task:
@@ -864,8 +868,16 @@ does not hold back another team's first task. For each task:
    repositories the task may run in, because the owner may have left
    the team since the node connected (§5.3). A node that is no longer
    admitted has its claim released and is passed over for `Retry`.
-3. The task is marked `offered`. `Server.Open(node)` opens a task
-   stream, and the dispatcher writes `{"type":"offer","task":{...}}`.
+   Each pass asks the directory once for each owner and set of
+   repositories; a pass placing many tasks on one owner's nodes asks
+   once.
+3. The task is marked `offered`, and `Server.Open(node)` opens a task
+   stream, where the dispatcher writes `{"type":"offer","task":{...}}`.
+   Both happen in the task's own goroutine, not in the pass, so a pass
+   does not wait on the database for each task it places; at most 16
+   offers are written at once. The write is one `UPDATE`, conditional
+   on the version the pass read. A task cancelled meanwhile, or a
+   write that fails, has its claim released and stays queued.
 4. The node's grain answers on the stream:
    - `accept` with its local task ID: the task is `running`, and the
      next heartbeat settles the claim.

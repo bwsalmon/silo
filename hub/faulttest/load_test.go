@@ -31,11 +31,12 @@ func (l load) eventsPerSecond() float64 {
 }
 
 // The thresholds the CI-sized run is held to, set from the results in
-// docs/test-runs/2026-10-16-hub-load.md with room for a slower runner.
+// docs/test-runs/2026-10-16-hub-load.md with room for a slower runner:
+// about 100× the measured p99s, and 4× the peak RSS.
 const (
-	ciDispatchP99 = 2 * time.Second
-	ciFanoutP99   = time.Second
-	ciPeakRSS     = 512 << 20
+	ciDispatchP99 = 500 * time.Millisecond
+	ciFanoutP99   = 250 * time.Millisecond
+	ciPeakRSS     = 256 << 20
 )
 
 // TestLoad runs the hub under sustained load: Grains across teams,
@@ -46,13 +47,23 @@ const (
 //
 // Without SILO_LOAD it is the CI-sized version, held to the ci*
 // thresholds; with SILO_LOAD=1 it is the full size (500 Grains, 50
-// teams, 10k events/s, 1k subscribers), which only reports. With
-// SILO_LOAD_REPORT set, the report is also written to that file.
+// teams, 10k events/s, 1k subscribers), and with SILO_LOAD=burst the
+// same Grains taking 300 short tasks a second, past what a dispatcher
+// making a round trip per task in turn could place; both only report.
+// SILO_LOAD_DB_LATENCY (a duration) delays each chunk the hub and the
+// database send each other by that much, as a database across a network
+// would. With SILO_LOAD_REPORT set, the report is also written to that
+// file.
 func TestLoad(t *testing.T) {
 	l := load{teams: 5, grainsPerTeam: 10, slots: 4, rate: 10, duration: 20 * time.Second,
 		work: 10 * time.Second, events: 20, tokens: 4, subscribers: 100}
 	big := os.Getenv("SILO_LOAD") != ""
-	if big {
+	switch os.Getenv("SILO_LOAD") {
+	case "":
+	case "burst":
+		l = load{teams: 50, grainsPerTeam: 10, slots: 4, rate: 300, duration: 20 * time.Second,
+			work: 4 * time.Second, events: 4, tokens: 4, subscribers: 200}
+	default:
 		l = load{teams: 50, grainsPerTeam: 10, slots: 4, rate: 50, duration: 60 * time.Second,
 			work: 20 * time.Second, events: 40, tokens: 4, subscribers: 1000}
 	}
@@ -60,6 +71,13 @@ func TestLoad(t *testing.T) {
 	c := NewCluster(t, Options{Teams: l.teams, GrainsPerTeam: l.grainsPerTeam, Slots: l.slots, Heartbeat: 5 * time.Second,
 		Grain: Work{Work: l.work, Events: l.events, Tokens: l.tokens, Pad: 64}})
 	connected := time.Since(start)
+	if v := os.Getenv("SILO_LOAD_DB_LATENCY"); v != "" {
+		lat, err := time.ParseDuration(v)
+		if err != nil {
+			t.Fatalf("SILO_LOAD_DB_LATENCY: %v", err)
+		}
+		c.PGProxy.Degrade(lat, 0)
+	}
 	dbBefore := c.DBSize()
 	cpuBefore, _, _ := c.Hub.Usage()
 

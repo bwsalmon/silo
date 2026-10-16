@@ -759,3 +759,104 @@ func TestNodeStringsLogged(t *testing.T) {
 		t.Errorf("%d of the node's strings were logged quoted, want at least 3: %q", seen, lines)
 	}
 }
+
+// countingDirectory counts the admission checks the dispatcher asks.
+type countingDirectory struct {
+	Directory
+	mu     sync.Mutex
+	admits int
+}
+
+func (c *countingDirectory) AdmitContext(ctx context.Context, owner string, n registry.Node) error {
+	c.mu.Lock()
+	c.admits++
+	c.mu.Unlock()
+	return c.Directory.AdmitContext(ctx, owner, n)
+}
+
+func (c *countingDirectory) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.admits
+}
+
+func TestAdmissionAskedOncePerPass(t *testing.T) {
+	cd := &countingDirectory{}
+	h := newHarness(t, func(d *Dispatcher) { cd.Directory, d.Directory = d.Directory, cd })
+	var ids []string
+	for range 4 {
+		ids = append(ids, h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"}).ID)
+	}
+	// Queued with no node to take them: one node then takes all four in
+	// a single pass, asking the directory about its owner once.
+	time.Sleep(100 * time.Millisecond)
+	n := h.node(t, "alice@example.com", silo("ws-1", 4))
+	for range ids {
+		n.next(t, TypeOffer)
+	}
+	for _, id := range ids {
+		h.await(t, id, "offered", inState(Offered))
+	}
+	if got := cd.count(); got != 1 {
+		t.Errorf("%d admission checks for 4 tasks on one node, want 1", got)
+	}
+}
+
+func TestOfferWriteFailing(t *testing.T) {
+	failed := make(chan struct{}, 1)
+	h := newHarness(t, func(d *Dispatcher) {
+		d.Observe = func(ev Event, _ Task) {
+			if ev == EventStoreError {
+				select {
+				case failed <- struct{}{}:
+				default:
+				}
+			}
+		}
+	})
+	ctx := context.Background()
+	// The store refuses to mark any task offered while fail_offers has a
+	// row: the database failing just that write.
+	for _, q := range []string{
+		`CREATE TABLE fail_offers (x INTEGER)`,
+		`INSERT INTO fail_offers VALUES (1)`,
+		`CREATE TRIGGER fail_offer BEFORE UPDATE OF state ON tasks
+			WHEN NEW.state = 'offered' AND EXISTS (SELECT 1 FROM fail_offers)
+			BEGIN SELECT RAISE(ABORT, 'offers failing'); END`,
+	} {
+		_, err := h.store.db.ExecContext(ctx, q)
+		check(t, err)
+	}
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo"})
+	select {
+	case <-failed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no offer was attempted")
+	}
+	n.none(t, 500*time.Millisecond)
+	// The store is back: the task, still queued, is offered on a later
+	// pass, and its node's slot was given back meanwhile.
+	_, err := h.store.db.ExecContext(ctx, `DELETE FROM fail_offers`)
+	check(t, err)
+	n.next(t, TypeOffer)
+	h.await(t, task.ID, "offered", inState(Offered))
+}
+
+func TestGrew(t *testing.T) {
+	for _, c := range []struct {
+		was, now map[string]int
+		want     bool
+	}{
+		{map[string]int{"a": 2}, map[string]int{"a": 2}, false},
+		{map[string]int{"a": 2}, map[string]int{"a": 1}, false},
+		{map[string]int{"a": 2, "b": 0}, map[string]int{"a": 2}, false},
+		{map[string]int{"a": 1}, map[string]int{"a": 2}, true},
+		{map[string]int{"a": 1}, map[string]int{"a": 1, "b": 0}, true},
+		{nil, map[string]int{"a": 0}, true},
+	} {
+		if got := grew(c.was, c.now); got != c.want {
+			t.Errorf("grew(%v, %v) = %v, want %v", c.was, c.now, got, c.want)
+		}
+	}
+}

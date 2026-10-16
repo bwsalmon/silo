@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,10 +48,14 @@ func check(t *testing.T, err error) {
 }
 
 // ticking is a clock that moves on a millisecond each time it is read,
-// so that tasks created one after another are ordered.
+// so that tasks created one after another are ordered. The dispatcher
+// reads it from each task's stream at once.
 func ticking() func() time.Time {
+	var mu sync.Mutex
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
 		now = now.Add(time.Millisecond)
 		return now
 	}
@@ -311,4 +316,43 @@ func TestNodeOwnerColumn(t *testing.T) {
 	}
 	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
 	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
+}
+
+func TestOfferRead(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		s.Now = ticking()
+		var ids []string
+		for _, title := range []string{"fresh", "changed", "cancelled"} {
+			task, err := s.Create(ctx, spec("infra", "bwsalmon/silo", title))
+			check(t, err)
+			ids = append(ids, task.ID)
+		}
+		read, err := s.Dispatchable(ctx)
+		check(t, err)
+		if len(read) != 3 {
+			t.Fatalf("dispatchable: %d tasks, want 3", len(read))
+		}
+		// Changed since it was read: read again and offered all the same.
+		_, err = s.Retry(ctx, ids[1])
+		check(t, err)
+		_, err = s.Cancel(ctx, ids[2], "no longer wanted")
+		check(t, err)
+
+		for _, q := range read[:2] {
+			got, err := s.offerRead(ctx, q, "ws-1", "alice@example.com")
+			check(t, err)
+			if got.State != Offered || got.Node != "ws-1" || got.NodeOwner != "alice@example.com" || got.Attempts != 1 {
+				t.Errorf("offered %s: %+v", q.Title, got)
+			}
+			stored, err := s.Get(ctx, q.ID)
+			check(t, err)
+			if stored.State != Offered || stored.version != got.version {
+				t.Errorf("stored %s: %+v, want it as offered (version %d)", q.Title, stored, got.version)
+			}
+		}
+		if _, err := s.offerRead(ctx, read[2], "ws-1", "alice@example.com"); !errors.Is(err, ErrState) {
+			t.Errorf("offering a task cancelled since it was read: %v, want ErrState", err)
+		}
+	})
 }

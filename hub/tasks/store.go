@@ -18,6 +18,13 @@ import (
 	_ "modernc.org/sqlite"             // "sqlite"
 )
 
+// maxConns caps the backlog's PostgreSQL connections, all of which it
+// keeps open once made: a connection made for each query, and closed
+// after it, costs PostgreSQL a process, and a pool with no cap runs the
+// server out of connections under load
+// (docs/test-runs/2026-10-16-hub-load.md).
+const maxConns = 16
+
 // Store is the backlog: SQLite for one hub replica, PostgreSQL for
 // several, as the team directory's store is.
 type Store struct {
@@ -47,6 +54,10 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	)
 	if postgres {
 		db, err = sql.Open("pgx", url)
+		if err == nil {
+			db.SetMaxOpenConns(maxConns)
+			db.SetMaxIdleConns(maxConns)
+		}
 	} else {
 		path := strings.TrimPrefix(url, "sqlite:")
 		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
@@ -366,10 +377,26 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 // the task is bound to that owner as well as to the node ID, which
 // another owner may register later (SA1-H1).
 func (s *Store) Offer(ctx context.Context, id, node, owner string) (Task, error) {
-	return s.update(ctx, id, []State{Queued}, func(t *Task) {
+	return s.update(ctx, id, []State{Queued}, offerTo(node, owner))
+}
+
+// offerRead is Offer for a queued task as the dispatcher read it: one
+// write, conditional on the task's version, with no read before it. A
+// task that changed since it was read is read again, as Offer does.
+func (s *Store) offerRead(ctx context.Context, t Task, node, owner string) (Task, error) {
+	if t.State == Queued && t.version != 0 {
+		if ot, ok, err := s.write(ctx, t.ID, t, offerTo(node, owner)); ok {
+			return ot, err
+		}
+	}
+	return s.Offer(ctx, t.ID, node, owner)
+}
+
+func offerTo(node, owner string) func(*Task) {
+	return func(t *Task) {
 		t.State, t.Node, t.NodeOwner, t.NodeTask, t.Reason = Offered, node, owner, "", ""
 		t.Attempts++
-	})
+	}
 }
 
 // Accept marks a task its node has accepted running: an offered task,

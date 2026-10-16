@@ -379,6 +379,22 @@ func (r *Registry) entry(n *node, now time.Time) Entry {
 	return e
 }
 
+// Available is the slots each online node has available now, by node
+// ID: what the dispatcher compares to tell a change that may let it
+// place a task from one that cannot.
+func (r *Registry) Available() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	out := make(map[string]int, len(r.nodes))
+	for id, n := range r.nodes {
+		if r.status(n, now) == Online {
+			out[id] = max(n.entry.Free-n.entry.Claimed, 0)
+		}
+	}
+	return out
+}
+
 // Get returns one node's entry.
 func (r *Registry) Get(id string) (Entry, bool) {
 	r.mu.Lock()

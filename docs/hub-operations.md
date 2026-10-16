@@ -417,7 +417,12 @@ Top row: **Hub ready** and **Database up** should both read 1.
   design); 502 is a node that did not answer.
 - **HTTP requests by route and code** and **HTTP 5xx ratio**: the API.
 - **Store errors** and **Database connections by store**: the database
-  from the hub's side. Waits that climb mean the pool is starved.
+  from the hub's side. Waits that climb mean the pool is starved. Each
+  store's pool is capped, and keeps its connections open once made:
+  `events` 32, `backlog` 16, `directory` 8, and the shared registry's 8,
+  which the metric does not report. That is 64 a pod, plus the lease's
+  own connection (hub.md §2.2.1), so the database's `max_connections`
+  should allow about 70 for each replica.
 
 ### 5.4 The alerts, and what to do
 
