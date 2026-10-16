@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/include.schema.json",
+  "title": "grain/include@v1: the only object that adds names to a namespace. It names a file or a folder, and everything that file or folder contributes joins the namespace of the folder holding this object, unchanged (docs/task-repos.md §3.3)",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "include"},
+    "schema": {"const": "grain/include@v1"},
+    "target": {
+      "$ref": "common.schema.json#/$defs/refString",
+      "description": "A file, or a folder ending in /, by relative or /-rooted path, alias or git URL, with @<branch|tag|sha>. A relative or /-rooted target has no @: it reads the same commit as this object. A target in another repo must carry its @ref"
+    },
+    "ref_mode": {
+      "enum": ["track", "pin"],
+      "description": "track: @ names a branch, read at its tip on every fetch (live, as Silo's placements). pin: @ names a tag or a commit, and the target never changes under the includer (stable, as a shared template set). Required for a target in another repo"
+    },
+    "kinds": {
+      "description": "The object kinds this include accepts: a trust boundary on top of the Grain's local policy. Intersected with every include above it on the path. [\"*\"] accepts every kind. Include and exclude objects are configuration, and are always followed, but only within these kinds",
+      "type": "array",
+      "items": {"enum": ["*", "task", "ref", "run", "comment", "template", "schedule", "suite", "trigger", "design"]},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "max_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8,
+      "description": "Optional: how many further levels of includes below this one are followed. It can only lower the depth left on the path, never raise it"
+    },
+    "added_by": {"$ref": "common.schema.json#/$defs/principal"},
+    "added_at": {"$ref": "common.schema.json#/$defs/time"}
+  },
+  "required": ["kind", "schema", "target", "kinds"],
+  "additionalProperties": false
+}

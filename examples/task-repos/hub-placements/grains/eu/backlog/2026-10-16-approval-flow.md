@@ -13,5 +13,8 @@ attestation: eyJhbGciOiJFZERTQSIsImtpZCI6ImNsYWltcy0yMDI2LTEwIiwidHlwIjoiSldUIn0
 ---
 
 Silo placed it with the intake's rank and priority, `c` and `high`.
-The Grain's owner then moved it to `t` by editing `rank` here (§8.6).
-Its `high` priority still puts it ahead of every `normal` reference.
+The Grain's owner then moved it to `t` in Silo's UI, and Silo made the
+commit with `ranked_by` set to them: this folder has one writer, Silo
+(docs/task-repos.md §8.6). Its `high` priority still puts it ahead of
+every `normal` reference in this lane. Ranks here are compared only with
+ranks here, never with the Grain's own `backlog/` (§5.2).

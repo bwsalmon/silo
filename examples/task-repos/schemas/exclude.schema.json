@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/exclude.schema.json",
+  "title": "grain/exclude@v1: removes names from the contribution of the folder holding it, and from nothing else. Excluding an include object's name disables that include. There is no re-include (docs/task-repos.md §3.3)",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "exclude"},
+    "schema": {"const": "grain/exclude@v1"},
+    "names": {
+      "description": "Exact names, as references (relative, alias or URL form), canonicalised before matching. No @ref and no #anchor",
+      "type": "array",
+      "items": {"$ref": "common.schema.json#/$defs/refString"},
+      "minItems": 1
+    },
+    "patterns": {
+      "description": "Names by glob over the canonical path, after the repo part is canonicalised: * matches within one path segment, ** across segments. The repo part is never a glob",
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1
+    },
+    "added_by": {"$ref": "common.schema.json#/$defs/principal"},
+    "added_at": {"$ref": "common.schema.json#/$defs/time"},
+    "reason": {"type": "string"}
+  },
+  "required": ["kind", "schema"],
+  "anyOf": [{"required": ["names"]}, {"required": ["patterns"]}],
+  "additionalProperties": false
+}

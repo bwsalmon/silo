@@ -1,8 +1,9 @@
 ---
 kind: repo
 schema: grain/repo@v1
-role: grain
-title: Backlog and execution records of Grain "us"
+role: grain-root
+grain: {id: us, silo: https://silo.example.com}
+title: Root of Grain "us"
 owner:
   grain: us
   team: hub
@@ -13,85 +14,34 @@ ref_policy:
   protected: [main]
   fast_forward_only: true
 backlog: [backlog/]
+lanes:
+  mode: strict
+  order:
+    - {lane: "placements:grains/us/backlog/"}
+    - {lane: backlog/}
 aliases:
   intake: https://silo.example.com/git/hub/intake.git
   shared: https://silo.example.com/git/hub/shared.git
+  placements: https://silo.example.com/git/hub/placements.git
   eu: https://silo.example.com/git/grains/eu.git
-writers:
-  - who: [silo]
-    may: [create, delete]
-    kinds: [ref]
-    paths: ["backlog/**"]
-    fields: [kind, schema, to, spec_rev, rank, priority, expedite, previous, added_by, added_at, attestation, body]
-    bind: {added_by: $pusher}
-    note: >-
-      Placement adds a reference (the offer of hub-interface.md, as a
-      commit); re-placement, cancel and close remove it. The rank and
-      priority it is created with are the intake's.
-  - who: [silo]
-    may: update
-    kinds: [ref]
-    paths: ["backlog/**"]
-    fields: [expedite, to]
-    note: >-
-      expedite is Silo's at_front. to may change only to the end of the
-      redirect chain it already resolves through (docs/task-repos.md §4).
-  - who: ["grain:us", "team:hub#admin"]
-    may: update
-    kinds: [ref]
-    paths: ["backlog/**"]
-    fields: [rank, priority, ranked_by, ranked_at]
-    bind: {ranked_by: $pusher}
-    note: The Grain and its owners, the hub team's admins, own this queue's order. Silo never changes it.
-  - who: ["grain:us"]
-    may: create
-    kinds: [run]
-    paths: ["runs/**"]
-    where: {grain: us}
-    fields: "*"
-    note: An execution record starts as accepted, or as refused by local policy.
-  - who: ["grain:us"]
-    may: update
-    kinds: [run]
-    paths: ["runs/**"]
-    transition: {field: state, from: [accepted, running, waiting], to: [running, waiting, done, failed, cancelled]}
-    fields: [state, started_at, closed]
-  - who: [silo]
-    may: update
-    kinds: [run]
-    paths: ["runs/**"]
-    transition: {field: state, from: [accepted, running, waiting], to: [superseded]}
-    fields: [state, superseded]
-    note: >-
-      Re-placement only, in the same commit that deletes the run's backlog
-      reference (§8.8). The hook checks that the reference is gone.
-  - who: ["grain:us", silo, "team:hub#admin"]
-    may: create
-    kinds: [comment]
-    paths: ["runs/**/comments/**"]
-    fields: "*"
-    note: The thread of each run. Silo writes users' replies with via silo.
-  - who: ["grain:us", "team:hub#admin"]
-    may: create
-    kinds: [task, ref, run]
-    paths: ["local/**"]
-    fields: "*"
-    note: >-
-      Work the Grain authors itself: firings of the schedules its own
-      config lists, and its owner's own tasks, with their references and
-      runs. Add local/backlog/ to backlog to queue them.
-  - who: ["team:hub#admin"]
-    may: update
-    kinds: [repo]
-    fields: [title, aliases, backlog, require_signed, keys, moved_to, body]
-    note: The owner field of a Grain repo can never change.
+writers: ["grain:us", "team:hub#admin"]
 ---
 
-# Backlog and execution records of Grain "us"
+# Root of Grain "us"
 
-This repo belongs to Grain `us`, a team Grain owned by the hub team's
-admins. The example shows a task re-placed here from Grain `eu`
-(docs/task-repos.md §8.8): `backlog/` references it, and its execution
-record names the superseded record in `eu` as `previous`. The task
-depends on a task that Grain `eu` completed, which this Grain read from
-`eu`'s execution record (§8.9).
+The root of Grain `us`, a team Grain owned by the hub team's admins. Only
+the Grain and its owners write here (docs/task-repos.md §8.1).
+
+- `backlog/silo.md` includes Silo's placements for this Grain. The example
+  shows a task re-placed here from Grain `eu` (§8.8): Silo moved its
+  placement between the two Grains' folders in `hub/placements`, and this
+  Grain's execution record names the fenced record in `eu` as
+  `previous`. The task depends on a task that Grain `eu` completed, which
+  this Grain read from `eu`'s execution record (§8.9).
+- `schedules/silo.md` includes the team schedules Silo assigned to this
+  Grain, which Silo's folder in turn includes from `hub/shared`.
+  `schedules/no-granule-pull.md` excludes one of them, and
+  `schedules/granule-pull-weekly.md` is this Grain's own version of it,
+  referencing the original in `derived_from` (§6.2).
+- Lanes are strict: Silo's placements first, then the team admins' own
+  work in `backlog/`.

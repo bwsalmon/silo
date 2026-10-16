@@ -11,7 +11,7 @@
     "spec_rev": {"$ref": "common.schema.json#/$defs/sha", "description": "The commit of the task's repo the placement read; the attestation's spec_digest is over the task at this commit"},
     "rank": {"$ref": "common.schema.json#/$defs/rank"},
     "priority": {"$ref": "common.schema.json#/$defs/priority"},
-    "expedite": {"type": "boolean", "default": false, "description": "Silo's: sorts ahead of every priority band (at_front)"},
+    "expedite": {"type": "boolean", "default": false, "description": "Silo's, on its placements: sorts ahead of every priority band in its own lane (at_front). It never crosses lanes unless the root's lanes.expedite says so (§5.2)"},
     "previous": {"$ref": "common.schema.json#/$defs/refString", "description": "On re-placement: the superseded run on the old Grain (§8.8)"},
     "added_by": {"$ref": "common.schema.json#/$defs/principal"},
     "added_at": {"$ref": "common.schema.json#/$defs/time"},

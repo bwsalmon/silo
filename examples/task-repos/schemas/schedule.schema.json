@@ -49,12 +49,16 @@
     "repo": {
       "type": "string"
     },
+    "derived_from": {
+      "$ref": "common.schema.json#/$defs/refString",
+      "description": "Provenance only: the schedule this one was customised from, which the same root excludes (§6.2). A reference: it adds no name to any namespace and inherits nothing"
+    },
     "fires_in": {
       "enum": [
         "silo",
         "grain"
       ],
-      "description": "Where it fires: Silo files into the team intake; a Grain into its own repo"
+      "description": "Who fires it: silo files into the team intake; grain means every Grain whose namespace contains it fires it into its own root. A Grain lists a silo schedule in its namespace but never fires it"
     },
     "auto_approve_proposals": {
       "type": "boolean"
