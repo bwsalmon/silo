@@ -1,7 +1,6 @@
 ---
 kind: template
 schema: grain/template@v1
-id: tmpl-c766c8y9281f
 aka:
 - template-1
 name: Nightly granule pull

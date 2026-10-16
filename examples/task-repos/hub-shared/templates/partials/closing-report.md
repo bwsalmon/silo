@@ -1,7 +1,6 @@
 ---
 kind: template
 schema: grain/template@v1
-id: tmpl-p6q9fceyh42c
 name: Closing report
 partial: true
 inputs:
@@ -12,8 +11,8 @@ inputs:
 
 ## Report
 
-Finish with a summary of {{ subject | trim }}. It becomes this task's
-`closed.summary`.
+Finish with a summary of {{ subject | trim }}. It becomes the
+`closed.summary` of this run's execution record.
 {% if checks %}
 Before you report, confirm each of these:
 {% for c in checks %}
