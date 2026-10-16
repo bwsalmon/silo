@@ -49,6 +49,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/lease"
@@ -118,6 +119,16 @@ type Config struct {
 	// every name reaches this hub, behind the same IAP. Empty serves
 	// none.
 	NodeUIDomain string
+
+	// ClaimsIssuer and ClaimsKeys, when set, sign the attestation each
+	// task offer carries (docs/hub.md §6.4) and publish its keys at
+	// claims.KeysPath: ClaimsIssuer is the "iss" nodes' policies name
+	// as silo_issuer, conventionally the hub's URL, and ClaimsKeys are
+	// PEM private keys, EC P-256 or RSA, the first of which signs (the
+	// rest are published only, for a rotation). Neither set offers
+	// tasks unattested; one without the other is an error.
+	ClaimsIssuer string
+	ClaimsKeys   [][]byte
 
 	// Heartbeat is the interval nodes heartbeat at;
 	// rendezvous.DefaultHeartbeat when zero.
@@ -345,6 +356,12 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 
 		LostRequeueAfter: h.Directory.LostRequeueAfter,
 	}
+	if cfg.ClaimsIssuer != "" || len(cfg.ClaimsKeys) > 0 {
+		if h.Dispatcher.Claims, err = claims.NewSigner(cfg.ClaimsIssuer, cfg.ClaimsKeys...); err != nil {
+			return fail(fmt.Errorf("server: the task claims' signer: %w", err))
+		}
+		cfg.logf("hub: signing task claims as %s with key %s", cfg.ClaimsIssuer, h.Dispatcher.Claims.KeyID())
+	}
 	h.Live = &live.Hub{
 		Log:       h.Events,
 		Tasks:     h.Backlog,
@@ -378,6 +395,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		fmt.Fprintln(w, "ok")
 	})
 	m.HandleFunc("GET "+ReadyzPath, h.serveReady)
+	if h.Dispatcher.Claims != nil {
+		m.Handle("GET "+claims.KeysPath, h.Dispatcher.Claims.Handler())
+	}
 	rv := h.Rendezvous.Handler()
 	m.Handle(rendezvous.ConnectPath, rv)
 	m.Handle(rendezvous.DirectoryPath, rv)

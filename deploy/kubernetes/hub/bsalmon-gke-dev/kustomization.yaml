@@ -16,6 +16,8 @@ configMapGenerator:
       # SET: /projects/<project number>/global/backendServices/<the silo-hub backend's ID>
       - SILO_HUB_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
       - SILO_HUB_ADMINS=user:bsalmon@google.com
+      # SET: https:// and terraform's domain, as the HTTPRoute's host
+      - SILO_HUB_CLAIMS_ISSUER=https://silo-hub.example.com
       # Empty: no node UIs. To serve them, terraform output -raw
       # node_ui_domain (nodes.<domain>), with the HTTPRoute below.
       - SILO_HUB_NODE_UI_DOMAIN=

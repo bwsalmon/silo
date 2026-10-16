@@ -13,8 +13,8 @@ import (
 // (rendezvous.Server.Open) for one task, carrying JSON, one message per
 // line. The hub writes first:
 //
-//	hub → node  {"type":"offer","task":{...}}              run this task
-//	            {"type":"resume","task":{...}}             a task you ran when the hub lost you: still yours?
+//	hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}   run this task
+//	            {"type":"resume","task":{...},"requester_attestation":"<JWT>"}  a task you ran when the hub lost you: still yours?
 //	            {"type":"cancel","task":{"id":...}}        stop it
 //	node → hub  {"type":"accept","node_task":"<local id>"} it is running
 //	            {"type":"refuse","reason":"..."}           not here (to an offer), or not mine (to a resume)
@@ -40,6 +40,10 @@ type Message struct {
 	Type string `json:"type"`
 	// Task is the task, in offer and resume; in cancel, only its ID.
 	Task *Spec `json:"task,omitempty"`
+	// Attestation is the hub's signed claims about Task, for the node it
+	// is written to (hub/claims, docs/hub.md §6.4), in offer and resume;
+	// absent when the hub has no signing key.
+	Attestation string `json:"requester_attestation,omitempty"`
 	// NodeTask is the node's own ID for the task, in accept.
 	NodeTask string `json:"node_task,omitempty"`
 	// State is the task's end, done or failed, in result.

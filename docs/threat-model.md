@@ -51,10 +51,11 @@ Contents:
   identity claims (`submitter`, `team`, and later `approved_by`) on
   trust. A compromised hub can forge who asked for, or approved, a
   task. It must not be able to get a task past a Grain's local policy.
-  Claims a Grain verifies independently of the hub are future work:
-  grain already verifies them when its policy names `silo_issuer`
-  (grain `pkg/policy/silo.go`, `ApplySiloClaims`), but the hub does not
-  sign yet (hub.md §1.2).
+  The hub signs its claims for each node when it has a key (hub.md
+  §6.4, `hub/claims`), and grain verifies them when its policy names
+  `silo_issuer` (grain `pkg/policy/silo.go`, `ApplySiloClaims`). That
+  stops anything between the hub and a Grain from altering them; it
+  does not stop a compromised hub, which holds the signing key.
 - **What follows from it.** The hub's compromise is bounded by the sum
   of the Grains' local policies, so each Grain owner's policy is a
   security control, not a preference; and every hub control that

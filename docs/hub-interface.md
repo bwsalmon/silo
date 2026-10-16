@@ -41,9 +41,9 @@ connection then ends anyway.
 The hub opens one stream per task (hub.md §6.2):
 
 ```
-hub → node  {"type":"offer","task":{...}}         run this task
-            {"type":"resume","task":{...}}        a task you ran when the hub lost you: still yours?
-            {"type":"cancel","task":{"id":...}}   stop it
+hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}    run this task
+            {"type":"resume","task":{...},"requester_attestation":"<JWT>"}   a task you ran when the hub lost you: still yours?
+            {"type":"cancel","task":{"id":...}}                              stop it
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
@@ -63,6 +63,14 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 | `created_at` | When it was submitted. |
 
 `approved_by` and `capabilities` are not carried yet.
+
+An offer or resume from a hub with a signing key also carries
+`requester_attestation`: a JWT, signed for this Grain's node ID, of the
+claims grain's local policy checks (`iss`, `aud`, `iat`, `exp`,
+`requester`, `team`, `approved_by`, `granted_capabilities`,
+`spec_digest`), with the hub's keys at `/v1/claims/keys` (hub.md
+§6.4). A Grain whose policy names `silo_issuer` verifies it and refuses
+an offer without one; any other Grain may ignore it.
 
 The Grain takes these claims on trust and holds the task to its own
 local policy, refusing what that policy does not allow (hub.md §1.2).
