@@ -163,20 +163,28 @@ CREATE TABLE IF NOT EXISTS team_repos (
 CREATE INDEX IF NOT EXISTS team_repos_team ON team_repos (team);
 CREATE TABLE IF NOT EXISTS node_tokens (
 	id TEXT PRIMARY KEY,
-	hash TEXT NOT NULL UNIQUE,
+	hash TEXT NOT NULL,
 	owner TEXT NOT NULL,
 	node TEXT NOT NULL,
 	created_at BIGINT NOT NULL,
 	revoked_at BIGINT,
 	released_at BIGINT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_hash ON node_tokens (hash);
 CREATE INDEX IF NOT EXISTS node_tokens_node ON node_tokens (node);
-CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_live ON node_tokens (node) WHERE revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS team_settings (
 	team TEXT PRIMARY KEY REFERENCES teams (id) ON DELETE CASCADE,
 	lost_requeue_seconds BIGINT NOT NULL
 );
 `
+
+// liveTokens lets a node have one live token at a time, however two
+// mints for it race (MintNodeToken). Spanner has no partial index but
+// a null-filtered one, and needs none: its transactions are
+// serializable, so of two racing mints, which both read the node's
+// tokens before inserting, one is aborted and, run again, sees the
+// other's token.
+const liveTokens = `CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_live ON node_tokens (node) WHERE revoked_at IS NULL`
 
 // legacyPrincipals makes every team_members row from before principals
 // had prefixes a user: the only deployment then was behind IAP, whose
@@ -199,7 +207,11 @@ var added = []dbaccess.Column{
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	for _, stmt := range append(strings.Split(schema, ";"), legacyPrincipals) {
+	stmts := strings.Split(schema, ";")
+	if !dbaccess.Spanner(ctx, s.db) {
+		stmts = append(stmts, liveTokens)
+	}
+	for _, stmt := range append(stmts, legacyPrincipals) {
 		if strings.TrimSpace(stmt) == "" {
 			continue
 		}
@@ -236,17 +248,10 @@ func (s *Store) q(query string) string {
 	return b.String()
 }
 
-// tx runs f in a transaction, committing if it returns nil.
+// tx runs f in a transaction, committing if it returns nil, and runs
+// it again if the database aborts it (dbaccess.InTx).
 func (s *Store) tx(ctx context.Context, f func(*sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if err := f(tx); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return dbaccess.InTx(ctx, s.db, f)
 }
 
 var teamID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)

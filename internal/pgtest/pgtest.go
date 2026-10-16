@@ -41,12 +41,19 @@ type Server struct {
 	// over TCP.
 	URL  string
 	Port int
+	// Spanner is set when URL is a Spanner PostgreSQL-dialect database
+	// behind PGAdapter rather than PostgreSQL (StartSpanner).
+	Spanner bool
 }
 
 // Start starts a server for t, or skips t when PostgreSQL is not
-// installed (fails it, when RequireEnv is set).
+// installed (fails it, when RequireEnv is set). When SpannerEnv is set
+// it gives t a fresh database on Spanner instead (StartSpanner).
 func Start(t testing.TB) *Server {
 	t.Helper()
+	if Spanner() {
+		return StartSpanner(t)
+	}
 	initdb, err := findBinary("initdb")
 	if err == nil {
 		_, err = findBinary("postgres")
@@ -196,6 +203,7 @@ func pgCommand(ctx context.Context, path string, args ...string) *exec.Cmd {
 // program skips t, or fails it when RequireEnv is set, as Start does.
 func Run(t testing.TB, program string, args ...string) {
 	t.Helper()
+	SkipOnSpanner(t, "PostgreSQL's client programs need a PostgreSQL server")
 	path, err := findBinary(program)
 	if err != nil {
 		if Required() {
