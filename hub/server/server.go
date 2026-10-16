@@ -307,7 +307,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	for _, p := range authPaths {
 		m.Handle(p, authHandler)
 	}
-	h.handler = m
+	h.handler = bodyDeadline(m, bodyTimeout)
 	if cfg.NodeUIDomain != "" {
 		h.NodeUI = &nodeui.Server{
 			Domain:    strings.TrimSuffix(strings.ToLower(cfg.NodeUIDomain), "."),
@@ -316,7 +316,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			Open:      h.Rendezvous.Open,
 			Logf:      cfg.Logf,
 		}
-		h.handler = h.NodeUI.Hosts(m)
+		h.handler = h.NodeUI.Hosts(h.handler)
 	}
 	// The node UI's hosts are counted as one route: their paths are the
 	// nodes' own.
@@ -415,6 +415,9 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 		Handler:           h.handler,
 		BaseContext:       func(net.Listener) context.Context { return reqCtx },
 		ReadHeaderTimeout: 30 * time.Second,
+		// Not ReadTimeout: it would end the event subscriptions and the
+		// nodes' WebSockets, which bodyDeadline leaves alone.
+		IdleTimeout: 2 * time.Minute,
 	}
 	dispatchCtx, stopDispatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopDispatch()

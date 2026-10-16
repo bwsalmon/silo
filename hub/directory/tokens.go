@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 // tokenPrefix starts every node token, so a leaked one is recognisable
 // to secret scanners and to the humans reading a log.
 const tokenPrefix = "silo-node_"
+
+// tokenShape is exactly what MintNodeToken makes: the prefix, the 8-byte
+// ID in hex, and the 32-byte secret in unpadded base64url. Anything else
+// is refused before it costs a database query (SA1-L10).
+var tokenShape = regexp.MustCompile(`^` + tokenPrefix + `[0-9a-f]{16}_[A-Za-z0-9_-]{43}$`)
 
 // NodeToken is a minted node token's record. The token itself is not
 // in it: the store holds only its hash.
@@ -97,7 +103,7 @@ func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, 
 
 // VerifyNodeToken is the owner and node a live token proves.
 func (s *Store) VerifyNodeToken(ctx context.Context, tok string) (owner, node string, err error) {
-	if !strings.HasPrefix(tok, tokenPrefix) {
+	if !tokenShape.MatchString(tok) {
 		return "", "", errors.New("directory: not a node token")
 	}
 	err = s.db.QueryRowContext(ctx, s.q(`SELECT owner, node FROM node_tokens WHERE hash = ? AND revoked_at IS NULL`), hashToken(tok)).Scan(&owner, &node)

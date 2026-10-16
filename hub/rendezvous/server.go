@@ -377,12 +377,18 @@ func (s *Server) Shutdown(ctx context.Context, reason string) error {
 	}
 	s.mu.Unlock()
 
+	// All at once, each with a deadline, so a node that has stopped
+	// reading delays nobody's goodbye but its own (SA1-L7).
+	var wg sync.WaitGroup
 	for _, nc := range conns {
-		nc.ctl.c.SetWriteDeadline(time.Now().Add(time.Second))
-		if err := nc.ctl.write(Message{Type: TypeGoodbye, Error: reason}); err != nil {
-			nc.m.Close()
-		}
+		wg.Go(func() {
+			nc.ctl.c.SetWriteDeadline(time.Now().Add(time.Second))
+			if err := nc.ctl.write(Message{Type: TypeGoodbye, Error: reason}); err != nil {
+				nc.m.Close()
+			}
+		})
 	}
+	wg.Wait()
 	var err error
 	for _, nc := range conns {
 		select {

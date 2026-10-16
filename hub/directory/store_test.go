@@ -177,6 +177,15 @@ func TestNodeTokens(t *testing.T) {
 				t.Errorf("Authorization %q proved %+v", bad, id)
 			}
 		}
+		// A bearer that is not shaped like a token is refused without
+		// a query: on a canceled context, a query would fail otherwise.
+		dead, cancel := context.WithCancel(ctx)
+		cancel()
+		for _, bad := range []string{tokenPrefix + "x", tok[:len(tok)-1], tok + "A", strings.ToUpper(tok[:26]) + tok[26:], tok[:len(tok)-1] + "="} {
+			if _, _, err := s.VerifyNodeToken(dead, bad); err == nil || !strings.Contains(err.Error(), "not a node token") {
+				t.Errorf("VerifyNodeToken(%q) = %v, want refused by shape", bad, err)
+			}
+		}
 
 		// Only the hash is stored.
 		var stored string
