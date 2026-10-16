@@ -56,6 +56,16 @@ locals {
       duration = "300s"
       doc      = "Over 5% of the hub's requests have been answered 5xx for 5 minutes. See \"Error rate\" in docs/hub-operations.md."
     }
+    no_dispatcher = {
+      name     = "Silo hub not dispatching"
+      severity = "CRITICAL"
+      # A hub that is up while no pod holds the dispatcher's lease
+      # (hub.md §2.2.1): its Recover keeps failing, or the lease is held
+      # by a session that is not dispatching.
+      query    = "max(up{${local.hub_selector}}) == 1 and sum(silo_hub_dispatcher_leader{${local.hub_selector}}) == 0"
+      duration = "300s"
+      doc      = "The hub has been up for 5 minutes with no pod running the dispatcher: no task is placed, resumed or cancelled. See \"Not dispatching\" in docs/hub-operations.md."
+    }
     database_errors = {
       name     = "Silo hub database errors"
       severity = "CRITICAL"

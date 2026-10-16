@@ -56,6 +56,8 @@ done
 # What the API server's schemas cannot say.
 for o in "${overlays[@]}"; do
 	f="$work/$o.yaml"
+	# One pod until docs/hub.md §2.2's stages R2 to R5 are built: a
+	# node's connection lives on the one pod holding it.
 	grep -q 'replicas: 1$' "$f" || { echo "$o: the hub must run one replica"; exit 1; }
 	grep -q 'type: Recreate' "$f" || { echo "$o: the hub must roll with Recreate"; exit 1; }
 	[ "$(grep -c 'requestPath: /readyz' "$f")" = 2 ] || { echo "$o: both backends' health checks must be /readyz"; exit 1; }

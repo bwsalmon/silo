@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
@@ -48,6 +49,8 @@ type metrics struct {
 	viewLatency                     prometheus.Histogram
 	requests                        *prometheus.CounterVec
 	storeErrors                     *prometheus.CounterVec
+	leader                          prometheus.Gauge
+	terms                           prometheus.Counter
 }
 
 func newMetrics(h *Hub) *metrics {
@@ -92,8 +95,14 @@ func newMetrics(h *Hub) *metrics {
 		Name: "silo_hub_store_errors_total",
 		Help: "Database errors, by store: backlog (the dispatcher's reads and updates), events (keeping streamed events), database (pings and the scrape's reads).",
 	}, []string{"store"})
+	m.leader = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "silo_hub_dispatcher_leader", Help: "1 while this pod holds the dispatcher's lease and runs the dispatcher, 0 otherwise.",
+	})
+	m.terms = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "silo_hub_dispatcher_terms_total", Help: "Terms of the dispatcher's lease this pod has taken: each one recovers the backlog.",
+	})
 	m.own = []prometheus.Collector{m.connects, m.disconnects, m.refusals, m.dispatch, m.dispatchLatency,
-		m.ingested, m.subscribers, m.views, m.viewLatency, m.requests, m.storeErrors,
+		m.ingested, m.subscribers, m.views, m.viewLatency, m.requests, m.storeErrors, m.leader, m.terms,
 		&stateCollector{h: h, m: m}}
 	m.reg.MustRegister(m.own...)
 	m.reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
@@ -121,6 +130,16 @@ func (m *metrics) observeRendezvous(ev rendezvous.Event) {
 	case rendezvous.EventRefused:
 		m.refusals.Inc()
 	}
+}
+
+// observeTerm is a term of the dispatcher's lease starting or ending.
+func (m *metrics) observeTerm(_ lease.Term, started bool) {
+	if started {
+		m.terms.Inc()
+		m.leader.Set(1)
+		return
+	}
+	m.leader.Set(0)
 }
 
 func (m *metrics) observeDispatch(ev tasks.Event, t tasks.Task) {

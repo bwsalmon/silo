@@ -4,7 +4,8 @@ This is the runbook for a hub that is already deployed
 ([deploy.md](deploy.md) is how it gets there): upgrading it, rotating
 its secrets, restoring its database, and reading its dashboard and
 alerts. The hub's design is [hub.md](hub.md); §2.2 there is why it runs
-one replica and how long each kind of failure keeps it down.
+one replica, how long each kind of failure keeps it down, and the
+staged design for several replicas.
 
 The commands assume the cluster's credentials
 (`eval "$(terraform -chdir=deploy/terraform/hub output -raw get_credentials)"`),
@@ -22,6 +23,7 @@ database `silo`.
 | The node registry: who is connected, their slots and heartbeats | memory | yes: rebuilt as nodes reconnect, within their backoff (at most a minute) |
 | Token-stream rings, live subscribers | memory | yes: subscribers reconnect from their cursor; ring events older than the restart are not replayed |
 | Open task streams | memory | yes: on start, offered tasks are requeued and running ones are `lost` until their nodes resume them (hub.md §6.2) |
+| The dispatcher's lease | PostgreSQL: an advisory lock held by the dispatching pod's session; `hub_leases` numbers its terms and names the holder | released: the next pod to start takes it (hub.md §2.2.1) |
 
 Backing up the database is therefore backing up the hub.
 
@@ -53,7 +55,10 @@ What happens, and how node connections are drained:
   (`-shutdown-grace`). The pod's `terminationGracePeriodSeconds` (40)
   leaves the Cloud SQL proxy, a native sidecar, running until the hub
   has gone.
-- The new pod starts, its proxy first. Its dispatcher marks every
+- The new pod starts, its proxy first. It takes the dispatcher's
+  lease, which the old pod released as it stopped (if the old pod is
+  gone without releasing it, PostgreSQL frees it when the old session
+  ends, about ten seconds later). Its dispatcher marks every
   running task `lost` and requeues every offered one; as each node
   reconnects, its lost tasks are resumed on it. No team's lost-task
   grace (hub.md §6.3) can expire for a task that was running at the
@@ -74,9 +79,11 @@ well as the image. Take an on-demand backup before such an upgrade:
 
 **Rolling back** is the same apply with the previous tag.
 
-**Never scale the Deployment.** Two hub pods would both run the
-dispatcher over one backlog (hub.md §2.2). `validate.sh` refuses
-manifests that do.
+**Never scale the Deployment.** The dispatcher's lease (hub.md
+§2.2.1) keeps two pods from both dispatching, but a node's connection,
+its events and the streams to it still live on the one pod holding it:
+a second pod would not see half the nodes (hub.md §2.2, stages R2 to
+R5). `validate.sh` refuses manifests that do.
 
 ## 3. Rotating secrets
 
@@ -167,6 +174,7 @@ up with:
 | Point-in-time recovery | on, with `point_in_time_recovery_days` (7) of write-ahead log |
 | Backup location | `backup_location`; Cloud SQL's default multi-region when unset |
 | Deletion protection | terraform's and Cloud SQL's own (`deletion_protection`) |
+| Availability | `database_availability_type`: `ZONAL` (the default, no standby) or `REGIONAL` (a standby in another zone, failover in about a minute, about twice the cost; hub.md §2.2) |
 
 So the database can be put back to any second in the last seven days,
 or to any of the last fourteen daily backups. Check the backups exist:
@@ -176,7 +184,9 @@ or to any of the last fourteen daily backups. Check the backups exist:
 
 - **The instance is gone or broken, the data is fine** (zone outage,
   instance deleted with its backups kept): restore the latest backup
-  into a new instance (4.3).
+  into a new instance (4.3). A `REGIONAL` instance fails over to its
+  standby by itself for a zone's outage; restoring is for losing the
+  instance.
 - **The data is wrong** (a bad migration, rows deleted by hand): clone
   the instance to just before the change (4.4), check the clone, and
   point the hub at it.
@@ -281,7 +291,7 @@ default) makes:
 
 - a Cloud Monitoring dashboard, **Silo hub** (Monitoring → Dashboards),
   from `dashboards/hub.json`;
-- five alert policies (Monitoring → Alerting), each notifying
+- six alert policies (Monitoring → Alerting), each notifying
   `alert_notification_channels` and linking to this section.
 
 They read what GKE's Managed Service for Prometheus scrapes from the
@@ -317,6 +327,8 @@ data-source credentials and an Alertmanager.
 | `silo_hub_subscribers` | gauge | live event subscriptions open |
 | `silo_hub_view_requests_total{code}`, `silo_hub_view_latency_seconds` | counter, histogram | artifact view-throughs by answer, and the time to the node's answer |
 | `silo_hub_http_requests_total{route,code}` | counter | every request, by its route pattern (`POST /v1/tasks`, `unmatched`; `node-ui` for every request to a node's own UI, hub.md §11) |
+| `silo_hub_dispatcher_leader` | gauge | 1 on the pod holding the dispatcher's lease and running the dispatcher (hub.md §2.2.1) |
+| `silo_hub_dispatcher_terms_total` | counter | terms of the lease this pod has taken; each recovers the backlog |
 | `silo_hub_store_errors_total{store}` | counter | database errors: `backlog` (the dispatcher), `events` (keeping events), `database` (pings and the scrape's reads) |
 | `silo_hub_db_open_connections{store}`, `silo_hub_db_wait_count_total{store}` | gauge, counter | each store's connection pool |
 
@@ -381,6 +393,19 @@ counting `/readyz` while draining, the view-through's 503 for an
 offline node, or requests to nodes' own UIs, route `node-ui`) for 5
 minutes. The dashboard's route breakdown says
 which API; the hub's logs say why. Usually it is the database.
+
+**Not dispatching** (critical). The hub has been up for 5 minutes and
+no pod reports `silo_hub_dispatcher_leader` 1: no task is placed,
+resumed or cancelled. Read the pod's log for `lease dispatcher:`
+lines. A term that fails at once (`recovering the backlog`) is the
+database; see the next alert. No term at all means another session
+holds the lease: `SELECT holder, epoch, taken_at FROM hub_leases` names
+the last pod to take it, and `SELECT pid, backend_start FROM pg_locks
+JOIN pg_stat_activity USING (pid) WHERE locktype = 'advisory' AND
+classid = 1936288879` the session holding it (1936288879 is "silo").
+If that session belongs to no running pod, `SELECT
+pg_terminate_backend(pid)` frees the lease, and the hub takes it
+within five seconds.
 
 **Database errors** (critical). The database did not answer, or the
 stores failed, for 5 minutes. Check the proxy's logs, the instance in

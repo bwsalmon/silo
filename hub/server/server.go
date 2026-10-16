@@ -4,7 +4,8 @@
 // (hub/tasks), live events (hub/live), the node registry
 // (hub/registry) and the rendezvous nodes connect to
 // (hub/rendezvous), over one database and one human sign-on
-// (hub/identity).
+// (hub/identity). The dispatcher runs only while this process holds
+// the database lease "dispatcher" (hub/lease, docs/hub.md §2.2.1).
 //
 // It serves:
 //
@@ -42,6 +43,7 @@ import (
 
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
+	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/nodeui"
 	"github.com/bwsalmon/silo/hub/registry"
@@ -110,6 +112,15 @@ type Config struct {
 	// DispatchRetry is the dispatcher's Retry; tasks.DefaultRetry when
 	// zero.
 	DispatchRetry time.Duration
+
+	// Holder names this process in the dispatcher's lease;
+	// lease.DefaultHolder (the pod's name and a random suffix) when
+	// empty.
+	Holder string
+	// LeaseRetry is how often a process that does not hold the
+	// dispatcher's lease asks for it again; lease.DefaultRetry when
+	// zero.
+	LeaseRetry time.Duration
 
 	// MetricsAddr, when set, is the address Serve serves MetricsPath on:
 	// a listener of its own, so that the metrics are never on the
@@ -183,6 +194,7 @@ type Hub struct {
 	Directory  *directory.Store
 	Backlog    *tasks.Store
 	Events     *live.Store
+	Leases     *lease.Store
 	Registry   *registry.Registry
 	Rendezvous *rendezvous.Server
 	Dispatcher *tasks.Dispatcher
@@ -221,6 +233,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	}
 	if h.Events, err = live.Open(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the event store: %w", err))
+	}
+	if h.Leases, err = lease.Open(ctx, cfg.Database); err != nil {
+		return fail(fmt.Errorf("server: opening the leases: %w", err))
 	}
 
 	h.Registry = registry.New()
@@ -349,6 +364,9 @@ func (h *Hub) Close() error {
 	if h.Events != nil {
 		errs = append(errs, h.Events.Close())
 	}
+	if h.Leases != nil {
+		errs = append(errs, h.Leases.Close())
+	}
 	return errors.Join(errs...)
 }
 
@@ -399,8 +417,23 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	}
 	dispatchCtx, stopDispatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopDispatch()
+	// The dispatcher runs only while this process holds its lease, and
+	// each term starts it afresh: its Run recovers the backlog first.
+	// A term whose dispatcher fails gives the lease up and asks again.
 	dispatched := make(chan error, 1)
-	go func() { dispatched <- h.Dispatcher.Run(dispatchCtx) }()
+	go func() {
+		dispatched <- lease.Run(dispatchCtx, lease.Options{
+			Store:  h.Leases,
+			Name:   "dispatcher",
+			Holder: h.cfg.Holder,
+			Retry:  h.cfg.LeaseRetry,
+			Run: func(ctx context.Context, _ lease.Term) error {
+				return h.Dispatcher.Run(ctx)
+			},
+			OnTerm: h.metrics.observeTerm,
+			Logf:   h.cfg.Logf,
+		})
+	}()
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(l) }()
 	h.cfg.logf("hub: serving on %s", l.Addr())
@@ -409,9 +442,6 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	select {
 	case <-ctx.Done():
 	case serveErr = <-served:
-	case err := <-dispatched:
-		serveErr = fmt.Errorf("server: the dispatcher stopped: %w", err)
-		dispatched <- err
 	}
 
 	grace := h.cfg.ShutdownGrace

@@ -51,6 +51,11 @@ run "defaults" {
   command = apply
 
   assert {
+    condition     = google_sql_database_instance.hub.settings[0].availability_type == "ZONAL"
+    error_message = "the database is zonal by default"
+  }
+
+  assert {
     condition     = length(google_iap_web_iam_member.access) == 2 && length(google_iap_web_backend_service_iam_member.access) == 0
     error_message = "before the backend service is known, access is granted project-wide"
   }
@@ -121,8 +126,8 @@ run "defaults" {
     error_message = "Cloud SQL's own deletion protection is on"
   }
   assert {
-    condition     = toset(keys(google_monitoring_alert_policy.hub)) == toset(["hub_down", "no_online_nodes", "dispatch_stuck", "error_rate", "database_errors"])
-    error_message = "the five alert policies"
+    condition     = toset(keys(google_monitoring_alert_policy.hub)) == toset(["hub_down", "no_online_nodes", "dispatch_stuck", "error_rate", "no_dispatcher", "database_errors"])
+    error_message = "the six alert policies"
   }
   assert {
     condition     = alltrue([for p in google_monitoring_alert_policy.hub : strcontains(p.conditions[0].condition_prometheus_query_language[0].query, "namespace=\"silo-hub\",job=\"silo-hub\"")])
@@ -256,4 +261,27 @@ run "bad_domain" {
   }
 
   expect_failures = [var.domain]
+}
+
+run "regional_database" {
+  command = apply
+
+  variables {
+    database_availability_type = "REGIONAL"
+  }
+
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].availability_type == "REGIONAL"
+    error_message = "database_availability_type = REGIONAL gives the instance a standby"
+  }
+}
+
+run "bad_availability_type" {
+  command = plan
+
+  variables {
+    database_availability_type = "MULTI_REGION"
+  }
+
+  expect_failures = [var.database_availability_type]
 }
