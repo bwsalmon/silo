@@ -11,7 +11,7 @@ import (
 )
 
 var app = fstest.MapFS{
-	"index.html":          {Data: []byte(`<!doctype html><div id="root"></div><script type="module" src="/assets/index-abc.js"></script>`)},
+	"index.html":          {Data: []byte(`<!doctype html><meta name="csp-nonce" content="__SILO_CSP_NONCE__"><div id="root"></div><script type="module" src="/assets/index-abc.js"></script>`)},
 	"assets/index-abc.js": {Data: []byte(`console.log("app")`)},
 	"favicon.svg":         {Data: []byte(`<svg/>`)},
 }
@@ -43,9 +43,34 @@ func TestHandler(t *testing.T) {
 		if got := r.Header.Get("Cache-Control"); got != "no-store" {
 			t.Errorf("%s: Cache-Control %q, want no-store", p, got)
 		}
-		if got := r.Header.Get("Content-Security-Policy"); !strings.Contains(got, "worker-src 'none'") || !strings.Contains(got, "connect-src 'self'") {
-			t.Errorf("%s: CSP %q", p, got)
+		csp := r.Header.Get("Content-Security-Policy")
+		for _, want := range []string{"script-src 'self';", "worker-src 'none'", "connect-src 'self'", "img-src 'self';", "frame-ancestors 'none'"} {
+			if !strings.Contains(csp, want) {
+				t.Errorf("%s: CSP %q, want %s", p, csp, want)
+			}
 		}
+		if strings.Contains(csp, "unsafe-") {
+			t.Errorf("%s: CSP %q allows something unsafe", p, csp)
+		}
+	}
+	// Each load of the page has a nonce of its own for its styles,
+	// written into the page and its CSP alike.
+	nonces := map[string]bool{}
+	for range 2 {
+		r := get(t, h, "GET", "/")
+		b := body(t, r)
+		_, rest, ok := strings.Cut(b, `name="csp-nonce" content="`)
+		nonce, _, _ := strings.Cut(rest, `"`)
+		if !ok || nonce == "" || nonce == NoncePlaceholder {
+			t.Fatalf("no nonce in the page: %q", b)
+		}
+		if csp := r.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "style-src 'self' 'nonce-"+nonce+"'") {
+			t.Errorf("CSP %q, want the page's nonce %s", csp, nonce)
+		}
+		nonces[nonce] = true
+	}
+	if len(nonces) != 2 {
+		t.Errorf("two loads shared a nonce")
 	}
 	r := get(t, h, "GET", "/assets/index-abc.js")
 	if r.StatusCode != http.StatusOK || body(t, r) != `console.log("app")` {

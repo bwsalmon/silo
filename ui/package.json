@@ -1,0 +1,35 @@
+{
+  "name": "silo-hub-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The Silo hub's web UI (docs/ui.md), built into hub/ui/static/app and embedded in the hub.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@emotion/cache": "^11.14.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^7.3.11",
+    "react": "^19.3.1",
+    "react-diff-view": "^3.3.3",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^20.19.43",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.4",
+    "vitest": "^3.2.7"
+  }
+}

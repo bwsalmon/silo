@@ -407,7 +407,7 @@ func TestWebUI(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(body, "<html") {
 			t.Errorf("%s: %d %q, want the UI's page", p, resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
-		if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "worker-src 'none'") {
+		if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "worker-src 'none'") || strings.Contains(csp, "unsafe-") {
 			t.Errorf("%s: CSP %q", p, csp)
 		}
 	}

@@ -41,6 +41,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `hub/live` | Live events (hub.md §7): the event streams nodes open per task, the classification by schema (lifecycle and conversation stored, the token stream in an in-memory ring, node-only events kept as references), fan-out over SSE and WebSocket from a cursor, and the view-through to a node's diffs and tool logs. |
 | `hub/notify` | The hub's wake-ups and event notices between its pods (hub.md §2.2.4): PostgreSQL `NOTIFY silo_hub`, listened for on a connection of each pod's own. |
 | `hub/server` | The hub as one HTTP server over one database (hub.md §2.1): every part above wired together, `/healthz` and `/readyz`, and a graceful shutdown that says goodbye to nodes. |
+| `hub/ui`, `ui/` | The hub's web UI ([`docs/ui.md`](docs/ui.md), stage U1): its React source in `ui/`, built into `hub/ui/static/app` and embedded by `hub/ui`, which serves it at `/`. Without a built bundle the hub embeds a placeholder page. |
 | `cmd/silo` | The `silo` command: `silo hub serve`, `silo hub migrate` (create the tables as the schema's owner and grant the role the hub serves as its rows), and `silo hub team` and `silo hub token` to bootstrap a hub's database. |
 | `Dockerfile`, `deploy/` | The hub's image, its GKE manifests (`deploy/kubernetes/hub`) and terraform (`deploy/terraform/hub`), for GKE behind IAP: the runbook is [`docs/deploy.md`](docs/deploy.md). |
 | `events` | The schema of the events a node streams to the hub for each task (hub.md §7.1), copied from the retired runner's `old/events`. |
@@ -50,7 +51,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
 | `docs/deploy.md` | How to deploy the hub on GKE behind IAP, in `bsalmon-gke-dev`. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
-| `docs/ui.md` | A proposal, not decided: the hub's human web UI (hub.md §9, stage 2.6). |
+| `docs/ui.md` | The hub's human web UI (hub.md §9, stage 2.6): the options, the chosen one, its stages, and how to run it locally (§7.1). |
 | [`docs/threat-model.md`](docs/threat-model.md) | The threat model of the Grain + Silo system: assets, actors, trust boundaries, threats, the numbered security invariants (`INV-`) that audits and security tests cite, and the audit plan. |
 | `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |
 
@@ -67,7 +68,15 @@ server binaries are installed; CI installs them and sets
 `SILO_REQUIRE_POSTGRES=1`, which turns a missing server into a
 failure.
 
-`.grain/workflows/deploy.yml` builds the image, validates the
+`.grain/workflows/ui.yml` builds and tests the web UI (`ui/`, Node 20.19
+or later): `npm ci`, `npm run build` (tsc and Vite), `npm test`
+(vitest), and then `hub/ui`'s and `hub/server`'s tests with the bundle
+embedded. The Go build above needs no Node: without the bundle it
+embeds a placeholder page. [`docs/ui.md`](docs/ui.md) §7.1 says how to
+run the UI locally.
+
+`.grain/workflows/deploy.yml` builds the image (the UI's bundle
+included), validates the
 manifests on a kind cluster (`deploy/kubernetes/hub/validate.sh`) and
 runs `terraform validate` and `terraform test` (mock providers) in
 `deploy/terraform/hub`. Nothing is applied anywhere.

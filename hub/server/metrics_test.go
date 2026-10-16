@@ -111,7 +111,9 @@ func TestMetrics(t *testing.T) {
 		`silo_hub_events_ingested_total{class="unknown",result="rejected"} 1`,
 		`silo_hub_http_requests_total{code="201",route="POST /v1/tasks"} 2`,
 		`silo_hub_http_requests_total{code="400",route="PUT /v1/teams/{team}/settings"} 1`,
-		`silo_hub_http_requests_total{code="404",route="unmatched"}`,
+		// The web UI answers every path the API does not have, and
+		// /metrics with a 404.
+		`silo_hub_http_requests_total{code="404",route="/"}`,
 		`silo_hub_store_errors_total{store="database"} 0`,
 		`silo_hub_dispatch_events_total{event="lost_requeued"} 0`,
 		`silo_hub_subscribers 0`,

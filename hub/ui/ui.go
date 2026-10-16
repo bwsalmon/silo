@@ -11,7 +11,10 @@
 package ui
 
 import (
+	"bytes"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"io/fs"
 	"net/http"
 	"path"
@@ -47,17 +50,36 @@ func placeholder() fs.FS {
 
 // Reserved are the path prefixes that are the hub's own and never the
 // app's: a request for one that reached Handler matched no route of the
-// hub's, and answers 404 rather than the app's page.
-var Reserved = []string{"/v1/", "/internal/", "/auth/", "/.well-known/"}
+// hub's, and answers 404 rather than the app's page. /metrics is served
+// only on a listener of its own (hub/server), and is a 404 here too.
+var Reserved = []string{"/v1/", "/internal/", "/auth/", "/.well-known/", "/metrics"}
 
-// CSP is the Content-Security-Policy the app is served under. It may
-// talk only to its own origin, and worker-src 'none' refuses it a
-// service worker, so that no artifact it views is cached behind the
-// hub's no-store (docs/ui.md §2, the trust boundary). MUI's styles are
-// injected at run time, hence style-src's 'unsafe-inline'.
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-	"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'none'; " +
-	"object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+// NoncePlaceholder, in the app's index.html, is replaced at each load
+// by the nonce that page's styles are allowed under (CSP).
+const NoncePlaceholder = "__SILO_CSP_NONCE__"
+
+// CSP is the Content-Security-Policy the app is served under, with the
+// page's style nonce (docs/threat-model.md T-TB4-1, INV-15). Script
+// comes only from the hub's own files, never inline or evaluated;
+// styles from its files, or a <style> carrying the nonce (MUI's,
+// inserted at run time); images and everything fetched only from the
+// hub's own origin. worker-src 'none' refuses the app a service worker,
+// so that no artifact it views is cached behind the hub's no-store
+// (docs/ui.md §2, INV-4).
+func CSP(nonce string) string {
+	style := "style-src 'self'"
+	if nonce != "" {
+		style += " 'nonce-" + nonce + "'"
+	}
+	return "default-src 'self'; script-src 'self'; " + style + "; img-src 'self'; font-src 'self'; " +
+		"connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+}
+
+func newNonce() string {
+	b := make([]byte, 18)
+	rand.Read(b)
+	return base64.StdEncoding.EncodeToString(b)
+}
 
 // Handler serves the app from app, or the placeholder when app is nil:
 // a file under assets/ as itself, cached for good (Vite names each
@@ -82,7 +104,7 @@ func Handler(app fs.FS) http.Handler {
 			}
 		}
 		h := w.Header()
-		h.Set("Content-Security-Policy", CSP)
+		h.Set("Content-Security-Policy", CSP(""))
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
@@ -107,6 +129,9 @@ func Handler(app fs.FS) http.Handler {
 			http.Error(w, "ui: no index.html", http.StatusInternalServerError)
 			return
 		}
+		nonce := newNonce()
+		index = bytes.ReplaceAll(index, []byte(NoncePlaceholder), []byte(nonce))
+		h.Set("Content-Security-Policy", CSP(nonce))
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)

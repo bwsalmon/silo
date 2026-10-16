@@ -35,3 +35,7 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// The web UI's npm packages (ui/, docs/ui.md) are not Go, whatever
+// files some of them carry.
+ignore ./ui/node_modules

@@ -1,0 +1,71 @@
+// A small path router over the History API: the UI has three pages,
+// which do not need a routing library. The hub serves index.html for
+// every path that is not its API's (hub/ui), so each route below is a
+// URL a person can reload or share.
+import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
+import { Link as MuiLink, type LinkProps } from '@mui/material';
+
+export type Route =
+  | { page: 'backlog'; team?: string }
+  | { page: 'task'; id: string }
+  | { page: 'nodes' }
+  | { page: 'notfound'; path: string };
+
+export function parseRoute(path: string): Route {
+  const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts.length === 0) return { page: 'backlog' };
+  if (parts[0] === 'teams' && parts.length === 2) return { page: 'backlog', team: parts[1] };
+  if (parts[0] === 'tasks' && parts.length === 2) return { page: 'task', id: parts[1] };
+  if (parts[0] === 'nodes' && parts.length === 1) return { page: 'nodes' };
+  return { page: 'notfound', path };
+}
+
+export function routePath(r: Route): string {
+  switch (r.page) {
+    case 'backlog':
+      return r.team ? `/teams/${encodeURIComponent(r.team)}` : '/';
+    case 'task':
+      return `/tasks/${encodeURIComponent(r.id)}`;
+    case 'nodes':
+      return '/nodes';
+    case 'notfound':
+      return r.path;
+  }
+}
+
+const listeners = new Set<() => void>();
+
+export function navigate(path: string) {
+  if (path === window.location.pathname) return;
+  window.history.pushState(null, '', path);
+  listeners.forEach((l) => l());
+}
+
+export function useRoute(): Route {
+  const [path, setPath] = useState(window.location.pathname);
+  useEffect(() => {
+    const update = () => setPath(window.location.pathname);
+    listeners.add(update);
+    window.addEventListener('popstate', update);
+    return () => {
+      listeners.delete(update);
+      window.removeEventListener('popstate', update);
+    };
+  }, []);
+  return parseRoute(path);
+}
+
+// Link is an in-app link: a plain left click navigates without a load,
+// and anything else (a new tab, a copy) is an ordinary link.
+export function Link({ to, children, ...rest }: { to: string; children: ReactNode } & Omit<LinkProps, 'href'>) {
+  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    navigate(to);
+  };
+  return (
+    <MuiLink href={to} onClick={onClick} {...rest}>
+      {children}
+    </MuiLink>
+  );
+}

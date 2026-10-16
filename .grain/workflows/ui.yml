@@ -1,0 +1,48 @@
+# The hub's web UI (ui/, docs/ui.md), run by grain on every push and
+# pull request: the frontend is type-checked, built into
+# hub/ui/static/app, and unit-tested with vitest, the trust-boundary
+# tests among them (no service worker, no storage, the view-through
+# uncached); then hub/ui and hub/server are tested with that bundle
+# embedded, as the hub's image carries it. The bundle is never
+# committed; hub.yml's Go build embeds the placeholder in its place.
+name: ui
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GOFLAGS: -mod=readonly
+  GOTOOLCHAIN: auto
+  # hub/ui's and the vitest suite's bundle tests fail, rather than skip,
+  # without one.
+  SILO_UI_REQUIRE_BUNDLE: "1"
+
+jobs:
+  ui:
+    name: ui
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    timeout-minutes: 15
+    steps:
+      - name: Check Node
+        infrastructure: true
+        run: |
+          node --version
+          npm --version
+
+      - name: Install
+        run: cd ui && npm ci --no-audit --no-fund
+
+      - name: Type-check and build
+        run: cd ui && npm run build
+
+      - name: Test
+        run: cd ui && npm test
+
+      - name: Embed
+        run: go test ./hub/ui ./hub/server -run 'TestBundle|TestHandler|TestPlaceholder|TestWebUI'
