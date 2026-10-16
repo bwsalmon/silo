@@ -1201,8 +1201,13 @@ If the node is offline, the artifact is unavailable. This is the
 intended trade.
 
 As built, a viewer asks `GET /v1/tasks/{id}/artifacts?ref=<ref>`, with
-the same access check as the task's events. The view stream carries
-one JSON line each way and then the bytes:
+the same access check as the task's events. The hub asks the node only
+for a ref the node itself listed in the task's artifact events, and
+answers 404 to any other without reaching the node (audit SA1-M3): it
+keeps the listed refs, and only the refs, in `task_refs`, the newest
+4096 per task (`live.MaxRefs`), so they outlast the token ring and a
+hub restart. The view stream carries one JSON line each way and then
+the bytes:
 
 ```
 hub → node  {"type":"view","task":"<hub id>","node_task":"<local id>","ref":"<ref>"}

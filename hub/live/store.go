@@ -25,7 +25,18 @@ type Log interface {
 	// Last returns task's last kept event's seq and type: 0 and "" when
 	// it has none.
 	Last(ctx context.Context, task string) (int64, string, error)
+	// AddRef keeps ref as one of task's artifacts' refs, which its node
+	// listed in event seq: only the ref, never what it names. It keeps
+	// the newest MaxRefs of a task's refs.
+	AddRef(ctx context.Context, task, ref string, seq int64) error
+	// HasRef is whether task's node listed ref (AddRef), among the
+	// refs kept.
+	HasRef(ctx context.Context, task, ref string) (bool, error)
 }
+
+// MaxRefs is how many of a task's artifact refs the hub keeps, the
+// newest; a view of an older one is refused (O-5, INV-19).
+const MaxRefs = 4096
 
 // maxConns caps the event store's PostgreSQL connections, all of which
 // it keeps open once made: every running task writes its events here, so
@@ -80,7 +91,7 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	}
 	s := &Store{db: db, postgres: postgres}
 	if !create {
-		if err := dbaccess.Check(ctx, db, "live", "task_events"); err != nil {
+		if err := dbaccess.Check(ctx, db, "live", "task_events", "task_refs"); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -96,6 +107,19 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 )`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("live: creating tables: %w", err)
+	}
+	// The refs a task's node listed in its artifact events, which alone
+	// the view-through asks a node for (SA1-M3, INV-11).
+	for _, stmt := range []string{`CREATE TABLE IF NOT EXISTS task_refs (
+	task TEXT NOT NULL,
+	ref TEXT NOT NULL,
+	seq BIGINT NOT NULL,
+	PRIMARY KEY (task, ref)
+)`, `CREATE INDEX IF NOT EXISTS task_refs_seq ON task_refs (task, seq)`} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("live: creating tables: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -179,4 +203,29 @@ func (s *Store) Last(ctx context.Context, task string) (int64, string, error) {
 		return 0, "", nil
 	}
 	return seq, typ, err
+}
+
+// AddRef keeps ref as one of task's listed refs, and drops the oldest
+// past MaxRefs. A ref listed again keeps its first seq.
+func (s *Store) AddRef(ctx context.Context, task, ref string, seq int64) error {
+	if !validRef(ref) {
+		return fmt.Errorf("live: not a ref: %q", ref)
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_refs (task, ref, seq) VALUES (?, ?, ?) ON CONFLICT (task, ref) DO NOTHING`), task, ref, seq)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, s.q(`DELETE FROM task_refs WHERE task = ? AND seq <= (
+	SELECT seq FROM task_refs WHERE task = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)`), task, task, MaxRefs)
+	return err
+}
+
+// HasRef is whether task's node listed ref.
+func (s *Store) HasRef(ctx context.Context, task, ref string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM task_refs WHERE task = ? AND ref = ?`), task, ref).Scan(&n)
+	return n > 0, err
 }

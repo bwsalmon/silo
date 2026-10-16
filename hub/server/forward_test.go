@@ -158,6 +158,11 @@ func TestForwardedOpen(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
+	// diff-1 as the node lists it, through whichever pod holds its
+	// event stream: the refs are shared in the database.
+	if _, err := db.Exec(`INSERT INTO task_refs (task, ref, seq) VALUES ($1, 'diff-1', 1)`, task.ID); err != nil {
+		t.Fatal(err)
+	}
 	if code, body := get("", disp.url+tasks.TasksPath+"/"+task.ID+"/artifacts?ref=diff-1"); code != http.StatusOK || body != forwardedDiff {
 		t.Fatalf("viewing diff-1 through the other pod: %d %q", code, body)
 	}

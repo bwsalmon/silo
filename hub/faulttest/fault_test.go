@@ -324,6 +324,10 @@ func TestViewThroughDisconnect(t *testing.T) {
 	id := c.SubmitN(1)[0]
 	running(c, 1)
 	url := c.Hub.URL + "/v1/tasks/" + id + "/artifacts?ref=art-1"
+	// art-1 as the Grain lists it: the hub views no other ref.
+	if _, err := c.DB.Exec(`INSERT INTO task_refs (task, ref, seq) VALUES ($1, 'art-1', 1)`, id); err != nil {
+		t.Fatal(err)
+	}
 	view := func() (int, int, error) {
 		req, _ := http.NewRequest("GET", url, nil)
 		req.Header.Set(UserHeader, Ops)
