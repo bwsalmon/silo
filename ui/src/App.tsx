@@ -1,6 +1,7 @@
 // The UI's shell: a bar with the pages and who is signed in, and the
-// page the URL names. /v1/me is asked only to fill the team selector
-// and say who the caller is; it decides nothing.
+// page the URL names. /v1/me is asked only to fill the team selector,
+// say who the caller is and choose which edit actions to show; it
+// decides nothing, and the API answers every action itself.
 import { Alert, AppBar, Box, Button, Container, Toolbar, Typography } from '@mui/material';
 import { ApiError, getMe } from './api';
 import { useLoad } from './load';
@@ -8,6 +9,9 @@ import { navigate, useRoute } from './router';
 import { Backlog } from './pages/Backlog';
 import { TaskPage } from './pages/TaskPage';
 import { Nodes } from './pages/Nodes';
+import { FileTask } from './pages/FileTask';
+import { Teams } from './pages/Teams';
+import { TeamPage } from './pages/TeamPage';
 
 export function App() {
   const route = useRoute();
@@ -24,8 +28,14 @@ export function App() {
           <Button color="inherit" onClick={() => navigate('/')}>
             Backlog
           </Button>
+          <Button color="inherit" onClick={() => navigate('/teams')}>
+            Teams
+          </Button>
           <Button color="inherit" onClick={() => navigate('/nodes')}>
             Nodes
+          </Button>
+          <Button color="inherit" onClick={() => navigate('/file')}>
+            File a task
           </Button>
           <Box sx={{ flex: 1 }} />
           {me.data && (
@@ -43,8 +53,11 @@ export function App() {
           <>
             {me.error && <Alert severity="error">{me.error.message}</Alert>}
             {route.page === 'backlog' && <Backlog me={me.data} team={route.team} />}
-            {route.page === 'task' && <TaskPage id={route.id} />}
-            {route.page === 'nodes' && <Nodes />}
+            {route.page === 'task' && <TaskPage id={route.id} me={me.data} />}
+            {route.page === 'nodes' && <Nodes me={me.data} />}
+            {route.page === 'file' && <FileTask me={me.data} team={route.team} />}
+            {route.page === 'teams' && <Teams me={me.data} />}
+            {route.page === 'team' && <TeamPage me={me.data} team={route.team} />}
             {route.page === 'notfound' && <Alert severity="warning">No page at {route.path}.</Alert>}
           </>
         )}

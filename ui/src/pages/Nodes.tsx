@@ -1,12 +1,14 @@
 // The node directory (GET /v1/nodes): the nodes the caller may see,
-// as the API filters them.
+// as the API filters them; and the caller's node tokens, minted and
+// revoked here.
 import { Alert, LinearProgress, Paper, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
-import { listNodes } from '../api';
+import { listNodes, type Me } from '../api';
+import { NodeTokens } from '../components/NodeTokens';
 import { useLoad } from '../load';
 import { NodeStatusChip } from '../components/StateChip';
 import { when } from './Backlog';
 
-export function Nodes() {
+export function Nodes({ me }: { me?: Me }) {
   const nodes = useLoad((signal) => listNodes(signal), [], 15000);
   return (
     <Stack spacing={2}>
@@ -54,6 +56,7 @@ export function Nodes() {
           </TableBody>
         </Table>
       </Paper>
+      <NodeTokens showOwner={!!me?.hub_admin} />
     </Stack>
   );
 }
