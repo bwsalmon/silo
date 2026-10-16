@@ -785,10 +785,11 @@ more) holds:
   emails, so the hub does not guess. Rows from before principals had
   prefixes are made `user:` when the tables are migrated (the only
   deployment then was behind IAP, which has no groups).
-- `team_repos(repo, team)`, keyed by repository, so every repository
-  has at most one owning team. Assigning a repository that another team
-  owns is refused: it has to be released first, so one team's admin
-  cannot take another team's repository.
+- `team_repos(repo, team, history)`, keyed by repository, so every
+  repository has at most one owning team. Assigning a repository that
+  another team owns is refused: it has to be released first, so no team
+  can take another team's repository. `history` says whether the team
+  was given the tasks earlier teams filed in the repository (below).
 - `node_tokens(id, hash, owner, node, created_at, revoked_at,
   released_at)`, with at most one live token per node ID, and an ID's
   unreleased rows all of one owner (§5.2).
@@ -808,13 +809,41 @@ These rules follow:
   for would sit in the directory looking healthy while the work it was
   set up for went nowhere. (This settles the question §10 used to ask.)
 - A human sees the tasks, events and nodes of their own teams
-  (`Access`): `SeesTeam` for a team-targeted task, `SeesRepo` for a
-  repository's tasks and events, and `SeesNode` for the directory, where
+  (`Access`): `SeesTask` for a task, its events and its artifacts, and
+  `SeesNode` for the directory, where
   a node is visible to its own owner and to the members of any team
   that owns one of its repositories. The node directory and the teams
   list are filtered this way. A team the caller is not in answers 404,
   as one that does not exist would.
-- Team admins assign repositories to their team and manage its members.
+- **Only a hub admin assigns a repository to a team** (SA1-M2). Team
+  admins manage their team's members and settings, and may release a
+  repository of their team, but not claim one: nothing ties a
+  repository to a team except the assignment, so a team admin who
+  could assign would claim, first come first served, any repository no
+  team owned at that moment (never assigned, released for a transfer,
+  or left by a deleted team), and with it the right to serve its tasks
+  and a 409 for the team it was meant for. Team admins are delegated
+  (any team admin can make anyone an admin), so that was any user a
+  team had made admin. Granting team admins forge owners or prefixes
+  to claim under, or accepting proof of forge access, was considered
+  and left for when hub admins assigning every repository is too slow.
+- **A task stays with the team it was filed under.** `SeesTask` shows a
+  task to the members of the team recorded on it (`Task.Team`) and, for
+  a repository's task, to the members of the team that owns the
+  repository now only if that team was given the repository's history:
+  a hub admin's `PUT .../repos/{owner}/{name} {"history": true}`
+  (`Store.TransferRepo`). An assignment without it, the default, and
+  every assignment made before `history` existed, shows the new team
+  only the tasks it files itself, so neither a release nor deleting a
+  team hands a repository's past prompts, conversation and events to
+  whoever owns it next. Assigning a repository again to the team that
+  owns it sets `history` to what that call says. A recreated team with a
+  deleted team's ID is that team again, tasks included: choose a new ID
+  for a new team.
+- Every change to who owns what is logged as a `directory: audit:`
+  line naming the signed-in caller: deleting a team, assigning a
+  repository (with whether its history went with it), releasing one.
+  This is a start on O-10, not a tamper-evident audit log.
 - A hub-wide admin role creates and deletes teams and sees everything.
   It is the hub's configuration (`API.HubAdmins`, `SILO_HUB_ADMINS`),
   not a row a team admin could grant. Its entries are principals as
@@ -835,7 +864,7 @@ POST   /v1/teams {"id","name"}                         hub admin
 DELETE /v1/teams/{team}                                hub admin; its repositories are left unowned
 PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin; principal is user:EMAIL or group:NAME
 DELETE /v1/teams/{team}/members/{principal}            team admin
-PUT    /v1/teams/{team}/repos/{owner}/{name}           team admin
+PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history": true}]   hub admin; history also gives the team the repository's earlier tasks
 DELETE /v1/teams/{team}/repos/{owner}/{name}           team admin
 GET    /v1/node-tokens                                 the caller's (all, for a hub admin)
 POST   /v1/node-tokens {"node"}                        mint one for the caller
@@ -1201,8 +1230,13 @@ If the node is offline, the artifact is unavailable. This is the
 intended trade.
 
 As built, a viewer asks `GET /v1/tasks/{id}/artifacts?ref=<ref>`, with
-the same access check as the task's events. The view stream carries
-one JSON line each way and then the bytes:
+the same access check as the task's events. The hub asks the node only
+for a ref the node itself listed in the task's artifact events, and
+answers 404 to any other without reaching the node (audit SA1-M3): it
+keeps the listed refs, and only the refs, in `task_refs`, the newest
+4096 per task (`live.MaxRefs`), so they outlast the token ring and a
+hub restart. The view stream carries one JSON line each way and then
+the bytes:
 
 ```
 hub → node  {"type":"view","task":"<hub id>","node_task":"<local id>","ref":"<ref>"}

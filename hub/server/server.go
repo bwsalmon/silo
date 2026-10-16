@@ -323,7 +323,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			cfg.logf("hub: hub admin %q has no user: or group: prefix; treating it as %s (write group:NAME if a group was meant)", adm, p)
 		}
 	}
-	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins}
+	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins, Logf: cfg.Logf}
 	h.Rendezvous = &rendezvous.Server{
 		Registry:     h.Registry,
 		Authenticate: h.Directory.Authenticate,

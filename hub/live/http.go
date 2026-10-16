@@ -78,9 +78,10 @@ func (h *Hub) task(w http.ResponseWriter, r *http.Request) (tasks.Task, bool) {
 }
 
 // sees is the backlog's rule: a member of the task's team, or, for a
-// repository's task, of the team that owns the repository now.
+// repository's task, of the team a hub admin transferred the repository
+// to with its history (directory.Access.SeesTask).
 func sees(acc *directory.Access, t tasks.Task) bool {
-	return acc.SeesTeam(t.Team) || (t.Repo != "" && acc.SeesRepo(t.Repo))
+	return acc.SeesTask(t.Team, t.Repo)
 }
 
 // endMessage is the last message of a subscription whose task's events
@@ -216,8 +217,9 @@ func (h *Hub) serveWebSocket(w http.ResponseWriter, r *http.Request, t tasks.Tas
 //	node → hub  {"type":"ok"} and the bytes
 //	            {"type":"error","error":"..."}
 //
-// A node serves only refs it has itself listed in its events; the hub
-// passes the bytes to its viewer as they come and keeps none of them.
+// A node serves only refs it has itself listed in its events, and the
+// hub asks it for no other (Log.HasRef); the hub passes the bytes to
+// its viewer as they come and keeps none of them.
 const (
 	TypeView  = "view"
 	TypeOK    = "ok"
@@ -251,6 +253,15 @@ func (h *Hub) serveArtifact(w http.ResponseWriter, r *http.Request) {
 		// Not the node the task ran on, though it may have its ID.
 		h.logf("live: not asking node %q for task %s's artifact: %v", t.Node, t.ID, err)
 		http.Error(w, "unavailable: node "+t.Node+", which holds it, is offline", http.StatusServiceUnavailable)
+		return
+	}
+	// Only a ref the node itself listed: whatever else a viewer names,
+	// a ../ path for one, never reaches the node (SA1-M3, INV-11).
+	if listed, err := h.Log.HasRef(r.Context(), t.ID, ref); err != nil {
+		http.Error(w, "reading the task's artifacts: "+err.Error(), http.StatusInternalServerError)
+		return
+	} else if !listed {
+		http.Error(w, "no such artifact", http.StatusNotFound)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), viewTimeout)
