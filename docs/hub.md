@@ -1072,7 +1072,8 @@ afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
 | header `alg`, `kid` | `ES256` for an EC P-256 key, `RS256` for RSA of 2048 bits or more; `kid` is the key's RFC 7638 thumbprint, the same on every pod |
 | `iss` | `-claims-issuer`: what nodes name as `silo_issuer` |
 | `aud` | the node's ID, checked by a node whose policy sets `silo_audience` |
-| `iat`, `exp` | when it was signed, and an hour later |
+| `iat`, `exp` | when it was signed, and an hour later; both always present, and the signer refuses a lifetime over 24 hours (`claims.MaxTTL`), which grain refuses too |
+| `hub_task_id` | the task's hub ID, `tasks.Spec.ID` |
 | `requester` | the task's `submitter`; the Grain records them as the task's creator |
 | `team` | the task's team |
 | `approved_by` | the task's `approved_by`: empty for a task nobody approved at the hub, which is every direct submission |
@@ -1081,7 +1082,21 @@ afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
 | `spec_digest` | `sha256:` and the hex SHA-256 of `{"target":repo,"base":"","reads":[],"writes":[],"title":title,"body":prompt}`, compact, in that key order (`claims.SpecDigest`, as grain's `policy.SpecDigest`) |
 
 The digest binds the claims to the task the node was given: a
-different repository, title or prompt has a different digest. A
+different repository, title or prompt has a different digest.
+
+**What the digest covers, agreed with grain.** grain's
+`ApplySiloClaims` compares `spec_digest` with `policy.SpecDigest` of
+the task as the Grain files it, and the hub has to be able to compute
+the same value from the spec alone. So a Grain files a hub task with:
+target the offer's `repo` (empty for a team-targeted task), no base
+branch, no reads or writes, title the offer's `title`, and body the
+offer's `prompt`, byte for byte. Nothing is appended to the body: the
+link back to the hub, which grain used to write as a footer naming the
+hub task, is the signed `hub_task_id` claim and the attestation the
+Grain records with `Store.SetSiloAttestation`. A Grain that still wants
+to show the hub task in its UI does so from those, not from the body.
+Anything added to the body, a footer included, makes the digest
+mismatch and the offer is refused. A
 team-targeted task's target is empty, because the node chooses its
 repository; the node's own policy decides whether it may run there.
 When the hub gains approvals, capabilities, a base branch or
@@ -1105,10 +1120,11 @@ This is that attestation in the JWT form grain's local policy verifies:
 the approval (the task's `approved_by`; empty until the hub has an
 approval flow), carried on the offer
 (§6.2), which is the hub's `RunTaskRequest`, as
-`requester_attestation`. grain's node client (`pkg/hubnode`) still
-refuses every offer; accepting one, by passing the attestation to
-`policy.ApplySiloClaims` and recording it with
-`Store.SetSiloAttestation`, is grain's follow-up.
+`requester_attestation`. A Grain under `silo_issuer` refuses every hub
+offer until its `hubTasks.Start` (`pkg/daemon/hub.go`) passes the
+attestation to `policy.ApplySiloClaims`, records it with
+`Store.SetSiloAttestation`, refuses the offer when either fails, and
+files the body as above; that is grain's follow-up.
 
 
 ## 7. Live events and privacy (built: `hub/live`)

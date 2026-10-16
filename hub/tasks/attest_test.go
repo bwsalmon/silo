@@ -51,6 +51,12 @@ func verifyAttestation(t *testing.T, s *claims.Signer, m Message, node string) c
 	if c.SpecDigest != want {
 		t.Errorf("spec_digest %s, want %s for the task offered", c.SpecDigest, want)
 	}
+	if c.HubTaskID == "" || c.HubTaskID != m.Task.ID {
+		t.Errorf("hub_task_id %q, want the offered task's ID %q", c.HubTaskID, m.Task.ID)
+	}
+	if c.IssuedAt == 0 || c.Expiry <= c.IssuedAt || c.Expiry-c.IssuedAt > int64(claims.MaxTTL.Seconds()) {
+		t.Errorf("iat %d, exp %d: want both, at most a day apart", c.IssuedAt, c.Expiry)
+	}
 	return c
 }
 

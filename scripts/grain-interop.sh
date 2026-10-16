@@ -125,10 +125,23 @@ hub() { # METHOD PATH [BODY]
 	[ $# -ge 3 ] && args+=(-H 'Content-Type: application/json' -d "$3")
 	curl "${args[@]}"
 }
+# GRAIN_CODE is the running grain's access code file. A single-tenant
+# grain asks every caller, loopback included, for the code it writes
+# there; one that writes none (older grains) trusts loopback.
+GRAIN_CODE=
+grain_auth() {
+	[ -n "$GRAIN_CODE" ] && [ -s "$GRAIN_CODE" ] && printf '%s\n' -H "Authorization: Bearer $(tr -d '[:space:]' <"$GRAIN_CODE")"
+}
 grainapi() { # METHOD PATH [BODY]
 	local args=(-sS -X "$1" "http://127.0.0.1:$UI_PORT$2")
+	local -a auth; mapfile -t auth < <(grain_auth)
+	args+=("${auth[@]}")
 	[ $# -ge 3 ] && args+=(-H 'Content-Type: application/json' -d "$3")
 	curl "${args[@]}"
+}
+grain_up() {
+	local -a auth; mapfile -t auth < <(grain_auth)
+	curl -sf "${auth[@]}" "http://127.0.0.1:$UI_PORT/api/teams" -o /dev/null
 }
 
 # until_true SECONDS CMD... runs CMD every second until it succeeds.
@@ -253,7 +266,8 @@ round_trip() {
 		-hub-url "http://127.0.0.1:$HUB_PORT" -hub-token-file "$d/token" -hub-node-id "$NODE" \
 		-hub-repos acme/widgets,acme/outside -hub-slots 4 >"$d/grain.log" 2>&1 &
 	PIDS+=($!)
-	until_true 60 curl -sf "http://127.0.0.1:$UI_PORT/api/teams" -o /dev/null || { fail grain "grain's API did not come up"; return 1; }
+	GRAIN_CODE="$d/grain/local-api-token"
+	until_true 60 grain_up || { fail grain "grain's API did not come up"; return 1; }
 
 	grain_team widgets acme/widgets || return 1
 
@@ -311,7 +325,7 @@ round_trip() {
 	until_true "$WAIT" task_settled "$c" || { fail result "hub task $c was not settled: $(hub GET "/v1/tasks/$c")"; return 1; }
 	nc="$(task_field "$c" node_task)"
 	[ -n "$nc" ] || { fail result "grain did not accept hub task $c: $(task_field "$c" reason)"; return 1; }
-	GRAIN_SERVER="http://127.0.0.1:$UI_PORT" "$grain" close "$nc" >/dev/null 2>"$d/close.err" ||
+	GRAIN_SERVER="http://127.0.0.1:$UI_PORT" GRAIN_DATA_DIR="$d/grain" "$grain" close "$nc" >/dev/null 2>"$d/close.err" ||
 		{ fail result "closing grain task $nc: $(cat "$d/close.err")"; return 1; }
 	until_true "$WAIT" task_state_is "$c" failed || { fail result "grain task $nc closed, but hub task $c is $(task_field "$c" state)"; return 1; }
 	say "grain task $nc closed; hub task $c failed: $(task_field "$c" reason)"
