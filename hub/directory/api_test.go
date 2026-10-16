@@ -230,4 +230,22 @@ func TestAPI(t *testing.T) {
 	if _, err := connect(aliceTok, registry.Node{ID: "ws-alice", Slots: 1}); err == nil {
 		t.Error("a revoked token connected")
 	}
+
+	// Minting again revokes the earlier token, and so ends the
+	// connection it holds (SA1-L2): a thief's connection with a stolen
+	// token does not outlive the owner's recovery from it.
+	bobTok2 := mint(bob, "ws-bob")
+	select {
+	case <-cb.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("a re-minted node's old connection is still up")
+	}
+	if _, err := connect(bobTok, registry.Node{ID: "ws-bob", Slots: 1}); err == nil {
+		t.Error("a re-minted node's old token connected")
+	}
+	cb2, err := connect(bobTok2, registry.Node{ID: "ws-bob", Repos: []string{"bwsalmon/web"}, Slots: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb2.Close()
 }

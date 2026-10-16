@@ -44,13 +44,21 @@ func hashToken(tok string) string {
 // IDs stay bound to their owner across hub restarts, which the
 // in-memory registry alone would forget.
 func (s *Store) MintNodeToken(ctx context.Context, owner, node string) (string, NodeToken, error) {
+	tok, t, _, err := s.mintNodeToken(ctx, owner, node)
+	return tok, t, err
+}
+
+// mintNodeToken is MintNodeToken, also saying how many earlier tokens
+// it revoked, so the API can end the connection one of them holds.
+func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, NodeToken, int64, error) {
 	o, err := normPrincipal(owner)
 	if err != nil {
-		return "", NodeToken{}, err
+		return "", NodeToken{}, 0, err
 	}
 	if _, err := registry.Validate(registry.Node{ID: node}); err != nil {
-		return "", NodeToken{}, fmt.Errorf("%w node: %v", ErrInvalid, err)
+		return "", NodeToken{}, 0, fmt.Errorf("%w node: %v", ErrInvalid, err)
 	}
+	var revoked int64
 	idb := make([]byte, 8)
 	secret := make([]byte, 32)
 	rand.Read(idb)
@@ -66,8 +74,12 @@ func (s *Store) MintNodeToken(ctx context.Context, owner, node string) (string, 
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE node = ? AND owner = ? AND revoked_at IS NULL`),
-			t.Created.UnixMilli(), node, o); err != nil {
+		res, err := tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE node = ? AND owner = ? AND revoked_at IS NULL`),
+			t.Created.UnixMilli(), node, o)
+		if err != nil {
+			return err
+		}
+		if revoked, err = res.RowsAffected(); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO node_tokens (id, hash, owner, node, created_at) VALUES (?, ?, ?, ?, ?)`),
@@ -78,9 +90,9 @@ func (s *Store) MintNodeToken(ctx context.Context, owner, node string) (string, 
 		return err
 	})
 	if err != nil {
-		return "", NodeToken{}, err
+		return "", NodeToken{}, 0, err
 	}
-	return tok, t, nil
+	return tok, t, revoked, nil
 }
 
 // VerifyNodeToken is the owner and node a live token proves.

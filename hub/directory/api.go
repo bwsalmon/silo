@@ -329,9 +329,14 @@ func (a *API) mintToken(w http.ResponseWriter, r *http.Request, acc *Access) err
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
-	tok, rec, err := a.Store.MintNodeToken(r.Context(), acc.Email, req.Node)
+	tok, rec, revoked, err := a.Store.mintNodeToken(r.Context(), acc.Email, req.Node)
 	if err != nil {
 		return err
+	}
+	// Minting again is how a stolen token is recovered from, so the
+	// connection an earlier token holds ends with it, as on revoke.
+	if revoked > 0 && a.Disconnect != nil {
+		a.Disconnect(rec.Node)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	return writeJSON(w, http.StatusCreated, struct {

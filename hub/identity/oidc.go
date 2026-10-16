@@ -261,9 +261,20 @@ func (o *OIDC) setCookie(w http.ResponseWriter, name, value string, ttl time.Dur
 }
 
 // localReturn is where to send the user after signing in: a path on
-// this hub only, never another site.
+// this hub only, never another site. Browsers strip control
+// characters and read `\` as `/`, so `/\t/evil.example` would reach
+// another site: any of them, raw or percent-encoded, refuses the value.
 func localReturn(s string) string {
-	if !strings.HasPrefix(s, "/") || strings.HasPrefix(s, "//") || strings.HasPrefix(s, "/\\") {
+	bad := func(v string) bool {
+		return strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '\\' })
+	}
+	if bad(s) {
+		return "/"
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" ||
+		!strings.HasPrefix(u.Path, "/") || strings.HasPrefix(u.Path, "//") || bad(u.Path) ||
+		!strings.HasPrefix(s, "/") || strings.HasPrefix(s, "//") {
 		return "/"
 	}
 	return s
