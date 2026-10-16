@@ -1,0 +1,74 @@
+# The hub's deployment (docs/deploy.md), checked without touching any
+# project: the container image builds, the Kubernetes manifests build
+# and pass a kind cluster's strict server-side validation with the
+# Gateway API's and GKE's CRDs installed, and the terraform validates
+# and passes its tests against mock providers. Nothing is pushed or
+# applied.
+name: deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  image:
+    name: image
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    timeout-minutes: 20
+    steps:
+      # The build reaches Go modules through this sandbox's own module
+      # proxy, which a container cannot reach by TLS to the public one.
+      - name: Build the hub image
+        run: |
+          docker build --network host --build-arg GOPROXY="$(go env GOPROXY)" -t silo-hub:ci .
+          docker run --rm silo-hub:ci hub serve -h 2>&1 | grep -q -- -iap-audience
+
+  manifests:
+    name: manifests
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 2
+      memory-mb: 8192
+    timeout-minutes: 20
+    steps:
+      - name: Check kind
+        infrastructure: true
+        run: |
+          kind version
+          kubectl version --client
+
+      - name: Validate the manifests
+        run: deploy/kubernetes/hub/validate.sh
+
+  terraform:
+    name: terraform
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    timeout-minutes: 15
+    steps:
+      - name: Check terraform
+        infrastructure: true
+        run: terraform version
+
+      - name: Format
+        run: terraform -chdir=deploy/terraform/hub fmt -check -recursive
+
+      - name: Validate
+        run: |
+          terraform -chdir=deploy/terraform/hub init -backend=false -input=false
+          terraform -chdir=deploy/terraform/hub validate
+
+      - name: Test
+        run: |
+          terraform -chdir=deploy/terraform/hub test
+          terraform -chdir=deploy/terraform/hub test -var-file=bsalmon-gke-dev.tfvars

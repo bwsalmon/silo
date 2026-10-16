@@ -36,6 +36,15 @@ type Client struct {
 	// TLS configures the connection to an https hub; nil uses the
 	// system roots.
 	TLS *tls.Config
+	// Logf, when set, receives one line each time Run's connection
+	// ends or fails, saying why, before it reconnects.
+	Logf func(format string, args ...any)
+}
+
+func (cl *Client) logf(format string, args ...any) {
+	if cl.Logf != nil {
+		cl.Logf(format, args...)
+	}
 }
 
 // Conn is one live connection to the hub.
@@ -44,6 +53,17 @@ type Conn struct {
 	ctl   *lines
 	owner string
 	once  sync.Once
+
+	mu      sync.Mutex
+	goodbye string
+}
+
+// Goodbye is the reason the hub gave for ending the connection, when
+// it said goodbye (it was shutting down); empty otherwise.
+func (c *Conn) Goodbye() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.goodbye
 }
 
 // Owner is the identity the hub registered the node under.
@@ -111,10 +131,18 @@ func (cl *Client) Connect(ctx context.Context) (*Conn, error) {
 	}
 	go cl.heartbeat(c, hb)
 	go func() {
-		// The hub sends nothing more on the control stream; a read
-		// ending is the stream or the connection ending.
+		// The hub sends nothing more on the control stream but a
+		// goodbye; a read ending is the stream or the connection ending.
 		for {
-			if _, err := l.read(); err != nil {
+			msg, err := l.read()
+			if err != nil {
+				c.Close()
+				return
+			}
+			if msg.Type == TypeGoodbye {
+				c.mu.Lock()
+				c.goodbye = msg.Error
+				c.mu.Unlock()
 				c.Close()
 				return
 			}
@@ -176,8 +204,10 @@ func (cl *Client) config(ctx context.Context) (*websocket.Config, error) {
 
 // Run keeps the node connected until ctx ends: it connects, hands each
 // stream the hub opens to handle, and reconnects with backoff (up to a
-// minute) when the connection drops. A refusal is returned rather than
-// retried, since retrying would be refused the same way.
+// minute) when the connection drops, or when the hub says goodbye
+// because it is shutting down (a rolling update replaces it). A refusal
+// is returned rather than retried, since retrying would be refused the
+// same way.
 func (cl *Client) Run(ctx context.Context, handle func(net.Conn)) error {
 	backoff := time.Second
 	for {
@@ -201,6 +231,13 @@ func (cl *Client) Run(ctx context.Context, handle func(net.Conn)) error {
 				}
 				go handle(st)
 			}
+			if why := c.Goodbye(); why != "" {
+				cl.logf("rendezvous: the hub closed the connection: %s; reconnecting", why)
+			} else if ctx.Err() == nil {
+				cl.logf("rendezvous: the connection to the hub dropped; reconnecting")
+			}
+		} else {
+			cl.logf("rendezvous: connecting to the hub: %v; retrying in %s", err, backoff)
 		}
 		select {
 		case <-ctx.Done():

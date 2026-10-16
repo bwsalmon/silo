@@ -1,0 +1,73 @@
+# IAP on the humans' backend. The OAuth client is terraform's
+# (iap_client_id); its secret is the Secret silo-hub-iap, key "key"
+# (docs/deploy.md). Event subscriptions are long-lived, so its timeout
+# is an hour; they reconnect from their cursor.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: silo-hub
+spec:
+  default:
+    iap:
+      enabled: true
+      clientID: IAP_CLIENT_ID
+      oauth2ClientSecret:
+        name: silo-hub-iap
+    timeoutSec: 3600
+    connectionDraining:
+      drainingTimeoutSec: 30
+  targetRef:
+    group: ""
+    kind: Service
+    name: silo-hub
+---
+# The nodes' backend: no IAP, and the longest timeout the load balancer
+# takes, since a WebSocket lives no longer than its backend's timeout.
+# Nodes reconnect anyway, when it ends and whenever the pod rolls.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: silo-hub-nodes
+spec:
+  default:
+    iap:
+      enabled: false
+    timeoutSec: 86400
+    connectionDraining:
+      drainingTimeoutSec: 30
+  targetRef:
+    group: ""
+    kind: Service
+    name: silo-hub-nodes
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: silo-hub
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        requestPath: /readyz
+  targetRef:
+    group: ""
+    kind: Service
+    name: silo-hub
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: silo-hub-nodes
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        requestPath: /readyz
+  targetRef:
+    group: ""
+    kind: Service
+    name: silo-hub-nodes

@@ -57,14 +57,20 @@ type Server struct {
 	// Logf, when set, receives one line per connection event.
 	Logf func(format string, args ...any)
 
-	mu    sync.Mutex
-	conns map[string]*nodeConn
+	mu      sync.Mutex
+	conns   map[string]*nodeConn
+	closing string // why Shutdown is ending every connection, once called
 }
 
 type nodeConn struct {
 	m     *mux.Mux
+	ctl   *lines
 	lease *registry.Lease
 }
+
+// ErrShuttingDown is a node connecting to a hub that Shutdown has
+// been called on: answered 503, which the node retries.
+var ErrShuttingDown = errors.New("rendezvous: the hub is shutting down")
 
 func (s *Server) logf(format string, args ...any) {
 	if s.Logf != nil {
@@ -107,6 +113,13 @@ func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request) {
 	if s.Authenticate == nil {
 		http.Error(w, "node authentication is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.mu.Lock()
+	closing := s.closing != ""
+	s.mu.Unlock()
+	if closing {
+		http.Error(w, ErrShuttingDown.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	id, err := s.Authenticate(r)
@@ -184,8 +197,15 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	}
 	defer lease.Close()
 
-	nc := &nodeConn{m: m, lease: lease}
+	nc := &nodeConn{m: m, ctl: l, lease: lease}
 	s.mu.Lock()
+	if s.closing != "" {
+		// Shutdown has already said goodbye to the connections it saw.
+		why := s.closing
+		s.mu.Unlock()
+		l.write(Message{Type: TypeGoodbye, Error: why})
+		return
+	}
 	if s.conns == nil {
 		s.conns = map[string]*nodeConn{}
 	}
@@ -301,4 +321,43 @@ func (s *Server) Disconnect(nodeID string) bool {
 	}
 	nc.m.Close()
 	return true
+}
+
+// Shutdown ends every node's connection, as a hub that is going away
+// does: new connections are answered 503, and each welcomed node is
+// sent a goodbye saying reason, so that it reconnects (to this hub's
+// replacement) rather than wondering. It waits for the nodes to close
+// their connections, until ctx ends, and then closes what is left.
+// The registry marks each node offline as its connection ends.
+func (s *Server) Shutdown(ctx context.Context, reason string) error {
+	if reason == "" {
+		reason = ErrShuttingDown.Error()
+	}
+	s.mu.Lock()
+	s.closing = reason
+	conns := make([]*nodeConn, 0, len(s.conns))
+	for _, nc := range s.conns {
+		conns = append(conns, nc)
+	}
+	s.mu.Unlock()
+
+	for _, nc := range conns {
+		nc.ctl.c.SetWriteDeadline(time.Now().Add(time.Second))
+		if err := nc.ctl.write(Message{Type: TypeGoodbye, Error: reason}); err != nil {
+			nc.m.Close()
+		}
+	}
+	var err error
+	for _, nc := range conns {
+		select {
+		case <-nc.m.Done():
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		nc.m.Close()
+	}
+	if err == nil {
+		s.logf("rendezvous: said goodbye to %d nodes: %s", len(conns), reason)
+	}
+	return err
 }

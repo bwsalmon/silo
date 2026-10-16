@@ -1,0 +1,28 @@
+# Two Services over the same pods, because IAP is set per backend
+# service and the Gateway makes one backend service per Service
+# (docs/hub.md §4.1): silo-hub carries humans' UI and SDK traffic with
+# IAP on, and silo-hub-nodes carries only the node WebSocket, with IAP
+# off, where the hub checks each node's token itself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: silo-hub
+spec:
+  selector:
+    app: silo-hub
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: silo-hub-nodes
+spec:
+  selector:
+    app: silo-hub
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,206 @@
+// Command silo runs the Silo hub (docs/hub.md):
+//
+//	silo hub serve     run the hub: the rendezvous nodes connect to, the directory, the backlog and its dispatcher, live events
+//	silo hub team      create a team, or add admins and repositories to one, straight in the database
+//	silo hub token     mint a node token, straight in the database
+//
+// The last two are for bootstrapping a hub that has no hub admin who
+// can reach its API yet (docs/deploy.md): they act on the database the
+// hub uses, as whoever can reach it, with no sign-in. Every flag can
+// also be set from the environment variable its help names.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/server"
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.LUTC)
+	if err := run(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(2)
+		}
+		fmt.Fprintln(os.Stderr, "silo:", err)
+		os.Exit(1)
+	}
+}
+
+const usage = `usage:
+  silo hub serve [flags]   run the hub
+  silo hub team [flags]    create a team, or add admins and repositories to one
+  silo hub token [flags]   mint a node token
+Run a command with -h for its flags.`
+
+func run(args []string) error {
+	if len(args) < 2 || args[0] != "hub" {
+		fmt.Fprintln(os.Stderr, usage)
+		return flag.ErrHelp
+	}
+	switch args[1] {
+	case "serve":
+		return serve(args[2:])
+	case "team":
+		return team(args[2:])
+	case "token":
+		return token(args[2:])
+	default:
+		fmt.Fprintln(os.Stderr, usage)
+		return flag.ErrHelp
+	}
+}
+
+// env is the environment's value for name, or def.
+func env(name, def string) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+	return def
+}
+
+// list splits a comma-separated list, dropping empty entries.
+func list(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// multi is a repeatable flag.
+type multi []string
+
+func (m *multi) String() string     { return strings.Join(*m, ",") }
+func (m *multi) Set(v string) error { *m = append(*m, v); return nil }
+
+func databaseFlag(fs *flag.FlagSet) *string {
+	return fs.String("database", env("SILO_HUB_DATABASE", ""),
+		"the hub's database: postgres://... (sqlite:PATH for local development only) [SILO_HUB_DATABASE]")
+}
+
+func serve(args []string) error {
+	fs := flag.NewFlagSet("silo hub serve", flag.ContinueOnError)
+	addr := fs.String("addr", env("SILO_HUB_ADDR", ":8080"), "address to listen on [SILO_HUB_ADDR]")
+	db := databaseFlag(fs)
+	iap := fs.String("iap-audience", env("SILO_HUB_IAP_AUDIENCE", ""),
+		"sign humans in behind IAP: the backend service's audience, /projects/NUMBER/global/backendServices/ID [SILO_HUB_IAP_AUDIENCE]")
+	issuer := fs.String("oidc-issuer", env("SILO_HUB_OIDC_ISSUER", ""), "sign humans in with OIDC: the provider's issuer URL [SILO_HUB_OIDC_ISSUER]")
+	clientID := fs.String("oidc-client-id", env("SILO_HUB_OIDC_CLIENT_ID", ""), "the OIDC client ID [SILO_HUB_OIDC_CLIENT_ID]")
+	redirect := fs.String("oidc-redirect-url", env("SILO_HUB_OIDC_REDIRECT_URL", ""), "the hub's OIDC callback URL [SILO_HUB_OIDC_REDIRECT_URL]")
+	devHeader := fs.String("dev-user-header", env("SILO_HUB_DEV_USER_HEADER", ""),
+		"INSECURE, local development only: take the caller's email from this header, unverified [SILO_HUB_DEV_USER_HEADER]")
+	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, emails or groups [SILO_HUB_ADMINS]")
+	grace := fs.Duration("shutdown-grace", server.DefaultShutdownGrace, "how long shutdown waits for nodes and requests")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg := server.Config{
+		Database:     *db,
+		IAPAudience:  *iap,
+		OIDCIssuer:   *issuer,
+		OIDCClientID: *clientID,
+		// Secrets come only from the environment, never a flag, so
+		// they do not show in the process list.
+		OIDCClientSecret: os.Getenv("SILO_HUB_OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:  *redirect,
+		OIDCSessionKey:   []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
+		DevUserHeader:    *devHeader,
+		HubAdmins:        list(*admins),
+		ShutdownGrace:    *grace,
+		Logf:             log.Printf,
+	}
+	l, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	// SIGTERM is how Kubernetes stops a pod; the hub says goodbye to
+	// its nodes so that they reconnect to its replacement.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	return server.Serve(ctx, l, cfg)
+}
+
+func team(args []string) error {
+	fs := flag.NewFlagSet("silo hub team", flag.ContinueOnError)
+	db := databaseFlag(fs)
+	id := fs.String("id", "", "the team's ID, lower-case: created if it does not exist")
+	name := fs.String("name", "", "the team's display name, when it is created")
+	var admins, members, repos multi
+	fs.Var(&admins, "admin", "an admin of the team, an email or group (repeatable)")
+	fs.Var(&members, "member", "a member of the team, an email or group (repeatable)")
+	fs.Var(&repos, "repo", "a repository, owner/name, the team owns (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *db == "" || *id == "" {
+		return errors.New("silo hub team: -database and -id are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	s, err := directory.Open(ctx, *db)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if err := s.CreateTeam(ctx, *id, *name); err != nil && !errors.Is(err, directory.ErrExists) {
+		return err
+	}
+	for _, p := range admins {
+		if err := s.SetMember(ctx, *id, p, directory.Admin); err != nil {
+			return err
+		}
+	}
+	for _, p := range members {
+		if err := s.SetMember(ctx, *id, p, directory.Member); err != nil {
+			return err
+		}
+	}
+	for _, r := range repos {
+		if err := s.AssignRepo(ctx, *id, r); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("team %s: %d admins, %d members and %d repositories added\n", *id, len(admins), len(members), len(repos))
+	return nil
+}
+
+func token(args []string) error {
+	fs := flag.NewFlagSet("silo hub token", flag.ContinueOnError)
+	db := databaseFlag(fs)
+	owner := fs.String("owner", "", "the node's owner, the email its tasks are admitted under")
+	node := fs.String("node", "", "the node's ID: the only ID the token may register")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *db == "" || *owner == "" || *node == "" {
+		return errors.New("silo hub token: -database, -owner and -node are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	s, err := directory.Open(ctx, *db)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	tok, rec, err := s.MintNodeToken(ctx, *owner, *node)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "minted token %s for node %s of %s; it is shown only once:\n", rec.ID, rec.Node, rec.Owner)
+	fmt.Println(tok)
+	return nil
+}

@@ -26,10 +26,15 @@ node → hub  {"type":"hello","node":{"id":"...","repos":["owner/name",...],"slo
 hub → node  {"type":"welcome","owner":"<from the credential>","heartbeat_seconds":15}
             or {"type":"error","error":"..."}, then close
 node → hub  {"type":"heartbeat","free":N}      every heartbeat_seconds
+hub → node  {"type":"goodbye","error":"<why>"}  the hub is shutting down, then close
 ```
 
 `hello` must come within 30s of the handshake. `free` is the Grain's
-own count of free slots, counting every task it has accepted.
+own count of free slots, counting every task it has accepted. After
+`goodbye`, or any drop, the Grain reconnects with backoff: the hub's
+replacement is usually a few seconds away (a rolled pod). A Grain that
+does not know `goodbye` loses nothing by ignoring it, since the
+connection then ends anyway.
 
 ## Accept or refuse a task, report its result (the task stream)
 
