@@ -267,6 +267,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Ingested:  h.metrics.observeIngest,
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
+	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
 	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI}
 
 	m := http.NewServeMux()
