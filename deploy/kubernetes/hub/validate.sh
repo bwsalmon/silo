@@ -55,5 +55,9 @@ for o in "${overlays[@]}"; do
 	grep -q 'replicas: 1$' "$f" || { echo "$o: the hub must run one replica"; exit 1; }
 	grep -q 'type: Recreate' "$f" || { echo "$o: the hub must roll with Recreate"; exit 1; }
 	[ "$(grep -c 'requestPath: /readyz' "$f")" = 2 ] || { echo "$o: both backends' health checks must be /readyz"; exit 1; }
+	# The node UI hosts are IAP's alone: their route goes to silo-hub
+	# and never to the nodes' backend.
+	route="$(awk 'BEGIN { RS = "\n---\n" } /kind: HTTPRoute/ && /\n  name: silo-hub-node-ui\n/' "$f")"
+	{ grep -q -- '- name: silo-hub$' <<<"$route" && ! grep -q 'silo-hub-nodes' <<<"$route"; } || { echo "$o: the node UI hosts' route must go to the IAP backend alone"; exit 1; }
 done
 echo "manifests valid"

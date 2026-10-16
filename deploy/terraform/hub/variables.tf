@@ -46,8 +46,18 @@ variable "domain" {
   }
 }
 
+variable "node_ui_domain" {
+  description = "The domain the nodes' UIs are served under, each at <node>.<it> (SILO_HUB_NODE_UI_DOMAIN, docs/hub.md §11.2): it gets a *.<it> certificate, certificate map entry and, with dns_zone, a wildcard A record. Unset, nodes.<domain>; \"\" makes none."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.node_ui_domain == null || var.node_ui_domain == "" || can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", var.node_ui_domain))
+    error_message = "node_ui_domain must be a lower-case host name, or empty."
+  }
+}
+
 variable "dns_zone" {
-  description = "A Cloud DNS managed zone in the project that holds domain. When set, the A record and the certificate's DNS authorization record are made in it; when empty, the dns_records output says what to create."
+  description = "A Cloud DNS managed zone in the project that holds domain. When set, the A records and the certificates' DNS authorization records are made in it; when empty, the dns_records output says what to create."
   type        = string
   default     = ""
 }

@@ -25,15 +25,23 @@ output "certificate_map" {
 }
 
 output "dns_records" {
-  description = "The records domain needs, made here when dns_zone is set and by hand otherwise."
-  value = [
+  description = "The records domain and node_ui_domain need, made here when dns_zone is set and by hand otherwise."
+  value = concat([
     { name = "${var.domain}.", type = "A", data = google_compute_global_address.hub.address },
     {
       name = google_certificate_manager_dns_authorization.hub.dns_resource_record[0].name
       type = google_certificate_manager_dns_authorization.hub.dns_resource_record[0].type
       data = google_certificate_manager_dns_authorization.hub.dns_resource_record[0].data
     },
-  ]
+    ], flatten([for d, a in google_certificate_manager_dns_authorization.node_ui : [
+      { name = "*.${d}.", type = "A", data = google_compute_global_address.hub.address },
+      { name = a.dns_resource_record[0].name, type = a.dns_resource_record[0].type, data = a.dns_resource_record[0].data },
+  ]]))
+}
+
+output "node_ui_domain" {
+  description = "SILO_HUB_NODE_UI_DOMAIN in the manifests' config, and the HTTPRoute silo-hub-node-ui's host name without its \"*.\"; empty when there is none."
+  value       = local.node_ui_domain
 }
 
 output "iap_audience_prefix" {

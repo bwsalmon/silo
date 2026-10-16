@@ -74,12 +74,36 @@ run "defaults" {
     error_message = "the audience is the project number's"
   }
   assert {
-    condition     = length(google_dns_record_set.hub) == 0 && length(output.dns_records) == 2
-    error_message = "with no zone, the records are output rather than made"
+    condition     = length(google_dns_record_set.hub) == 0 && length(google_dns_record_set.node_ui) == 0 && length(output.dns_records) == 4
+    error_message = "with no zone, the records (the hub's and the node UI hosts') are output rather than made"
+  }
+  assert {
+    condition     = contains([for r in output.dns_records : r.name], "*.nodes.silo-hub.example.com.")
+    error_message = "the records include the node UI hosts' wildcard A record"
   }
   assert {
     condition     = google_certificate_manager_certificate_map_entry.hub.hostname == "silo-hub.example.com"
     error_message = "the certificate map serves the domain"
+  }
+  assert {
+    condition     = output.node_ui_domain == "nodes.silo-hub.example.com"
+    error_message = "the node UI domain defaults to nodes.<domain>"
+  }
+  assert {
+    condition     = google_certificate_manager_dns_authorization.node_ui["nodes.silo-hub.example.com"].domain == "nodes.silo-hub.example.com"
+    error_message = "the node UI domain has its own DNS authorization, which covers its wildcard"
+  }
+  assert {
+    condition     = one(google_certificate_manager_certificate.node_ui["nodes.silo-hub.example.com"].managed[0].domains) == "*.nodes.silo-hub.example.com"
+    error_message = "the node UI hosts' certificate is the wildcard"
+  }
+  assert {
+    condition     = google_certificate_manager_certificate_map_entry.node_ui["nodes.silo-hub.example.com"].hostname == "*.nodes.silo-hub.example.com" && google_certificate_manager_certificate_map_entry.node_ui["nodes.silo-hub.example.com"].map == google_certificate_manager_certificate_map.hub.name
+    error_message = "the hub's certificate map serves the node UI hosts"
+  }
+  assert {
+    condition     = google_certificate_manager_certificate.hub.managed[0].domains == tolist(["silo-hub.example.com"])
+    error_message = "the hub's own certificate is unchanged"
   }
 }
 
@@ -100,9 +124,59 @@ run "dns_and_backend_service" {
     error_message = "the certificate's authorization record is made in the zone"
   }
   assert {
+    condition     = google_dns_record_set.node_ui["nodes.silo-hub.example.com"].name == "*.nodes.silo-hub.example.com." && google_dns_record_set.node_ui["nodes.silo-hub.example.com"].type == "A"
+    error_message = "the node UI hosts' wildcard A record is made in the zone"
+  }
+  assert {
+    condition     = length(google_dns_record_set.node_ui_cert_authorization) == 1
+    error_message = "the node UI certificate's authorization record is made in the zone"
+  }
+  assert {
     condition     = length(google_iap_web_iam_member.access) == 0 && length(google_iap_web_backend_service_iam_member.access) == 2
     error_message = "once the backend service is known, access is granted on it alone"
   }
+}
+
+run "node_ui_domain" {
+  command = apply
+
+  variables {
+    dns_zone       = "example-com"
+    node_ui_domain = "silo-nodes.example.com"
+  }
+
+  assert {
+    condition     = output.node_ui_domain == "silo-nodes.example.com" && google_certificate_manager_certificate_map_entry.node_ui["silo-nodes.example.com"].hostname == "*.silo-nodes.example.com"
+    error_message = "node_ui_domain names the node UI hosts' domain"
+  }
+  assert {
+    condition     = google_dns_record_set.node_ui["silo-nodes.example.com"].name == "*.silo-nodes.example.com."
+    error_message = "the wildcard A record follows node_ui_domain"
+  }
+}
+
+run "no_node_ui" {
+  command = apply
+
+  variables {
+    dns_zone       = "example-com"
+    node_ui_domain = ""
+  }
+
+  assert {
+    condition     = output.node_ui_domain == "" && length(google_certificate_manager_certificate.node_ui) == 0 && length(google_certificate_manager_certificate_map_entry.node_ui) == 0 && length(google_dns_record_set.node_ui) == 0 && length(output.dns_records) == 2
+    error_message = "an empty node_ui_domain makes no node UI hosts"
+  }
+}
+
+run "bad_node_ui_domain" {
+  command = plan
+
+  variables {
+    node_ui_domain = "*.nodes.example.com"
+  }
+
+  expect_failures = [var.node_ui_domain]
 }
 
 run "bad_domain" {

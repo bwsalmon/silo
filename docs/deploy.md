@@ -12,8 +12,8 @@ The pieces:
 | Path | What it is |
 | --- | --- |
 | `Dockerfile` | The hub's image: a static `silo` binary on distroless. |
-| `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, a Certificate Manager certificate and map, DNS records (optional) and an Artifact Registry repository. `bsalmon-gke-dev.tfvars` is the example for this project. |
-| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it, two Services, the Gateway and HTTPRoute, and the GKE policies (IAP, timeouts, health checks). `validate.sh` checks them on a kind cluster. |
+| `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, Certificate Manager certificates (the hub's host and the nodes' UI hosts, `*.nodes.<domain>`) and their map, DNS records (optional) and an Artifact Registry repository. `bsalmon-gke-dev.tfvars` is the example for this project. |
+| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), and the GKE policies (IAP, timeouts, health checks). `validate.sh` checks them on a kind cluster. |
 
 Traffic, once deployed:
 
@@ -25,7 +25,9 @@ grain nodes ──WSS───>  (static IP,  Exact /v1/nodes/connect > Service 
 
 The node path is outside IAP and the hub checks each node's token
 itself; every other path is behind IAP, and the hub checks IAP's
-signed assertion too (hub.md §5.2.1).
+signed assertion too (hub.md §5.2.1). The nodes' UI hosts
+(`<node>.nodes.<domain>`, §8) have a route of their own, every path on
+them to the `silo-hub` Service and so behind the same IAP.
 
 ## 1. Prerequisites
 
@@ -75,13 +77,15 @@ State: the module declares no backend, so state is local. For anything
 longer-lived than a trial, add a `backend "gcs"` block for a bucket in
 the project first.
 
-Then, unless `dns_zone` was set, create the two records
-`terraform output dns_records` lists (the A record for the host, and
-the CNAME that lets Certificate Manager issue the certificate). The
-certificate turns `ACTIVE` some minutes after the CNAME resolves:
+Then, unless `dns_zone` was set, create the records
+`terraform output dns_records` lists: for the hub's host and for the
+nodes' UI hosts (§8) each, an A record and the CNAME that lets
+Certificate Manager issue its certificate. Each certificate turns
+`ACTIVE` some minutes after its CNAME resolves:
 
 ```sh
 gcloud certificate-manager certificates describe silo-hub --project bsalmon-gke-dev
+gcloud certificate-manager certificates describe silo-hub-nodes --project bsalmon-gke-dev
 ```
 
 ## 3. The image
@@ -101,6 +105,9 @@ Fill in the overlay, `deploy/kubernetes/hub/bsalmon-gke-dev/kustomization.yaml`
 - `newTag`: the tag pushed in step 3.
 - `CLOUD_SQL_INSTANCE`: `terraform output -raw sql_connection_name`.
 - The HTTPRoute's host name: the `domain` given to terraform.
+- The HTTPRoute `silo-hub-node-ui`'s host name: `*.` and
+  `terraform output -raw node_ui_domain`. `SILO_HUB_NODE_UI_DOMAIN`
+  stays empty until the nodes' UIs are turned on (§8).
 - The `GCPBackendPolicy` `silo-hub`'s `clientID`: the OAuth client's ID.
 - `SILO_HUB_ADMINS`: the hub admins (already `bsalmon@google.com`).
 - `SILO_HUB_IAP_AUDIENCE` is filled in after the first apply, below.
@@ -207,6 +214,40 @@ timeout.
 - **Removing it:** `kubectl delete -k deploy/kubernetes/hub/bsalmon-gke-dev`,
   then `terraform destroy` (after setting `deletion_protection = false`
   for the database).
+
+## 8. The nodes' UIs
+
+The hub can serve each connected node's own UI to that node's owner,
+at `https://<node>.<node_ui_domain>` (hub.md §11.2), through the node's
+existing connection. It is off until the hub is told the domain.
+
+- **Terraform.** `node_ui_domain` is `nodes.<domain>` unless set (set
+  it to `""` for none). For it terraform makes a DNS authorization of
+  its own (the hub's covers only `domain` and `*.<domain>`), a
+  certificate `silo-hub-nodes` for `*.<node_ui_domain>`, its entry in
+  the certificate map the Gateway already uses and, with `dns_zone`, the
+  wildcard A record `*.<node_ui_domain>` to the hub's address and the
+  authorization's CNAME. Without `dns_zone`, both are in
+  `terraform output dns_records`; the zone that holds `domain` takes
+  them as they are.
+- **The manifests.** The HTTPRoute `silo-hub-node-ui` matches
+  `*.<node_ui_domain>` and sends every path to the `silo-hub` Service,
+  so the hub's IAP signs viewers in there as on the hub's host. To turn
+  it on, set in the overlay `SILO_HUB_NODE_UI_DOMAIN` to
+  `terraform output -raw node_ui_domain` and that route's host name to
+  `*.` and the same, and apply. Once the `silo-hub-nodes` certificate
+  is `ACTIVE`, a node's owner opens `https://<node>.<node_ui_domain>/`.
+- **They need IAP.** Behind an OIDC hub (hub.md §5.1) the node hosts
+  sign nobody in: its session cookie belongs to the hub's host, and no
+  node host can set one. Turn them on only for a hub behind IAP, as
+  this one is. Who may pass IAP is the same `iap_members`; the hub then
+  admits only each node's owner (others get 404), and a node checking
+  the assertion itself uses the hub's `SILO_HUB_IAP_AUDIENCE`.
+- **Which nodes.** Only a node whose ID is a DNS label (lower-case
+  letters, digits and `-`) has a host. A node's UI is served at its
+  host's root, so grain's UI works there unchanged.
+- **Checking it.** `curl -sI https://<node>.<node_ui_domain>/` is a
+  302 to Google sign-in; signed in as the node's owner, the node's UI.
 
 ## Cloud Run, the alternative not taken
 
