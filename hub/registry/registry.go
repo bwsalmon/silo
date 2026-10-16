@@ -182,18 +182,15 @@ func New() *Registry {
 }
 
 // announce tells the other pods, through the Bus, that node id's row
-// changed. It is called after the write, outside r.mu; a notice that
-// fails is logged, and the other pods see the change at their next
-// refill.
+// changed. It is called after the write, outside r.mu, and does not
+// wait for the database: the bus sends the notice soon after,
+// coalesced with the node's later ones (Bus.Post). A notice that is
+// lost leaves the other pods to see the change at their next refill.
 func (r *Registry) announce(id string) {
 	if r.Bus == nil {
 		return
 	}
-	ctx, cancel := storeContext()
-	defer cancel()
-	if err := r.Bus.Notify(ctx, notify.Message{Node: id}); err != nil {
-		r.logf("registry: announcing %s's change: %v", id, err)
-	}
+	r.Bus.Post(notify.Message{Node: id})
 }
 
 // Notice is a notice from the Bus: a node's row changed, on this pod or

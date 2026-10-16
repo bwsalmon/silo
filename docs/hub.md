@@ -438,6 +438,18 @@ wakes the dispatcher once and refills the mirror. A notice that cannot
 be sent is logged, and costs the same. SQLite, one process, keeps the
 in-memory signals.
 
+**Sending.** No caller waits on the database for a wake-up, a `node`
+or an `event` notice: each is queued (`Bus.Post`), and one goroutine a
+pod sends what is queued, gathered for 2ms and while its last send is
+in flight, as one `SELECT pg_notify(...) FROM unnest(...)`: one
+transaction per batch, of at most 500 notices. Queued notices about
+the same thing are coalesced, since every receiver reads the state
+again at a notice: one `wake`, one `node` per node, one `event` per
+task with the highest seq. The payloads are the ones above, so pods
+either side of an upgrade read each other. A batch that fails is
+logged and lost, at the same cost as any lost notice. A `cancel` is
+still sent while its caller waits.
+
 **Live events.** A task's events arrive on the pod holding its node,
 which stores the lifecycle and conversation events and keeps the
 token ring (§7.1) in memory. A subscriber's request lands on any pod:
@@ -457,8 +469,8 @@ token ring (§7.1) in memory. A subscriber's request lands on any pod:
   its pod and ends the same way.
 - If no pod holds the node, the subscriber's pod serves the stored
   events from the database and follows new ones on `NOTIFY silo_hub
-  {"event":"<task>","seq":N}`, which the ingesting pod sends after each
-  stored event; it reads the store again on the task's `cancel`, on the
+  {"event":"<task>","seq":N}`, which the ingesting pod sends after it
+  stores events (coalesced, as above); it reads the store again on the task's `cancel`, on the
   listener reconnecting, and every 15 seconds, and ends with the
   task's result, or once the task is over. Token events, which no
   store keeps, are not seen this way. A holder that cannot be reached

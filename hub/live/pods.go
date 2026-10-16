@@ -294,17 +294,15 @@ func (h *Hub) Notice(m notify.Message) {
 }
 
 // announce tells the other pods, through the Bus, that task's event seq
-// is stored. One that fails is logged; their subscriptions read the
-// store again within keepaliveEvery.
+// is stored. It does not wait for the database: the bus sends the
+// notice soon after, coalesced with the task's later ones (Bus.Post).
+// A notice that is lost or late holds a subscription only until it
+// reads the store again, within keepaliveEvery.
 func (h *Hub) announce(task string, seq int64) {
 	if h.Bus == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := h.Bus.Notify(ctx, notify.Message{Event: task, Seq: seq}); err != nil {
-		h.logf("live: announcing task %s's event %d: %v", task, seq, err)
-	}
+	h.Bus.Post(notify.Message{Event: task, Seq: seq})
 }
 
 // readLimited reads one line, without its end, of at most max bytes.
