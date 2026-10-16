@@ -3,7 +3,7 @@ kind: run
 schema: grain/run@v1
 aka: ["grain:eu/task/4248"]
 task: {ref: "intake:tasks/4248-sign-offers/task.md", rev: 2f4e6a8c0b1d3f5a7c9e1b3d5f7a9c0e2b4d6f82}
-from: {ref: /backlog/4248-sign-offers.md, rev: a1b2c3d4e5f60718293a4b5c6d7e8f9012345602}
+from: {ref: "placements:grains/eu/backlog/4248-sign-offers.md", rev: a1b2c3d4e5f60718293a4b5c6d7e8f9012345602}
 grain: eu
 state: done
 accepted_at: "2026-10-16T09:13:20Z"

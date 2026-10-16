@@ -50,6 +50,7 @@
     },
     "depends_on": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/refString"}},
     "supersedes": {"$ref": "common.schema.json#/$defs/refString"},
+    "catalog": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*:([a-z0-9-]+/)?[A-Za-z0-9._-]+$"}, "description": "Optional labels naming software-catalog entities the task touches, in Backstage's own form (component:default/payments). Data only: not references in the sense of §4, so they add no name and grant no read (§3.4)"},
     "implements": {
       "type": "array",
       "items": {

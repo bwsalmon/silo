@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/task-repos/repo.schema.json",
-  "title": "grain/repo@v1: a task repo's README.md front matter, at the repo's root or in a grain folder such as .grain/ (docs/task-repos.md §3)",
+  "title": "grain/repo@v1: a task repo's README.md front matter, at the repo's root or in a folder such as .grain/; metadata only. role: grain-root marks a Grain's root (docs/task-repos.md §3, §3.2)",
   "type": "object",
   "properties": {
     "kind": {
@@ -12,7 +12,7 @@
     },
     "role": {
       "type": "string",
-      "description": "A convention: grain, intake, shared, code, archive, ..."
+      "description": "A convention: grain-root (a Grain's root folder, §3.2), intake, placements (Silo's per-Grain folders), shared, code, archive, ..."
     },
     "title": {
       "type": "string"
@@ -90,144 +90,159 @@
       }
     },
     "writers": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "who": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "minItems": 1
+      "description": "Write ownership (§3, §8.1). The common form is a list of principals: the folder's one writer, which may write any object in scope, still subject to schemas, path rules and state transitions. Only a folder that genuinely has several writers, which in this design is a team's intake, uses the ordered list of allow rules",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/principal"
           },
-          "may": {
-            "oneOf": [
-              {
-                "enum": [
-                  "create",
-                  "update",
-                  "delete",
-                  "move"
+          "minItems": 1
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "who": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "may": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "create",
+                      "update",
+                      "delete",
+                      "move"
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "enum": [
+                        "create",
+                        "update",
+                        "delete",
+                        "move"
+                      ]
+                    }
+                  }
                 ]
               },
-              {
+              "kinds": {
                 "type": "array",
                 "items": {
                   "enum": [
-                    "create",
-                    "update",
-                    "delete",
-                    "move"
+                    "repo",
+                    "task",
+                    "ref",
+                    "run",
+                    "comment",
+                    "template",
+                    "schedule",
+                    "design",
+                    "moved",
+                    "trigger",
+                    "suite",
+                    "include",
+                    "exclude"
                   ]
                 }
-              }
-            ]
-          },
-          "kinds": {
-            "type": "array",
-            "items": {
-              "enum": [
-                "repo",
-                "task",
-                "ref",
-                "run",
-                "comment",
-                "template",
-                "schedule",
-                "design",
-                "moved",
-                "trigger",
-                "suite"
-              ]
-            }
-          },
-          "paths": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "fields": {
-            "oneOf": [
-              {
-                "const": "*"
               },
-              {
+              "paths": {
                 "type": "array",
                 "items": {
                   "type": "string"
                 }
-              }
-            ]
-          },
-          "where": {
-            "type": "object"
-          },
-          "transition": {
-            "type": "object",
-            "properties": {
-              "field": {
+              },
+              "fields": {
+                "oneOf": [
+                  {
+                    "const": "*"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "where": {
+                "type": "object"
+              },
+              "transition": {
+                "type": "object",
+                "properties": {
+                  "field": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  },
+                  "to": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "field",
+                  "from",
+                  "to"
+                ],
+                "additionalProperties": false
+              },
+              "merge_of": {
+                "type": "string",
+                "description": "The commit must be a merge whose second parent is the tip of a ref matching this glob, authored by someone other than the pusher (§8.11)"
+              },
+              "bind": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "forbid": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Refs this rule applies on; default: default_ref"
+              },
+              "note": {
                 "type": "string"
-              },
-              "from": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "minItems": 1
-              },
-              "to": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "minItems": 1
               }
             },
             "required": [
-              "field",
-              "from",
-              "to"
+              "who",
+              "may"
             ],
             "additionalProperties": false
           },
-          "merge_of": {
-            "type": "string",
-            "description": "The commit must be a merge whose second parent is the tip of a ref matching this glob, authored by someone other than the pusher (§8.11)"
-          },
-          "bind": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "forbid": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "refs": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Refs this rule applies on; default: default_ref"
-          },
-          "note": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "who",
-          "may"
-        ],
-        "additionalProperties": false
-      }
+          "minItems": 1
+        }
+      ]
     },
     "backlog": {
-      "description": "The folders whose kind: ref files are this repo's queue (§5.2)",
+      "description": "The folders (globs allowed) that may hold this folder's own kind: ref files (§5.2). In a Grain root, its own lane; included lanes come from includes",
       "type": "array",
       "items": {
         "type": "string"
@@ -306,35 +321,102 @@
         }
       ]
     },
-    "schedules": {
-      "description": "Intake only: the schedules outside Silo's own repos that this team adopts. A schedule that names a team fires for it only if adopted here (§6.2, §11.13)",
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "ref": {
-            "$ref": "common.schema.json#/$defs/refString"
-          },
-          "auto_approve": {
+    "grain": {
+      "description": "Required on a grain-root: the Grain whose root this folder is",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "silo": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "lanes": {
+      "description": "Grain root only: the relative priority of the namespace's backlog lanes (§5.2). A lane is the folder holding a ref; an entry matches the lane it names and the folders under it",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "strict",
+            "weighted",
+            "round_robin"
+          ],
+          "default": "strict",
+          "description": "strict: the first listed lane with a runnable reference wins; weighted: smooth weighted round-robin over the lanes with a runnable reference; round_robin: weighted with every weight 1"
+        },
+        "order": {
+          "type": "array",
+          "items": {
             "type": "object",
             "properties": {
-              "digest": {
-                "type": "string",
-                "pattern": "^sha256:[0-9a-f]{64}$"
+              "lane": {
+                "$ref": "common.schema.json#/$defs/refString"
+              },
+              "weight": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1
               }
             },
             "required": [
-              "digest"
+              "lane"
             ],
-            "additionalProperties": false,
-            "description": "Firings are filed approved only while the schedule and the template it names still hash to this digest; otherwise they are filed proposed"
+            "additionalProperties": false
           }
         },
-        "required": [
-          "ref"
-        ],
-        "additionalProperties": false
-      }
+        "unlisted": {
+          "enum": [
+            "last",
+            "ignore"
+          ],
+          "default": "last",
+          "description": "Lanes the order does not name: after every listed lane, by name, or not dispatched at all"
+        },
+        "expedite": {
+          "enum": [
+            "lane",
+            "global"
+          ],
+          "default": "lane",
+          "description": "Whether Silo's expedite reorders only within its lane (default), or ahead of every lane"
+        }
+      },
+      "additionalProperties": false
+    },
+    "include_limits": {
+      "description": "Grain root only: lowers the resolver's limits (§3.3, §11.14); it can never raise them",
+      "type": "object",
+      "properties": {
+        "depth": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "includes_per_space": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "spaces": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "repos": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "objects": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [
@@ -344,5 +426,24 @@
     "owner",
     "host",
     "writers"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "grain-root"
+          }
+        },
+        "required": [
+          "role"
+        ]
+      },
+      "then": {
+        "required": [
+          "grain"
+        ]
+      }
+    }
   ]
 }

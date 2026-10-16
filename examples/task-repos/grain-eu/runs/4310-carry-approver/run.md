@@ -3,7 +3,7 @@ kind: run
 schema: grain/run@v1
 aka: ["grain:eu/task/4310"]
 task: {ref: "intake:tasks/4310-carry-approver/task.md", rev: 7a1c3e5b9d2f4a6c8e0b1d3f5a7c9e2b4d6f8a01}
-from: {ref: /backlog/4310-carry-approver.md, rev: a1b2c3d4e5f60718293a4b5c6d7e8f9012345601}
+from: {ref: "placements:grains/eu/backlog/4310-carry-approver.md", rev: a1b2c3d4e5f60718293a4b5c6d7e8f9012345601}
 grain: eu
 state: done
 accepted_at: "2026-10-16T13:58:30Z"
@@ -30,6 +30,6 @@ closed:
 ---
 
 Grain `eu`'s execution record of `intake:tasks/4310-carry-approver/task.md`.
-Its backlog reference, `backlog/4310-carry-approver.md`, was removed by
-Silo when this record closed. `from.rev` is the commit where it still
-exists. The thread is in `comments/`.
+Its placement, `placements:grains/eu/backlog/4310-carry-approver.md`,
+was removed by Silo, in Silo's own repo, when this record closed.
+`from.rev` is the placements commit where it still exists. The thread is in `comments/`.

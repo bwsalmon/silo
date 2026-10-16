@@ -19,13 +19,12 @@ aliases:
   us: https://silo.example.com/git/grains/us.git
   silo-code: https://github.com/bwsalmon/silo.git
   widgets: https://git.example.com/hub/widgets.git
+  placements: https://silo.example.com/git/hub/placements.git
 task_home:
   mode: intake
   allow: [intake, promote, code-repo]
   repos:
     https://git.example.com/hub/widgets.git: promote
-schedules:
-  - ref: "widgets:.grain/schedules/weekly-release-notes.md"
 writers:
   - who: [authenticated]
     may: create
@@ -97,6 +96,15 @@ writers:
     kinds: [task]
     note: A task moved to another team's intake, or reorganised, leaves a tombstone.
   - who: ["team:hub#admin"]
+    may: [create, update, delete]
+    kinds: [include, exclude]
+    paths: ["schedules/**"]
+    fields: "*"
+    note: >-
+      The team adopts a schedule Silo does not host with a kind: include
+      of it here. A tracking include files its firings proposed; only a
+      pinned one may file them approved (docs/task-repos.md §6.2, §11.13).
+  - who: ["team:hub#admin"]
     may: update
     kinds: [repo]
     fields: "*"
@@ -109,8 +117,9 @@ It holds proposals, approvals and cancels, discussion of tasks, and the
 team's ordering of its unplaced work in `backlog/`.
 
 A task is never copied or moved to the Grain that runs it. Placement adds
-a reference to it in that Grain's own `backlog/`, and the Grain records
-what it did in its own `runs/`. How a task is going is read from those
+a reference to it in that Grain's folder in `hub/placements`, Silo's own
+repo, which the Grain's root includes. The Grain records what it did in
+its own `runs/`. How a task is going is read from those
 records (docs/task-repos.md §5.1).
 
 - **To propose:** add `tasks/<yyyy-mm-dd>-<slug>/task.md` with
@@ -127,9 +136,13 @@ records (docs/task-repos.md §5.1).
 
 **Task home.** Tasks stay here by default (`task_home: intake`). The
 widgets repo is set to `promote`, which its own `.grain/README.md` also
-says. The team adopts the widgets repo's weekly release-notes schedule,
-so its firings are filed here, never into the widgets repo
-(docs/task-repos.md §5.5, §6.2).
+says. The team adopts the widgets repo's weekly release-notes schedule
+with `schedules/widgets.md`, a `kind: include` of it, so its firings are
+filed here, never into the widgets repo (docs/task-repos.md §5.5, §6.2).
 
 The rules above are enforced by Silo's pre-receive hook
-(docs/task-repos.md §8).
+(docs/task-repos.md §8). This is the one kind of folder that keeps
+field-level rules: a task here really does have several writers over its
+life (its submitter, an approver, the team's members ranking it, and
+Silo), so the hook has to say which of them may change which field. Every
+other repo in these examples has a single writer.

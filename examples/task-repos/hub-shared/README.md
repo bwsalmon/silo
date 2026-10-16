@@ -16,17 +16,18 @@ aliases:
   intake: https://silo.example.com/git/hub/intake.git
   grain-code: https://github.com/bwsalmon/grain.git
   silo-code: https://github.com/bwsalmon/silo.git
+  org: https://silo.example.com/git/org/templates.git
 writers:
   - who: ["team:hub#maintainer"]
     may: [create, update, move]
-    kinds: [template, schedule, design]
+    kinds: [template, schedule, design, include, exclude]
     fields: "*"
     note: >-
       Definitions are never deleted: a rename or reorganisation leaves a
       kind: moved tombstone at the old path (docs/task-repos.md §2.1).
   - who: ["team:hub#member"]
     may: [create, update]
-    kinds: [template, schedule, design]
+    kinds: [template, schedule, design, include, exclude]
     fields: "*"
     refs: ["review/*"]
     note: >-
@@ -35,7 +36,7 @@ writers:
       branch's author (docs/task-repos.md §8.11).
   - who: ["team:hub#approver"]
     may: update
-    kinds: [template, schedule, design]
+    kinds: [template, schedule, design, include, exclude]
     fields: "*"
     merge_of: "review/*"
   - who: [silo]
@@ -58,8 +59,12 @@ referring repo's README.
 - `templates/` holds task templates. Their bodies use the strict Jinja2
   subset (§6.1). `templates/partials/` holds include-only pieces, and
   `templates/ghcr/` the GHCR ones. `templates/prune-packages.md` is the
-  tombstone the move to `ghcr/` left.
-- `schedules/` holds cadences that fire templates. They fire in Silo and
-  land in the hub intake.
+  tombstone the move to `ghcr/` left. `templates/org.md` includes the
+  org-wide templates at `v3`, and `templates/no-legacy-triage.md`
+  excludes one of them from what this folder contributes (§3.3).
+- `schedules/` holds the team's cadences. A `fires_in: silo` schedule
+  fires in Silo and lands in the hub intake. A `fires_in: grain` one fires
+  on the Grains Silo assigns it to, by including this folder from their
+  folders in `hub/placements` (§6.2).
 - `designs/` holds design docs with `{#HS-n}` requirement anchors. Silo
   plans them on every merge to `main`.
