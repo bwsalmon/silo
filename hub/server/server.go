@@ -25,6 +25,7 @@
 // only the hub's other pods reach, it serves
 //
 //	GET  /internal/v1/nodes/{id}/open   a stream to a node this pod holds, for the pod that asked (docs/hub.md §2.2.3)
+//	GET  /internal/v1/tasks/{id}/events a subscription to the events of a task whose node this pod holds (§2.2.4)
 //
 // Every path but the first three signs its caller in through the
 // configured sign-on: IAP's assertion behind Google Cloud IAP, or OIDC.
@@ -53,6 +54,7 @@ import (
 	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/nodeui"
+	"github.com/bwsalmon/silo/hub/notify"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
@@ -225,11 +227,14 @@ func (h headerAuth) Principal(r *http.Request) (identity.Principal, error) {
 type Hub struct {
 	cfg Config
 
-	Directory  *directory.Store
-	Backlog    *tasks.Store
-	Events     *live.Store
-	Leases     *lease.Store
-	Nodes      *registry.Store
+	Directory *directory.Store
+	Backlog   *tasks.Store
+	Events    *live.Store
+	Leases    *lease.Store
+	Nodes     *registry.Store
+	// Bus carries wake-ups and event notices between the hub's pods
+	// (docs/hub.md §2.2.4): nil on SQLite.
+	Bus        *notify.Bus
 	Registry   *registry.Registry
 	Rendezvous *rendezvous.Server
 	Dispatcher *tasks.Dispatcher
@@ -280,6 +285,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	if h.Nodes, err = openNodes(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the shared registry: %w", err))
 	}
+	if h.Bus, err = notify.Open(cfg.Database); err != nil {
+		return fail(fmt.Errorf("server: opening the notice bus: %w", err))
+	}
 
 	host, _ := os.Hostname()
 	if host == "" {
@@ -293,6 +301,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	}
 	h.Registry.PodLease = cfg.PodLease
 	h.Registry.Logf = cfg.Logf
+	h.Registry.Bus = h.Bus
 	hb := cfg.Heartbeat
 	if hb <= 0 {
 		hb = rendezvous.DefaultHeartbeat
@@ -332,6 +341,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Retry:     cfg.DispatchRetry,
 		Logf:      cfg.Logf,
 		Observe:   h.metrics.observeDispatch,
+		Bus:       h.Bus,
 
 		LostRequeueAfter: h.Directory.LostRequeueAfter,
 	}
@@ -346,6 +356,18 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		},
 		Logf:     cfg.Logf,
 		Ingested: h.metrics.observeIngest,
+		Bus:      h.Bus,
+		Holds:    h.Registry.Holds,
+		Changes:  h.Registry.Changes,
+	}
+	if h.Rendezvous.Forwards() {
+		h.Live.Forward = h.Rendezvous.Get
+	}
+	if h.Bus != nil {
+		h.Bus.Logf = cfg.Logf
+		h.Bus.Handle(h.Registry.Notice)
+		h.Bus.Handle(h.Dispatcher.Notice)
+		h.Bus.Handle(h.Live.Notice)
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
@@ -437,6 +459,9 @@ func (h *Hub) Close() error {
 	if h.Nodes != nil {
 		errs = append(errs, h.Nodes.Close())
 	}
+	if h.Bus != nil {
+		errs = append(errs, h.Bus.Close())
+	}
 	return errors.Join(errs...)
 }
 
@@ -484,10 +509,14 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 		if h.cfg.PodAddr == "" {
 			h.Registry.PodAddr = podAddr(il.Addr())
 		}
-		isrv := &http.Server{Handler: h.Rendezvous.InternalHandler(), ReadHeaderTimeout: 10 * time.Second}
+		im := http.NewServeMux()
+		im.Handle(rendezvous.InternalOpenPath, h.Rendezvous.InternalHandler())
+		im.Handle(live.InternalEventsPath, h.Rendezvous.Internal(h.Live.InternalHandler()))
+		isrv := &http.Server{Handler: im, ReadHeaderTimeout: 10 * time.Second}
 		go isrv.Serve(il)
 		// Its streams are hijacked, and end with the node connections
-		// they ride.
+		// they ride; its subscriptions end with this pod's hold of their
+		// nodes, or here.
 		defer isrv.Close()
 		h.cfg.logf("hub: serving the internal listener on %s, as %s at %s", il.Addr(), h.Registry.Pod, h.Registry.PodAddr)
 	}
@@ -512,6 +541,14 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	go func() {
 		defer close(podDone)
 		h.Registry.Run(podCtx)
+	}()
+	// The bus listens for as long as the pod's lease lasts.
+	busDone := make(chan struct{})
+	go func() {
+		defer close(busDone)
+		if h.Bus != nil {
+			h.Bus.Run(podCtx)
+		}
 	}()
 	dispatchCtx, stopDispatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopDispatch()
@@ -569,6 +606,10 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	case <-podDone:
 	case <-sctx.Done():
 		h.cfg.logf("hub: the pod's lease was not deleted in time")
+	}
+	select {
+	case <-busDone:
+	case <-sctx.Done():
 	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr

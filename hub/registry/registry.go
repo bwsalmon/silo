@@ -34,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bwsalmon/silo/hub/notify"
 )
 
 // Node is what a Grain node says about itself when it registers.
@@ -135,6 +137,10 @@ type Registry struct {
 	PodLease time.Duration
 	// Logf, when set, receives the Store's failures.
 	Logf func(format string, args ...any)
+	// Bus, when set, tells the other pods of each change this pod
+	// writes through to the Store, as {"node":"<id>"} (docs/hub.md
+	// §2.2.4); hand its notices to Notice, which refills the mirror.
+	Bus *notify.Bus
 
 	// wmu serialises Register, so that the database and the memory
 	// agree on which of two connections for a node came last.
@@ -142,6 +148,8 @@ type Registry struct {
 	mu    sync.Mutex
 	nodes map[string]*node
 	subs  map[chan struct{}]struct{}
+	// kick asks Run to refill the mirror now: a change notice.
+	kick chan struct{}
 	// seq counts this pod's own changes to nodes, so that a refill read
 	// from the database before one does not undo it.
 	seq uint64
@@ -170,7 +178,44 @@ type node struct {
 
 // New returns an empty registry.
 func New() *Registry {
-	return &Registry{nodes: map[string]*node{}, subs: map[chan struct{}]struct{}{}}
+	return &Registry{nodes: map[string]*node{}, subs: map[chan struct{}]struct{}{}, kick: make(chan struct{}, 1)}
+}
+
+// announce tells the other pods, through the Bus, that node id's row
+// changed. It is called after the write, outside r.mu; a notice that
+// fails is logged, and the other pods see the change at their next
+// refill.
+func (r *Registry) announce(id string) {
+	if r.Bus == nil {
+		return
+	}
+	ctx, cancel := storeContext()
+	defer cancel()
+	if err := r.Bus.Notify(ctx, notify.Message{Node: id}); err != nil {
+		r.logf("registry: announcing %s's change: %v", id, err)
+	}
+}
+
+// Notice is a notice from the Bus: a node's row changed, on this pod or
+// another, or the bus reconnected and may have missed one. Either asks
+// Run to refill the mirror now, which wakes the Changes subscribers (the
+// dispatcher) if anything changed.
+func (r *Registry) Notice(m notify.Message) {
+	if m.Node == "" && !m.Reconnected {
+		return
+	}
+	select {
+	case r.kick <- struct{}{}:
+	default:
+	}
+}
+
+// Holds is whether this pod holds node id's connection.
+func (r *Registry) Holds(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.nodes[id]
+	return n != nil && n.lease != nil
 }
 
 func (r *Registry) now() time.Time {
@@ -272,6 +317,7 @@ func (r *Registry) Register(n Node, owner string) (*Lease, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer r.announce(n.ID)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -313,6 +359,7 @@ func (r *Registry) Forget(id string) bool {
 		if !ok {
 			return false
 		}
+		r.announce(id)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -338,6 +385,7 @@ func (r *Registry) Unbind(id string) error {
 		if err != nil {
 			return err
 		}
+		defer r.announce(id)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -555,6 +603,7 @@ func (l *Lease) Heartbeat(free int) bool {
 		return false
 	}
 	free = min(max(free, 0), n.entry.Slots)
+	moved := free != n.entry.Free
 	now := r.now()
 	r.mu.Unlock()
 	if r.Store != nil {
@@ -566,6 +615,10 @@ func (l *Lease) Heartbeat(free int) bool {
 			// The node is still connected here; the database will hear
 			// from it at the next heartbeat.
 			r.logf("registry: heartbeat of %s: %v", l.id, err)
+		case held && moved:
+			// Only a change of free slots: the dispatcher's claims settle
+			// at its next refill anyway.
+			r.announce(l.id)
 		case !held:
 			r.mu.Lock()
 			if n := l.current(); n != nil {
@@ -607,6 +660,7 @@ func (l *Lease) Close() {
 			l.r.logf("registry: closing %s: %v", l.id, err)
 		}
 		cancel()
+		l.r.announce(l.id)
 	}
 }
 

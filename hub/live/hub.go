@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/notify"
 	"github.com/bwsalmon/silo/hub/tasks"
 	"github.com/bwsalmon/silo/internal/logsafe"
 )
@@ -69,6 +71,26 @@ type Hub struct {
 	// the hub's metrics: its class, and err if the hub rejected it or
 	// could not keep it.
 	Ingested func(c Class, err error)
+
+	// Bus, when set, tells the hub's other pods of each event this pod
+	// stores, as {"event":"<task>","seq":N} (docs/hub.md §2.2.4); hand
+	// its notices to Notice.
+	Bus *notify.Bus
+	// Forward, when set, asks the pod holding a node for a path on its
+	// internal listener: rendezvous.Server.Get. A subscription to a task
+	// whose node this pod does not hold is then forwarded to that pod,
+	// or served from the store when no pod holds it (InternalEventsPath).
+	// Nil serves every subscription from this pod's own topics.
+	Forward func(ctx context.Context, nodeID, path string) (*http.Response, error)
+	// Holds is whether this pod holds a node's connection, and Changes
+	// tells of every change to the registry (registry.Registry's Holds
+	// and Changes): with Forward, a subscription this pod serves for
+	// holding its task's node ends when it stops holding it.
+	Holds   func(nodeID string) bool
+	Changes func() (<-chan struct{}, func())
+
+	wmu     sync.Mutex
+	waiters map[string]map[chan struct{}]struct{} // stored subscriptions, by task
 
 	mu        sync.Mutex
 	topics    map[string]*topic
@@ -333,6 +355,7 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			t.mu.Unlock()
 			return
 		}
+		fresh := e.Seq > t.last
 		err = h.publish(ctx, t, e, class)
 		t.mu.Unlock()
 		h.ingested(class, err)
@@ -340,6 +363,9 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			// The node replays it after it reconnects.
 			h.logf("live: task %s: keeping event %d: %v", t.id, e.Seq, err)
 			return
+		}
+		if fresh && class.Stored() {
+			h.announce(t.id, e.Seq)
 		}
 	}
 }

@@ -200,8 +200,8 @@ by the nodes (§2). The exceptions are the view-through (§7.2) and a
 node's UI (§11), which put bytes through the one pod, so capacity is
 what is likeliest to force the move. This section is the design for
 several replicas, in five stages (§2.2.1 to §2.2.5). Stages R1 to
-R3 are built; R4 and R5 are follow-ups, each landing behind the one
-before it, and the Deployment stays at one replica until R5.
+R4 are built; R5 is a follow-up, and the Deployment stays at one
+replica until it lands.
 
 **Recovery time as deployed.** One pod, nodes that reconnect with
 backoff (1s doubling to a minute):
@@ -239,7 +239,7 @@ recover the backlog.
 | R1 | The dispatcher under a database lease (`hub/lease`), `database_availability_type` | built |
 | R2 | The shared registry: `hub_pods` and `hub_nodes` in the database, each node naming the pod holding it, under that pod's lease (`hub/registry`) | built |
 | R3 | `Server.Open` forwarded to the holder over a pod-to-pod stream; the directory read from the shared registry | built |
-| R4 | Cross-pod wake-ups and live events: LISTEN/NOTIFY for the dispatcher, subscriptions forwarded to the pod holding the task's node | follow-up, after R3 |
+| R4 | Cross-pod wake-ups and live events: LISTEN/NOTIFY for the dispatcher, subscriptions forwarded to the pod holding the task's node | built |
 | R5 | Two or more replicas, `RollingUpdate`, a PodDisruptionBudget, the operations runbook and alerts | follow-up, after R4 |
 
 #### 2.2.1 R1: the dispatcher under a lease (built)
@@ -344,7 +344,7 @@ Each rule of §3 moves into a conditional statement:
   holder claims. Every pod's registry is a mirror of the others' nodes,
   which it refills from `hub_nodes` (joined with `hub_pods`) at each
   renewal of its own lease, every five seconds, and on every change
-  notice once R4 lands. That is more often than the `StaleAfter` this
+  notice (R4, §2.2.4). That is more often than the `StaleAfter` this
   section first named, because a mirror refilled only every
   `StaleAfter` would see another pod's fifteen-second lease, and its
   nodes' heartbeats, lapse between refills; a few thousand rows every
@@ -410,19 +410,27 @@ The cost is one more hop for view-through and node-UI bytes when the
 browser's pod is not the node's. Session affinity on the Gateway
 cannot avoid it, since a browser and a node are different clients.
 
-#### 2.2.4 R4: wake-ups and live events across pods
+#### 2.2.4 R4: wake-ups and live events across pods (built)
 
 **Wake-ups.** Three things wake the dispatcher today from inside the
 pod: a task submitted or requeued (`Wake`), a cancel (`Cancel`, which
 signals the task's live stream) and a registry change. Each becomes a
 PostgreSQL `NOTIFY` on the channel `silo_hub`, with a short JSON
 payload (`{"wake":true}`, `{"cancel":"<task>"}`, `{"node":"<id>"}`),
-and every pod `LISTEN`s on a connection of its own. The leader wakes
-on `wake` and `node`, refilling its mirror on the latter, and signals
-the task's stream on `cancel`. A notice lost while the listening
-connection was down costs at most one `Retry` (30s): the dispatcher's
-pass still runs on its timer, and a reconnecting listener wakes the
-dispatcher once. SQLite, one process, keeps the in-memory signals.
+and every pod `LISTEN`s on a connection of its own (`hub/notify`),
+reconnecting with backoff. The leader wakes on `wake`, and signals the
+task's stream on `cancel` (or, with no stream open, wakes, to tell a
+node that is back); every pod refills its mirror on `node`, at once,
+which wakes the leader's dispatcher if the mirror changed. A pod sends
+`node` after each registry change it writes through: a registration,
+a close, a node given up or forgotten, and a heartbeat whose free
+slots moved (not every heartbeat: the claims those settle are settled
+at the next five-second refill anyway). A notice lost while the
+listening connection was down costs at most one `Retry` (30s): the
+dispatcher's pass still runs on its timer, and a reconnecting listener
+wakes the dispatcher once and refills the mirror. A notice that cannot
+be sent is logged, and costs the same. SQLite, one process, keeps the
+in-memory signals.
 
 **Live events.** A task's events arrive on the pod holding its node,
 which stores the lifecycle and conversation events and keeps the
@@ -430,17 +438,30 @@ token ring (§7.1) in memory. A subscriber's request lands on any pod:
 
 - If the task's node is held by another pod, the subscriber's pod
   checks access as today, then forwards the subscription over the
-  internal listener (`GET /internal/v1/tasks/{id}/events?from=`) to
-  that pod, which serves it from its ring and store, and copies the
-  stream through. The ring stays on one pod, so late joiners see the
-  token history as today.
+  internal listener (`GET /internal/v1/tasks/{id}/events?from=`, under
+  the same token as R3's route) to that pod, which serves it from its
+  ring and store as Server-Sent Events, and copies the events, the
+  keepalives and the `end` through, as SSE or WebSocket messages. The
+  ring stays on one pod, so late joiners see the token history as
+  today. A pod that does not hold the node answers 404, and the
+  subscriber's pod reads the registry once more, as `Open` does. A
+  subscription a pod serves because it holds the node, forwarded or
+  its own, ends without `end` when the pod stops holding it, and a
+  forwarded one that goes silent for three keepalives (45s) has lost
+  its pod and ends the same way.
 - If no pod holds the node, the subscriber's pod serves the stored
   events from the database and follows new ones on `NOTIFY silo_hub
   {"event":"<task>","seq":N}`, which the ingesting pod sends after each
-  stored event. That covers a task whose node reconnects to a new pod
-  mid-subscription: the subscriber's stream ends without `end` when
-  the holder goes away, and it reconnects from its cursor, as after a
-  dropped subscriber today.
+  stored event; it reads the store again on the task's `cancel`, on the
+  listener reconnecting, and every 15 seconds, and ends with the
+  task's result, or once the task is over. Token events, which no
+  store keeps, are not seen this way. A holder that cannot be reached
+  is served the same way. That covers a task whose node reconnects to
+  a new pod mid-subscription: the subscriber's stream ends without
+  `end` when the holder goes away, and it reconnects from its cursor,
+  as after a dropped subscriber today.
+- A hub without an internal key, which cannot forward, serves every
+  subscription from its own memory and store, as one pod did before.
 
 Publishing every event through `NOTIFY` (or a pub/sub) was rejected:
 token deltas are many and `NOTIFY` payloads are capped at 8000 bytes,
@@ -853,12 +874,12 @@ it clears the nodes that refused it, so they are offered it again.
 The dispatcher (`tasks.Dispatcher`) wakes on a new task, on a registry
 change that may let it place one, and every `Retry` (30s). A registry
 change counts only if a node came online or has more slots available
-than before (`Registry.Available`): most changes are heartbeats, a few
-a second for each node, and claims, and neither frees a slot by itself.
-It takes queued tasks oldest
-first, going round the teams: one task from each team in turn, in the
-order of each team's oldest task. A team with a long queue therefore
-does not hold back another team's first task. For each task:
+than before (`Registry.Available`). Most changes are heartbeats and
+claims, which seldom give a node a slot it did not have. It takes
+queued tasks oldest first, going round the teams: one task from each
+team in turn, in the order of each team's oldest task. A team with a
+long queue therefore does not hold back another team's first task. For
+each task:
 
 1. `ClaimFor(repos, ok)`: the task's repository, or every repository
    its team owns. `ok` passes over nodes that do not meet the
@@ -1139,7 +1160,7 @@ audit plan. This section is the hub's part of it in brief.
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the one-replica decision (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
-| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods; R5, the rolling Deployment. | here: R1 to R3 built, R4 and R5 follow-ups |
+| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods (`hub/notify`); R5, the rolling Deployment. | here: R1 to R4 built, R5 a follow-up |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
