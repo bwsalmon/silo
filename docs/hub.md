@@ -593,9 +593,9 @@ RS256 are accepted, and the algorithm must match the key's type, so
 neither `none` nor an HMAC algorithm keyed with a public key can be
 slipped in.
 
-Group membership comes from the IdP's `groups` claim (OIDC) or from the
-hub's own team directory, where a group address can be listed as a
-member (§5.3). IAP's assertion carries no groups.
+Group membership comes from the IdP's `groups` claim (OIDC). The
+hub's own team directory can list a group as a member, as
+`group:<name>` (§5.3). IAP's assertion carries no groups.
 
 ### 5.2 Nodes
 
@@ -661,7 +661,16 @@ more) holds:
 
 - `teams(id, name)`.
 - `team_members(team, principal, role: member | admin)`. A principal
-  is an email or a group address.
+  is IAM-style, `user:<email>` or `group:<name>`, lower-cased, and is
+  matched only against its own claim: `user:` against the signed-in
+  email, `group:` against each of the IdP's groups. A group named like
+  an email (`group:alice@corp.example`) is still only a group, so an
+  IdP that lets users create or rename groups cannot make one stand in
+  for a user, or for a group an admin listed under `user:` (SA1-L6).
+  A principal with neither prefix is refused: Google groups look like
+  emails, so the hub does not guess. Rows from before principals had
+  prefixes are made `user:` when the tables are migrated (the only
+  deployment then was behind IAP, which has no groups).
 - `team_repos(repo, team)`, keyed by repository, so every repository
   has at most one owning team. Assigning a repository that another team
   owns is refused: it has to be released first, so one team's admin
@@ -674,8 +683,8 @@ These rules follow:
 - `Admit` lets a node serve a repository only if the node's owner is a
   member (or admin) of the team that owns it. A repository with no
   owning team is refused, so nothing is served by accident. Admission
-  is by the owner's email only: a node token proves a principal, not
-  the groups the IdP put it in when it signed in.
+  is by the owner's email only, as `user:<email>`: a node token proves
+  a principal, not the groups the IdP put it in when it signed in.
 - **A node that may serve only some of its repositories is refused
   whole**, not registered for the admitted subset. The refusal names
   every repository it may not serve, and why (no owning team, or a team
@@ -692,8 +701,11 @@ These rules follow:
   as one that does not exist would.
 - Team admins assign repositories to their team and manage its members.
 - A hub-wide admin role creates and deletes teams and sees everything.
-  It is the hub's configuration (`API.HubAdmins`, emails or groups),
-  not a row a team admin could grant.
+  It is the hub's configuration (`API.HubAdmins`, `SILO_HUB_ADMINS`),
+  not a row a team admin could grant. Its entries are principals as
+  above, `user:<email>` or `group:<name>`, each matched only against
+  its own claim. An entry with no prefix is taken as `user:`, and the
+  hub logs a warning for it at start-up.
 
 Admission is checked when a node connects. A node that is already
 connected keeps its registration if its owner later leaves the team;
@@ -706,7 +718,7 @@ GET    /v1/me                                          the caller, their teams a
 GET    /v1/teams                                       the caller's teams (all, for a hub admin)
 POST   /v1/teams {"id","name"}                         hub admin
 DELETE /v1/teams/{team}                                hub admin; its repositories are left unowned
-PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin
+PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin; principal is user:EMAIL or group:NAME
 DELETE /v1/teams/{team}/members/{principal}            team admin
 PUT    /v1/teams/{team}/repos/{owner}/{name}           team admin
 DELETE /v1/teams/{team}/repos/{owner}/{name}           team admin

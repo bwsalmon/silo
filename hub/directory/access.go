@@ -31,8 +31,9 @@ const admitTimeout = 10 * time.Second
 // for less than it asked for would sit in the directory looking healthy
 // while the work it was set up for went nowhere.
 //
-// Membership is by the owner's email: a node token proves a principal
-// but not the groups the identity provider put it in when it signed in.
+// Membership is by the owner's email, as user:<email>: a node token
+// proves a principal but not the groups the identity provider put it
+// in when it signed in.
 func (s *Store) Admit(owner string, n registry.Node) error {
 	ctx, cancel := context.WithTimeout(context.Background(), admitTimeout)
 	defer cancel()
@@ -44,11 +45,12 @@ func (s *Store) AdmitContext(ctx context.Context, owner string, n registry.Node)
 	if len(n.Repos) == 0 {
 		return nil
 	}
-	o, err := normPrincipal(owner)
+	u, err := userPrincipal(owner)
 	if err != nil {
 		return err
 	}
-	teams, err := s.memberships(ctx, []string{o})
+	o := strings.TrimPrefix(u, UserPrefix)
+	teams, err := s.memberships(ctx, []string{u})
 	if err != nil {
 		return err
 	}
@@ -77,8 +79,9 @@ type Access struct {
 	identity.Principal
 	// HubAdmin creates and deletes teams, and sees everything.
 	HubAdmin bool
-	// Teams are the teams the principal is in, by email or by any of
-	// its groups, with the higher role where both match.
+	// Teams are the teams the principal is in, as user:<email> or as
+	// group:<name> for any of its groups, with the higher role where
+	// both match.
 	Teams map[string]Role
 	// repos maps each repository the principal's teams own to its team.
 	repos map[string]string
@@ -88,8 +91,11 @@ type Access struct {
 // say, not the store's.
 func (s *Store) Access(ctx context.Context, p identity.Principal, hubAdmin bool) (*Access, error) {
 	principals := []string{}
-	for _, x := range append([]string{p.Email}, p.Groups...) {
-		if n, err := normPrincipal(x); err == nil {
+	if u, err := userPrincipal(p.Email); err == nil {
+		principals = append(principals, u)
+	}
+	for _, g := range p.Groups {
+		if n, err := normPrincipal(GroupPrefix + g); err == nil {
 			principals = append(principals, n)
 		}
 	}

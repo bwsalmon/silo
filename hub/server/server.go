@@ -100,7 +100,8 @@ type Config struct {
 	// only: anyone who can reach the hub can claim to be anyone.
 	DevUserHeader string
 
-	// HubAdmins hold the hub-wide admin role (directory.API.HubAdmins).
+	// HubAdmins hold the hub-wide admin role (directory.API.HubAdmins):
+	// user:<email> or group:<name>.
 	HubAdmins []string
 
 	// NodeUIDomain, when set, serves each node's own UI to its owner at
@@ -255,6 +256,11 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		hb = rendezvous.DefaultHeartbeat
 	}
 	h.Registry.StaleAfter = 3 * hb
+	for _, adm := range cfg.HubAdmins {
+		if p, legacy := directory.HubAdminPrincipal(adm); legacy {
+			cfg.logf("hub: hub admin %q has no user: or group: prefix; treating it as %s (write group:NAME if a group was meant)", adm, p)
+		}
+	}
 	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins}
 	h.Rendezvous = &rendezvous.Server{
 		Registry:     h.Registry,

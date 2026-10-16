@@ -136,7 +136,11 @@ Fill in the overlay, `deploy/kubernetes/hub/bsalmon-gke-dev/kustomization.yaml`
   `terraform output -raw node_ui_domain`. `SILO_HUB_NODE_UI_DOMAIN`
   stays empty until the nodes' UIs are turned on (§8).
 - The `GCPBackendPolicy` `silo-hub`'s `clientID`: the OAuth client's ID.
-- `SILO_HUB_ADMINS`: the hub admins (already `bsalmon@google.com`).
+- `SILO_HUB_ADMINS`: the hub admins, comma-separated, each
+  `user:<email>` or `group:<name>` (already `user:bsalmon@google.com`).
+  An entry with no prefix is taken as `user:` and logged as a warning
+  at start-up; a group must be written `group:`, even one named like an
+  email (hub.md §5.3).
 - `SILO_HUB_IAP_AUDIENCE` is filled in after the first apply, below.
 
 The terraform's names (the `silo-hub` static IP, certificate map and
@@ -197,11 +201,13 @@ A fresh hub has no teams, and nobody can mint node tokens for a
 repository no team owns. Hub admins (`SILO_HUB_ADMINS`) can do all of
 this through the API (hub.md §5.3), but a browser makes POSTs awkward
 behind IAP, so the image carries commands that act directly on the
-database, run inside the pod (which reaches it through the proxy):
+database, run inside the pod (which reaches it through the proxy).
+Members are `user:<email>` or `group:<name>`; one with neither prefix
+is refused:
 
 ```sh
 kubectl -n silo-hub exec deploy/silo-hub -c hub -- /silo hub team \
-  -id infra -name "Infra" -admin bsalmon@google.com -repo bwsalmon/silo
+  -id infra -name "Infra" -admin user:bsalmon@google.com -repo bwsalmon/silo
 kubectl -n silo-hub exec deploy/silo-hub -c hub -- /silo hub token \
   -owner bsalmon@google.com -node my-workstation
 ```

@@ -113,8 +113,8 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(func() { dir.Close() })
 	check(t, dir.CreateTeam(ctx, "infra", ""))
 	check(t, dir.CreateTeam(ctx, "web", ""))
-	check(t, dir.SetMember(ctx, "infra", "alice@example.com", directory.Member))
-	check(t, dir.SetMember(ctx, "web", "bob@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:alice@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "web", "user:bob@example.com", directory.Member))
 	check(t, dir.AssignRepo(ctx, "infra", "bwsalmon/silo"))
 
 	store, err := Open(ctx, "sqlite::memory:")
@@ -603,7 +603,7 @@ func TestAccess(t *testing.T) {
 		}
 	}
 	// Bob joins the team that owns the repository: he sees it.
-	check(t, h.hub.Directory.Store.SetMember(context.Background(), "infra", "bob@example.com", directory.Member))
+	check(t, h.hub.Directory.Store.SetMember(context.Background(), "infra", "user:bob@example.com", directory.Member))
 	st := upstream(t, h.connect(t, "ws-1"))
 	send(t, st, status(1, "one"))
 	h.waitLast(t, "t-1", 1)

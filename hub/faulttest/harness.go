@@ -311,7 +311,7 @@ func NewCluster(t testing.TB, o Options) *Cluster {
 
 	for i := range o.Teams {
 		c.Call("POST", "/v1/teams", Admin, map[string]string{"id": Team(i), "name": Team(i)}, &struct{}{})
-		c.Call("PUT", "/v1/teams/"+Team(i)+"/members/"+Ops, Admin, map[string]string{"role": "member"}, &struct{}{})
+		c.Call("PUT", "/v1/teams/"+Team(i)+"/members/user:"+Ops, Admin, map[string]string{"role": "member"}, &struct{}{})
 		c.Call("PUT", "/v1/teams/"+Team(i)+"/repos/"+Repo(i), Admin, nil, &struct{}{})
 	}
 	for i := range o.Teams {

@@ -57,7 +57,7 @@ func (s *Store) MintNodeToken(ctx context.Context, owner, node string) (string, 
 // mintNodeToken is MintNodeToken, also saying how many earlier tokens
 // it revoked, so the API can end the connection one of them holds.
 func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, NodeToken, int64, error) {
-	o, err := normPrincipal(owner)
+	o, err := normEmail(owner)
 	if err != nil {
 		return "", NodeToken{}, 0, err
 	}
@@ -133,7 +133,7 @@ func (s *Store) NodeTokens(ctx context.Context, owner string) ([]NodeToken, erro
 	q := `SELECT id, owner, node, created_at, revoked_at FROM node_tokens`
 	var args []any
 	if owner != "" {
-		o, _ := normPrincipal(owner)
+		o, _ := normEmail(owner)
 		q += ` WHERE owner = ?`
 		args = append(args, o)
 	}
