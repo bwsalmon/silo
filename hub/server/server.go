@@ -18,6 +18,11 @@
 //
 // Every path but the first three signs its caller in through the
 // configured sign-on: IAP's assertion behind Google Cloud IAP, or OIDC.
+//
+// With NodeUIDomain set, a request to <node>.<NodeUIDomain>, on any
+// path, is none of the above: it is that node's own UI, carried through
+// to its owner over the node's rendezvous connection (hub/nodeui,
+// docs/hub.md §11).
 package server
 
 import (
@@ -34,6 +39,7 @@ import (
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/live"
+	"github.com/bwsalmon/silo/hub/nodeui"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
@@ -84,6 +90,12 @@ type Config struct {
 
 	// HubAdmins hold the hub-wide admin role (directory.API.HubAdmins).
 	HubAdmins []string
+
+	// NodeUIDomain, when set, serves each node's own UI to its owner at
+	// <node>.<NodeUIDomain> (nodeui.Server.Domain): a domain whose
+	// every name reaches this hub, behind the same IAP. Empty serves
+	// none.
+	NodeUIDomain string
 
 	// Heartbeat is the interval nodes heartbeat at;
 	// rendezvous.DefaultHeartbeat when zero.
@@ -166,6 +178,7 @@ type Hub struct {
 	Rendezvous *rendezvous.Server
 	Dispatcher *tasks.Dispatcher
 	Live       *live.Hub
+	NodeUI     *nodeui.Server
 
 	handler  http.Handler
 	draining atomic.Bool
@@ -256,6 +269,16 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		m.Handle(p, authHandler)
 	}
 	h.handler = m
+	if cfg.NodeUIDomain != "" {
+		h.NodeUI = &nodeui.Server{
+			Domain:    strings.TrimSuffix(strings.ToLower(cfg.NodeUIDomain), "."),
+			Registry:  h.Registry,
+			Directory: dirAPI,
+			Open:      h.Rendezvous.Open,
+			Logf:      cfg.Logf,
+		}
+		h.handler = h.NodeUI.Hosts(m)
+	}
 	return h, nil
 }
 

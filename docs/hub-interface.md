@@ -93,5 +93,21 @@ node → hub  {"type":"ok"}, then the artifact's bytes until the node closes the
             or {"type":"error","error":"..."}
 ```
 
+## Serve its own UI (the http stream, optional)
+
+When the node's owner opens `https://<node>.<the hub's node UI
+domain>`, the hub opens a stream (hub.md §11):
+
+```
+hub → node  {"type":"http","node":"<id>","viewer":"<email>"}
+node → hub  {"type":"ok"}, then one HTTP/1.1 request is read and its response written,
+            a 101 leaving the stream as the upgraded connection
+            or {"type":"error","error":"..."}
+```
+
+A Grain answers it only if its owner has turned this on, and refuses it
+otherwise. `nodeui.Serve` and `nodeui.Refuse` (`hub/nodeui`) are this
+end.
+
 A Grain serves only the streams above. It serves a view only of an
-artifact it has itself listed.
+artifact it has itself listed, and an http stream only to its own UI.
