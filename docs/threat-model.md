@@ -593,9 +593,12 @@ gateway.yaml`), and the node-UI hosts route only to the IAP backend
 Service names (checked by `validate.sh`); the containers run as the numeric user 65532
 with a read-only root filesystem (checked by `validate.sh`, SA1-L9); a
 default-deny NetworkPolicy admits 8080 only from Google's load balancer
-and health-check ranges and 9091 only from the Prometheus collectors
-(checked by `validate.sh`, SA1-L5). The planned internal listener (R3)
-uses an HMAC bound to the target pod and the minute (hub.md §2.2.3). *Residual:* `validate.sh` does not check
+and health-check ranges, 9091 only from the Prometheus collectors and
+9092, the internal listener, only from the hub's own pods (checked by
+`validate.sh`, SA1-L5). The internal listener is on no Service (checked
+by `validate.sh`) and refuses any request without an HMAC, under the
+`silo-hub-internal` key, bound to its own pod and the minute (hub.md
+§2.2.3; `hub/server` `TestForwardedOpen`). *Residual:* `validate.sh` does not check
 that the IAP-off route stays an exact match or that the dev sign-on is
 never set (O-12). *Status:* mitigated; checks open. INV-2, INV-20.
 
@@ -717,7 +720,7 @@ name or comment. **Gap** means nothing checks it yet.
 | ID | Invariant | Test |
 | --- | --- | --- |
 | INV-1 | The hub learns a human's identity only from a verified IAP assertion (signature, issuer, audience, expiry, an algorithm matching the key), a verified OIDC session cookie, or a verified OIDC ID token; never from `x-goog-authenticated-user-email` or any other plaintext header, except under `-dev-user-header`. | `hub/identity` `TestIAP`, `TestAlgorithmMustMatchKey`, `TestAudienceArray`, `TestOIDCSignIn`, `TestOIDCRefusesUnverifiedEmail`, `TestOIDCStateMismatch`, `TestOIDCBearerIDToken`; `hub/server` `TestConfigSignOn` |
-| INV-2 | The only route a request without human sign-on reaches is `/v1/nodes/connect` (plus `/healthz`, `/readyz`, and `/metrics` on its own listener), and it answers 401 before any WebSocket exists unless the bearer is a live node token. | `hub/rendezvous` `TestUnauthenticated`; `validate.sh` (metrics port on no Service); gap: a test that walks every registered route without credentials |
+| INV-2 | The only route a request without human sign-on reaches is `/v1/nodes/connect` (plus `/healthz`, `/readyz`, `/metrics` on its own listener, and the internal listener's open, which needs the pods' shared key), and it answers 401 before any WebSocket exists unless the bearer is a live node token. | `hub/rendezvous` `TestUnauthenticated`; `validate.sh` (metrics and internal ports on no Service); `hub/server` `TestForwardedOpen` (internal tokens); gap: a test that walks every registered route without credentials |
 | INV-3 | The hub's database never contains SILO_ONLY content: every stored event is of the lifecycle or conversation class and validates against its type's schema with no extra field; node-only events are stored as nothing and broadcast only as `{kind, ref, size}`; no result disk path is kept. | `hub/live` `TestNodeOnlyNeverStored`, `TestClassify`, `TestClassifyDropsNodePaths` |
 | INV-4 | Artifact bytes and node UI bytes are never written to the hub's disk or database and never cached; artifacts are answered `text/plain`, `nosniff`, `Content-Security-Policy: sandbox`, `Cache-Control: no-store`. | `hub/live` `TestViewThrough` (the bytes pass through); `hub/faulttest` `TestViewThroughDisconnect`; gap: an assertion on all four headers, and that nothing reaches the store |
 | INV-5 | A node is registered only under the owner its credential proves, under the node ID its token was minted for, and never under an ID another owner registered or has had a token for that it has not released, live or revoked. A task is resumed, cancelled, streamed into and viewed only through a node registered by the owner it was offered to. | `hub/rendezvous` `TestNodeBoundCredential`, `TestRefusals`; `hub/registry` `TestOwner`; `hub/directory` `TestNodeTokens`, `TestNodeIDReusableAfterRevoke`; `hub/tasks` `TestResumeOnlyToOwner`, `TestCancelOnlyToOwner`; `hub/live` `TestAnotherOwnersNode` |

@@ -71,9 +71,18 @@ for o in "${overlays[@]}"; do
 	if awk '/^kind: Service$/,/^---$/' "$f" | grep -qE 'metrics|9091'; then
 		echo "$o: a Service exposes the metrics port"; exit 1
 	fi
+	# Nor the internal listener (docs/hub.md §2.2.3), which only the
+	# hub's own pods reach, with the key from its Secret.
+	grep -q -- '-internal-addr=:9092' "$f" || { echo "$o: the hub must serve its internal listener on 9092"; exit 1; }
+	if awk '/^kind: Service$/,/^---$/' "$f" | grep -qE 'internal|9092'; then
+		echo "$o: a Service exposes the internal port"; exit 1
+	fi
+	grep -q 'secretName: silo-hub-internal$' "$f" && grep -q 'value: /var/run/secrets/silo-hub-internal/key$' "$f" ||
+		{ echo "$o: the hub must read its internal key from the silo-hub-internal Secret"; exit 1; }
 	# Ingress is denied by default, and allowed to the hub's port only
 	# from Google's load balancer and health-check ranges, and to its
-	# metrics only from the Prometheus collectors (SA1-L5).
+	# metrics only from the Prometheus collectors (SA1-L5), and to its
+	# internal listener only from the hub's own pods.
 	np() { awk -v n="$1" 'BEGIN { RS = "\n---\n" } /kind: NetworkPolicy/ && $0 ~ "\n  name: " n "\n"' "$f"; }
 	deny="$(np default-deny-ingress)"
 	{ grep -q 'podSelector: {}' <<<"$deny" && ! grep -q 'ingress:' <<<"$deny"; } || { echo "$o: ingress must be denied by default"; exit 1; }
@@ -82,7 +91,10 @@ for o in "${overlays[@]}"; do
 		[ "$(grep -c 'port:' <<<"$lb")" = 1 ] && grep -q 'port: 8080$' <<<"$lb"; } || { echo "$o: 8080 must be open to the load balancer's ranges alone"; exit 1; }
 	prom="$(np silo-hub-metrics-from-prometheus)"
 	{ grep -q 'kubernetes.io/metadata.name: gmp-system$' <<<"$prom" && [ "$(grep -c 'port:' <<<"$prom")" = 1 ] && grep -q 'port: 9091$' <<<"$prom"; } || { echo "$o: 9091 must be open to the Prometheus collectors alone"; exit 1; }
-	[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 3 ] || { echo "$o: a NetworkPolicy beyond the three checked here"; exit 1; }
+	internal="$(np silo-hub-internal-from-hub)"
+	{ ! grep -q 'namespaceSelector\|ipBlock' <<<"$internal" && grep -q 'app: silo-hub$' <<<"$(sed -n '/from:/,$p' <<<"$internal")" &&
+		[ "$(grep -c 'port:' <<<"$internal")" = 1 ] && grep -q 'port: 9092$' <<<"$internal"; } || { echo "$o: 9092 must be open to the hub's pods alone"; exit 1; }
+	[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 4 ] || { echo "$o: a NetworkPolicy beyond the four checked here"; exit 1; }
 	# The hub serves as its least-privileged role and only the migrate
 	# init container has the schema owner's password (SA1-L8).
 	grep -q 'auto-iam-authn=true$' "$f" || { echo "$o: the proxy must log the hub in as its IAM database user"; exit 1; }

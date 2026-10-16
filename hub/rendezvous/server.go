@@ -62,6 +62,16 @@ type Server struct {
 	// ending (EventDisconnected), or a connection refused before a node
 	// was registered (EventRefused).
 	Observe func(ev Event)
+	// InternalKey, when set, is the key the hub's pods share for their
+	// internal listeners (docs/hub.md §2.2.3, at least MinInternalKey
+	// bytes): Open then reaches a node another pod holds, as the shared
+	// registry (Registry.Store) names it, through that pod's
+	// InternalHandler, and this pod's InternalHandler admits the others,
+	// under Registry.Pod's name. Nil opens only the nodes this pod holds.
+	InternalKey []byte
+	// DialInternal, when set, dials another pod's internal listener;
+	// net.Dialer's when nil.
+	DialInternal func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
@@ -340,15 +350,21 @@ func acceptTimeout(m *mux.Mux, d time.Duration) (*mux.Stream, error) {
 
 // Open opens a stream to a connected node over its reverse tunnel: the
 // path the dispatcher hands a node its task on, and the view-through
-// path to a node's diffs and logs (docs/hub.md §6, §7).
+// path to a node's diffs and logs (docs/hub.md §6, §7). A node another
+// pod holds is reached through that pod, with InternalKey set
+// (docs/hub.md §2.2.3); the stream is then the upgraded connection to
+// it, and a node no pod holds is ErrOffline.
 func (s *Server) Open(ctx context.Context, nodeID string) (net.Conn, error) {
 	s.mu.Lock()
 	nc := s.conns[nodeID]
 	s.mu.Unlock()
-	if nc == nil {
+	if nc != nil {
+		return nc.m.OpenStream(ctx)
+	}
+	if len(s.InternalKey) == 0 || s.Registry.Store == nil {
 		return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
 	}
-	return nc.m.OpenStream(ctx)
+	return s.openRemote(ctx, nodeID)
 }
 
 // Disconnect ends nodeID's connection, if it has one, and says whether

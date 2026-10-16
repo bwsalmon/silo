@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -266,4 +267,19 @@ func encode(n Node) (repos, labels string, err error) {
 		return "", "", err
 	}
 	return string(r), string(l), nil
+}
+
+// holder reads the pod holding the node's connection, that pod's
+// address and its lease; pod is empty when no pod holds it.
+func (s *Store) holder(ctx context.Context, id string) (pod, addr string, until time.Time, err error) {
+	var ms int64
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT n.pod, p.addr, p.lease_until FROM hub_nodes n
+		JOIN hub_pods p ON p.pod = n.pod WHERE n.id = ? AND n.conn <> ''`), id).Scan(&pod, &addr, &ms)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", time.Time{}, nil
+	}
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	return pod, addr, time.UnixMilli(ms), nil
 }

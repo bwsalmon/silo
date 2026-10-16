@@ -21,7 +21,10 @@
 //
 // and, on a listener of its own (Config.MetricsAddr) that the load
 // balancer never reaches, GET /metrics: its Prometheus metrics
-// (docs/hub-operations.md).
+// (docs/hub-operations.md). On another (Config.InternalAddr), which
+// only the hub's other pods reach, it serves
+//
+//	GET  /internal/v1/nodes/{id}/open   a stream to a node this pod holds, for the pod that asked (docs/hub.md §2.2.3)
 //
 // Every path but the first three signs its caller in through the
 // configured sign-on: IAP's assertion behind Google Cloud IAP, or OIDC.
@@ -134,13 +137,24 @@ type Config struct {
 	LeaseRetry time.Duration
 
 	// Pod names this pod in the shared registry (hub_pods), and PodAddr
-	// is the address the other pods reach it at; both are the host's
-	// name when empty, which is enough for one pod.
+	// is the address the other pods reach its internal listener at. Pod
+	// is the host's name when empty. PodAddr, when empty, is the
+	// internal listener's address, its host the host's name when it
+	// listens on every address, as on Kubernetes, where the pod's name
+	// resolves to its IP; without one it is the host's name.
 	Pod     string
 	PodAddr string
 	// PodLease is the pod's lease in the shared registry;
 	// registry.DefaultPodLease when zero.
 	PodLease time.Duration
+
+	// InternalAddr, when set, is the address Serve serves the internal
+	// listener on (docs/hub.md §2.2.3): another pod's request for a
+	// stream to a node this pod holds, authenticated with InternalKey,
+	// which the pods share (at least rendezvous.MinInternalKey bytes).
+	// With InternalKey, Open forwards to the pod holding the node.
+	InternalAddr string
+	InternalKey  []byte
 
 	// MetricsAddr, when set, is the address Serve serves MetricsPath on:
 	// a listener of its own, so that the metrics are never on the
@@ -274,6 +288,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	h.Registry = registry.New()
 	h.Registry.Store = h.Nodes
 	h.Registry.Pod, h.Registry.PodAddr = cmp.Or(cfg.Pod, host), cmp.Or(cfg.PodAddr, host)
+	if cfg.InternalAddr != "" && len(cfg.InternalKey) < rendezvous.MinInternalKey {
+		return fail(fmt.Errorf("server: the internal listener needs a key of at least %d bytes", rendezvous.MinInternalKey))
+	}
 	h.Registry.PodLease = cfg.PodLease
 	h.Registry.Logf = cfg.Logf
 	hb := cfg.Heartbeat
@@ -302,6 +319,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Heartbeat: hb,
 		Logf:      cfg.Logf,
 		Observe:   h.metrics.observeRendezvous,
+
+		InternalKey: cfg.InternalKey,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
 	dirAPI.Unbind = h.Registry.Unbind
@@ -456,6 +475,22 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 		defer msrv.Close()
 		h.cfg.logf("hub: serving metrics on %s%s", ml.Addr(), MetricsPath)
 	}
+	if h.cfg.InternalAddr != "" {
+		il, err := net.Listen("tcp", h.cfg.InternalAddr)
+		if err != nil {
+			l.Close()
+			return fmt.Errorf("server: the internal listener: %w", err)
+		}
+		if h.cfg.PodAddr == "" {
+			h.Registry.PodAddr = podAddr(il.Addr())
+		}
+		isrv := &http.Server{Handler: h.Rendezvous.InternalHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go isrv.Serve(il)
+		// Its streams are hijacked, and end with the node connections
+		// they ride.
+		defer isrv.Close()
+		h.cfg.logf("hub: serving the internal listener on %s, as %s at %s", il.Addr(), h.Registry.Pod, h.Registry.PodAddr)
+	}
 	// Requests, hijacked node connections included, live in reqCtx:
 	// cancelling it ends the event subscriptions, which never go idle
 	// for http.Server.Shutdown to wait for.
@@ -540,4 +575,16 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	}
 	h.cfg.logf("hub: stopped")
 	return nil
+}
+
+// podAddr is the address the other pods reach the internal listener at
+// a: its own, unless it listens on every address, when it is the
+// host's name and a's port.
+func podAddr(a net.Addr) string {
+	ta, ok := a.(*net.TCPAddr)
+	if !ok || !ta.IP.IsUnspecified() {
+		return a.String()
+	}
+	host, _ := os.Hostname()
+	return net.JoinHostPort(cmp.Or(host, "localhost"), fmt.Sprint(ta.Port))
 }
