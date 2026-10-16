@@ -11,4 +11,4 @@ Subtracts one org template from what this folder contributes. It is
 scoped to this folder: a Grain that includes `hub/shared` does not see
 `legacy-triage.md`, but a Grain that also includes `org/templates`
 directly does, and nothing here can hide an object anywhere else
-(docs/task-repos.md §3.3, §11.14).
+(docs/task-repos.md §3.3, §11.15).
