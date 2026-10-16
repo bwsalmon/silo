@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/schedule.schema.json",
+  "title": "grain/schedule@v1: a cadence that files a templated task (docs/task-repos.md §6.2); next/last run times are runtime only",
+  "type": "object",
+  "allOf": [{"$ref": "common.schema.json#/$defs/cadence"}],
+  "properties": {
+    "kind": {"const": "schedule"},
+    "schema": {"const": "grain/schedule@v1"},
+    "id": {"$ref": "common.schema.json#/$defs/id"},
+    "aka": {"$ref": "common.schema.json#/$defs/aka"},
+    "title": {"type": "string"},
+    "template": {"$ref": "common.schema.json#/$defs/ref"},
+    "inputs": {"$ref": "common.schema.json#/$defs/inputValues"},
+    "overlap": {"enum": ["skip", "queue", "allow"]},
+    "timezone": {"type": "string"},
+    "enabled": {"type": "boolean"},
+    "base": {"type": "string"},
+    "team": {"type": "string"},
+    "repo": {"type": "string"},
+    "fires_in": {"enum": ["silo", "grain"], "description": "Where it fires: Silo files into the team intake; a Grain into its own repo"},
+    "auto_approve_proposals": {"type": "boolean"},
+    "auto_merge": {"type": "boolean"},
+    "created_at": {"$ref": "common.schema.json#/$defs/time"},
+    "next_run_at": false,
+    "last_run_at": false
+  },
+  "required": ["kind", "schema", "id", "template"]
+}

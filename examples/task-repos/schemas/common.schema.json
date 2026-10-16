@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/common.schema.json",
+  "title": "Definitions shared by every task-repo kind (docs/task-repos.md)",
+  "$defs": {
+    "id": {
+      "description": "<kind prefix>-<12 Crockford base32 characters, lower case> (docs/task-repos.md §2.1)",
+      "type": "string",
+      "pattern": "^(task|tmpl|sch|des|cmt)-[0-9abcdefghjkmnpqrstvwxyz]{12}$"
+    },
+    "refString": {
+      "description": "A reference: a relative or /-rooted path, <git URL>//<path>, or <alias>:<path>; then optional @<gitref> and #<anchor> (§4)",
+      "type": "string",
+      "minLength": 1,
+      "not": {"pattern": "^[^/:@]+@[^/:]+:"}
+    },
+    "ref": {
+      "description": "A reference with the id its target must have: the path is a hint, the id is the truth (§4)",
+      "type": "object",
+      "properties": {
+        "ref": {"$ref": "#/$defs/refString"},
+        "id": {"$ref": "#/$defs/id"}
+      },
+      "required": ["ref"]
+    },
+    "principal": {
+      "description": "Who: silo, silo:schedule/<id>, grain:<node>, user:<email>, agent:grain:<node>/<task id>, team:<name>#member|approver|admin, authenticated",
+      "type": "string",
+      "pattern": "^(silo(:schedule/[a-z0-9-]+)?|grain:[a-z0-9][a-z0-9-]*|user:[^@\\s]+@[^@\\s]+|agent:grain:[a-z0-9-]+/[a-z0-9-]+|team:[a-z0-9-]+#(member|approver|admin|maintainer)|authenticated)$"
+    },
+    "time": {"type": "string", "format": "date-time"},
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "aka": {
+      "description": "Earlier identities of this object (grain:<deployment>/task/<n>, a settings id, a hub task id)",
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "inputValues": {
+      "type": "object",
+      "additionalProperties": {"type": ["string", "integer", "boolean", "array"]}
+    },
+    "cadence": {
+      "description": "The cadence keys grain's declarations use (docs/declarations.md); exactly one of them",
+      "type": "object",
+      "properties": {
+        "hourly": {"type": "object"},
+        "every": {"type": "object"},
+        "daily": {"type": "object", "properties": {"at": {"type": "string", "pattern": "^[0-2][0-9]:[0-5][0-9]$"}}, "required": ["at"]},
+        "weekly": {"type": "object", "properties": {"day": {"enum": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]}, "at": {"type": "string"}}, "required": ["day", "at"]},
+        "monthly": {"type": "object"},
+        "cron": {"type": "string"}
+      }
+    }
+  }
+}
