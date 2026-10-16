@@ -215,11 +215,41 @@ or relative URLs, and images as links rather than loads. React never
 sets HTML from a string. `ui/src/content.test.tsx` feeds script-bearing
 text through every field and event type (threat-model T-TB4-1, INV-15).
 
-**Copied components.** None. The sandbox that built U1 could not read
-bwsalmon/grain, so the leaf components (markdown, the diff pane, state
-chips, theme) are small ones of silo's own on the same libraries. They
-can be swapped for grain's copies later, each with a note of its grain
-path and commit.
+**Copied components.** From bwsalmon/grain `ui/` at commit
+`7781f615c603f43e9170cc8bb329a29ad0343c42`, as TypeScript, each file
+opening with a comment naming its grain path and that commit and
+listing what the copy changes:
+
+- `ui/src/components/Markdown.tsx`, from
+  `ui/src/components/Markdown.jsx` (react-markdown with remark-gfm and
+  remark-breaks, memoised). The copy drops raw HTML (`skipHtml`)
+  where grain shows it escaped; its `safeUrl` also refuses a URL with
+  whitespace or a control character in it; a refused link is left as
+  text; an image is a link rather than a load; and grain's
+  `style.css` `.markdown` rules are MUI `sx` on theme tokens.
+- `ui/src/components/DiffView.tsx`, from
+  `ui/src/components/DiffView.jsx` (react-diff-view: side by side,
+  inline or raw, with within-line marks), and `ui/src/phone.ts`, from
+  `ui/src/phone.js`, which picks its default layout. The copy reads
+  the theme where grain reads its stylesheet's custom properties.
+- `ui/src/theme.ts`, from `ui/src/theme.js`: grain's light and dark
+  palettes, each with a reduced-motion variant. `main.tsx` picks one
+  from the browser's `prefers-color-scheme` and
+  `prefers-reduced-motion`; grain's own in-app switch, which keeps the
+  choice in browser storage, is not copied. Grain's `SIDEBAR_WIDTH`
+  (its app shell) is left out, and `mono` is the hub's.
+
+`ui/src/components/StateChip.tsx` stays the hub's own: grain draws
+its task states with stylesheet classes over its own set of states,
+not with a component, so there is nothing that fits the hub's
+queued/offered/running/done/failed/cancelled/lost to copy; the chip
+takes its colours from the copied palette. Grain's chat rendering
+(`TaskChat`, on `@chatscope`) is tied to grain's own task, comment and
+transcript model and is not copied; the hub's timeline
+(`Timeline.tsx`) renders hub/live's events with the copied Markdown.
+`ui/src/components/copied.test.tsx` checks the copies as the hub uses
+them; `content.test.tsx` and `trust.test.tsx` still check their
+safety.
 
 **Auth.** Same-origin behind IAP or the OIDC session. The app sends the
 browser's own cookie and no other credential, and the hub answers no

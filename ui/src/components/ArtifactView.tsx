@@ -7,7 +7,8 @@
 import { useEffect, useState } from 'react';
 import { Alert, Box, Button, CircularProgress } from '@mui/material';
 import { fetchArtifact, type ArtifactResult } from '../api';
-import { DiffPane, PlainText } from './DiffPane';
+import DiffView from './DiffView';
+import { mono } from '../theme';
 
 export function ArtifactView({ task, kind, artifactRef }: { task: string; kind: string; artifactRef: string }) {
   const [open, setOpen] = useState(false);
@@ -36,9 +37,18 @@ export function ArtifactView({ task, kind, artifactRef }: { task: string; kind: 
             <Alert severity="warning">Unavailable: the node that holds this {kind} is offline. The hub keeps no copy.</Alert>
           )}
           {result?.kind === 'error' && <Alert severity="error">{result.message}</Alert>}
-          {result?.kind === 'text' && (kind === 'diff' ? <DiffPane text={result.text} /> : <PlainText text={result.text} />)}
+          {result?.kind === 'text' && (kind === 'diff' ? <DiffView diff={result.text} label={kind} /> : <PlainText text={result.text} />)}
         </Box>
       )}
+    </Box>
+  );
+}
+
+// Any other artifact, as the text it is.
+function PlainText({ text }: { text: string }) {
+  return (
+    <Box component="pre" sx={{ fontFamily: mono, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word', m: 0 }}>
+      {text}
     </Box>
   );
 }

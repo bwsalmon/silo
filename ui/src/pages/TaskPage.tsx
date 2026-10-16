@@ -7,7 +7,7 @@ import { useEventStream, type StreamState } from '../events';
 import { useLoad } from '../load';
 import { Link, routePath } from '../router';
 import { StateChip } from '../components/StateChip';
-import { Markdown } from '../components/Markdown';
+import Markdown from '../components/Markdown';
 import { Timeline } from '../components/Timeline';
 import { when } from './Backlog';
 
@@ -96,7 +96,7 @@ export function TaskPage({ id }: { id: string }) {
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ alignItems: 'flex-start' }}>
         <Paper sx={{ p: 2, flex: 2, minWidth: 0, width: '100%' }}>
           <Typography variant="h6">Prompt</Typography>
-          <Markdown text={t.prompt} />
+          <Markdown>{t.prompt}</Markdown>
         </Paper>
         <Paper sx={{ p: 2, flex: 1, minWidth: 280, width: '100%' }}>
           <Typography variant="h6">Lifecycle</Typography>
