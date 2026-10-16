@@ -1,8 +1,10 @@
 # The retired single-run runner's CI (old/README.md): old/ is its own Go
 # module, github.com/bwsalmon/silo/old, which the hub's root module never
 # reaches, so hub.yml does not test it and this job does not test the
-# hub. It is kept green until the runner's pieces are ported into
-# bwsalmon/grain. It formats, builds, vets and race-tests the module,
+# hub. It is not part of the default CI: old/ is kept only as source to
+# port into bwsalmon/grain, and is no longer kept green, so this job runs
+# only when dispatched by hand (workflow_dispatch, e.g. `grain ci run`)
+# while porting. It formats, builds, vets and race-tests the module,
 # including the gateway's tests against real container and gVisor
 # sandboxes and gitproxy's against real git clients (SILO_V2_REQUIRE_DOCKER,
 # SILO_V2_REQUIRE_RUNSC and SILO_V2_REQUIRE_GIT make a missing Docker, runsc
@@ -17,10 +19,9 @@
 # granule builds Granulefiles with.
 name: old
 
+# Manual only: no push or pull_request trigger, so it is not in the
+# merge gate.
 on:
-  push:
-    branches: ["**"]
-  pull_request:
   workflow_dispatch:
 
 env:
@@ -29,15 +30,6 @@ env:
 jobs:
   old:
     name: old
-    # The hub's files, which the old module does not read. Anything else
-    # -- old/ itself, this workflow, a new top-level file -- runs the job.
-    paths-ignore:
-      - hub/**
-      - internal/**
-      - docs/**
-      - go.mod
-      - go.sum
-      - "*.md"
     sandbox:
       cpus: 2
       # location/k8s's tests run a kind cluster beside everything else.

@@ -54,8 +54,10 @@ still name paths as `v2/<package>`; read those as `old/<package>`. The
 hub's design moved to [`../docs/hub.md`](../docs/hub.md). Silo v1, which
 they mention, is deleted from the repository and is in its git history.
 
-grain CI still builds, vets and tests this module
-(`.grain/workflows/old.yml`), so it keeps working until it is ported.
+grain CI does not test this module by default, and it is not kept
+green. `.grain/workflows/old.yml` still builds, vets and tests it, but
+runs only when dispatched by hand (`workflow_dispatch`), for checking a
+piece while porting it.
 
 ## What it was
 
@@ -268,7 +270,8 @@ gofmt -l .
 go build ./... && go vet ./... && go test -race ./...
 ```
 
-grain CI runs the same in `.grain/workflows/old.yml`.
+`.grain/workflows/old.yml` runs the same in grain CI, but only when
+dispatched by hand; no push or pull request runs it.
 
 The gateway's, `sandbox/container`'s and `session`'s tests create real containers,
 with `busybox:1.37`, and run the same suite with `kind: gvisor`. They

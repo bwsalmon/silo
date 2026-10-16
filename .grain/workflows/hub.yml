@@ -2,7 +2,7 @@
 # request: it formats, builds, vets and race-tests the root module,
 # github.com/bwsalmon/silo (README.md). The root module's ./... stops at
 # old/go.mod, so the retired runner in old/ is not built here
-# (.grain/workflows/old.yml tests it).
+# (.grain/workflows/old.yml tests it, only when run by hand).
 name: hub
 
 on:
