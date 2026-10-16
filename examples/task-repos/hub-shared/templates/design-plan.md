@@ -1,7 +1,6 @@
 ---
 kind: template
 schema: grain/template@v1
-id: tmpl-4t2w0s3dn9f6
 aka: ["repo:template:bwsalmon:grain:design-planner"]
 name: Design-doc planner (abridged)
 title: "Plan design doc changes: {{group}}"

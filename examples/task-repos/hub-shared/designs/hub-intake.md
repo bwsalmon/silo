@@ -1,14 +1,13 @@
 ---
 kind: design
 schema: grain/design@v1
-id: des-2ghanwagam5v
 aka: ["https://github.com/bwsalmon/silo.git//docs/hub.md#6-task-intake-and-federation-built-hubtasks"]
 title: Hub task intake, approval and signed claims
 status: implementing
 owners: ["user:bsalmon@google.com"]
 applies_to:
-  - ref: "silo-code:/"
-  - ref: "grain-code:pkg/daemon/hub.go"
+  - "silo-code:/"
+  - "grain-code:pkg/daemon/hub.go"
 supersedes: []
 requirements:
   prefix: HS

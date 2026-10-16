@@ -1,48 +1,13 @@
 ---
-kind: template
-schema: grain/template@v1
-id: tmpl-7txvezb4bfz9
-aka:
-- repo:template:bwsalmon:grain:prune-packages
-name: Prune GHCR packages
-title: Prune superseded GHCR package versions with package-publish capability
-inputs: []
-team: hub
-repo: https://github.com/bwsalmon/grain.git
-base: candidate
-auto_merge: true
-created_at: '2026-09-26T04:43:16.568716Z'
+kind: moved
+schema: grain/moved@v1
+to: ghcr/prune-packages.md
+moved_by: "user:bsalmon@google.com"
+moved_at: "2026-10-16T17:40:00Z"
+reason: Group the GHCR templates under templates/ghcr/.
 ---
 
-Run `cmd/ghcr-prune` using the `package-publish` capability to clean up old,
-superseded container package versions in GitHub Container Registry (GHCR) that
-deployments and CI workflows have stopped needing.
-
-## 1. Verify credentials and capability environment
-
-- Ensure the `package-publish` capability (or valid GitHub package management token)
-  is available:
-  - Check for credentials placed at `/home/debian/.package-publish-token`,
-    `/home/debian/.github-sandbox-token`, or in `PACKAGE_PUBLISH_TOKEN` / `GITHUB_TOKEN`
-    environment variables.
-  - If required credentials are missing, note that `package-publish` capability
-    must be granted to this repository/task in deployment settings.
-
-## 2. Execute GHCR package pruning
-
-- First run `go run ./cmd/ghcr-prune` in dry-run mode to inspect the deletion plan:
-  - Review the count of package versions to be kept, deleted, and deferred.
-  - Confirm that active branch tags, latest tags, recent rollback commits, and
-    pinned guest caches will be preserved according to policy.
-- Execute the pruning operation with `-apply`:
-  ```bash
-  go run ./cmd/ghcr-prune -apply=true
-  ```
-- Monitor the output for any deletion errors, rate limits, or warnings.
-
-## 3. Review and report results
-
-- Review the summary of deleted, refused, kept, and deferred package versions.
-- If any unexpected refusals or high deferred counts remain across consecutive runs,
-  document findings in the task report.
-- Conclude the run with a clear summary of pruned packages and current registry status.
+A tombstone (docs/task-repos.md §2.1). This path is permanently the
+template's old address: readers follow `to:`, and Silo's hook refuses any
+new object here. The task fired on 2026-10-11 still names this path in
+`template.ref`, and resolves through it.
