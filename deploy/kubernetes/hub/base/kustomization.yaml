@@ -11,6 +11,7 @@ resources:
   - namespace.yaml
   - serviceaccount.yaml
   - deployment.yaml
+  - pdb.yaml
   - services.yaml
   - gateway.yaml
   - policies.yaml
