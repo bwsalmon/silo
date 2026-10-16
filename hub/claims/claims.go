@@ -40,6 +40,10 @@ const KeysPath = "/v1/claims/keys"
 // timeout; a resume is signed afresh.
 const DefaultTTL = time.Hour
 
+// MaxTTL is the longest an attestation may be good for: grain's local
+// policy refuses one whose exp is more than 24 hours after its iat.
+const MaxTTL = 24 * time.Hour
+
 // Claims are an attestation's claims, named as grain reads them.
 type Claims struct {
 	Issuer string `json:"iss"`
@@ -47,7 +51,10 @@ type Claims struct {
 	Audience  string `json:"aud"`
 	IssuedAt  int64  `json:"iat"`
 	NotBefore int64  `json:"nbf,omitempty"`
-	Expiry    int64  `json:"exp,omitempty"`
+	Expiry    int64  `json:"exp"`
+	// HubTaskID is the task's ID at the hub, Spec.ID: grain records the
+	// task as filed from it.
+	HubTaskID string `json:"hub_task_id"`
 	// Requester asked for the task: the node's grain records them as its
 	// creator.
 	Requester string `json:"requester"`
@@ -132,7 +139,8 @@ type Signer struct {
 	// Issuer is every attestation's "iss": the silo_issuer nodes'
 	// policies name, conventionally the hub's own URL.
 	Issuer string
-	// TTL is how long an attestation is good for; DefaultTTL when zero.
+	// TTL is how long an attestation is good for; DefaultTTL when zero,
+	// and no more than MaxTTL.
 	TTL time.Duration
 	// Now is the clock; time.Now when nil. For tests.
 	Now func() time.Time
@@ -245,6 +253,9 @@ func (s *Signer) Sign(c Claims) (string, error) {
 		now = s.Now
 	}
 	ttl := cmp.Or(s.TTL, DefaultTTL)
+	if ttl < 0 || ttl > MaxTTL {
+		return "", fmt.Errorf("claims: a TTL of %s is outside (0, %s]", ttl, MaxTTL)
+	}
 	t := now()
 	c.Issuer, c.IssuedAt, c.Expiry = s.Issuer, t.Unix(), t.Add(ttl).Unix()
 	if c.GrantedCapabilities == nil {

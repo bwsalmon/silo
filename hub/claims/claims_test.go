@@ -106,7 +106,7 @@ func TestSignVerifies(t *testing.T) {
 			defer srv.Close()
 
 			digest := SpecDigest(Spec{Target: "acme/widgets", Title: "t", Body: "b"})
-			tok, err := s.Sign(Claims{Audience: "ws-1", Requester: "ann@example.com", Team: "infra", SpecDigest: digest})
+			tok, err := s.Sign(Claims{Audience: "ws-1", HubTaskID: "t-1", Requester: "ann@example.com", Team: "infra", SpecDigest: digest})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,7 +131,7 @@ func TestSignVerifies(t *testing.T) {
 			decode(t, parts[1], &got)
 			want := map[string]any{
 				"iss": "https://hub.example.com", "aud": "ws-1",
-				"iat": float64(now.Unix()), "exp": float64(now.Add(DefaultTTL).Unix()),
+				"iat": float64(now.Unix()), "exp": float64(now.Add(DefaultTTL).Unix()), "hub_task_id": "t-1",
 				"requester": "ann@example.com", "team": "infra", "approved_by": "",
 				"granted_capabilities": []any{}, "spec_digest": digest,
 			}
@@ -200,6 +200,24 @@ func TestNewSignerRefuses(t *testing.T) {
 	} {
 		if _, err := NewSigner(c.issuer, c.pems...); err == nil {
 			t.Errorf("%s: NewSigner accepted it", c.name)
+		}
+	}
+}
+
+// An attestation is good for at most a day, as grain requires.
+func TestSignRefusesLongTTL(t *testing.T) {
+	s, err := NewSigner("https://hub.example.com", ecPEM(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.TTL = MaxTTL
+	if _, err := s.Sign(Claims{Audience: "ws-1"}); err != nil {
+		t.Errorf("a TTL of MaxTTL: %v", err)
+	}
+	for _, ttl := range []time.Duration{MaxTTL + time.Second, -time.Second} {
+		s.TTL = ttl
+		if _, err := s.Sign(Claims{Audience: "ws-1"}); err == nil {
+			t.Errorf("signed with a TTL of %s", ttl)
 		}
 	}
 }
