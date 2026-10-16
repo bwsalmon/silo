@@ -52,8 +52,8 @@ var (
 	// ErrOwned is a repository another team already owns: every
 	// repository has exactly one owning team.
 	ErrOwned = errors.New("directory: repository is owned by another team")
-	// ErrNodeOwner is a node token asked for a node ID that a live token
-	// already binds to another owner.
+	// ErrNodeOwner is a node token asked for a node ID that another
+	// owner has had a token for, and has not released (SA1-H1).
 	ErrNodeOwner = errors.New("directory: node belongs to another owner")
 	// ErrInvalid is a malformed team ID, repository or role.
 	ErrInvalid = errors.New("directory: invalid")
@@ -113,6 +113,9 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 		err = s.migrate(ctx)
 	} else {
 		err = dbaccess.Check(ctx, db, "directory", Tables...)
+		if err == nil {
+			err = dbaccess.CheckColumns(ctx, db, "directory", added...)
+		}
 	}
 	if err != nil {
 		db.Close()
@@ -154,7 +157,8 @@ CREATE TABLE IF NOT EXISTS node_tokens (
 	owner TEXT NOT NULL,
 	node TEXT NOT NULL,
 	created_at BIGINT NOT NULL,
-	revoked_at BIGINT
+	revoked_at BIGINT,
+	released_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS node_tokens_node ON node_tokens (node);
 CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_live ON node_tokens (node) WHERE revoked_at IS NULL;
@@ -171,6 +175,14 @@ CREATE TABLE IF NOT EXISTS team_settings (
 const legacyPrincipals = `UPDATE team_members SET principal = 'user:' || principal
 	WHERE principal NOT LIKE 'user:%' AND principal NOT LIKE 'group:%'`
 
+// added are the columns added to the directory's tables since they
+// were first made. node_tokens.released_at (SA1-H1) is null on every
+// token minted before it, so each node ID stays bound to every owner
+// that ever had a token for it until it is released.
+var added = []dbaccess.Column{
+	{Table: "node_tokens", Name: "released_at", Add: `ALTER TABLE node_tokens ADD COLUMN released_at BIGINT`},
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	for _, stmt := range append(strings.Split(schema, ";"), legacyPrincipals) {
 		if strings.TrimSpace(stmt) == "" {
@@ -180,7 +192,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("directory: migrating tables: %w", err)
 		}
 	}
-	return nil
+	return dbaccess.AddColumns(ctx, s.db, "directory", added...)
 }
 
 func (s *Store) now() time.Time {

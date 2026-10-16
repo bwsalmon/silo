@@ -47,6 +47,12 @@ type Hub struct {
 	// Open opens a stream to a connected node, for the view-through:
 	// rendezvous.Server.Open.
 	Open func(ctx context.Context, nodeID string) (net.Conn, error)
+	// NodeOwner is the owner a node ID is registered by now, if it is
+	// registered: the registry's entry. A node's event stream is taken,
+	// and a view sent to it, only for a task offered to that owner's node
+	// (tasks.Task.NodeOwner, SA1-H1): another owner may have registered
+	// the ID since. Nil takes and sends none.
+	NodeOwner func(nodeID string) (owner string, ok bool)
 	// Ring and RingBytes bound each task's in-memory ring of token and
 	// node-only events: DefaultRing events and DefaultRingBytes of them
 	// when zero.
@@ -303,6 +309,9 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			if err == nil && task.Node != nodeID {
 				err = fmt.Errorf("task %s is not on node %q", logsafe.Quote(e.Task), nodeID)
 			}
+			if err == nil {
+				err = h.holds(task)
+			}
 			if err != nil {
 				h.logf("live: refused node %q's event stream: %s", nodeID, logsafe.Quote(err.Error()))
 				return
@@ -333,6 +342,22 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			return
 		}
 	}
+}
+
+// holds fails unless t's node is registered by the owner it was
+// offered to t as (SA1-H1).
+func (h *Hub) holds(t tasks.Task) error {
+	if h.NodeOwner == nil {
+		return errors.New("no registry to check the node's owner in")
+	}
+	owner, ok := h.NodeOwner(t.Node)
+	switch {
+	case !ok:
+		return fmt.Errorf("node %q is not registered", t.Node)
+	case t.NodeOwner == "" || owner != t.NodeOwner:
+		return fmt.Errorf("node %q is registered by %s, not by the owner task %s was offered to", t.Node, owner, t.ID)
+	}
+	return nil
 }
 
 // upstreamClosed notes a stream's end. When the task's last stream ends

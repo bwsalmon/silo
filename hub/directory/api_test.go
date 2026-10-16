@@ -230,6 +230,11 @@ func TestAPI(t *testing.T) {
 	if _, err := connect(aliceTok, registry.Node{ID: "ws-alice", Slots: 1}); err == nil {
 		t.Error("a revoked token connected")
 	}
+	// The node ID stays alice's until she releases it (SA1-H1).
+	h.want(t, 409, bob, "POST", NodeTokensPath, map[string]string{"node": "ws-alice"})
+	h.want(t, 404, bob, "DELETE", NodeTokensPath+"/nodes/ws-alice", nil)
+	h.want(t, 204, alice, "DELETE", NodeTokensPath+"/nodes/ws-alice", nil)
+	h.want(t, 201, bob, "POST", NodeTokensPath, map[string]string{"node": "ws-alice"})
 
 	// Minting again revokes the earlier token, and so ends the
 	// connection it holds (SA1-L2): a thief's connection with a stolen

@@ -123,7 +123,7 @@ func newHarness(t *testing.T) *harness {
 	log := &recordingLog{Store: store}
 
 	ft := &fakeTasks{m: map[string]tasks.Task{}}
-	ft.put(tasks.Task{Spec: tasks.Spec{ID: "t-1", Team: "infra", Repo: "bwsalmon/silo"}, State: tasks.Running, Node: "ws-1", NodeTask: "local-1"})
+	ft.put(tasks.Task{Spec: tasks.Spec{ID: "t-1", Team: "infra", Repo: "bwsalmon/silo"}, State: tasks.Running, Node: "ws-1", NodeOwner: "alice@example.com", NodeTask: "local-1"})
 
 	logf := testlog.Logf(t)
 	h := &Hub{
@@ -146,6 +146,10 @@ func newHarness(t *testing.T) *harness {
 		Logf:       logf,
 	}
 	h.Open = rv.Open
+	h.NodeOwner = func(id string) (string, bool) {
+		e, ok := rv.Registry.Get(id)
+		return e.Owner, ok
+	}
 	rvs := httptest.NewServer(rv.Handler())
 	t.Cleanup(rvs.Close)
 	hs := httptest.NewServer(h.Handler())
@@ -156,9 +160,15 @@ func newHarness(t *testing.T) *harness {
 // connect connects node id to the hub, as alice.
 func (h *harness) connect(t *testing.T, id string) *rendezvous.Conn {
 	t.Helper()
+	return h.connectAs(t, "alice@example.com", id)
+}
+
+// connectAs connects node id to the hub, as owner.
+func (h *harness) connectAs(t *testing.T, owner, id string) *rendezvous.Conn {
+	t.Helper()
 	cl := &rendezvous.Client{
 		Hub:   h.rvURL,
-		Token: func(context.Context) (string, error) { return "alice@example.com", nil },
+		Token: func(context.Context) (string, error) { return owner, nil },
 		Node:  registry.Node{ID: id, Repos: []string{"bwsalmon/silo"}, Slots: 1},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -613,7 +623,7 @@ func TestAccess(t *testing.T) {
 // TestStreamForAnotherNode: a node streams only the tasks placed on it.
 func TestStreamForAnotherNode(t *testing.T) {
 	h := newHarness(t)
-	h.tasks.put(tasks.Task{Spec: tasks.Spec{ID: "t-2", Team: "infra"}, State: tasks.Running, Node: "ws-2"})
+	h.tasks.put(tasks.Task{Spec: tasks.Spec{ID: "t-2", Team: "infra"}, State: tasks.Running, Node: "ws-2", NodeOwner: "alice@example.com"})
 	st := upstream(t, h.connect(t, "ws-1"))
 	send(t, st, strings.Replace(status(1, "mine"), "t-1", "t-2", 1))
 	// The hub ends the stream.
@@ -639,6 +649,42 @@ func TestStreamForAnotherNode(t *testing.T) {
 	}
 	if seq, _, _ := h.log.Last(context.Background(), "t-1"); seq != 1 {
 		t.Fatalf("t-1's last event %d, want 1", seq)
+	}
+}
+
+// TestAnotherOwnersNode is audit SA1-H1: a node ID another owner has
+// registered since the task was offered, as after a hub restart, may
+// neither stream the task's events nor be asked for its artifacts.
+func TestAnotherOwnersNode(t *testing.T) {
+	h := newHarness(t)
+	c := h.connectAs(t, "mallory@example.com", "ws-1")
+	asked := make(chan struct{}, 1)
+	go func() {
+		for {
+			s, err := c.Accept()
+			if err != nil {
+				return
+			}
+			asked <- struct{}{}
+			s.Close()
+		}
+	}()
+	st := upstream(t, c)
+	send(t, st, status(1, "forged"))
+	st.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := st.Read(make([]byte, 1)); err == nil || errors.Is(err, mux.ErrTimeout) {
+		t.Fatalf("the stream stayed open: %v", err)
+	}
+	if seq, _, _ := h.log.Last(context.Background(), "t-1"); seq != 0 {
+		t.Fatalf("kept another owner's node's event: %d", seq)
+	}
+	if code, body := get(t, h.url+"/v1/tasks/t-1/artifacts?ref=diff-1", "alice@example.com"); code != http.StatusServiceUnavailable {
+		t.Fatalf("viewing on another owner's node: %d %q", code, body)
+	}
+	select {
+	case <-asked:
+		t.Fatal("another owner's node was asked for the task's artifact")
+	default:
 	}
 }
 
@@ -731,7 +777,7 @@ func TestViewThrough(t *testing.T) {
 	}
 
 	// The node goes: its artifacts are unavailable.
-	h.tasks.put(tasks.Task{Spec: tasks.Spec{ID: "t-3", Team: "infra"}, State: tasks.Lost, Node: "ws-gone"})
+	h.tasks.put(tasks.Task{Spec: tasks.Spec{ID: "t-3", Team: "infra"}, State: tasks.Lost, Node: "ws-gone", NodeOwner: "alice@example.com"})
 	if code, body := get(t, h.url+"/v1/tasks/t-3/artifacts?ref=diff-1", "alice@example.com"); code != http.StatusServiceUnavailable {
 		t.Fatalf("viewing on an offline node: %d %q", code, body)
 	}

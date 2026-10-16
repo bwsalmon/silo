@@ -230,6 +230,12 @@ func (h *Hub) serveArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no node holds this task's artifacts", http.StatusNotFound)
 		return
 	}
+	if err := h.holds(t); err != nil {
+		// Not the node the task ran on, though it may have its ID.
+		h.logf("live: not asking node %q for task %s's artifact: %v", t.Node, t.ID, err)
+		http.Error(w, "unavailable: node "+t.Node+", which holds it, is offline", http.StatusServiceUnavailable)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), viewTimeout)
 	c, err := h.Open(ctx, t.Node)
 	cancel()

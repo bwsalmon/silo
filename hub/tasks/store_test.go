@@ -109,21 +109,21 @@ func TestLifecycle(t *testing.T) {
 		if _, err := s.Accept(ctx, task.ID, "x"); !errors.Is(err, ErrState) {
 			t.Errorf("accepting a queued task: %v, want ErrState", err)
 		}
-		got, err := s.Offer(ctx, task.ID, "ws-1")
+		got, err := s.Offer(ctx, task.ID, "ws-1", "alice@example.com")
 		check(t, err)
-		if got.State != Offered || got.Node != "ws-1" || got.Attempts != 1 {
+		if got.State != Offered || got.Node != "ws-1" || got.NodeOwner != "alice@example.com" || got.Attempts != 1 {
 			t.Errorf("offered: %+v", got)
 		}
-		if _, err := s.Offer(ctx, task.ID, "ws-2"); !errors.Is(err, ErrState) {
+		if _, err := s.Offer(ctx, task.ID, "ws-2", "alice@example.com"); !errors.Is(err, ErrState) {
 			t.Errorf("offering twice: %v, want ErrState", err)
 		}
 		// Refused: back to the queue without that node.
 		got, err = s.Requeue(ctx, task.ID, "busy", "ws-1")
 		check(t, err)
-		if got.State != Queued || got.Node != "" || got.Reason != "busy" || strings.Join(got.Excluded, ",") != "ws-1" {
+		if got.State != Queued || got.Node != "" || got.NodeOwner != "" || got.Reason != "busy" || strings.Join(got.Excluded, ",") != "ws-1" {
 			t.Errorf("requeued: %+v", got)
 		}
-		_, err = s.Offer(ctx, task.ID, "ws-2")
+		_, err = s.Offer(ctx, task.ID, "ws-2", "alice@example.com")
 		check(t, err)
 		got, err = s.Accept(ctx, task.ID, "local-7")
 		check(t, err)
@@ -166,7 +166,7 @@ func TestCancel(t *testing.T) {
 		check(t, err)
 		lost, err := s.Create(ctx, spec("infra", "bwsalmon/silo", "lost"))
 		check(t, err)
-		_, err = s.Offer(ctx, lost.ID, "ws-1")
+		_, err = s.Offer(ctx, lost.ID, "ws-1", "alice@example.com")
 		check(t, err)
 		_, err = s.Accept(ctx, lost.ID, "")
 		check(t, err)
@@ -206,13 +206,13 @@ func TestDispatchableAndRecover(t *testing.T) {
 			ids = append(ids, task.ID)
 		}
 		// a offered, b running, c queued, d done.
-		_, err := s.Offer(ctx, ids[0], "ws-1")
+		_, err := s.Offer(ctx, ids[0], "ws-1", "alice@example.com")
 		check(t, err)
-		_, err = s.Offer(ctx, ids[1], "ws-1")
+		_, err = s.Offer(ctx, ids[1], "ws-1", "alice@example.com")
 		check(t, err)
 		_, err = s.Accept(ctx, ids[1], "")
 		check(t, err)
-		_, err = s.Offer(ctx, ids[3], "ws-1")
+		_, err = s.Offer(ctx, ids[3], "ws-1", "alice@example.com")
 		check(t, err)
 		_, err = s.Finish(ctx, ids[3], Done, "")
 		check(t, err)
@@ -276,4 +276,39 @@ func manyLabels(n int) map[string]string {
 		l[fmt.Sprint("l", i)] = "v"
 	}
 	return l
+}
+
+// TestNodeOwnerColumn: a tasks table from before node_owner gains it,
+// empty on its tasks, and OpenExisting refuses one without it.
+func TestNodeOwnerColumn(t *testing.T) {
+	run := func(t *testing.T, url string) {
+		ctx := context.Background()
+		s, err := Open(ctx, url)
+		check(t, err)
+		task, err := s.Create(ctx, spec("infra", "bwsalmon/silo", "one"))
+		check(t, err)
+		_, err = s.Offer(ctx, task.ID, "ws-1", "alice@example.com")
+		check(t, err)
+		_, err = s.db.ExecContext(ctx, `ALTER TABLE tasks DROP COLUMN node_owner`)
+		check(t, err)
+		s.Close()
+		if _, err := OpenExisting(ctx, url); err == nil || !strings.Contains(err.Error(), "node_owner") {
+			t.Errorf("OpenExisting on the old table: %v", err)
+		}
+		for range 2 {
+			s, err = Open(ctx, url)
+			check(t, err)
+			got, err := s.Get(ctx, task.ID)
+			check(t, err)
+			s.Close()
+			if got.Node != "ws-1" || got.NodeOwner != "" {
+				t.Fatalf("migrated task %+v", got)
+			}
+		}
+		s, err = OpenExisting(ctx, url)
+		check(t, err)
+		s.Close()
+	}
+	t.Run("sqlite", func(t *testing.T) { run(t, "sqlite:"+t.TempDir()+"/hub.db") })
+	t.Run("postgres", func(t *testing.T) { run(t, pgtest.Start(t).URL) })
 }

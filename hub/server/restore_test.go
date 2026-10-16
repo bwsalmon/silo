@@ -57,7 +57,7 @@ func TestBackupRestore(t *testing.T) {
 	spec.Prompt = "running when the backup was taken"
 	running, err := h.Backlog.Create(ctx, spec)
 	must(err)
-	_, err = h.Backlog.Offer(ctx, running.ID, "ws-1")
+	_, err = h.Backlog.Offer(ctx, running.ID, "ws-1", "alice@example.com")
 	must(err)
 	_, err = h.Backlog.Accept(ctx, running.ID, "local-1")
 	must(err)

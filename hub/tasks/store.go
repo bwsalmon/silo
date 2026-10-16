@@ -62,6 +62,9 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 		err = s.migrate(ctx)
 	} else {
 		err = dbaccess.Check(ctx, db, "tasks", "tasks")
+		if err == nil {
+			err = dbaccess.CheckColumns(ctx, db, "tasks", added...)
+		}
 	}
 	if err != nil {
 		db.Close()
@@ -86,6 +89,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	constraints TEXT NOT NULL,
 	state TEXT NOT NULL,
 	node TEXT NOT NULL,
+	node_owner TEXT NOT NULL DEFAULT '',
 	node_task TEXT NOT NULL,
 	reason TEXT NOT NULL,
 	excluded TEXT NOT NULL,
@@ -99,6 +103,14 @@ CREATE INDEX IF NOT EXISTS tasks_state ON tasks (state, created_at);
 CREATE INDEX IF NOT EXISTS tasks_team ON tasks (team, created_at)
 `
 
+// added are the columns added to tasks since it was first made.
+// node_owner (SA1-H1) is empty on a task offered before it: such a task,
+// if lost, is never resumed, since its node's owner cannot be checked,
+// and goes back to the queue after its team's grace.
+var added = []dbaccess.Column{
+	{Table: "tasks", Name: "node_owner", Add: `ALTER TABLE tasks ADD COLUMN node_owner TEXT NOT NULL DEFAULT ''`},
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	for _, stmt := range strings.Split(schema, ";") {
 		if strings.TrimSpace(stmt) == "" {
@@ -108,7 +120,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("tasks: creating tables: %w", err)
 		}
 	}
-	return nil
+	return dbaccess.AddColumns(ctx, s.db, "tasks", added...)
 }
 
 func (s *Store) now() time.Time {
@@ -137,7 +149,7 @@ func (s *Store) q(query string) string {
 	return b.String()
 }
 
-const columns = `id, team, repo, title, prompt, submitter, constraints, state, node, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
+const columns = `id, team, repo, title, prompt, submitter, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
 
 type scanner interface{ Scan(...any) error }
 
@@ -149,7 +161,7 @@ func scanTask(r scanner) (Task, error) {
 		created, updated int64
 		state            string
 	)
-	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &cons, &state, &t.Node, &t.NodeTask,
+	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
 		&t.Reason, &excl, &t.Attempts, &pending, &created, &updated, &t.version); err != nil {
 		return Task{}, err
 	}
@@ -190,8 +202,8 @@ func (s *Store) Create(ctx context.Context, spec Spec) (Task, error) {
 	spec.ID, spec.Created = newID(), now
 	t := Task{Spec: spec, State: Queued, Excluded: []string{}, Updated: now, version: 1}
 	cons, _ := json.Marshal(t.Constraints)
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, string(cons), string(t.State), "", "", "", "[]", 0, 0,
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
 		now.UnixMilli(), now.UnixMilli(), t.version)
 	if err != nil {
 		return Task{}, err
@@ -336,9 +348,9 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 		t.Excluded = []string{}
 	}
 	excl, _ := json.Marshal(t.Excluded)
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, node = ?, node_task = ?, reason = ?, excluded = ?,
+	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
 		attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
-		string(t.State), t.Node, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
+		string(t.State), t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
 		t.Updated.UnixMilli(), t.version+1, id, t.version)
 	if err != nil {
 		return Task{}, true, err
@@ -350,10 +362,12 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 	return t, true, nil
 }
 
-// Offer marks a queued task offered to node.
-func (s *Store) Offer(ctx context.Context, id, node string) (Task, error) {
+// Offer marks a queued task offered to node, which owner registered:
+// the task is bound to that owner as well as to the node ID, which
+// another owner may register later (SA1-H1).
+func (s *Store) Offer(ctx context.Context, id, node, owner string) (Task, error) {
 	return s.update(ctx, id, []State{Queued}, func(t *Task) {
-		t.State, t.Node, t.NodeTask, t.Reason = Offered, node, "", ""
+		t.State, t.Node, t.NodeOwner, t.NodeTask, t.Reason = Offered, node, owner, "", ""
 		t.Attempts++
 	})
 }
@@ -374,7 +388,7 @@ func (s *Store) Accept(ctx context.Context, id, nodeTask string) (Task, error) {
 // to be offered again: the one that refused it.
 func (s *Store) Requeue(ctx context.Context, id, reason, exclude string) (Task, error) {
 	return s.update(ctx, id, []State{Offered, Lost}, func(t *Task) {
-		t.State, t.Node, t.NodeTask, t.Reason = Queued, "", "", reason
+		t.State, t.Node, t.NodeOwner, t.NodeTask, t.Reason = Queued, "", "", "", reason
 		if exclude != "" && !slices.Contains(t.Excluded, exclude) {
 			t.Excluded = append(t.Excluded, exclude)
 		}
@@ -387,7 +401,7 @@ func (s *Store) Requeue(ctx context.Context, id, reason, exclude string) (Task, 
 // that refused it is offered it again.
 func (s *Store) Retry(ctx context.Context, id string) (Task, error) {
 	return s.update(ctx, id, []State{Queued, Lost}, func(t *Task) {
-		t.State, t.Node, t.NodeTask, t.Reason = Queued, "", "", ""
+		t.State, t.Node, t.NodeOwner, t.NodeTask, t.Reason = Queued, "", "", "", ""
 		t.Excluded = []string{}
 	})
 }
@@ -406,7 +420,7 @@ func (s *Store) RequeueLost(ctx context.Context, id, reason string, lostSince ti
 		return t, fmt.Errorf("%w: task %s is %s since %s", ErrState, id, t.State, t.Updated.Format(time.RFC3339))
 	}
 	return s.updateVersion(ctx, id, t.version, func(t *Task) {
-		t.State, t.Node, t.NodeTask, t.Reason = Queued, "", "", reason
+		t.State, t.Node, t.NodeOwner, t.NodeTask, t.Reason = Queued, "", "", "", reason
 	})
 }
 
