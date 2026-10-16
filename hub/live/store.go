@@ -27,6 +27,14 @@ type Log interface {
 	Last(ctx context.Context, task string) (int64, string, error)
 }
 
+// maxConns caps the event store's PostgreSQL connections, all of which
+// it keeps open once made: every running task writes its events here, so
+// a pool with no cap runs the server out of connections under load, and
+// one that closes them makes PostgreSQL a process for each query
+// (docs/test-runs/2026-10-16-hub-load.md). Writes beyond it wait for a
+// connection.
+const maxConns = 32
+
 // Store is the event store: SQLite for one hub replica, PostgreSQL for
 // several, as the backlog is. It holds events as the hub classified
 // them (Classify), one row per event.
@@ -56,6 +64,10 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	)
 	if postgres {
 		db, err = sql.Open("pgx", url)
+		if err == nil {
+			db.SetMaxOpenConns(maxConns)
+			db.SetMaxIdleConns(maxConns)
+		}
 	} else {
 		path := strings.TrimPrefix(url, "sqlite:")
 		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")

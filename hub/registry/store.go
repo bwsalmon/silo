@@ -15,6 +15,12 @@ import (
 	_ "modernc.org/sqlite"             // "sqlite"
 )
 
+// maxConns caps the shared registry's PostgreSQL connections, all of
+// which it keeps open once made, as the hub's other stores do
+// (docs/test-runs/2026-10-16-hub-load.md): every node's heartbeat writes
+// here.
+const maxConns = 8
+
 // Store is the shared registry (docs/hub.md §2.2.2, stage R2): every
 // pod's registry, published to the hub's database so that the pods see
 // each other's nodes. hub_pods holds each pod's lease, hub_nodes one row
@@ -46,6 +52,10 @@ func openStore(ctx context.Context, url string, create bool) (*Store, error) {
 	var err error
 	if s.postgres {
 		s.db, err = sql.Open("pgx", url)
+		if err == nil {
+			s.db.SetMaxOpenConns(maxConns)
+			s.db.SetMaxIdleConns(maxConns)
+		}
 	} else {
 		path := strings.TrimPrefix(url, "sqlite:")
 		s.db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")

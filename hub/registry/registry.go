@@ -427,6 +427,22 @@ func (r *Registry) entry(n *node, now time.Time) Entry {
 	return e
 }
 
+// Available is the slots each online node has available now, by node
+// ID: what the dispatcher compares to tell a change that may let it
+// place a task from one that cannot.
+func (r *Registry) Available() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	out := make(map[string]int, len(r.nodes))
+	for id, n := range r.nodes {
+		if r.status(n, now) == Online {
+			out[id] = max(n.entry.Free-n.entry.Claimed, 0)
+		}
+	}
+	return out
+}
+
 // Get returns one node's entry.
 func (r *Registry) Get(id string) (Entry, bool) {
 	r.mu.Lock()
@@ -457,22 +473,32 @@ func (r *Registry) ForRepo(repo string) []Entry {
 	return r.forRepos([]string{repo})
 }
 
-// forRepos is ForRepo for the nodes registered for any of repos.
+// forRepos is ForRepo for the nodes registered for any of repos, the
+// ones with the same available slots by ID. It copies only those nodes'
+// entries: the dispatcher calls it for each task it places.
 func (r *Registry) forRepos(repos []string) []Entry {
 	want := map[string]bool{}
 	for _, repo := range repos {
 		want[strings.ToLower(repo)] = true
 	}
 	var out []Entry
-	for _, e := range r.List() {
-		for _, repo := range e.Repos {
+	r.mu.Lock()
+	now := r.now()
+	for _, n := range r.nodes {
+		for _, repo := range n.entry.Repos {
 			if want[repo] {
-				out = append(out, e)
+				out = append(out, r.entry(n, now))
 				break
 			}
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Available() > out[j].Available() })
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if a, b := out[i].Available(), out[j].Available(); a != b {
+			return a > b
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 

@@ -56,6 +56,10 @@ type Bus struct {
 	listening atomic.Bool
 }
 
+// maxConns caps the connections notices are sent on, all of which the
+// bus keeps open once made.
+const maxConns = 16
+
 // Open returns a bus over the PostgreSQL database at url, or nil for
 // any other database: SQLite keeps its signals in memory.
 func Open(url string) (*Bus, error) {
@@ -66,7 +70,13 @@ func Open(url string) (*Bus, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(4)
+	// Every stored event is announced, on the node's stream as it is
+	// read: thousands a second at 500 Grains. Too few connections, or
+	// ones made afresh for each notice, hold up the streams behind them
+	// once the database is a round trip away
+	// (docs/test-runs/2026-10-16-hub-load.md).
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns)
 	return &Bus{url: url, db: db}, nil
 }
 
