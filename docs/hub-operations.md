@@ -459,10 +459,10 @@ moves the lease.
   from the hub's side. Waits that climb mean the pool is starved. Each
   store's pool is capped, and keeps its connections open once made:
   `events` 32, `backlog` 16, `directory` 8, and two the metric does not
-  report: the shared registry's 8 and the notice bus's 16 (hub.md
-  §2.2.4). That is 80 a pod, plus the lease's and the bus listener's
+  report: the shared registry's 8 and the notice bus's 4 (hub.md
+  §2.2.4). That is 68 a pod, plus the lease's and the bus listener's
   own connections, so the database's `max_connections` should allow
-  about 85 for each replica.
+  about 75 for each replica.
 
 ### 5.4 The alerts, and what to do
 
