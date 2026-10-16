@@ -19,14 +19,21 @@ const maxAttempts = 10
 // deadlock (40P01). PostgreSQL raises them under REPEATABLE READ and
 // SERIALIZABLE, and Cloud Spanner, whose read-write transactions are
 // always serializable, raises 40001 whenever two of them conflict
-// (docs/spanner-evaluation.md).
+// (docs/spanner-evaluation.md). On SQLite it is SQLITE_BUSY, which a
+// transaction that read before writing gets at once, whatever the busy
+// timeout, when another connection is committing a write.
 func Retryable(err error) bool {
 	var pe *pgconn.PgError
-	if !errors.As(err, &pe) {
-		return false
+	if errors.As(err, &pe) {
+		return pe.Code == "40001" || pe.Code == "40P01"
 	}
-	return pe.Code == "40001" || pe.Code == "40P01"
+	var se interface{ Code() int }
+	return errors.As(err, &se) && se.Code()&0xff == sqliteBusy
 }
+
+// sqliteBusy is SQLITE_BUSY, the primary result code of every
+// SQLITE_BUSY_* extended one.
+const sqliteBusy = 5
 
 // InTx runs f in a transaction on db and commits it if f returns nil,
 // running the whole of it again, after a short random pause, when the
