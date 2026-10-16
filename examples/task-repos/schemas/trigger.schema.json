@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/trigger.schema.json",
+  "title": "grain/trigger@v1: a .grain/triggers declaration as Markdown; its keys are pkg/declschema's, verbatim, and the body is its notes (docs/task-repos.md §12.1)",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "trigger"},
+    "schema": {"const": "grain/trigger@v1"},
+    "aka": {"$ref": "common.schema.json#/$defs/aka"},
+    "moved_from": {"$ref": "common.schema.json#/$defs/movedFrom"},
+    "on": {"description": "The event, as the YAML declaration writes it. Quote the key in front matter: a YAML 1.1 reader takes a bare on for true"},
+    "paths": {"type": "array", "items": {"type": "string"}},
+    "gate": {"type": "boolean"},
+    "human": {"type": "string", "description": "required or on-findings, as declschema defines it"},
+    "sensitive": {"type": "boolean"},
+    "template": {"$ref": "common.schema.json#/$defs/refString", "description": "A trigger that files a task names its template by reference"},
+    "reads": false,
+    "writes": false,
+    "grants": false,
+    "target": false
+  },
+  "required": ["kind", "schema"]
+}

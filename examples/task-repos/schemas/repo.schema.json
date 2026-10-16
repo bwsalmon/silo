@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/task-repos/repo.schema.json",
-  "title": "grain/repo@v1: a task repo's README.md front matter (docs/task-repos.md §3)",
+  "title": "grain/repo@v1: a task repo's README.md front matter, at the repo's root or in a grain folder such as .grain/ (docs/task-repos.md §3)",
   "type": "object",
   "properties": {
     "kind": {
@@ -136,7 +136,9 @@
                 "template",
                 "schedule",
                 "design",
-                "moved"
+                "moved",
+                "trigger",
+                "suite"
               ]
             }
           },
@@ -238,6 +240,101 @@
       "description": "A repo-level redirect: this repo has moved to that URL (§2.1)",
       "type": "string",
       "pattern": "^(https|ssh|file)://"
+    },
+    "scope": {
+      "description": "The subtrees this README governs, as paths from the repo root (/-rooted) or from the README's directory. Default: the README's own directory. A file is governed by the README whose scope entry covering it is longest (§3.1)",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "task_home": {
+      "description": "Where an approved task's definition lives (§5.5). A bare mode is shorthand for {mode: <mode>}. allow and repos are read from a team's intake README; path from a code repo's grain-folder README",
+      "oneOf": [
+        {
+          "enum": [
+            "intake",
+            "code-repo",
+            "promote"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "intake",
+                "code-repo",
+                "promote"
+              ],
+              "default": "intake"
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "intake",
+                  "code-repo",
+                  "promote"
+                ]
+              },
+              "minItems": 1,
+              "description": "Team only: the modes a code repo's own setting may choose. Default: all three"
+            },
+            "repos": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^(https|ssh|file)://"
+              },
+              "additionalProperties": {
+                "enum": [
+                  "intake",
+                  "code-repo",
+                  "promote"
+                ]
+              },
+              "description": "Team only: per-repo overrides, keyed by the code repo's git URL"
+            },
+            "path": {
+              "type": "string",
+              "default": "tasks/",
+              "description": "Code repo only: the folder, relative to this README, that tasks are committed into"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "schedules": {
+      "description": "Intake only: the schedules outside Silo's own repos that this team adopts. A schedule that names a team fires for it only if adopted here (§6.2, §11.13)",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "$ref": "common.schema.json#/$defs/refString"
+          },
+          "auto_approve": {
+            "type": "object",
+            "properties": {
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "digest"
+            ],
+            "additionalProperties": false,
+            "description": "Firings are filed approved only while the schedule and the template it names still hash to this digest; otherwise they are filed proposed"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [

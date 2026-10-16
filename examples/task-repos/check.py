@@ -3,7 +3,9 @@
 
 This is a reviewer's aid, not the implementation. It:
 
-- finds every object by scanning front matter (never by path);
+- finds every object by scanning front matter (never by path), and the
+  README that governs it by nearest-README discovery: a grain folder's
+  .grain/README.md as well as a whole repo's README.md;
 - validates each against its kind's JSON Schema;
 - resolves every reference -- relative, by alias, and by git URL, mapping
   this folder's illustrative Silo URLs to the sibling directories -- with
@@ -14,6 +16,9 @@ This is a reviewer's aid, not the implementation. It:
 - checks backlogs: every reference resolves to a task, no backlog holds two
   references to one task, and no reference outlives its task's close;
 - checks execution records: at most one open run per task;
+- checks code repos' grain folders: a task there came from an intake
+  (moved_from) and is not a scheduled firing, and a template there carries
+  no reads, writes, grants or target;
 - derives each task's status from its runs, and prints each backlog's
   effective order;
 - recomputes requirement hashes;
@@ -39,6 +44,7 @@ HOSTED = {
     "https://silo.example.com/git/hub/shared.git": "hub-shared",
     "https://silo.example.com/git/grains/eu.git": "grain-eu",
     "https://silo.example.com/git/grains/us.git": "grain-us",
+    "https://git.example.com/hub/widgets.git": "widgets-code",
 }
 EXTERNAL = ("https://github.com/",)  # real repos: referenced, not fetched here
 REPOS = sorted(set(HOSTED.values()))
@@ -71,19 +77,54 @@ def load_schemas():
     return store, schemas
 
 
+def readmes(repo):
+    """Every README.md declaring kind: repo, with its scope as repo-rooted
+    folder prefixes ("" is the whole repo)."""
+    out = []
+    for p in sorted((HERE / repo).rglob("README.md")):
+        fm, _ = split(p)
+        if not (isinstance(fm, dict) and fm.get("kind") == "repo"):
+            continue
+        rel = str(p.relative_to(HERE / repo))
+        home = posixpath.dirname(rel)
+        scope = []
+        for s in fm.get("scope") or [home + "/" if home else "/"]:
+            s = s.lstrip("/") if s.startswith("/") else posixpath.join(home, s)
+            s = posixpath.normpath(s) if s.strip("/") else ""
+            scope.append("" if s in ("", ".") else s + "/")
+        out.append((rel, home, fm, scope))
+    return out
+
+
+def governor(repo, path):
+    """The README governing a file: of those whose scope covers it, the one
+    with the longest covering entry (§3.1). Two at one length is an error."""
+    best, length = None, -1
+    for rel, home, fm, scope in readmes(repo):
+        for s in scope:
+            if path.startswith(s) and len(s) >= length:
+                if len(s) == length and best[0] != rel:
+                    err(f"{repo}/{path}: governed by both {best[0]} and {rel}")
+                best, length = (rel, home, fm), len(s)
+    return best
+
+
 def objects():
     objs = {}
     for repo in REPOS:
         for p in sorted((HERE / repo).rglob("*.md")):
             fm, body = split(p)
             if isinstance(fm, dict) and "kind" in fm:
-                objs[(repo, str(p.relative_to(HERE / repo)))] = (fm, body)
+                path = str(p.relative_to(HERE / repo))
+                if governor(repo, path) is None:
+                    err(f"{repo}/{path}: kind {fm['kind']} outside every README's scope")
+                objs[(repo, path)] = (fm, body)
     return objs
 
 
-def aliases(repo):
-    fm, _ = split(HERE / repo / "README.md")
-    return fm.get("aliases", {})
+def aliases(repo, src):
+    gov = governor(repo, src)
+    return gov[2].get("aliases", {}) if gov else {}
 
 
 def short(ident):
@@ -105,7 +146,7 @@ def canonical(repo, src, ref):
         return HOSTED[url], posixpath.normpath(inpath.lstrip("/")) if inpath else ""
     m = re.match(r"^([a-z][a-z0-9-]*):(.*)$", target)
     if m:
-        al = aliases(repo)
+        al = aliases(repo, src)
         if m.group(1) not in al:
             return None, f"undeclared alias {m.group(1)}"
         return canonical(repo, src, al[m.group(1)] + "//" + m.group(2))
@@ -163,7 +204,7 @@ def edges(fm):
         add("supersedes", fm.get("supersedes"), "task")
         add("filed_by.run", (fm.get("filed_by") or {}).get("run"), "run")
     elif kind == "ref":
-        add("to", fm.get("to"), "task")
+        add("to", fm.get("to"), "schedule" if fm.get("fired_at") else "task")
         add("previous", fm.get("previous"), "run")
     elif kind == "run":
         add("task", fm.get("task"), "task")
@@ -181,6 +222,9 @@ def edges(fm):
         add("supersedes", fm.get("supersedes"), "comment")
     elif kind == "schedule":
         add("template", fm.get("template"), "template")
+    elif kind == "repo":
+        for s in fm.get("schedules") or []:
+            add("schedules", s, "schedule")
     elif kind == "design":
         for r in fm.get("applies_to") or []:
             add("applies_to", r)
@@ -263,6 +307,27 @@ def main():
             if old not in objs or objs[old][0]["kind"] != "moved":
                 err(f"{repo}/{path}: moved_from {r}: not a tombstone")
 
+    # Code repos' grain folders (§5.5, §6.2, §8.13).
+    for (repo, path), (fm, body) in objs.items():
+        gov = governor(repo, path)
+        if not gov or gov[2].get("role") != "code":
+            continue
+        rel, home, gfm = gov
+        if fm["kind"] == "task":
+            th = gfm.get("task_home") or "intake"
+            folder = posixpath.join(home, (th.get("path", "tasks/") if isinstance(th, dict) else "tasks/"))
+            if not path.startswith(folder):
+                err(f"{repo}/{path}: a task outside {folder}, the folder task_home names")
+            if fm.get("schedule"):
+                err(f"{repo}/{path}: a scheduled firing in a code repo; firings live in an intake")
+            homes = [canonical(repo, path, r)[0] for r in fm.get("moved_from") or []]
+            if not any(h and split(HERE / h / "README.md")[0].get("role") == "intake" for h in homes):
+                err(f"{repo}/{path}: a task in a code repo with no intake in moved_from; Silo will not place it")
+        if fm["kind"] == "template":
+            for k in ("reads", "writes", "grants", "target"):
+                if k in fm:
+                    err(f"{repo}/{path}: a code repo's template may not carry {k}")
+
     # Execution records, by task (§5.3).
     runs = {}
     for (repo, path), (fm, body) in objs.items():
@@ -305,7 +370,8 @@ def main():
     for (repo, path), (fm, body) in objs.items():
         if fm["kind"] != "ref":
             continue
-        folders = split(HERE / repo / "README.md")[0].get("backlog", ["backlog/"])
+        rel, home, gfm = governor(repo, path) or ("", "", {})
+        folders = [posixpath.join(home, f) for f in gfm.get("backlog", ["backlog/"])]
         if not any(path.startswith(f) for f in folders):
             err(f"{repo}/{path}: a ref outside the README's backlog folders {folders}")
         ident, task, _ = resolve(objs, repo, path, fm["to"])

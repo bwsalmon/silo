@@ -11,6 +11,20 @@ are in [`examples/task-repos/`](../examples/task-repos/README.md).
   where they were authored (§5.2);*
 - *a Grain records its work as execution records in its own repo (§5.3).*
 
+*Amended again 2026-10-16 (task 4450), as the owner settled:*
+
+- *any repo, a code repo included, may hold task-repo objects in a grain
+  folder (`.grain/` by convention) declared by its own
+  `.grain/README.md`, and a reader finds a file's README by
+  nearest-README discovery (§3.1). Grain's existing `.grain/`
+  declarations move to the same Markdown format, workflows excepted, and
+  design docs in `docs/design/` become objects in place (§12);*
+- *objects in a code repo are trusted as that repo's own merge process
+  is, not through Silo's hook (§8.13, §11.12);*
+- *where an approved task lives, its **task home**, is configured per
+  team and per repo: the intake (the default), the code repo, or the
+  intake until someone promotes it (§5.5, §8.14).*
+
 This design stores grain's **tasks, schedules, templates and design docs**
 as self-contained Markdown files in a **graph of plain-git repositories**
 ("task repos"). Each object is one file, and the repos link to each other
@@ -69,12 +83,13 @@ The format does not depend on them:
 | **grain** | one per Grain instance | that Grain's backlog (ranked references to tasks), its execution records and their threads | Silo (adds and removes references, sets `expedite`, supersedes a lost Grain's runs), that Grain and its owner (ranks, execution records, threads) |
 | **intake** | one per team, in Silo | the team's tasks: proposals, approvals and cancels; the team's ranking of unplaced work; discussion on tasks | any authenticated user (new proposals only), the team's approvers, the team's members (ranks), Silo |
 | **shared** | any number, in Silo or elsewhere | templates, schedules, design docs, include files | the team's maintainers, through review branches |
-| **code** | the code repos themselves | `.grain/` declarations and `docs/design/` (§12) | the forge's usual rules |
+| **code** | the code repos themselves | a grain folder (`.grain/`, with its own `.grain/README.md`): templates, schedules, suites, triggers and workflows, tasks homed there (§5.5), and design docs in place in `docs/design/` (§3.1, §12) | whoever the repo's own review and merge process lets land a change (§8.13) |
 
 "Silo" is **one or more repos**, not a special store. Everything works by
 references alone:
 
-- a backlog reference in a Grain repo points at a task in an intake;
+- a backlog reference in a Grain repo points at a task in an intake, or
+  in a code repo's grain folder (§5.5);
 - an execution record points at its task and at the backlog reference it
   came from;
 - a task points at its template in a shared repo;
@@ -119,7 +134,7 @@ Every object is one UTF-8 file. The file has **YAML front matter**
 between `---` lines, then a **Markdown body**. Every file declares:
 
 - `kind:`, one of `repo`, `task`, `ref`, `run`, `comment`, `template`,
-  `schedule`, `design` or `moved`;
+  `schedule`, `suite`, `trigger`, `design` or `moved`;
 - `schema:`, as in `grain/task@v1` (§10).
 
 There is **no `id:` field.** An object is named by where it is (§2.1).
@@ -146,6 +161,21 @@ templates/partials/<name>.md               kind: template (include-only, inputs 
 schedules/<name>.md                        kind: schedule
 designs/<name>.md                          kind: design
 <an old path>                              kind: moved   (a tombstone, §2.1)
+```
+
+A code repo keeps the same kinds in its grain folder, beside the code
+(§3.1):
+
+```
+README.md                                  the code's own README: no front matter needed
+.grain/README.md                           kind: repo    (scope: [/.grain/, /docs/design/])
+.grain/templates/<name>.md                 kind: template
+.grain/schedules/<name>.md                 kind: schedule
+.grain/suites/<name>.md                    kind: suite
+.grain/triggers/<name>.md                  kind: trigger
+.grain/workflows/<name>.yml                a GitHub Actions workflow: YAML, not an object (§12.2)
+.grain/tasks/<name>/task.md                kind: task    (homed here, §5.5)
+docs/design/<name>.md                      kind: design  (in place, §12.3)
 ```
 
 **Names.** Whoever creates an object picks its path, once:
@@ -184,7 +214,8 @@ their canonical forms are equal after following redirects (§4).
 
 **Paths are stable by design.** State lives in front matter (§1.2), so
 an object never moves to change state. A task is proposed, approved,
-placed, run and closed without its path changing. Placement adds a
+placed, run and closed without its path changing, unless its task home
+moves it, once, into a code repo (§5.5). Placement adds a
 reference to it in a Grain's backlog (§5.2), and running it adds an
 execution record in that Grain's repo (§5.3).
 
@@ -234,8 +265,10 @@ them.
 
 ## 3. Repo metadata: `README.md` front matter (`kind: repo`)
 
-Each repo's root `README.md` declares the repo. Its prose body is for
-humans. Schema: [`schemas/repo.schema.json`](../examples/task-repos/schemas/repo.schema.json).
+A whole-repo task repo's root `README.md` declares the repo. A grain
+folder inside another repo is declared by its own `README.md`
+(`.grain/README.md`), with a `scope` (§3.1). Either way the prose body is
+for humans. Schema: [`schemas/repo.schema.json`](../examples/task-repos/schemas/repo.schema.json).
 
 ```yaml
 ---
@@ -292,6 +325,17 @@ writers:                           # write ownership; whatever is not allowed is
   references (§5.2). The default is `[backlog/]`.
 - `aliases`: shorthand for related repos.
 - `moved_to`: a repo-level redirect, set when the repo has moved (§2.1).
+- `scope`: the subtrees this README governs (§3.1). The default is the
+  README's own directory, so a root README governs the whole repo.
+- `task_home`: where approved tasks live (§5.5). On an intake, it is the
+  team's setting; on a code repo's grain folder, the repo's.
+- `schedules`: on an intake, the schedules from repos Silo does not host
+  that the team adopts (§6.2).
+
+Paths in a README (`backlog`, `scope`, `writers.paths`, `task_home.path`)
+are relative to the README's directory, or to the repo root when they
+start with `/`. For a root README the two are the same, so a whole-repo
+task repo reads exactly as before.
 - `writers`: an **ordered list of allow rules**. Nothing is writable
   unless a rule allows it.
 
@@ -338,7 +382,70 @@ in full. In outline:
 | `comment` | any signed-in user, on tasks; Silo on their behalf | the Grain, on its runs; Silo on a user's behalf; the owner |
 | `moved` | the team's admins and Silo (`may: move`) | the Grain's owner |
 
+### 3.1 Grain folders inside any repo
+
+**Any repo may hold task-repo objects in a subfolder**: a code repo, a
+docs repo, a monorepo with one folder per project. The convention is
+`.grain/`, but nothing is located by a fixed path. Objects are still
+found by scanning front matter (§2), and the folder is declared by a
+`README.md` in it with `kind: repo`. The repo's top-level `README.md`
+belongs to the code, and is left alone.
+
+```yaml
+---
+kind: repo
+schema: grain/repo@v1
+role: code
+title: The widgets repo's grain folder
+owner: {team: hub, silo: https://silo.example.com}
+host: other                        # the forge enforces writes; readers validate (§8.13)
+scope: [/.grain/, /docs/design/]   # what this README governs
+default_ref: main
+backlog: []                        # a code repo queues nothing itself
+task_home: {mode: promote, path: tasks/}
+aliases:
+  intake: https://silo.example.com/git/hub/intake.git
+writers: […]                       # what belongs here; checked on read (§8.13)
+---
+```
+
+This is [`widgets-code/.grain/README.md`](../examples/task-repos/widgets-code/.grain/README.md).
+
+**Nearest-README discovery.** To find the README that governs a file —
+whose `aliases` expand its references, whose `backlog` folders it may
+sit in, whose `writers` rules it is checked against — a reader:
+
+1. collects every `README.md` in the repo, at the commit it is reading,
+   whose front matter has `kind: repo`;
+2. keeps those with a `scope` entry that contains the file;
+3. picks the one whose containing entry is **longest**. With default
+   scopes, that is exactly the nearest enclosing README with
+   `kind: repo`. An explicit `scope` lets a grain folder's README also
+   take in a sibling subtree, as `.grain/README.md` takes in
+   `/docs/design/`.
+
+Two READMEs whose entries tie for one file are an error, reported on
+both, and the file is governed by neither. A file with `kind:` that no
+README governs is reported, and is not an object. A code repo's other
+Markdown, with no `kind:` front matter, is never read as an object.
+
+A reader finds the candidates cheaply: it reads `README.md` files only,
+and a reader that caches them per commit does this once per fetch.
+
+**Identity does not change.** An object in a grain folder is named by
+its repo URL and its **repo-relative** path, as anywhere else (§2.1):
+`https://git.example.com/hub/widgets.git//.grain/templates/release-notes.md`.
+A `/`-rooted reference inside the folder is rooted at the repo, not at
+the folder, so `/docs/design/widgets.md#WG-2` names the design doc from
+anywhere in that repo.
+
+**A `.grain/` folder with no README** reads as if it had one with
+`role: code`, `scope: [/.grain/]`, `host: other`, `task_home: intake`
+and, for `writers`, today's declaration rules (§12.1). So every repo's
+existing `.grain/` keeps working unchanged until it adds one (§13.1).
+
 ## 4. References: plain git, no forge
+
 
 ```
 ref     = [ repo "//" ] path [ "@" gitref ] [ "#" anchor ]
@@ -374,7 +481,10 @@ Those are for humans and carry no meaning.
 
 1. **Canonicalise.** Expand the alias, and resolve a relative path
    against the referring file, to get the canonical global identity
-   (§2.1).
+   (§2.1). The aliases are those of the README that governs the
+   referring file, found by nearest-README discovery (§3.1): an object in
+   a code repo's `.grain/` uses `.grain/README.md`'s aliases, not the
+   code's README. A `/`-rooted path is rooted at the repo.
 2. **Unpinned references** resolve to the tip of the target repo's
    `default_ref` at the moment they are read. Anything recorded for
    traceability records the commit sha that was actually used: a task's
@@ -442,8 +552,10 @@ execution records, task → dependents, requirement → tasks, and
 
 ## 5. Tasks, backlogs, execution records and comments
 
-A task is written once, where its author wrote it, and is never copied.
-Three other kinds point at it:
+A task is written once, in the intake where it was proposed, and is
+never copied. It stays there unless its task home says otherwise, in
+which case it moves once, leaving a tombstone (§5.5). Three other kinds
+point at it, by path, wherever it lives:
 
 - a **backlog reference** puts it in a queue, at a rank (§5.2);
 - an **execution record** says what one Grain did with it (§5.3);
@@ -697,7 +809,153 @@ to do it at all, references the task, and lives beside it in its repo
 The hub shows one thread per task: the task's comments and every run's
 comments, merged by time and labelled by Grain.
 
+### 5.5 Where a task lives: the task home
+
+A task's **home** is the repo that holds its file. Every task starts in
+the team's intake; where it lives once it is approved is **an option**,
+`task_home`, set per team, with an optional per-repo override:
+
+| Mode | Where an approved task's file lives | For |
+| --- | --- | --- |
+| **`intake`** (the default) | the team's intake, where it was proposed. Code repos hold only the definitions someone deliberately committed there | most work: nothing is written to a code repo but the work itself |
+| **`code-repo`** | the target code repo's grain folder (`.grain/tasks/<name>/task.md`), committed on approval through that repo's own review and merge. The intake path becomes a tombstone | teams that want every task reviewed and versioned with the code |
+| **`promote`** | the intake, until an explicit **promote** moves it into the code repo, leaving a tombstone | long-lived or design-linked work, chosen task by task |
+
+**Configuring it.** The team's setting is in its intake's README; a
+code repo's is in its `.grain/README.md`:
+
+```yaml
+# hub-intake/README.md: the team
+task_home:
+  mode: intake                          # the team's default
+  allow: [intake, promote, code-repo]   # what a code repo may choose for itself (default: all three)
+  repos:                                # per-repo overrides
+    https://git.example.com/hub/widgets.git: promote
+
+# widgets/.grain/README.md: the code repo
+task_home: {mode: promote, path: tasks/}  # path: where tasks are committed, under this README
+```
+
+A bare mode (`task_home: promote`) is short for `{mode: promote}`. The
+**effective mode** for an approved task is the first of these that is
+set, for the code repo its `repo:` names:
+
+1. that code repo's `.grain/README.md` `task_home.mode`, if the team's
+   `allow` lists it;
+2. the team's `task_home.repos` entry for that repo;
+3. the team's `task_home.mode`;
+4. `intake`.
+
+A task with no `repo:` (team-targeted) is always homed in the intake.
+The code repo's choice comes first because nothing lands in it except
+through its own review anyway, so its maintainers have the last say over
+what is committed there. The team's `allow` bounds it because a task's
+prompt, once committed to a code repo, is readable by everyone who can
+read that repo, which may be more people than can read the intake.
+
+**Rules for every mode:**
+
+- **Proposals always start in the Silo intake** (§8.2). Proposing never
+  needs GitHub, a code-repo account or code-repo write access.
+- **Approval always happens in the intake**, under the hook's approver
+  rules (§8.3). Only an approved task leaves the intake, so a task in a
+  code repo always carries `moved_from:` naming its intake tombstone.
+  Silo places a task homed in a code repo only if that tombstone points
+  back at it, and its spec digest equals the spec that was approved in
+  the intake. A task someone commits straight into a code repo is a
+  definition Silo will not place: to run it, propose it in the intake.
+  A standalone Grain whose local policy trusts that repo may run it
+  (§8.13).
+- **Scheduled-task instances are never committed to code repos.** Only
+  schedule definitions are (§6.2). `task_home` never applies to a task
+  with `schedule:`, Silo never promotes one, and readers reject a
+  `kind: task` with `schedule:` in a code repo's grain folder.
+- **Backlogs and execution records do not care which mode is used.** A
+  backlog reference's `to:`, a run's `task:` and a dependency's
+  `depends_on` name the task by path or git URL wherever it is (§4).
+- **The spec stays frozen** across the move (§5.1). The file at its new
+  home is the intake's file with `moved_from` added. The only other
+  change allowed is to how its references are written: an alias or a
+  relative path that meant something in the intake is re-expressed for
+  the new home's README, and must name the same canonical identity
+  (§2.1). The spec digest is computed over canonical references, so it
+  does not change. The example task's `implements:` was
+  `widgets:docs/design/widgets.md#WG-2` in the intake, and is
+  `/docs/design/widgets.md#WG-2` in the widgets repo.
+
+- **A move follows the identity rules of §2.1:** the new home first, then
+  the tombstone in the intake, then Silo rewrites the references it owns
+  (§8.11). It rewrites a backlog reference's `to:` to the new address and
+  its `spec_rev` to the commit the task landed in. The attestation is
+  left as it was: it names the task's intake identity, which now
+  redirects to `to:`, and its `spec_digest` still matches (§11.7).
+  Execution records already written keep naming the intake address, and
+  resolve through the tombstone.
+
+**How `code-repo` mode lands the file.** On approval, Silo commits the
+task into the code repo's grain folder through the repo's normal path:
+
+- **a direct push**, where the host lets Silo's identity write that path
+  without review: a GitHub ruleset bypass for Silo's app limited to
+  `.grain/tasks/**`, or the equivalent Gerrit or depot permission. One
+  commit on the default branch;
+- otherwise **a small change**: Silo pushes one commit adding the file to
+  a branch `silo/task-home/<name>`, and opens a pull request or CL. The
+  repo's checks and triggers run on it as on any change, and grain's
+  merge queue lands it. In a repo whose `.grain/**` trigger requires a
+  human (as bwsalmon/silo's `grain-declarations` trigger does), that is a
+  human's Submit per task. That cost is the repo's choice, and one
+  reason `intake` is the default.
+
+**While that change is pending**, the task is still at home in the
+intake, and is fully usable there. Silo places it from its intake
+address without waiting, and a Grain can run it. A cancel is written on
+the intake file as usual. Silo records the pending change in its
+database, and as a comment on the intake task naming the change's URL.
+Then:
+
+- **the change merges:** Silo reads the merged file and checks it: its
+  spec digest equals the intake's, and `moved_from` names the intake
+  path. Then it commits the tombstone in the intake and rewrites the
+  references. A file edited in review fails the check: Silo writes no
+  tombstone, reports the divergence on the task, and the task stays in
+  the intake. The file in the code repo is then a definition nobody
+  places, and readers report its `moved_from` as not a tombstone;
+- **the change is closed unmerged,** or is still open after 7 days: Silo
+  closes it, comments on the task, and the task stays in the intake;
+- **the task is cancelled first:** Silo closes the change. Nothing needs
+  to move.
+
+**Promote** works the same way, started by hand instead of by approval:
+
+- an **owning-team member** (`team:<team>#member` of the task's team)
+  runs `silo task promote <task>`, or uses the UI;
+- an **agent** proposes it: a `propose_promotion` request over its node
+  connection, as `propose_task` is today. Silo commits a comment on the
+  intake task recording the proposal, and a member confirms it. Nothing
+  moves on an agent's word alone.
+
+Any approved task whose home is the intake may be promoted, closed
+ones included: its runs keep resolving through the tombstone. A
+proposal cannot be promoted (approval happens in the intake), and
+neither can a rejected, cancelled or scheduled task. The target is the
+code repo the task's `repo:` names, and the promotion fails if that
+repo's effective mode is `intake`. A promotion is a move, so it cannot be
+undone by moving back to a tombstoned path (§2.1). A task promoted by
+mistake is cancelled where it now lives.
+
+**Cancelling a task homed in a code repo** writes `cancelled` where the
+task lives, through the same direct push or change. Until that lands,
+Silo acts in the repos it hosts, at once: it removes the task's backlog
+references, so no Grain starts it, and it supersedes any open run, with
+`reason: cancel pending in <change URL>`, which fences the Grain as
+re-placement does (§8.8). A cancel committed by the code repo's own
+maintainers is honoured too: it only ever stops work.
+
+The worked flows, with the commits each repo receives, are in §8.14.
+
 ## 6. Templates and schedules
+
 
 ### 6.1 Templating: a strict Jinja2 subset
 
@@ -773,6 +1031,45 @@ the schedule and the firing time, so a retried firing writes nothing new:
 
 `overlap` reads the previous firing's derived status (§5.1): `skip`
 skips a firing while the last one is unplaced, queued or has an open run.
+
+**Schedules in code repos.** A schedule's *definition* may live in a
+code repo's grain folder, beside the code it is about
+(`widgets:.grain/schedules/weekly-release-notes.md`). Its *instances*
+never do:
+
+- **In Silo**, a schedule that Silo does not host fires for a team only
+  if that team **adopts** it, by listing it in its intake README's
+  `schedules:`. A code repo cannot make a team's intake receive firings
+  by naming the team. The instances go into the adopting team's intake,
+  at `tasks/scheduled/<repo name>/<schedule>/<fired_at>/task.md`, where
+  `<repo name>` is the last element of the code repo's URL without
+  `.git`. So two code repos' schedules of the same name never collide.
+  A firing is filed `approved` only if the schedule says
+  `auto_approve_proposals` **and** the adoption pins
+  `auto_approve: {digest}` over the schedule and the template it names,
+  and both still hash to it. Otherwise it is filed `proposed` (§11.13).
+- **On a Grain** whose config lists a code repo's schedule, a firing goes
+  into the Grain's own repo as today, or is an **inline firing**: a
+  backlog reference whose `to:` is the schedule, with `fired_at`, and
+  then the execution record. No task file is written, because the task is
+  exactly the schedule rendered at that time. `spec_rev` pins the
+  schedule's commit, and with it the template's, so an inline firing is
+  allowed only when the template is in the same repo as the schedule.
+
+**Why instances are kept out of code repos.** A daily schedule fires 365
+times a year. In a code repo, each firing would be:
+
+- a commit in the code's history, showing up in `git log`, blame and
+  bisect;
+- a change through the repo's review and CI, and, in a repo whose
+  `.grain/**` needs a human, a human's Submit every day;
+- a review of nothing, because an instance is the schedule plus a time,
+  rendered deterministically.
+
+What deserves review is the definition, which changes rarely, so that is
+what lives with the code. `task_home` never applies to a firing, and
+readers reject a `kind: task` with `schedule:` in a code repo's grain
+folder (§5.5).
 
 **Runtime state is not committed.** `next_run_at`, `last_run_at` and
 the overlap bookkeeping stay in the database. The task each firing
@@ -983,8 +1280,8 @@ checks four things:
 - the only fields changed are `state`, `approved_by` and `approved_at`,
   and `state` went from `proposed` to `approved`.
 
-Silo then places the task (§8.4). Commits: **intake**, 1, by the
-approver.
+Silo then places the task (§8.4), and in `code-repo` mode starts moving
+it to its code repo (§5.5). Commits: **intake**, 1, by the approver.
 
 **Rejected: wrong pusher.** `mallory@example.com`, who is not an
 approver, pushes `state: approved, approved_by: user:approver@example.com`.
@@ -1098,7 +1395,8 @@ decides, and writes on the **task**:
 3. **Silo removes the references**, as for any close (§8.5).
 
 A Grain that is away sees the cancel when it next pulls, which replaces
-today's `cancel_pending`.
+today's `cancel_pending`. A task homed in a code repo is cancelled there,
+and Silo fences its runs at once while that lands (§5.5).
 
 Commits:
 
@@ -1193,6 +1491,8 @@ So for those a Grain applies the same rules **on read**:
 - **A standalone Grain's own repo** is trusted as its owner's: the owner
   has the filesystem anyway.
 
+**Code repos** are other hosts too, with their own review: §8.13.
+
 ### 8.11 No cross-repo transactions
 
 Every multi-repo flow above writes in a fixed order, and records the
@@ -1224,6 +1524,8 @@ first step whose effect is missing in git.
 | schedule firing in Silo | intake (approved task, deterministic path) → Grain repo (reference) |
 | planning | intake proposals and their references (deterministic paths) → design's `planning.last_rev` recorded in Silo's DB |
 | definitions via review branch | `review/*` branch → the approver's merge commit on `main` |
+| home a task in a code repo (`code-repo` on approval, or `promote`) | code repo (the task with `moved_from`, by direct push or a merged change) → intake (tombstone) → Silo rewrites `to:` and `spec_rev` in the backlogs it hosts |
+| cancel a task homed in a code repo | Grain repos (references removed, open runs superseded) → code repo (`cancelled`, by direct push or change) |
 
 **Definitions** (templates, schedules and designs) are pushed straight
 to `main` by maintainers, or through **review branches**. Anyone with
@@ -1330,7 +1632,122 @@ ahead of its test) after the team's current last reference. Commits:
   **Grain repo**, 1 by Silo, then 1 by the owner; **other Grains**, 1
   each for the re-placed tasks.
 
+### 8.13 Code repos: write authority is the repo's own
+
+Silo's pre-receive hook (§8.1) runs only on the repos Silo hosts. In a
+code repo, on GitHub, Gerrit, a depot or anything else, **write
+authority comes from that repo's own host and review process**: whatever
+its branch protection, required reviews, path triggers and merge queue
+let land on `default_ref` is what the repo says. Silo neither proxies
+nor mirrors those pushes. The grain folder's README says `host: other`,
+and its `writers` rules describe what belongs there, but nobody can
+check who pushed. Readers treat a code repo's objects like this:
+
+- **Trust follows the repo's merge process.** An object on the code
+  repo's `default_ref` is trusted exactly as much as code merged beside
+  it: no more, because Silo did not check its pusher, and no less,
+  because the repo's own review did. A repo that wants its grain folder
+  reviewed more strictly than its code says so with a path trigger on
+  `.grain/**`, as bwsalmon/silo already does.
+- **Silo validates on read.** Silo reads a code repo when one of its
+  repos references it, on the host's push webhook where there is one,
+  and otherwise on its next pass. For each changed file in a grain
+  folder's scope, it checks what the hook would: schema, the path rules
+  (§2.1), the README's `writers` rules on read (§8.10), references
+  (§4), design ID allocation (§7.1), and the invariants of §5.5. It
+  resolves references from a code repo with the rights of whoever is
+  using them, never with its own (§11.4). An object that fails is shown
+  in the repo's health view, and as a comment on the change if Silo
+  opened it, and is not used. Silo never writes to a code repo except
+  through §5.5's direct push or change.
+- **Grains are the PEPs, as everywhere.** A Grain runs a task from a
+  code repo only through a reference in its own backlog, whose
+  attestation's `spec_digest` must match the file (§11.7). Its local
+  policy may limit the code repos it reads templates, includes and
+  designs from. Definitions are data that an accepted task may use; they
+  grant nothing (§8.10).
+- **What a code-repo object can do is bounded by the design, not by its
+  README.** Anyone who can merge to the repo can edit its
+  `.grain/README.md`, so its `writers` rules are advisory, and the
+  limits below hold whatever it says:
+  - a task there is placed only with an intake approval behind it (§5.5);
+  - a template, schedule, suite or trigger carries no `reads`, `writes`,
+    `grants` or `target` (§12.1);
+  - a schedule fires for a team only if the team adopted it (§6.2);
+  - a `task_home` there is bounded by the team's `allow` (§5.5).
+
+A standalone Grain may trust a code repo further, since its owner's
+policy decides. It may run tasks committed there by hand, for instance,
+if its policy names that repo.
+
+### 8.14 Worked flows for each task home
+
+The same work in each mode, with the commits each repo receives. "Grain
+repo" is the placed Grain's own repo, and "the work" is the change the
+agent makes, which lands in the code repo through its review in every
+mode.
+
+**`intake` (the default).** Task 4310 in the examples: proposed, approved,
+placed on `eu` and run there, all with the task at
+`intake:tasks/4310-carry-approver/task.md` throughout.
+
+| Step | Intake | Code repo | Grain repo |
+| --- | --- | --- | --- |
+| propose (§8.2) | 1: the task, `proposed` (and its reference, if ranked) | — | — |
+| approve (§8.3) | 1, by the approver | — | — |
+| place (§8.4) | — | — | 1, by Silo: a reference to the intake path |
+| run (§8.5) | — | the work | `accepted`, `running`, the thread's batches |
+| close (§8.5) | 1, by Silo: the team's reference removed | none | 1, the run closed; then 1, by Silo: the reference removed |
+
+**`code-repo`.** The hub team sets
+`task_home.repos: {https://git.example.com/hub/widgets.git: code-repo}`.
+A member proposes `tasks/2026-10-17-widget-lint/task.md` for the widgets
+repo, and an approver approves it.
+
+| Step | Intake | Code repo | Grain repo |
+| --- | --- | --- | --- |
+| propose | 1: the task, `proposed` | — | — |
+| approve | 1, by the approver | — | — |
+| place the task's file | 1, by Silo: a comment naming the pending change | 1 commit on `silo/task-home/2026-10-17-widget-lint`, adding `.grain/tasks/2026-10-17-widget-lint/task.md` with `moved_from`; the merge queue lands it as 1 merge on `main` (or 1 direct push, where the host allows it) | — |
+| place the work, without waiting | — | — | 1, by Silo: a reference to the intake path |
+| the change merges | 1, by Silo: the tombstone, plus the team's reference rewritten, in one commit | — | 1, by Silo: `to:` and `spec_rev` rewritten |
+| run | — | the work | `accepted`, `running`, the thread |
+| close | 1, by Silo: the team's reference removed | none: the task file is never touched again | 1, the run closed; then 1, by Silo: the reference removed |
+
+If the change merges before the task is placed, the reference is created
+pointing at the code repo, and there is nothing to rewrite. A run
+accepted before the merge names the intake path in `task.ref`, and keeps
+resolving it through the tombstone.
+
+**`promote`.** The example's
+`widgets:.grain/tasks/2026-10-16-widget-schema-v2/task.md`. The widgets
+repo says `task_home: promote`. The task, which implements WG-2 of the
+widgets design, was proposed and approved in the intake, and placed on
+`eu`. The agent working on a related task then proposed promoting it,
+since it will be revisited with each format version, and bsalmon@google.com
+confirmed.
+
+| Step | Intake | Code repo | Grain repo |
+| --- | --- | --- | --- |
+| propose | 1: the task, `proposed` | — | — |
+| approve | 1, by the approver | — | — |
+| place | — | — | 1, by Silo: a reference to the intake path |
+| propose the promotion (agent) | 1, by Silo: a comment recording the proposal | — | 1, by the Grain: a comment on the agent's run naming it |
+| a member confirms | 1, by Silo: a comment naming the pending change | 1 commit on `silo/task-home/2026-10-16-widget-schema-v2`, then the merge queue's merge on `main`, after the repo's `.grain/**` trigger is satisfied | — |
+| the change merges | 1, by Silo: the tombstone (`kind: moved`, `moved_by` the member) | — | 1, by Silo: `to:` and `spec_rev` rewritten |
+| run | — | the work | `accepted`, `running`, the thread |
+| close | 1, by Silo: the team's reference removed, if there was one | none | 1, the run closed; then 1, by Silo: the reference removed |
+
+A member who promotes directly skips the proposal row. In the examples,
+the tombstone is
+[`hub-intake/tasks/2026-10-16-widget-schema-v2/task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-widget-schema-v2/task.md),
+Silo's comment beside it records the change, and `eu`'s
+[reference](../examples/task-repos/grain-eu/backlog/2026-10-16-widget-schema-v2.md)
+names the code-repo path, while the other references in that backlog
+name the intake.
+
 ## 9. How the task interface reduces
+
 
 | hub-interface.md today | With task repos |
 | --- | --- |
@@ -1358,7 +1775,10 @@ from the commits.
 Each kind has a JSON Schema (2020-12) in
 [`examples/task-repos/schemas/`](../examples/task-repos/schemas/):
 `common` (shared definitions), `repo`, `task`, `ref`, `run`, `comment`,
-`template`, `schedule`, `design` and `moved`.
+`template`, `schedule`, `suite`, `trigger`, `design` and `moved`.
+`repo` covers a grain folder's README as well as a root one, with
+`scope`, `task_home` and an intake's `schedules` (§3, §3.1, §5.5). `ref`
+gains `fired_at` for inline firings (§6.2).
 
 - **Every file names its schema** (`grain/task@v1`). A minor addition,
   an optional field, keeps `v1`. Readers ignore fields they do not know
@@ -1373,7 +1793,7 @@ Each kind has a JSON Schema (2020-12) in
 - Front-matter keys are `snake_case`, like the hub's JSON. For `template`
   and `schedule`, the loader also accepts the hyphenated keys of
   `.grain/` declarations (`auto-merge`, `auto-approve-proposals`) as
-  aliases, so existing declarations move over verbatim (§12).
+  aliases, so existing declarations move over verbatim (§12.1).
 
 ## 11. Security
 
@@ -1406,7 +1826,10 @@ messages to commits plus notifications.
    backlog references need: the task's own repo, the repos the task
    references (template, includes, designs), and the Grain repos holding
    its dependencies' execution records (§8.9), for as long as the
-   reference is in its backlog. The hook checks new references
+   reference is in its backlog. Silo cannot grant read on a code repo it does not host:
+   a Grain reads a task or definition there with its own credential, as
+   it must to work on that repo anyway. The hook checks new references
+
    with the pusher's rights, so nobody can use a reference to make Silo
    reveal a repo the pusher cannot read. Included files render only
    under the same check.
@@ -1430,7 +1853,9 @@ messages to commits plus notifications.
    - A backlog reference carries Silo's signed `attestation` (hub.md
      §6.4). Its `aud` is this Grain, its `task` is the task's canonical
      global identity, and its `spec_digest` covers the task's canonical
-     spec at `spec_rev`. A Grain whose policy names `silo_issuer` refuses
+     spec at `spec_rev`: its spec fields, with every reference in its
+     canonical form (§2.1), so a move that re-expresses a reference for
+     its new home leaves the digest unchanged (§5.5). A Grain whose policy names `silo_issuer` refuses
      a reference without a valid one.
    - **A redirect cannot change what was placed.** If the task has moved
      since, the Grain follows the tombstone and recomputes the digest on
@@ -1466,26 +1891,183 @@ messages to commits plus notifications.
     can only be given by an approver other than the task's submitter.
 11. **Content is untrusted where it is displayed.** Silo renders Markdown
     from these files as it renders agent-written text today (TB4).
+12. **Code repos are trusted as their merge process is** (§8.13). This
+    adds no boundary to the threat model: a code repo's `default_ref` is
+    already trusted for the code an agent works on. What is new is that
+    Silo and Grains read objects from it. The model:
+    - Silo's hook does not run there, so nothing in a grain folder is
+      attributed to a pusher. An object is as trusted as the repo's
+      review made it, and no more.
+    - Silo validates every object it reads from a code repo (schema,
+      paths, references, ID allocation, the §5.5 invariants) and uses
+      none that fails.
+    - The design's limits do not depend on the folder's README, which
+      anyone who can merge may edit (§8.13).
+    - Grains apply local policy as PEPs. A placed task's spec must match
+      the attestation's digest, and a Grain's policy may refuse code
+      repos it does not trust for templates, includes or designs.
+    - **Disclosure.** A task homed in a code repo is readable by
+      everyone who can read that repo. The team's `task_home.allow`
+      decides whether a code repo may choose that for itself, so a team
+      with a private intake can keep its prompts out of a public repo
+      (§5.5).
+13. **A malicious `.grain/` change in a code repo**, merged by someone
+    who can get a change through that repo's review, can do no more than
+    this:
+    - **Edit a homed task's spec after approval.** The digest no longer
+      matches the intake's approved spec, or the attestation's
+      `spec_digest`. Silo stops placing it and reports it, and a Grain
+      refuses it. The commit that did it is in the repo's history.
+    - **Add a task, `state: approved`, by hand.** No intake tombstone
+      points at it, so Silo never places it (§5.5).
+    - **Forge `moved_from`** to claim an intake origin. Silo checks the
+      other end: the intake path must be a tombstone pointing back, and
+      only the team's admins and Silo can write a tombstone in the
+      intake, under the hook (§8.1).
+    - **Edit a template or include.** A task already filed pins
+      `template.rev`. A schedule renders its template's tip, so a firing
+      after the edit uses it. That firing is filed `proposed`, and an
+      approver reads the rendered prompt, unless the team's adoption
+      pins `auto_approve.digest`: that digest covers the schedule and its
+      template, so any edit turns firings back into proposals until an
+      approver re-adopts it. What remains is prompt injection, bounded by
+      local policy (item 5).
+    - **Grant itself access.** A template, schedule, suite or trigger
+      with `reads`, `writes`, `grants` or `target` is refused (§12.1). A
+      capability named in a homed task is a request, granted only in
+      Silo's attestation (item 6).
+    - **Flood a team.** A schedule naming a team the team has not adopted
+      never fires (§6.2). Firings never land in the code repo itself. A
+      design edit files at most a capped number of proposals (item 10).
+      Silo reads at most 1,000 changed files per code-repo push, as the
+      hook caps pushes (§14).
+    - **Widen its own rules.** It can edit `.grain/README.md`'s
+      `writers`, which are advisory there, and its `task_home`, which the
+      team's `allow` bounds.
+    - **Reference a private Silo repo** to make Silo reveal it. Silo
+      resolves code-repo references with the rights of the principal
+      using them, never its own (item 4).
+    - **Cancel a homed task.** That is honoured, because it only stops
+      work, and the commit names who merged it.
 
-## 12. Interop with `.grain/` and `docs/design/`
+    The repo's own defence is to review `.grain/**` as strictly as it
+    reviews code that touches credentials, which bwsalmon/silo already
+    does with a path trigger that requires a human (`grain-declarations`).
 
-- **Declarations stay readable.** `pkg/repodecl` keeps loading
-  `.grain/templates/*.yml` and `.grain/schedules/*.yml`.
-- **The recommended form is the same Markdown** with front matter
-  (`.grain/templates/<name>.md`, `kind: template`). It carries the same
-  keys `pkg/declschema` defines, and the body is the prompt. The
-  refusals of `docs/declaration-schema.md` still hold: a repo declaration
-  cannot carry `reads`, `writes`, `grants` or `target`. The hook and
-  `grain declarations check` enforce this from the README `writers` rules
-  of a code repo.
-- **`docs/design/*.md`** gains optional `kind: design` front matter.
-  `{#D-n}` and `{#HS-n}` anchors, and the `Design-Item:`, `Design-Rev:`
-  and `Design-Removed:` trailers, carry over unchanged. A doc in a code
-  repo keeps its in-repo `Design-Item:` path. A Silo-hosted design is
+
+## 12. Grain folders in code repos: `.grain/` and `docs/design/`
+
+bwsalmon/grain's `.grain/` declarations (`docs/declarations.md`,
+`docs/declaration-schema.md`) **converge on the task-repo format**: each
+becomes a Markdown file with front matter, read by the same parser as
+every other object, in a grain folder governed by `.grain/README.md`
+(§3.1). Workflows are the one exception (§12.2). The keys do not change:
+each kind carries exactly the keys `pkg/declschema` defines for it today,
+and this design adds and removes none. The loader accepts the hyphenated
+spellings (`auto-merge`) as aliases of the `snake_case` ones (§10).
+
+### 12.1 The mapping
+
+| `.grain/` today | Becomes | `kind:` | Front matter | Body |
+| --- | --- | --- | --- | --- |
+| `templates/<name>.yml` | `templates/<name>.md` | `template` | every template key, verbatim; `fields` become `inputs` (§13) | the prompt, now Markdown rather than a YAML block scalar; `{{name}}` placeholders are already Jinja (§6.1) |
+| `schedules/<name>.yml` | `schedules/<name>.md` | `schedule` | every schedule key, verbatim: the cadence, `overlap`, `timezone`, `enabled`, `base`, `team`, `auto-approve-proposals`; `template: <name>` becomes the reference `../templates/<name>.md` | notes: the YAML file's leading comment |
+| `suites/<name>.yml` | `suites/<name>.md` | `suite` | every suite key, verbatim | the suite's description: the leading comment |
+| `triggers/<name>.yml` | `triggers/<name>.md` | `trigger` | every trigger key, verbatim (`on`, `paths`, `gate`, `human`, `sensitive`, …); a trigger that files a task names its template by reference, and its variables (`{{group}}`, `{{from_sha}}`) become that template's declared inputs | the leading comment |
+| `workflows/<name>.yml` | unchanged | — | — | — |
+
+The new kinds' schemas are
+[`suite.schema.json`](../examples/task-repos/schemas/suite.schema.json) and
+[`trigger.schema.json`](../examples/task-repos/schemas/trigger.schema.json).
+[`widgets-code/.grain/triggers/grain-declarations.md`](../examples/task-repos/widgets-code/.grain/triggers/grain-declarations.md)
+is bwsalmon/silo's own `.grain/triggers/grain-declarations.yml`,
+converted. One spelling needs care: front matter should quote the key
+`"on"`, because a YAML 1.1 reader (PyYAML) reads a bare `on` as `true`.
+The Go loader, on YAML 1.2, accepts both.
+
+- **Identity carries over.** A declaration's existing name,
+  `repo:<kind>:<owner>:<repo>:<name>`, comes from its name and not its
+  file extension, so it is the same for the `.md` file, and goes in its
+  `aka:`. Settings rows in grain/config that cite it keep working.
+- **The refusals of `docs/declaration-schema.md` still hold, for every
+  kind:** a repo declaration carries no `reads`, `writes`, `grants` or
+  `target`. The schemas say so, and readers enforce it on every object
+  in a code repo's grain folder, whatever its README says (§8.13). A job
+  that needs another repo's access stays a settings-owned row.
+- **One parser.** The `taskrepo` package's front-matter reader (§16)
+  serves `pkg/repodecl` for `.md` declarations, Silo's code-repo reader,
+  and `grain declarations check`.
+
+### 12.2 Workflows stay YAML
+
+**Decision: `.grain/workflows/*.yml` stay GitHub Actions YAML,** and are
+not `kind:` objects. The reasons:
+
+- **They must stay Actions-compatible.** Grain runs the same dialect
+  GitHub does (`on:`, `jobs:`, `steps:`), and the same file can run on
+  GitHub. `actionlint`, editors' workflow schemas and Dependabot's action
+  updates all read it. A Markdown wrapper would break each of them, and
+  would have to be unwrapped before any of them could run.
+- **They are programs, not prose.** A workflow has no body for Markdown
+  to carry. What the format buys for templates (a reviewable prompt
+  rather than a YAML block scalar) buys nothing here.
+- **What one parser would give is not needed for them.** Nothing names a
+  workflow with a `kind:`-checked edge. A suite or a schedule that names
+  one uses its plain path (`.grain/workflows/hub.yml`), resolved as a
+  file, like a reference into code. A workflow's `on.schedule` still
+  becomes a grain schedule that runs it, as today.
+
+The cost is that grain keeps its workflow parser beside the front-matter
+parser. It has that parser already, and needs it for GitHub
+compatibility anyway. A grain folder's `scope` covers `workflows/`, but
+only `*.md` files with `kind:` are objects, so YAML there is never misread.
+
+### 12.3 Design docs in place
+
+Design docs already in code repos (`docs/design/*.md`, with `{#D-n}` or
+`{#HS-n}` anchors) are referenceable as `kind: design` objects **where
+they are**. Nothing moves:
+
+- The repo's `.grain/README.md` lists `/docs/design/` in its `scope`, so
+  it governs them (§3.1).
+- Each doc gains this front matter, and nothing else:
+
+  ```yaml
+  ---
+  kind: design
+  schema: grain/design@v1
+  title: Widget description format
+  status: implementing              # as §7
+  owners: ["user:bsalmon@google.com"]
+  requirements: {prefix: WG, next: 3, retired: []}
+  ---
+  ```
+
+  `applies_to` defaults to the repo (`["/"]`). `requirements.next`
+  starts at one more than the highest ID in the doc, and `retired` lists
+  the IDs that `Design-Removed:` trailers in the repo's history have
+  removed. `planning:` is added only if Silo should plan the doc (below).
+  A doc that already has front matter for another tool keeps its keys,
+  and gains these beside them.
+- **A doc without front matter is still referenceable** by path and
+  anchor (`grain-code:docs/design/<name>.md#D-7`), as a plain file:
+  its anchors resolve and its section hashes compute (§7.2). It is not an
+  object, so readers check no ID allocation on it and Silo does not plan
+  it.
+- **Trailers carry over unchanged:** `{#D-n}` and `{#HS-n}` anchors, and
+  `Design-Item:`, `Design-Rev:` and `Design-Removed:`. A doc in a code
+  repo keeps its in-repo `Design-Item:` path, and a Silo-hosted design is
   cited by its ref. `pkg/designdoc`'s parsing becomes the shared parser.
-  Once a design is in a Silo repo, the in-repo planner trigger
-  (`.grain/triggers/design-docs.yml`) is replaced by Silo planning, and
-  doing both is refused.
+- **ID allocation (§7.1) is checked on read**, because Silo's hook does
+  not run in a code repo: by Silo when it reads the repo, and by
+  `grain declarations check` in the repo's own CI, which can refuse the
+  change before it merges.
+- **Planning is one or the other.** A design in a code repo is planned by
+  the in-repo planner trigger (`.grain/triggers/design-docs.yml`) unless
+  its front matter has `planning:`. With `planning:`, Silo plans it on
+  each change to `default_ref` that it reads (§7.4), and the in-repo
+  trigger skips it. A design in a Silo repo is always planned by Silo.
+  Doing both is refused.
 
 ## 13. Migration
 
@@ -1565,6 +2147,38 @@ settings-owned `template-1`/`sched-1` pair, which has `reads`, is
 Importing them yields the same rows minus the runtime columns, which the
 scheduler recomputes from the cadence.
 
+### 13.1 Existing `.grain/*.yml` declarations
+
+Code repos move from `.grain/*.yml` to `.grain/*.md` one repo at a time,
+and **both forms stay readable throughout**:
+
+1. **Readers accept both.** `pkg/repodecl` loads `templates/`,
+   `schedules/`, `suites/` and `triggers/` in either form, using the
+   `taskrepo` parser for `.md`. If one name exists in both forms, the
+   `.yml` is used and the conflict is reported by
+   `grain declarations check`. So a half-finished conversion changes
+   nothing that runs.
+2. **A `.grain/` folder with no README** reads as before (§3.1). A repo
+   adds `.grain/README.md` when it wants a `scope` beyond `.grain/`, a
+   `task_home`, or aliases.
+3. **`grain declarations convert`** rewrites a repo's declarations in one
+   commit, which lands through the repo's normal review (a `.grain/**`
+   change, so human-gated where the repo says so). For each file it
+   writes the `.md` with the same keys, moves the leading comment into
+   the body (and a template's prompt into the body), turns a schedule's
+   template name into a reference, and deletes the `.yml` in the same
+   commit. **No tombstones are needed:** nothing references a
+   declaration by path today, only by the name id, which does not change
+   (§12.1).
+4. **bwsalmon/grain and bwsalmon/silo convert first.** Then
+   `grain declarations check` warns on `.yml` templates, schedules,
+   suites and triggers. It keeps loading them until a `v2` of the
+   declaration format, which this design does not schedule.
+
+Workflows are never converted (§12.2). Design docs gain front matter
+whenever their owners choose (§12.3); until then they are referenceable
+as plain files.
+
 ## 14. Running Silo as a git host
 
 - **Storage.** A `silo-git` StatefulSet holds the repos as bare
@@ -1641,16 +2255,32 @@ scheduler recomputes from the cadence.
 | Filename-prefix ordering (`backlog/0010-…`, `backlog/0020-…`) | A reorder becomes a rename. That conflicts with path-as-identity, and makes `git log` and every record that names the reference (`from:`) follow renames |
 | Silo writes a `closed:` summary onto the task when a run closes | Makes every close a cross-repo transaction, adds a second writer to a frozen spec, and leaves two copies of the outcome to drift. The outcome is derived from execution records instead (§5.1) |
 | Re-placement as a move of the task, with a tombstone | Nothing about the task changes on re-placement, only which queue holds it. Moving it would break its address for its author, its dependents and its intake references, for no gain |
+| A grain folder at a fixed path only (`.grain/`, found by name) | The layout is loose everywhere else (§2), and a monorepo wants one folder per project. Nearest-README discovery finds the governing README wherever the folder is, and `.grain/` stays the convention |
+| Code-repo metadata in the repo's top-level `README.md` | That file belongs to the code: forges render it as the repo's front page (GitHub shows front matter as a table), documentation tools read it, and its edits are code changes. A grain folder's own README keeps grain's metadata with grain's objects |
+| A separate metadata file (`.grain/repo.yml`) | A second format, and a file that explains nothing to a human. A README with front matter is what a whole-repo task repo uses, so one rule covers both |
+| Keep `.grain/` declarations YAML for good | Two parsers, two schema sets and two spellings of every key, for the same kinds. Prompts stay in YAML block scalars, which review badly |
+| Workflows as Markdown too | Breaks GitHub Actions compatibility and the tools that read workflows, for a body workflows do not have (§12.2) |
+| Silo's hook in front of code repos (Silo as the code repo's proxy or mirror) | Silo would have to sit between developers and their forge, or the two would disagree. The forge's review already decides what lands; Silo validates what it reads instead (§8.13) |
+| Task home always the code repo | Proposing would need forge accounts and write access, every task would cost a review in the code repo, and team-targeted work has no code repo to go to |
+| Task home always the intake | The owner's case: long-lived, design-linked work belongs beside the design and the code, versioned and reviewed with them. `promote` gives that task by task, without making it the default |
+| Copy the task into the code repo, keeping the intake's | Two copies of one spec, the problem 4448 removed. A move with a tombstone keeps one |
+| Commit the task file in the work's own change | The definition would not exist in the code repo until the work merged, a failed run would leave none, and the task file would be reviewed as part of a change it describes |
+| Placement waits for the code-repo commit to land | Delays the work by a review, for nothing: the spec is the same at both addresses, and references follow the move (§5.5) |
+| Scheduled firings committed to code repos | A commit, and a review, per firing, in the code's history, for content that is the schedule plus a time (§6.2) |
+| Let a code repo name the team its schedules fire for, with no adoption | Any repo could fill any team's intake. Adoption makes the team's admins the ones who choose (§6.2) |
+
 
 ## 16. Staged implementation plan
 
 | Stage | silo (bwsalmon/silo) | grain (bwsalmon/grain) |
 | --- | --- | --- |
-| **1. Format** | a `taskrepo` package: front-matter parse and write (field-preserving), JSON Schemas, the reference grammar and resolver with redirects (tombstones and repo `moved_to`), the path rules, rank keys and backlog ordering, and `writers` rule evaluation; the Jinja subset on gonja with the Python fixture CI job | pin `taskrepo`; `grain tasks export/import` with the round-trip test on a copy of the database; `grain declarations check` accepts `.md` declarations |
+| **1. Format** | a `taskrepo` package: front-matter parse and write (field-preserving), JSON Schemas (`suite` and `trigger` included), the reference grammar and resolver with redirects (tombstones and repo `moved_to`), nearest-README discovery and `scope`, the path rules, rank keys and backlog ordering, `task_home` resolution, and `writers` rule evaluation; the Jinja subset on gonja with the Python fixture CI job | pin `taskrepo`; `grain tasks export/import` with the round-trip test on a copy of the database; `pkg/repodecl` and `grain declarations check` read `.md` declarations beside `.yml` (§13.1); `grain declarations convert`; convert bwsalmon/grain's own `.grain/` |
 | **2. Standalone Grain on a task repo** | none | a local task repo becomes the backlog's source of truth for git-backed fields, with the database as runtime and index: tasks, ranked references in `backlog/`, execution records in `runs/`, comments as files; schedules from the repo |
 | **3. Silo hosts git** | `silo-git`: smart HTTP behind IAP and node tokens, the pre-receive hook, protected refs, bundles to GCS, restore drill, metrics; intake repos per team; propose and approve by push and through the API (the same commit); the threat-model boundary | `grain tasks link/unlink`; push and pull to a Silo remote |
 | **4. Placement by commit** | the dispatcher adds and removes backlog references, writes cancels on tasks and supersedes runs, in §8.11 order; the run index and dependency resolution from execution records; the `pull` notify; WebSocket offers derived from commits behind a flag, then retired | accept, refuse and close as execution records, attestation on the reference, the removed-reference fence, upward filing through Silo; then drop `offer`/`resume` handling |
 | **5. Shared definitions and planning** | templates and schedules fired in Silo; the design index, planning and flood control; the review-branch gate | render shared templates locally; `implements`/`closed.design_revs`; trailers from refs |
+| **5b. Code repos and task homes** | the code-repo reader (webhook or poll) with validation on read (§8.13); schedule adoption; designs planned in place; `task_home`: landing a task by direct push or a change through grain's merge queue, the pending-change record, the tombstone and reference rewrite, `silo task promote`; cancels of homed tasks | `propose_promotion`; inline firings; local policy for code repos a Grain trusts |
+
 | **6. Signed commits** | keys in README rules; verifying signatures in the hook | verifying the approver's signature against policy (`require_signed`) |
 
 Each stage is a design-item set to be filed after this review. None is
