@@ -127,10 +127,17 @@ resource "google_service_account" "hub" {
   description  = "The Silo hub's pods (Kubernetes ${var.namespace}/${var.service_account}), through Workload Identity: the Cloud SQL Auth Proxy connects as it."
 }
 
+# On the hub's instance alone, not every instance in the project
+# (SA1-L8).
 resource "google_project_iam_member" "cloudsql_client" {
   project = var.project
   role    = "roles/cloudsql.client"
   member  = google_service_account.hub.member
+  condition {
+    title       = "${var.name}-instance"
+    description = "The hub's Cloud SQL instance only."
+    expression  = "resource.service == \"sqladmin.googleapis.com\" && resource.name == \"projects/${var.project}/instances/${google_sql_database_instance.hub.name}\""
+  }
 }
 
 resource "google_service_account_iam_member" "workload_identity" {
@@ -146,8 +153,12 @@ resource "google_service_account_iam_member" "workload_identity" {
 # 2026. It is made once in the console (docs/deploy.md), and its ID and
 # secret go into the manifests, never into terraform state.
 
+# On every IAP resource in the project only if asked for: by default
+# nobody passes IAP until iap_backend_service names the hub's backend
+# (SA1-L8), which is as soon as anyone could sign in anyway, since the
+# hub refuses humans until its IAP audience is set from that backend.
 resource "google_iap_web_iam_member" "access" {
-  for_each = var.iap_backend_service == "" ? toset(var.iap_members) : toset([])
+  for_each = var.iap_backend_service == "" && var.iap_project_wide ? toset(var.iap_members) : toset([])
   project  = var.project
   role     = "roles/iap.httpsResourceAccessor"
   member   = each.value
