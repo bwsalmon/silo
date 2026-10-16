@@ -68,6 +68,12 @@ type nodeConn struct {
 	lease *registry.Lease
 }
 
+// ErrUnavailable wraps an Admit error that is not a refusal but the
+// hub failing to decide (its database is away): the node is not told it
+// is refused, which it would not retry (Client.Run), but has its
+// connection closed, which it retries.
+var ErrUnavailable = errors.New("rendezvous: the hub cannot admit nodes now")
+
 // ErrShuttingDown is a node connecting to a hub that Shutdown has
 // been called on: answered 503, which the node retries.
 var ErrShuttingDown = errors.New("rendezvous: the hub is shutting down")
@@ -185,6 +191,10 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	}
 	if err == nil && s.Admit != nil {
 		err = s.Admit(owner, node)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		s.logf("rendezvous: could not admit node %q of %s: %v", hello.Node.ID, owner, err)
+		return
 	}
 	if err != nil {
 		refuse(err)

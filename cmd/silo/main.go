@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/server"
+	"github.com/bwsalmon/silo/hub/tasks"
 )
 
 func main() {
@@ -105,6 +107,8 @@ func serve(args []string) error {
 		"INSECURE, local development only: take the caller's email from this header, unverified [SILO_HUB_DEV_USER_HEADER]")
 	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, emails or groups [SILO_HUB_ADMINS]")
 	grace := fs.Duration("shutdown-grace", server.DefaultShutdownGrace, "how long shutdown waits for nodes and requests")
+	heartbeat := fs.Duration("heartbeat", rendezvous.DefaultHeartbeat, "the interval nodes heartbeat at; a node is stale after three missed")
+	retry := fs.Duration("dispatch-retry", tasks.DefaultRetry, "how often the dispatcher looks at the queue unprompted")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -121,6 +125,8 @@ func serve(args []string) error {
 		DevUserHeader:    *devHeader,
 		HubAdmins:        list(*admins),
 		ShutdownGrace:    *grace,
+		Heartbeat:        *heartbeat,
+		DispatchRetry:    *retry,
 		Logf:             log.Printf,
 	}
 	l, err := net.Listen("tcp", *addr)

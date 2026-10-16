@@ -378,9 +378,7 @@ func (d *Dispatcher) deliverCancel(ctx context.Context, t Task) {
 		d.holdNode(t.ID, t.Node)
 		return
 	}
-	if err := d.Store.CancelDelivered(ctx, t.ID); err != nil {
-		d.logf("tasks: %s: %v", t.ID, err)
-	}
+	d.record(ctx, t.ID, func() (Task, error) { return Task{}, d.Store.CancelDelivered(ctx, t.ID) })
 	d.logf("tasks: told node %s that %s is cancelled", t.Node, t.ID)
 }
 
@@ -414,7 +412,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 		if exclude {
 			ex = t.Node
 		}
-		d.transition(ctx, t.ID)(d.Store.Requeue(ctx, t.ID, reason, ex))
+		d.record(ctx, t.ID, func() (Task, error) { return d.Store.Requeue(ctx, t.ID, reason, ex) })
 	}
 	conn, err := d.Open(ctx, t.Node)
 	if err != nil {
@@ -463,7 +461,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 			if err := st.Write(Message{Type: TypeCancel, Task: &Spec{ID: t.ID}}); err != nil {
 				return // still pending: told when the node is back
 			}
-			d.transition(ctx, t.ID)(Task{}, d.Store.CancelDelivered(ctx, t.ID))
+			d.record(ctx, t.ID, func() (Task, error) { return Task{}, d.Store.CancelDelivered(ctx, t.ID) })
 			d.logf("tasks: cancelled %s on node %s", t.ID, t.Node)
 			grace = time.After(d.offerTimeout())
 		case <-grace:
@@ -478,7 +476,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					return
 				}
 				d.logf("tasks: %s: lost node %s: %v", t.ID, t.Node, r.err)
-				d.transition(ctx, t.ID)(d.Store.Lose(ctx, t.ID, "lost the node while the task ran"))
+				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Lose(ctx, t.ID, "lost the node while the task ran") })
 				return
 			}
 			switch r.m.Type {
@@ -488,7 +486,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 				}
 				answered, unansweredC = true, nil
 				d.logf("tasks: node %s accepted %s as %q", t.Node, t.ID, r.m.NodeTask)
-				d.transition(ctx, t.ID)(d.Store.Accept(ctx, t.ID, r.m.NodeTask))
+				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Accept(ctx, t.ID, r.m.NodeTask) })
 			case TypeRefuse:
 				if answered {
 					d.logf("tasks: node %s refused %s after accepting it; ignored", t.Node, t.ID)
@@ -506,7 +504,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					// running it: queue it afresh, the node included.
 					exclude = ""
 				}
-				d.transition(ctx, t.ID)(d.Store.Requeue(ctx, t.ID, reason, exclude))
+				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Requeue(ctx, t.ID, reason, exclude) })
 				return
 			case TypeResult:
 				if r.m.State != Done && r.m.State != Failed {
@@ -514,7 +512,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					continue
 				}
 				d.logf("tasks: %s %s on node %s", t.ID, r.m.State, t.Node)
-				d.transition(ctx, t.ID)(d.Store.Finish(ctx, t.ID, r.m.State, r.m.Reason))
+				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Finish(ctx, t.ID, r.m.State, r.m.Reason) })
 				return
 			default:
 				d.logf("tasks: node %s sent an unknown %q message for %s", t.Node, r.m.Type, t.ID)
@@ -523,13 +521,27 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	}
 }
 
-// transition logs a store update's error. One the task's state no
-// longer allows is a human having cancelled the task meanwhile, which
-// is not an error.
-func (d *Dispatcher) transition(ctx context.Context, id string) func(Task, error) {
-	return func(_ Task, err error) {
-		if err != nil && !errors.Is(err, ErrState) && ctx.Err() == nil {
-			d.logf("tasks: updating %s: %v", id, err)
+// record writes a task's transition to the store, retrying with
+// backoff while the store fails (the database is away) until the
+// dispatcher stops: a transition dropped would leave the task offered or
+// running in the store with no stream to end it, which no pass looks at
+// again. A transition the task's state no longer allows is a human
+// having cancelled the task meanwhile, which is not an error; a
+// dispatcher stopped before it could write one leaves the task to
+// Recover.
+func (d *Dispatcher) record(ctx context.Context, id string, write func() (Task, error)) {
+	wait := 100 * time.Millisecond
+	for {
+		_, err := write()
+		if err == nil || errors.Is(err, ErrState) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalid) || ctx.Err() != nil {
+			return
 		}
+		d.logf("tasks: updating %s: %v; retrying in %s", id, err, wait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(2*wait, 5*time.Second)
 	}
 }

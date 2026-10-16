@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -246,10 +247,21 @@ func (t *topic) endAll(why string) {
 // line too long to read, ends the stream. An event the hub rejects is
 // dropped and the stream goes on.
 //
-// The hub writes nothing back. A node that reconnects may replay its
-// task's events from the start: the hub drops those it already has.
+// The hub writes nothing back. It closes the stream once the node has
+// closed its end and every event is in; a stream it ends for any other
+// reason (an event it could not keep, the stream refused) it resets,
+// which the node sees as an error rather than an end, so that it
+// replays the task's events, now or after it reconnects. The hub drops
+// the replayed events it already has.
 func (h *Hub) NodeStream(nodeID string, c net.Conn) {
-	defer c.Close()
+	clean := false
+	defer func() {
+		if r, ok := c.(interface{ Reset() error }); ok && !clean {
+			r.Reset()
+			return
+		}
+		c.Close()
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := bufio.NewReaderSize(c, 4096)
@@ -262,6 +274,7 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 	for {
 		line, err := readLine(r)
 		if err != nil {
+			clean = err == io.EOF
 			if t == nil {
 				h.logf("live: node %q's event stream ended before it named a task: %v", nodeID, err)
 			}

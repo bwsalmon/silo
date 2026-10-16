@@ -1,0 +1,76 @@
+# The hub's full fault matrix and load test (hub/faulttest,
+# docs/test-runs), nightly. Every pull request already runs the short
+# fault scenarios and the CI-sized load test in hub.yml's `go test`;
+# this runs each fault for longer (a 30s database outage, a partition
+# past the mux keepalive, repeated crashes) and the load test at full
+# size: 500 Grains across 50 teams, 10k events/s, 1k subscribers.
+#
+# It is self-contained: a scheduled run gets no secrets, and needs
+# none. PostgreSQL is installed into the runner, the hub is built from
+# the checkout, and everything talks over 127.0.0.1.
+name: hub-nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  faults:
+    name: faults
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 45
+    steps:
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+
+      - name: Full fault matrix
+        env:
+          SILO_REQUIRE_POSTGRES: "1"
+          SILO_FAULT_FULL: "1"
+        run: go test -count=1 -timeout 40m -v -run 'Test[^L]' ./hub/faulttest
+
+  load:
+    name: load
+    sandbox:
+      cpus: 8
+      memory-mb: 16384
+    timeout-minutes: 30
+    steps:
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+
+      # The file descriptors 500 Grains, their streams and 1k
+      # subscribers take, at both ends, in one machine.
+      - name: Load test
+        env:
+          SILO_REQUIRE_POSTGRES: "1"
+          SILO_LOAD: "1"
+          SILO_LOAD_REPORT: /tmp/hub-load.txt
+        run: |
+          ulimit -n 65536 || ulimit -n "$(ulimit -Hn)"
+          go test -count=1 -timeout 25m -v -run TestLoad ./hub/faulttest
+          cat /tmp/hub-load.txt
