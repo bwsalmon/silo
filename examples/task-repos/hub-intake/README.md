@@ -18,6 +18,14 @@ aliases:
   eu: https://silo.example.com/git/grains/eu.git
   us: https://silo.example.com/git/grains/us.git
   silo-code: https://github.com/bwsalmon/silo.git
+  widgets: https://git.example.com/hub/widgets.git
+task_home:
+  mode: intake
+  allow: [intake, promote, code-repo]
+  repos:
+    https://git.example.com/hub/widgets.git: promote
+schedules:
+  - ref: "widgets:.grain/schedules/weekly-release-notes.md"
 writers:
   - who: [authenticated]
     may: create
@@ -112,6 +120,16 @@ records (docs/task-repos.md §5.1).
   `state: approved`, `approved_by: user:<you>` and `approved_at`, then push.
 - **To reorder unplaced work** (members): edit `rank` in a reference in
   `backlog/`, or drag it in Silo's UI.
+- **To promote a task** into its code repo (members, or an agent
+  proposing it for a member to confirm): `silo task promote <task>`.
+  The task moves to that repo's `.grain/tasks/`, through its review, and
+  leaves a tombstone here.
+
+**Task home.** Tasks stay here by default (`task_home: intake`). The
+widgets repo is set to `promote`, which its own `.grain/README.md` also
+says. The team adopts the widgets repo's weekly release-notes schedule,
+so its firings are filed here, never into the widgets repo
+(docs/task-repos.md §5.5, §6.2).
 
 The rules above are enforced by Silo's pre-receive hook
 (docs/task-repos.md §8).

@@ -17,6 +17,7 @@ aliases:
   intake: https://silo.example.com/git/hub/intake.git
   shared: https://silo.example.com/git/hub/shared.git
   us: https://silo.example.com/git/grains/us.git
+  widgets: https://git.example.com/hub/widgets.git
 writers:
   - who: [silo]
     may: [create, delete]
@@ -32,10 +33,11 @@ writers:
     may: update
     kinds: [ref]
     paths: ["backlog/**"]
-    fields: [expedite, to]
+    fields: [expedite, to, spec_rev]
     note: >-
       expedite is Silo's at_front. to may change only to the end of the
-      redirect chain it already resolves through (docs/task-repos.md §4).
+      redirect chain it already resolves through (docs/task-repos.md §4),
+      with spec_rev moving to the commit of the new home it was read at.
   - who: ["grain:eu", "user:bsalmon@google.com"]
     may: update
     kinds: [ref]
@@ -95,7 +97,8 @@ and pushes to it, and Silo's WebSocket tells it when to pull. The Grain
 never pushes anywhere else.
 
 - `backlog/` is the queue: one small `kind: ref` per task, pointing at
-  the task where it lives (here, the hub intake). Silo adds and removes
+  the task where it lives: the hub intake, or the widgets code repo for a
+  promoted task. Silo adds and removes
   references. The Grain and its owner set `rank` and `priority`.
   Order is dependencies first, then `expedite`, then `priority`, then
   `rank` (docs/task-repos.md §5.2).

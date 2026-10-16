@@ -13,6 +13,7 @@ is named by its path: there are no ids.
 | [`hub-shared/`](hub-shared/README.md) | `https://silo.example.com/git/hub/shared.git` | shared templates (one moved, leaving a tombstone), a schedule, and a design doc |
 | [`grain-eu/`](grain-eu/README.md) | `https://silo.example.com/git/grains/eu.git` | Grain `eu` (owned by bsalmon@google.com): its backlog of ranked references and its execution records |
 | [`grain-us/`](grain-us/README.md) | `https://silo.example.com/git/grains/us.git` | Grain `us` (a team Grain): the same, with one re-placed task |
+| [`widgets-code/`](widgets-code/.grain/README.md) | `https://git.example.com/hub/widgets.git` | a code repo on a forge Silo does not host. Its top-level `README.md` is the code's; its grain folder, `.grain/`, has its own `README.md` with `scope` and `task_home: promote` |
 
 They also reference real repos by URL: `https://github.com/bwsalmon/silo.git`
 and `https://github.com/bwsalmon/grain.git`. Those are named but not
@@ -30,8 +31,8 @@ copied here.
 | a task, run to completion with a thread | `hub-intake/tasks/4310-carry-approver/` and `grain-eu/runs/4310-carry-approver/` | grain task 4310; its change is silo commit `5623aa2` |
 | a second task on the same design | `hub-intake/tasks/4248-sign-offers/` and `grain-eu/runs/4248-sign-offers/` | grain task 4248; silo PR #140, merge `776f8e8` |
 
-The tasks are real, except `2026-10-16-reject-dangling-refs`, which is
-illustrative. Their prompts and comments are reconstructed from their
+The tasks are real, except `2026-10-16-reject-dangling-refs` and the
+widgets repo's, which are illustrative. Their prompts and comments are reconstructed from their
 commits. Migration maps grain's team `default` to the Silo team `hub`,
 grain's `target: owner/name` to the repo's git URL, and grain task 4310
 to the path `tasks/4310-carry-approver/task.md` (docs/task-repos.md §13).
@@ -87,6 +88,24 @@ repos do not exist; code-repo shas are real silo commits. The
   HS-3), with the section hash they were filed against. The done runs
   record the hash they were done against in `closed.design_revs` (§7.2).
 
+- **A grain folder in a code repo:** `widgets-code/.grain/` holds a
+  template, a schedule, a trigger converted from bwsalmon/silo's own
+  `.grain/triggers/grain-declarations.yml`, and a promoted task. Its CI
+  stays YAML in `.grain/workflows/`. `.grain/README.md` governs the
+  folder and, through its `scope`, `docs/design/widgets.md`, a design doc
+  in place (§3.1, §12).
+- **A promoted task:** `widgets-code/.grain/tasks/2026-10-16-widget-schema-v2/`
+  was proposed and approved in the intake, then promoted. Its intake path
+  is a tombstone, beside a Silo comment recording the change that landed
+  it. It lists that path in `moved_from` (§5.5, §8.14).
+- **Backlog references into both homes:** `grain-eu/backlog/` holds
+  `2026-10-16-widget-schema-v2.md`, pointing into the code repo, beside
+  references pointing into the intake (§5.5).
+- **An adopted schedule:** `hub-intake/README.md` sets the team's
+  `task_home` (with the widgets repo on `promote`) and adopts the widgets
+  repo's weekly schedule, whose firings go to the intake and never into
+  the code repo (§6.2).
+
 ## Checking them
 
 ```
@@ -96,7 +115,8 @@ python3 examples/task-repos/check.py     # needs python3-yaml, python3-jsonschem
 [`check.py`](check.py) is a reviewer's aid, not the implementation. It
 does these things:
 
-- finds objects by scanning front matter;
+- finds objects by scanning front matter, and each one's governing README
+  by nearest-README discovery;
 - validates each against [`schemas/`](schemas/);
 - resolves every reference (relative, by alias and by URL), with the path
   as the identity, following tombstones with a hop limit and cycle
@@ -104,6 +124,10 @@ does these things:
 - checks that tombstones and `moved_from` agree;
 - checks that every backlog reference resolves to a task, that no backlog
   holds two references to one task, and that no task has two open runs;
+- checks code repos' grain folders: a task there came from an intake and
+  is not a scheduled firing, and a template there carries no `reads`,
+  `writes`, `grants` or `target`;
+
 - derives each task's status from its execution records, and prints
   each backlog's effective order;
 - recomputes the requirement hashes;
