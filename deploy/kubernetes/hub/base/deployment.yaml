@@ -112,8 +112,11 @@ spec:
           image: silo-hub
           # Metrics on a port of their own, which no Service names, so
           # the load balancer never reaches them; the PodMonitoring
-          # (monitoring.yaml) scrapes the pod directly.
-          args: ["hub", "serve", "-addr=:8080", "-metrics-addr=:9091"]
+          # (monitoring.yaml) scrapes the pod directly. The internal
+          # listener (docs/hub.md §2.2.3) is on another, which no
+          # Service names either: the hub's other pods reach it at the
+          # pod's address, to open streams to the nodes this pod holds.
+          args: ["hub", "serve", "-addr=:8080", "-metrics-addr=:9091", "-internal-addr=:9092"]
           envFrom:
             - configMapRef:
                 name: silo-hub-config
@@ -131,11 +134,21 @@ spec:
             # `silo hub token`, exec'd here).
             - name: SILO_HUB_MIGRATE
               value: "false"
+            # The key the hub's pods share for their internal listeners
+            # (docs/deploy.md).
+            - name: SILO_HUB_INTERNAL_KEY_FILE
+              value: /var/run/secrets/silo-hub-internal/key
+          volumeMounts:
+            - name: internal-key
+              mountPath: /var/run/secrets/silo-hub-internal
+              readOnly: true
           ports:
             - name: http
               containerPort: 8080
             - name: metrics
               containerPort: 9091
+            - name: internal
+              containerPort: 9092
           readinessProbe:
             httpGet:
               path: /readyz
@@ -159,3 +172,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: internal-key
+          secret:
+            secretName: silo-hub-internal

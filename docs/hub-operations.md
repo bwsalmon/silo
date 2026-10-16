@@ -175,6 +175,24 @@ IAM database user; terraform puts both back.
 Changing `SILO_HUB_OIDC_SESSION_KEY` signs everyone out, since it signs
 their session cookies.
 
+### 3.5 The internal key
+
+The Secret `silo-hub-internal` (key `key`) is the key the hub's pods
+sign their requests to each other's internal listeners with (hub.md
+§2.2.3). Nothing outside the pods holds it. To rotate it, replace the
+Secret and restart the hub:
+
+```sh
+kubectl -n silo-hub create secret generic silo-hub-internal \
+  --from-literal=key="$(openssl rand -hex 32)" --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n silo-hub rollout restart deploy/silo-hub
+```
+
+The hub reads the key when it starts. With one replica that is all;
+with several, pods on the old key and the new one refuse each other's
+streams until the roll is done, so views, node UIs and offers to a node
+on a pod of the other key fail for the roll's duration, and are retried.
+
 ## 4. Backups and restoring
 
 ### 4.1 What is backed up

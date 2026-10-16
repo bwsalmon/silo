@@ -149,10 +149,12 @@ service account) are the manifests' defaults; if `name` or
 `networking.gke.io/certmap` annotation and the service account's
 annotation to match.
 
-Then create the two Secrets and apply. `silo-hub-db` holds both
+Then create the three Secrets and apply. `silo-hub-db` holds both
 database URLs: `url`, the hub's (its IAM user, no password), and
 `migrate-url`, the schema owner's (with its password), which only the
-`migrate` init container is given:
+`migrate` init container is given. `silo-hub-internal` holds the key the
+hub's pods share for their internal listeners (hub.md §2.2.3), random
+and at least 32 bytes; the pod does not start without it:
 
 ```sh
 eval "$(terraform -chdir=deploy/terraform/hub output -raw get_credentials)"
@@ -161,6 +163,7 @@ kubectl -n silo-hub create secret generic silo-hub-db \
   --from-literal=url="$(terraform -chdir=deploy/terraform/hub output -raw database_url)" \
   --from-literal=migrate-url="$(terraform -chdir=deploy/terraform/hub output -raw migrate_database_url)"
 kubectl -n silo-hub create secret generic silo-hub-iap --from-literal=key=<the OAuth client's secret>
+kubectl -n silo-hub create secret generic silo-hub-internal --from-literal=key="$(openssl rand -hex 32)"
 kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev
 kubectl -n silo-hub rollout status deploy/silo-hub
 kubectl -n silo-hub get gateway silo-hub   # PROGRAMMED True, with the static IP, after a few minutes
@@ -303,6 +306,11 @@ order, with the image built from this change or later:
 3. `kubectl apply -k` the overlay. The new pod's `migrate` container
    finds the tables there and already `silo-hub`'s, grants the runtime
    role, and the hub starts as it.
+
+### A hub deployed before the internal listener
+
+Create `silo-hub-internal` (the `kubectl create secret` above) before
+applying a change that mounts it, or the new pod waits for the Secret.
 
 ## 8. The nodes' UIs
 

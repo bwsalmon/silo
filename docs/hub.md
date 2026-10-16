@@ -163,10 +163,12 @@ on the rest through a serverless NEG behind the same kind of load
 balancer. It is not built.
 
 **One replica.** The deployment runs one pod and rolls it with
-`Recreate`, because a node's connection, its events and the streams
-to it live on the one pod that holds it (§2.2). The dispatcher runs
-under a database lease (§2.2.1), so two overlapping pods never both
-recover the backlog, but the rest of the hub still assumes one pod. A
+`Recreate`, because a node's events, and the wake-ups its connection
+gives the dispatcher, still reach only the pod that holds it (§2.2).
+The dispatcher runs under a database lease (§2.2.1), so two
+overlapping pods never both recover the backlog, the registry is
+shared (§2.2.2), and streams to a node are forwarded to its pod
+(§2.2.3), but live events still assume one pod. A
 roll therefore costs nodes a reconnect of a few seconds. §2.2 is the
 decision to stay that way for now, what it costs, and the staged
 design for several replicas.
@@ -177,7 +179,9 @@ Service names, so the load balancer and IAP never reach it. GKE's
 Managed Service for Prometheus scrapes it (a `PodMonitoring`), and
 Cloud Monitoring alerts on it and charts it (`deploy/terraform/hub/
 monitoring.tf`). [hub-operations.md](hub-operations.md) lists the
-metrics, the alerts and the dashboard.
+metrics, the alerts and the dashboard. With `-internal-addr` (`:9092`
+as deployed) it serves the internal listener, for the hub's other pods
+alone (§2.2.3).
 
 [deploy.md](deploy.md) is the runbook: the terraform
 (`deploy/terraform/hub`), the manifests (`deploy/kubernetes/hub`) and
@@ -195,8 +199,8 @@ that matters is in the database and everything in memory is restated
 by the nodes (§2). The exceptions are the view-through (§7.2) and a
 node's UI (§11), which put bytes through the one pod, so capacity is
 what is likeliest to force the move. This section is the design for
-several replicas, in five stages (§2.2.1 to §2.2.5). Stages R1 and
-R2 are built; R3 to R5 are follow-ups, each landing behind the one
+several replicas, in five stages (§2.2.1 to §2.2.5). Stages R1 to
+R3 are built; R4 and R5 are follow-ups, each landing behind the one
 before it, and the Deployment stays at one replica until R5.
 
 **Recovery time as deployed.** One pod, nodes that reconnect with
@@ -234,7 +238,7 @@ recover the backlog.
 | --- | --- | --- |
 | R1 | The dispatcher under a database lease (`hub/lease`), `database_availability_type` | built |
 | R2 | The shared registry: `hub_pods` and `hub_nodes` in the database, each node naming the pod holding it, under that pod's lease (`hub/registry`) | built |
-| R3 | `Server.Open` forwarded to the holder over a pod-to-pod stream; the directory read from the shared registry | follow-up, after R2 |
+| R3 | `Server.Open` forwarded to the holder over a pod-to-pod stream; the directory read from the shared registry | built |
 | R4 | Cross-pod wake-ups and live events: LISTEN/NOTIFY for the dispatcher, subscriptions forwarded to the pod holding the task's node | follow-up, after R3 |
 | R5 | Two or more replicas, `RollingUpdate`, a PodDisruptionBudget, the operations runbook and alerts | follow-up, after R4 |
 
@@ -300,7 +304,10 @@ connections that pod holds, and each pod publishes it to two tables
   connections have closed. The name and address are `-pod` and
   `-pod-addr` (`SILO_HUB_POD`, `SILO_HUB_POD_ADDR`), both the host's
   name when unset, which is the pod's name on Kubernetes and enough for
-  one pod; R5 sets them from the downward API.
+  one pod; the address, when unset, is the internal listener's (the
+  host's name and its port, when it listens on every address, as
+  deployed: the pod's name resolves to its IP). R5 sets both from the
+  downward API.
 - `hub_nodes (id, owner, pod, conn, repos, slots, version, labels,
   free, settled, connected_at, last_seen)`: one row per node ever
   registered, `pod` and `conn` (a random ID per connection) naming the
@@ -359,7 +366,7 @@ database is already shared, consistent and the thing every pod must
 reach to be ready, where gossip would add membership, a protocol and
 its split-brain, for a table of at most a few thousand rows.
 
-#### 2.2.3 R3: `Server.Open` across pods
+#### 2.2.3 R3: `Server.Open` across pods (built)
 
 Each pod serves a second listener, the **internal listener**
 (`-internal-addr`, `:9092` as deployed), on its pod IP, which no
@@ -367,11 +374,14 @@ Service names: the load balancer and IAP never reach it. It answers
 one route, `GET /internal/v1/nodes/{id}/open`, an HTTP upgrade
 (`Upgrade: silo-open.v1`). The holder checks that it still holds the
 node's connection, opens a mux stream to the node as `Server.Open`
-does locally, answers `101`, and splices the two until either ends.
+does locally, answers `101`, and splices the two until both directions
+end: a direction that ends cleanly half-closes the other side, as a
+local stream's `CloseWrite` does, and one that fails ends both.
 
 `Server.Open(ctx, node)` opens locally when this pod holds the node,
-and otherwise reads the holder's `addr` from `hub_nodes` and
-`hub_pods`, dials it, upgrades, and returns the upgraded connection
+and otherwise reads the holder's `addr` afresh from `hub_nodes` and
+`hub_pods` (`Registry.Holder`; a pod whose lease has lapsed holds
+nothing), dials it, upgrades, and returns the upgraded connection
 as the `net.Conn`. Everything that opens a stream rides it unchanged:
 the offer, resume and cancel streams (the dispatcher, on whichever pod
 holds the lease), the view stream (on the viewer's pod) and the node
@@ -380,16 +390,21 @@ UI's `http` streams (on the browser's pod). A holder that answers 404
 then `Open` fails as for an offline node.
 
 **Authentication.** Internal requests carry
-`Authorization: Bearer <HMAC>`: a token derived from a key all pods
-share (a Kubernetes Secret, `silo-hub-internal`, mounted as a file),
-over the target pod's name and a minute's timestamp, so a token cannot
-be replayed to another pod or later. A NetworkPolicy admits the
-internal port from hub pods only. The caller has already checked the
+`Authorization: Bearer <HMAC>`: HMAC-SHA256, in hex, under a key all
+pods share (a Kubernetes Secret, `silo-hub-internal`, mounted as a
+file and named by `-internal-key-file`, at least 32 bytes), over the
+target pod's name and the minute (Unix time over 60), so a token cannot
+be replayed to another pod or later. The holder accepts the minutes
+either side of its own. A NetworkPolicy admits the internal port from
+hub pods only, and no Service names it (`validate.sh` checks both).
+Without a key the hub serves no internal listener and opens only the
+nodes it holds. The caller has already checked the
 human's or the dispatcher's right to the node; the holder trusts that
 check, as one pod trusts another's database writes.
 
 **The directory** (`GET /v1/nodes`) and the node UI's host check read
-the shared registry, so any pod answers either.
+the shared registry, through the pod's mirror of it (§2.2.2), so any
+pod answers either.
 
 The cost is one more hop for view-through and node-UI bytes when the
 browser's pod is not the node's. Session affinity on the Gateway
@@ -1112,7 +1127,7 @@ audit plan. This section is the hub's part of it in brief.
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | 2.7 | A node's own UI through the hub, to its owner: the `http` stream, per-node hosts, `-node-ui-domain` (`hub/nodeui`, §11). The Gateway, certificate and DNS for the node hosts are not in `deploy/` yet. | here, built |
 | 2.8 | Production readiness: Prometheus metrics on their own listener and a `PodMonitoring`, Cloud Monitoring alert policies and dashboard, Cloud SQL backups and point-in-time recovery with a tested restore, requeueing lost tasks per team (§6.3), and the one-replica decision (§2.2) ([hub-operations.md](hub-operations.md)). | here, built (not applied to any project) |
-| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods; R4, wake-ups and live events across pods; R5, the rolling Deployment. | here: R1 and R2 built, R3 to R5 follow-ups |
+| 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods; R5, the rolling Deployment. | here: R1 to R3 built, R4 and R5 follow-ups |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 
