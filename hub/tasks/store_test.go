@@ -80,8 +80,13 @@ func TestCreate(t *testing.T) {
 		got, err := s.Get(ctx, task.ID)
 		check(t, err)
 		if got.Prompt != task.Prompt || got.Constraints.Labels["zone"] != "eu" || got.Constraints.Node != "ws-1" ||
-			!got.Created.Equal(task.Created) || got.State != Queued || len(got.Excluded) != 0 {
+			!got.Created.Equal(task.Created) || got.State != Queued || len(got.Excluded) != 0 || got.ApprovedBy != "" {
 			t.Errorf("read back %+v, want %+v", got, task)
+		}
+		approved, err := s.Create(ctx, Spec{Team: "infra", Repo: "bwsalmon/silo", Prompt: "x", Submitter: "alice@example.com", ApprovedBy: " Bob@Example.com "})
+		check(t, err)
+		if got, err := s.Get(ctx, approved.ID); err != nil || got.ApprovedBy != "bob@example.com" {
+			t.Errorf("read back an approved task: %+v, %v", got, err)
 		}
 		if _, err := s.Get(ctx, "t-nope"); !errors.Is(err, ErrNotFound) {
 			t.Errorf("Get(missing) = %v, want ErrNotFound", err)
@@ -96,6 +101,7 @@ func TestCreate(t *testing.T) {
 			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Labels: manyLabels(maxLabels + 1)}},
 			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Labels: map[string]string{strings.Repeat("k", maxLabelKey+1): "v"}}},
 			{Team: "infra", Prompt: "x", Submitter: "a@b", Constraints: Constraints{Labels: map[string]string{"k": strings.Repeat("v", maxLabelValue+1)}}},
+			{Team: "infra", Prompt: "x", Submitter: "a@b", ApprovedBy: "A@B"},
 		} {
 			if _, err := s.Create(ctx, bad); !errors.Is(err, ErrInvalid) {
 				t.Errorf("Create(%+v) = %v, want ErrInvalid", bad, err)
@@ -283,9 +289,16 @@ func manyLabels(n int) map[string]string {
 	return l
 }
 
-// TestNodeOwnerColumn: a tasks table from before node_owner gains it,
-// empty on its tasks, and OpenExisting refuses one without it.
-func TestNodeOwnerColumn(t *testing.T) {
+// TestAddedColumns: a tasks table from before node_owner and
+// approved_by gains them, empty on its tasks, and OpenExisting refuses
+// one without either.
+func TestAddedColumns(t *testing.T) {
+	for _, c := range added {
+		t.Run(c.Name, func(t *testing.T) { testAddedColumn(t, c.Name) })
+	}
+}
+
+func testAddedColumn(t *testing.T, column string) {
 	run := func(t *testing.T, url string) {
 		ctx := context.Background()
 		s, err := Open(ctx, url)
@@ -294,10 +307,10 @@ func TestNodeOwnerColumn(t *testing.T) {
 		check(t, err)
 		_, err = s.Offer(ctx, task.ID, "ws-1", "alice@example.com")
 		check(t, err)
-		_, err = s.db.ExecContext(ctx, `ALTER TABLE tasks DROP COLUMN node_owner`)
+		_, err = s.db.ExecContext(ctx, `ALTER TABLE tasks DROP COLUMN `+column)
 		check(t, err)
 		s.Close()
-		if _, err := OpenExisting(ctx, url); err == nil || !strings.Contains(err.Error(), "node_owner") {
+		if _, err := OpenExisting(ctx, url); err == nil || !strings.Contains(err.Error(), column) {
 			t.Errorf("OpenExisting on the old table: %v", err)
 		}
 		for range 2 {
@@ -306,7 +319,7 @@ func TestNodeOwnerColumn(t *testing.T) {
 			got, err := s.Get(ctx, task.ID)
 			check(t, err)
 			s.Close()
-			if got.Node != "ws-1" || got.NodeOwner != "" {
+			if got.Node != "ws-1" || (column == "node_owner" && got.NodeOwner != "") || got.ApprovedBy != "" {
 				t.Fatalf("migrated task %+v", got)
 			}
 		}

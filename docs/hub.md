@@ -66,9 +66,11 @@ what: who may submit a task for which repository or team (§6.1), which
 Grains are admitted to serve which repositories (§5.3), and where a task
 is placed (§6.2). It puts **claims** on each task it dispatches. As
 built, the offered task (`tasks.Spec`) carries the requester
-(`submitter`, from the caller's sign-on) and the `team`. The other
-claims of this model, `approved_by` and the `capabilities` the task is
-granted, are not in `tasks.Spec` yet. With a signing key the hub also
+(`submitter`, from the caller's sign-on), the `team`, and
+`approved_by`, the human other than the submitter who approved it at
+the hub (empty until the hub has an approval flow: a submission cannot
+name one). The `capabilities` the task is granted are not in
+`tasks.Spec` yet. With a signing key the hub also
 signs these claims for the node it offers the task to (§6.4).
 
 Each Grain is a **Policy Enforcement Point (PEP)**. It **takes the hub's
@@ -1073,7 +1075,7 @@ afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
 | `iat`, `exp` | when it was signed, and an hour later |
 | `requester` | the task's `submitter`; the Grain records them as the task's creator |
 | `team` | the task's team |
-| `approved_by` | empty: every hub task is a direct submission |
+| `approved_by` | the task's `approved_by`: empty for a task nobody approved at the hub, which is every direct submission |
 | `granted_capabilities` | `[]`: the hub grants none |
 | `network_access` | absent: left to the Grain |
 | `spec_digest` | `sha256:` and the hex SHA-256 of `{"target":repo,"base":"","reads":[],"writes":[],"title":title,"body":prompt}`, compact, in that key order (`claims.SpecDigest`, as grain's `policy.SpecDigest`) |
@@ -1100,7 +1102,8 @@ one can go once nothing it signed is still good, an hour later.
 describes `Requester` and `Approval` attestations on `RunTaskRequest`.
 This is that attestation in the JWT form grain's local policy verifies:
 `requester` and `team` are the requester attestation, `approved_by`
-the approval (empty until the hub has approvals), carried on the offer
+the approval (the task's `approved_by`; empty until the hub has an
+approval flow), carried on the offer
 (§6.2), which is the hub's `RunTaskRequest`, as
 `requester_attestation`. grain's node client (`pkg/hubnode`) still
 refuses every offer; accepting one, by passing the attestation to

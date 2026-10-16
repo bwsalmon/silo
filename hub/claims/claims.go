@@ -52,8 +52,8 @@ type Claims struct {
 	// creator.
 	Requester string `json:"requester"`
 	Team      string `json:"team,omitempty"`
-	// ApprovedBy approved the task; empty for one submitted directly,
-	// which is every task the hub has today.
+	// ApprovedBy approved the task: the task's approved_by, empty for
+	// one nobody approved at the hub.
 	ApprovedBy string `json:"approved_by"`
 	// GrantedCapabilities are capabilities the hub grants the task;
 	// none today.

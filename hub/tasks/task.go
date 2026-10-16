@@ -84,10 +84,16 @@ type Spec struct {
 	// Repo is the repository the task targets, "owner/name"; empty for a
 	// task that targets a team, whose node's grain chooses the
 	// repository.
-	Repo        string      `json:"repo,omitempty"`
-	Title       string      `json:"title"`
-	Prompt      string      `json:"prompt"`
-	Submitter   string      `json:"submitter"`
+	Repo      string `json:"repo,omitempty"`
+	Title     string `json:"title"`
+	Prompt    string `json:"prompt"`
+	Submitter string `json:"submitter"`
+	// ApprovedBy is the human who approved the task at the hub, never
+	// its submitter: recorded by the hub's approval flow, never taken
+	// from the submission itself. It is empty for a task nobody has
+	// approved, which is every task submitted directly, and a node's
+	// grain files such a task for local approval (threat model INV-17).
+	ApprovedBy  string      `json:"approved_by,omitempty"`
 	Constraints Constraints `json:"constraints"`
 	Created     time.Time   `json:"created_at"`
 }
@@ -154,7 +160,8 @@ var (
 )
 
 // normalize checks a submitted spec and fills in what it leaves out: a
-// lower-cased repository, and a title from the prompt's first line.
+// lower-cased repository and approver, and a title from the prompt's
+// first line. A task's approver is never its submitter.
 func normalize(s Spec) (Spec, error) {
 	s.Repo = strings.ToLower(strings.TrimSpace(s.Repo))
 	if s.Repo != "" && !repoName.MatchString(s.Repo) {
@@ -171,6 +178,10 @@ func normalize(s Spec) (Spec, error) {
 	}
 	if s.Submitter == "" {
 		return s, fmt.Errorf("%w: no submitter", ErrInvalid)
+	}
+	s.ApprovedBy = strings.ToLower(strings.TrimSpace(s.ApprovedBy))
+	if s.ApprovedBy != "" && strings.EqualFold(s.ApprovedBy, s.Submitter) {
+		return s, fmt.Errorf("%w: a task's submitter cannot approve it", ErrInvalid)
 	}
 	s.Title = strings.TrimSpace(s.Title)
 	if s.Title == "" {

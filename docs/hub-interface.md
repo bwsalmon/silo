@@ -59,10 +59,12 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 | `repo` | `owner/name`, or empty for a team-targeted task, where the Grain chooses the repository. |
 | `title`, `prompt` | What to do. |
 | `submitter` | The requester, from their sign-on to the hub. |
+| `approved_by` | The human who approved the task at the hub, never its submitter; absent for a task nobody approved there. |
 | `constraints` | The labels or node ID the task was placed by. |
 | `created_at` | When it was submitted. |
 
-`approved_by` and `capabilities` are not carried yet.
+`capabilities` are not carried yet. A Grain files a task without
+`approved_by` for its own local approval.
 
 An offer or resume from a hub with a signing key also carries
 `requester_attestation`: a JWT, signed for this Grain's node ID, of the
