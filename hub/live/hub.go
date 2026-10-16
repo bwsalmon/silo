@@ -219,6 +219,13 @@ func (h *Hub) publish(ctx context.Context, t *topic, e Event, c Class) error {
 			return err
 		}
 	} else {
+		// The ref is what a viewer may ask the node for, so it is kept
+		// before anyone hears of it.
+		if a := e.Artifact; a != nil && a.Ref != "" {
+			if err := h.Log.AddRef(ctx, e.Task, a.Ref, e.Seq); err != nil {
+				return err
+			}
+		}
 		h.remember(t, e)
 	}
 	t.last, t.lastType = e.Seq, e.Type

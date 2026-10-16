@@ -115,6 +115,11 @@ node → hub  {"type":"ok"}, then the artifact's bytes until the node closes the
             or {"type":"error","error":"..."}
 ```
 
+The hub asks only for a ref the node listed in the task's artifact
+events, but a node must still serve only those itself, never resolve a
+ref as a path, and answer an error to any other ref: the hub's check is
+defence in depth, not the node's boundary.
+
 ## Serve its own UI (the http stream, optional)
 
 When the node's owner opens `https://<node>.<the hub's node UI

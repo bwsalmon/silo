@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -107,6 +108,15 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	store, err := Open(context.Background(), "sqlite::memory:")
+	check(t, err)
+	t.Cleanup(func() { store.Close() })
+	return newHarnessOn(t, store)
+}
+
+// newHarnessOn is newHarness keeping its events in store.
+func newHarnessOn(t *testing.T, store *Store) *harness {
+	t.Helper()
 	ctx := context.Background()
 	dir, err := directory.Open(ctx, "sqlite::memory:")
 	check(t, err)
@@ -117,9 +127,6 @@ func newHarness(t *testing.T) *harness {
 	check(t, dir.SetMember(ctx, "web", "user:bob@example.com", directory.Member))
 	check(t, dir.AssignRepo(ctx, "infra", "bwsalmon/silo"))
 
-	store, err := Open(ctx, "sqlite::memory:")
-	check(t, err)
-	t.Cleanup(func() { store.Close() })
 	log := &recordingLog{Store: store}
 
 	ft := &fakeTasks{m: map[string]tasks.Task{}}
@@ -780,5 +787,131 @@ func TestViewThrough(t *testing.T) {
 	h.tasks.put(tasks.Task{Spec: tasks.Spec{ID: "t-3", Team: "infra"}, State: tasks.Lost, Node: "ws-gone", NodeOwner: "alice@example.com"})
 	if code, body := get(t, h.url+"/v1/tasks/t-3/artifacts?ref=diff-1", "alice@example.com"); code != http.StatusServiceUnavailable {
 		t.Fatalf("viewing on an offline node: %d %q", code, body)
+	}
+}
+
+// serveViews answers the views the hub opens on c, telling views of
+// each, with the bytes "<ref>'s bytes" for any ref at all: a Grain that
+// trusts the hub to ask only for what it listed.
+func serveViews(c *rendezvous.Conn, views chan<- string) {
+	for {
+		s, err := c.Accept()
+		if err != nil {
+			return
+		}
+		go func() {
+			line, err := readLine(bufio.NewReader(s))
+			if err != nil {
+				s.Close()
+				return
+			}
+			var m ViewMessage
+			json.Unmarshal(line, &m)
+			views <- m.Ref
+			ServeView(s, m, func(m ViewMessage) (io.ReadCloser, error) {
+				return io.NopCloser(strings.NewReader(m.Ref + "'s bytes")), nil
+			})
+		}()
+	}
+}
+
+// TestViewOnlyListedRefs is audit SA1-M3: the hub asks a node only for
+// a ref the node listed in the task's events, whatever else a viewer
+// names, a path out of the node's artifacts above all.
+func TestViewOnlyListedRefs(t *testing.T) {
+	h := newHarness(t)
+	c := h.connect(t, "ws-1")
+	views := make(chan string, 10)
+	go serveViews(c, views)
+	st := upstream(t, c)
+	send(t, st,
+		`{"v":1,"seq":1,"task":"t-1","type":"artifact","artifact":{"kind":"diff","ref":"diff-1"}}`,
+		`{"v":1,"seq":2,"task":"t-1","type":"tool_call","tool_call":{"name":"Read"},"artifact":{"kind":"tool_call","ref":"call-2"}}`,
+		status(3, "running"))
+	h.waitLast(t, "t-1", 3)
+
+	for _, ref := range []string{"diff-1", "call-2"} {
+		if code, body := get(t, h.url+"/v1/tasks/t-1/artifacts?ref="+ref, "alice@example.com"); code != http.StatusOK || body != ref+"'s bytes" {
+			t.Fatalf("viewing listed %s: %d %q", ref, code, body)
+		}
+		if got := <-views; got != ref {
+			t.Fatalf("viewing %s asked the node for %q", ref, got)
+		}
+	}
+	h.tasks.put(tasks.Task{Spec: tasks.Spec{ID: "t-2", Team: "infra"}, State: tasks.Running, Node: "ws-1", NodeOwner: "alice@example.com", NodeTask: "local-2"})
+	for _, u := range []string{
+		"/v1/tasks/t-1/artifacts?ref=diff-2",
+		"/v1/tasks/t-1/artifacts?ref=../../.git-credentials",
+		"/v1/tasks/t-1/artifacts?ref=diff-1/../../../.git-credentials",
+		"/v1/tasks/t-1/artifacts?ref=%2Fhome%2Falice%2F.git-credentials",
+		// Listed for t-1, not for t-2.
+		"/v1/tasks/t-2/artifacts?ref=diff-1",
+	} {
+		if code, body := get(t, h.url+u, "alice@example.com"); code != http.StatusNotFound || !strings.Contains(body, "no such artifact") {
+			t.Errorf("%s: %d %q", u, code, body)
+		}
+	}
+	select {
+	case ref := <-views:
+		t.Fatalf("the node was asked for unlisted %q", ref)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestViewListedBeforeRestart is a ref listed before the hub restarted,
+// its ring gone with it: still viewable, and an unlisted one still not.
+func TestViewListedBeforeRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.db")
+	ctx := context.Background()
+	store, err := Open(ctx, path)
+	check(t, err)
+	before := newHarnessOn(t, store)
+	st := upstream(t, before.connect(t, "ws-1"))
+	send(t, st, `{"v":1,"seq":1,"task":"t-1","type":"artifact","artifact":{"kind":"diff","ref":"diff-1"}}`, status(2, "running"))
+	before.waitLast(t, "t-1", 2)
+	check(t, store.Close())
+
+	store, err = Open(ctx, path)
+	check(t, err)
+	t.Cleanup(func() { store.Close() })
+	h := newHarnessOn(t, store)
+	views := make(chan string, 10)
+	go serveViews(h.connect(t, "ws-1"), views)
+	if code, body := get(t, h.url+"/v1/tasks/t-1/artifacts?ref=diff-1", "alice@example.com"); code != http.StatusOK || body != "diff-1's bytes" {
+		t.Fatalf("viewing diff-1 after a restart: %d %q", code, body)
+	}
+	<-views
+	if code, body := get(t, h.url+"/v1/tasks/t-1/artifacts?ref=../diff-1", "alice@example.com"); code != http.StatusNotFound {
+		t.Fatalf("viewing an unlisted ref after a restart: %d %q", code, body)
+	}
+}
+
+// TestRefsBound is the bound on a task's kept refs: the newest MaxRefs.
+func TestRefsBound(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, "sqlite::memory:")
+	check(t, err)
+	defer store.Close()
+	for i := 1; i <= MaxRefs+2; i++ {
+		check(t, store.AddRef(ctx, "t-1", fmt.Sprintf("r-%d", i), int64(i)))
+	}
+	// Listed again: kept once.
+	check(t, store.AddRef(ctx, "t-1", "r-10", int64(MaxRefs+3)))
+	check(t, store.AddRef(ctx, "t-2", "r-1", 1))
+	var n int
+	check(t, store.db.QueryRow(`SELECT COUNT(*) FROM task_refs WHERE task = 't-1'`).Scan(&n))
+	if n != MaxRefs {
+		t.Fatalf("task t-1 keeps %d refs; want %d", n, MaxRefs)
+	}
+	for ref, want := range map[string]bool{"r-1": false, "r-2": false, "r-3": true, fmt.Sprintf("r-%d", MaxRefs+2): true, "r-0": false} {
+		if got, err := store.HasRef(ctx, "t-1", ref); err != nil || got != want {
+			t.Errorf("t-1 has %s: %v, %v; want %v", ref, got, err, want)
+		}
+	}
+	if ok, _ := store.HasRef(ctx, "t-2", "r-1"); !ok {
+		t.Error("t-2's ref went with t-1's")
+	}
+	if err := store.AddRef(ctx, "t-1", "", 1); err == nil {
+		t.Error("kept an empty ref")
 	}
 }
