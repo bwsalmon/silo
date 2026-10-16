@@ -16,6 +16,10 @@
 //	     /v1/tasks...          the backlog's API (§6), its events and artifacts (§7)
 //	     /auth/...             the OIDC sign-in, when the hub is not behind IAP
 //
+// and, on a listener of its own (Config.MetricsAddr) that the load
+// balancer never reaches, GET /metrics: its Prometheus metrics
+// (docs/hub-operations.md).
+//
 // Every path but the first three signs its caller in through the
 // configured sign-on: IAP's assertion behind Google Cloud IAP, or OIDC.
 //
@@ -107,6 +111,11 @@ type Config struct {
 	// zero.
 	DispatchRetry time.Duration
 
+	// MetricsAddr, when set, is the address Serve serves MetricsPath on:
+	// a listener of its own, so that the metrics are never on the
+	// routes the load balancer exposes.
+	MetricsAddr string
+
 	// Logf, when set, receives the hub's log lines.
 	Logf func(format string, args ...any)
 }
@@ -181,6 +190,7 @@ type Hub struct {
 	NodeUI     *nodeui.Server
 
 	handler  http.Handler
+	metrics  *metrics
 	draining atomic.Bool
 }
 
@@ -198,6 +208,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		cfg.logf("hub: using SQLite (%s): for local development only", cfg.Database)
 	}
 	h := &Hub{cfg: cfg}
+	h.metrics = newMetrics(h)
 	fail := func(err error) (*Hub, error) {
 		h.Close()
 		return nil, err
@@ -226,6 +237,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Visible:      dirAPI.Visible,
 		Heartbeat:    hb,
 		Logf:         cfg.Logf,
+		Observe:      h.metrics.observeRendezvous,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
 	h.Dispatcher = &tasks.Dispatcher{
@@ -235,6 +247,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Directory: h.Directory,
 		Retry:     cfg.DispatchRetry,
 		Logf:      cfg.Logf,
+		Observe:   h.metrics.observeDispatch,
+
+		LostRequeueAfter: h.Directory.LostRequeueAfter,
 	}
 	h.Live = &live.Hub{
 		Log:       h.Events,
@@ -242,6 +257,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Directory: dirAPI,
 		Open:      h.Rendezvous.Open,
 		Logf:      cfg.Logf,
+		Ingested:  h.metrics.observeIngest,
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
 	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI}
@@ -263,8 +279,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
 	lv := h.Live.Handler()
-	m.Handle("GET "+live.EventsPath, lv)
-	m.Handle("GET "+live.ArtifactsPath, lv)
+	m.Handle("GET "+live.EventsPath, h.metrics.subscriptions(lv))
+	m.Handle("GET "+live.ArtifactsPath, h.metrics.viewThrough(lv))
 	for _, p := range authPaths {
 		m.Handle(p, authHandler)
 	}
@@ -279,11 +295,25 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		}
 		h.handler = h.NodeUI.Hosts(m)
 	}
+	// The node UI's hosts are counted as one route: their paths are the
+	// nodes' own.
+	h.handler = h.metrics.instrument(h.handler, func(r *http.Request) string {
+		if h.NodeUI != nil {
+			if _, ok := h.NodeUI.Node(r.Host); ok {
+				return "node-ui"
+			}
+		}
+		return ""
+	})
 	return h, nil
 }
 
 // Handler is the hub's HTTP handler.
 func (h *Hub) Handler() http.Handler { return h.handler }
+
+// MetricsHandler serves the hub's Prometheus metrics: what Serve serves
+// on MetricsAddr.
+func (h *Hub) MetricsHandler() http.Handler { return h.metrics.handler() }
 
 func (h *Hub) serveReady(w http.ResponseWriter, r *http.Request) {
 	if h.draining.Load() {
@@ -293,6 +323,7 @@ func (h *Hub) serveReady(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := h.Directory.Ping(ctx); err != nil {
+		h.metrics.storeErrors.WithLabelValues("database").Inc()
 		http.Error(w, "database: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -334,6 +365,21 @@ func Serve(ctx context.Context, l net.Listener, cfg Config) error {
 // Serve is the package's Serve on an already wired hub. It does not
 // close the stores.
 func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
+	if h.cfg.MetricsAddr != "" {
+		ml, err := net.Listen("tcp", h.cfg.MetricsAddr)
+		if err != nil {
+			l.Close()
+			return fmt.Errorf("server: the metrics listener: %w", err)
+		}
+		mm := http.NewServeMux()
+		mm.Handle("GET "+MetricsPath, h.MetricsHandler())
+		msrv := &http.Server{Handler: mm, ReadHeaderTimeout: 10 * time.Second}
+		go msrv.Serve(ml)
+		// Closed last, so that a scrape during the shutdown still sees
+		// the hub unready.
+		defer msrv.Close()
+		h.cfg.logf("hub: serving metrics on %s%s", ml.Addr(), MetricsPath)
+	}
 	// Requests, hijacked node connections included, live in reqCtx:
 	// cancelling it ends the event subscriptions, which never go idle
 	// for http.Server.Shutdown to wait for.

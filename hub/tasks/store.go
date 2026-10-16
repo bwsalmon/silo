@@ -287,27 +287,53 @@ func (s *Store) update(ctx context.Context, id string, from []State, f func(*Tas
 		if !slices.Contains(from, t.State) {
 			return t, fmt.Errorf("%w: task %s is %s", ErrState, id, t.State)
 		}
-		f(&t)
-		if !t.State.valid() {
-			return Task{}, fmt.Errorf("%w state %q", ErrInvalid, t.State)
-		}
-		t.Updated = s.now().UTC().Truncate(time.Millisecond)
-		if t.Excluded == nil {
-			t.Excluded = []string{}
-		}
-		excl, _ := json.Marshal(t.Excluded)
-		res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, node = ?, node_task = ?, reason = ?, excluded = ?,
-			attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
-			string(t.State), t.Node, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
-			t.Updated.UnixMilli(), t.version+1, id, t.version)
-		if err != nil {
-			return Task{}, err
-		}
-		if n, _ := res.RowsAffected(); n == 1 {
-			t.version++
-			return t, nil
+		if t, ok, err := s.write(ctx, id, t, f); ok {
+			return t, err
 		}
 	}
+}
+
+// updateVersion applies f to task id only if it is still at version, as
+// read by the caller; otherwise it fails with ErrState.
+func (s *Store) updateVersion(ctx context.Context, id string, version int64, f func(*Task)) (Task, error) {
+	t, err := s.Get(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	if t.version != version {
+		return t, fmt.Errorf("%w: task %s changed", ErrState, id)
+	}
+	if t, ok, err := s.write(ctx, id, t, f); ok {
+		return t, err
+	}
+	return t, fmt.Errorf("%w: task %s changed", ErrState, id)
+}
+
+// write applies f to t, which was read at its version, and writes it
+// back if the task is still at that version. ok is false, with no
+// error, when another update got there first.
+func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ Task, ok bool, _ error) {
+	f(&t)
+	if !t.State.valid() {
+		return Task{}, true, fmt.Errorf("%w state %q", ErrInvalid, t.State)
+	}
+	t.Updated = s.now().UTC().Truncate(time.Millisecond)
+	if t.Excluded == nil {
+		t.Excluded = []string{}
+	}
+	excl, _ := json.Marshal(t.Excluded)
+	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, node = ?, node_task = ?, reason = ?, excluded = ?,
+		attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
+		string(t.State), t.Node, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
+		t.Updated.UnixMilli(), t.version+1, id, t.version)
+	if err != nil {
+		return Task{}, true, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return Task{}, false, nil
+	}
+	t.version++
+	return t, true, nil
 }
 
 // Offer marks a queued task offered to node.
@@ -351,6 +377,77 @@ func (s *Store) Retry(ctx context.Context, id string) (Task, error) {
 		t.Excluded = []string{}
 	})
 }
+
+// RequeueLost returns a lost task to the queue for any node, its own
+// included: the dispatcher giving up on its node coming back
+// (Dispatcher.LostRequeueAfter). It applies only to a task that is
+// still lost, and has been since lostSince, so a task its node resumed
+// in the meantime, even one lost again since, is left alone.
+func (s *Store) RequeueLost(ctx context.Context, id, reason string, lostSince time.Time) (Task, error) {
+	t, err := s.Get(ctx, id)
+	if err != nil {
+		return t, err
+	}
+	if t.State != Lost || !t.Updated.Equal(lostSince) {
+		return t, fmt.Errorf("%w: task %s is %s since %s", ErrState, id, t.State, t.Updated.Format(time.RFC3339))
+	}
+	return s.updateVersion(ctx, id, t.version, func(t *Task) {
+		t.State, t.Node, t.NodeTask, t.Reason = Queued, "", "", reason
+	})
+}
+
+// Counts is how many tasks the backlog holds in each unfinished state,
+// by team: the hub's backlog-depth metric. Finished tasks are not
+// counted.
+func (s *Store) Counts(ctx context.Context) (map[string]map[State]int, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, state, COUNT(*) FROM tasks WHERE state IN (?, ?, ?, ?) GROUP BY team, state`),
+		string(Queued), string(Offered), string(Running), string(Lost))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]map[State]int{}
+	for rows.Next() {
+		var (
+			team, state string
+			n           int
+		)
+		if err := rows.Scan(&team, &state, &n); err != nil {
+			return nil, err
+		}
+		if out[team] == nil {
+			out[team] = map[State]int{}
+		}
+		out[team][State(state)] = n
+	}
+	return out, rows.Err()
+}
+
+// OldestQueued is, for each team with a queued task, when its oldest
+// queued task was last queued (its last update): how long the team's
+// queue has waited.
+func (s *Store) OldestQueued(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, MIN(updated_at) FROM tasks WHERE state = ? GROUP BY team`), string(Queued))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var (
+			team string
+			ms   int64
+		)
+		if err := rows.Scan(&team, &ms); err != nil {
+			return nil, err
+		}
+		out[team] = time.UnixMilli(ms).UTC()
+	}
+	return out, rows.Err()
+}
+
+// Stats is the store's connection pool's statistics.
+func (s *Store) Stats() sql.DBStats { return s.db.Stats() }
 
 // Lose marks a running task lost: its node went away.
 func (s *Store) Lose(ctx context.Context, id, reason string) (Task, error) {

@@ -12,8 +12,8 @@ The pieces:
 | Path | What it is |
 | --- | --- |
 | `Dockerfile` | The hub's image: a static `silo` binary on distroless. |
-| `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, Certificate Manager certificates (the hub's host and the nodes' UI hosts, `*.nodes.<domain>`) and their map, DNS records (optional) and an Artifact Registry repository. `bsalmon-gke-dev.tfvars` is the example for this project. |
-| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), and the GKE policies (IAP, timeouts, health checks). `validate.sh` checks them on a kind cluster. |
+| `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, Certificate Manager certificates (the hub's host and the nodes' UI hosts, `*.nodes.<domain>`) and their map, DNS records (optional), an Artifact Registry repository, and Cloud Monitoring alert policies and a dashboard over the hub's metrics (`monitoring.tf`). `bsalmon-gke-dev.tfvars` is the example for this project. |
+| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), and the GKE policies (IAP, timeouts, health checks), and a `PodMonitoring` that scrapes the hub's metrics. `validate.sh` checks them on a kind cluster. |
 
 Traffic, once deployed:
 
@@ -40,6 +40,9 @@ them to the `silo-hub` Service and so behind the same IAP.
     `GCPBackendPolicy` and `HealthCheckPolicy` CRDs.
   - GKE 1.29 or later, for the proxy as a native sidecar
     (`restartPolicy: Always` in `initContainers`).
+  - **Managed Service for Prometheus**'s managed collection (on by
+    default since GKE 1.27; `--enable-managed-prometheus` otherwise),
+    for the `PodMonitoring` and the alerts (hub-operations.md §5).
 
   The terraform reads the cluster and warns (it does not fail) when
   the first two are missing.
@@ -203,14 +206,25 @@ timeout.
 
 ## 7. Operating it
 
+[hub-operations.md](hub-operations.md) is the full runbook: upgrades
+and how node connections drain, rotating the IAP, node-token and
+database secrets, backups and restoring them, and the dashboard and
+alerts. In short:
+
 - **Upgrades:** push a new tag, set `newTag`, `kubectl apply -k`. The
   Deployment is `Recreate`: the old pod says goodbye to its nodes and
   stops, then the new one starts, so nodes are away for a few seconds
   and running tasks resume when their node is back (hub.md §6.2).
 - **Logs:** `kubectl -n silo-hub logs deploy/silo-hub -c hub` (and
   `-c cloud-sql-proxy`).
+- **Metrics:** Managed Service for Prometheus scrapes the pod's port
+  9091 (the `PodMonitoring` `silo-hub`); the **Silo hub** dashboard and
+  five alert policies are terraform's (`monitoring.tf`), notifying
+  `alert_notification_channels`.
+- **Backups:** daily, 14 kept, with 7 days of point-in-time recovery
+  (terraform's `backup_*` and `point_in_time_recovery_days`).
 - **One replica only.** Do not scale the Deployment: the dispatcher
-  assumes it is alone (hub.md §10).
+  assumes it is alone (hub.md §2.2).
 - **Removing it:** `kubectl delete -k deploy/kubernetes/hub/bsalmon-gke-dev`,
   then `terraform destroy` (after setting `deletion_protection = false`
   for the database).

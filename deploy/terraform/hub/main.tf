@@ -22,6 +22,10 @@ check "cluster" {
     error_message = "Cluster ${var.cluster_name} does not have Workload Identity enabled (workload pool ${var.project}.svc.id.goog)."
   }
   assert {
+    condition     = try(data.google_container_cluster.hub.monitoring_config[0].managed_prometheus[0].enabled, false)
+    error_message = "Cluster ${var.cluster_name} does not have Managed Service for Prometheus enabled: the PodMonitoring in deploy/kubernetes/hub scrapes nothing, and the alerts in monitoring.tf never fire."
+  }
+  assert {
     condition     = contains(["CHANNEL_STANDARD", "CHANNEL_EXPERIMENTAL"], try(data.google_container_cluster.hub.gateway_api_config[0].channel, ""))
     error_message = "Cluster ${var.cluster_name} does not have the Gateway API enabled (gateway_api_config.channel CHANNEL_STANDARD)."
   }
@@ -34,6 +38,7 @@ locals {
     "certificatemanager.googleapis.com",
     "artifactregistry.googleapis.com",
     "dns.googleapis.com",
+    "monitoring.googleapis.com",
   ])
   workload_identity = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/${var.service_account}]"
   db_user           = "silo-hub"
@@ -63,15 +68,29 @@ resource "google_sql_database_instance" "hub" {
   settings {
     tier              = var.database_tier
     availability_type = "ZONAL"
+    # Cloud SQL's own guard against deleting the instance (and with it
+    # its automated backups), beside terraform's.
+    deletion_protection_enabled = var.deletion_protection
     ip_configuration {
       # Reached only through the Cloud SQL Auth Proxy, which
       # authorizes with IAM: no authorized networks.
       ipv4_enabled = true
       ssl_mode     = "ENCRYPTED_ONLY"
     }
+    # Daily backups and point-in-time recovery from the write-ahead
+    # log: the hub can be put back to any second in the last
+    # point_in_time_recovery_days (docs/hub-operations.md, "Restoring
+    # from a backup").
     backup_configuration {
       enabled                        = true
+      start_time                     = var.backup_start_time
+      location                       = var.backup_location
       point_in_time_recovery_enabled = true
+      transaction_log_retention_days = var.point_in_time_recovery_days
+      backup_retention_settings {
+        retained_backups = var.backups_retained
+        retention_unit   = "COUNT"
+      }
     }
   }
 

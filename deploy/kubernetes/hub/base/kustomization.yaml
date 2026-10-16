@@ -14,6 +14,7 @@ resources:
   - services.yaml
   - gateway.yaml
   - policies.yaml
+  - monitoring.yaml
 configMapGenerator:
   - name: silo-hub-config
     literals:
