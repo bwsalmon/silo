@@ -58,6 +58,16 @@ variable "database_tier" {
   default     = "db-custom-1-3840"
 }
 
+variable "database_availability_type" {
+  description = "ZONAL (no standby: a zone's failure is a restore by hand) or REGIONAL (a standby in another zone, failover in about a minute, at about twice the cost). docs/hub.md §2.2."
+  type        = string
+  default     = "ZONAL"
+  validation {
+    condition     = contains(["ZONAL", "REGIONAL"], var.database_availability_type)
+    error_message = "database_availability_type must be ZONAL or REGIONAL."
+  }
+}
+
 variable "database_version" {
   description = "The Cloud SQL PostgreSQL version."
   type        = string

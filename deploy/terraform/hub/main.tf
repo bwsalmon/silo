@@ -62,7 +62,7 @@ resource "google_sql_database_instance" "hub" {
 
   settings {
     tier              = var.database_tier
-    availability_type = "ZONAL"
+    availability_type = var.database_availability_type
     # Cloud SQL's own guard against deleting the instance (and with it
     # its automated backups), beside terraform's.
     deletion_protection_enabled = var.deletion_protection

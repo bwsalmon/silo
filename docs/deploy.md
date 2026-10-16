@@ -212,12 +212,17 @@ alerts. In short:
   `-c cloud-sql-proxy`).
 - **Metrics:** Managed Service for Prometheus scrapes the pod's port
   9091 (the `PodMonitoring` `silo-hub`); the **Silo hub** dashboard and
-  five alert policies are terraform's (`monitoring.tf`), notifying
+  six alert policies are terraform's (`monitoring.tf`), notifying
   `alert_notification_channels`.
 - **Backups:** daily, 14 kept, with 7 days of point-in-time recovery
   (terraform's `backup_*` and `point_in_time_recovery_days`).
 - **One replica only.** Do not scale the Deployment: the dispatcher
-  assumes it is alone (hub.md §2.2).
+  runs on one pod at a time, under a database lease, but a node's
+  connection and its streams live on the one pod holding it (hub.md
+  §2.2).
+- **Database availability:** `ZONAL` by default; set
+  `database_availability_type = "REGIONAL"` for a standby in another
+  zone (hub.md §2.2).
 - **Removing it:** `kubectl delete -k deploy/kubernetes/hub/bsalmon-gke-dev`,
   then `terraform destroy` (after setting `deletion_protection = false`
   for the database).

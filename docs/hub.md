@@ -217,8 +217,8 @@ hub; a hub whose backlog matters should set it.
 **What several replicas take.** Every node's connection is held by
 one pod. The dispatcher, the view-through and the node UI reach a node
 only through the pod holding it (`Server.Open`); a node's events reach
-only that pod (§7.1); and the dispatcher assumes it is alone (§6.2).
-So the registry has to be shared (R2), `Server.Open` has to reach
+only that pod (§7.1); and, before R1, the dispatcher assumed it was
+alone (§6.2). So the registry has to be shared (R2), `Server.Open` has to reach
 across pods (R3), the live fan-out and the dispatcher's wake-ups have
 to cross pods (R4), and only then can the Deployment run more than one
 pod (R5). The dispatcher's lease (R1) comes first because it is small,

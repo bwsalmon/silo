@@ -1,7 +1,9 @@
-# One hub replica. The dispatcher assumes it is the only one
-# (docs/hub.md §6.2, §10), so the rollout is Recreate: the old pod says
-# goodbye to its nodes and stops before the new one starts, and nodes
-# reconnect within their backoff. Several replicas are out of scope.
+# One hub replica. A node's connection and the streams to it live on
+# the one pod holding it (docs/hub.md §2.2), so the rollout is
+# Recreate: the old pod says goodbye to its nodes and stops before the
+# new one starts, and nodes reconnect within their backoff. The
+# dispatcher runs under a database lease (§2.2.1); several replicas
+# are designed in stages in §2.2 and not yet built.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
