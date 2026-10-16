@@ -107,16 +107,33 @@ func (h *Hub) serveEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		from = n
 	}
+	open := func(ctx context.Context) (follower, error) { return h.open(ctx, t, from) }
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		h.serveWebSocket(w, r, t, from)
+		h.serveWebSocket(w, r, t, open)
 		return
 	}
-	h.serveSSE(w, r, t, from)
+	h.serveSSE(w, r, open)
 }
 
-func (h *Hub) serveSSE(w http.ResponseWriter, r *http.Request, t tasks.Task, from int64) {
+// follower delivers a subscription to send, as Hub.follow does, and
+// says why it ended.
+type follower func(ctx context.Context, send func(Event) error, keepalive func() error) (string, error)
+
+// local is the follower for a subscription this pod serves from its
+// own topic.
+func (h *Hub) local(ctx context.Context, t tasks.Task, from int64) (follower, error) {
+	sn, err := h.subscribe(ctx, t, from)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, send func(Event) error, keepalive func() error) (string, error) {
+		return h.follow(ctx, sn, send, keepalive)
+	}, nil
+}
+
+func (h *Hub) serveSSE(w http.ResponseWriter, r *http.Request, open func(ctx context.Context) (follower, error)) {
 	rc := http.NewResponseController(w)
-	sn, err := h.subscribe(r.Context(), t, from)
+	follow, err := open(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -126,7 +143,7 @@ func (h *Hub) serveSSE(w http.ResponseWriter, r *http.Request, t tasks.Task, fro
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	rc.Flush()
-	why, err := h.follow(r.Context(), sn, func(e Event) error {
+	why, err := follow(r.Context(), func(e Event) error {
 		b, err := json.Marshal(e)
 		if err != nil {
 			return err
@@ -147,7 +164,7 @@ func (h *Hub) serveSSE(w http.ResponseWriter, r *http.Request, t tasks.Task, fro
 	}
 }
 
-func (h *Hub) serveWebSocket(w http.ResponseWriter, r *http.Request, t tasks.Task, from int64) {
+func (h *Hub) serveWebSocket(w http.ResponseWriter, r *http.Request, t tasks.Task, open func(ctx context.Context) (follower, error)) {
 	ws := websocket.Server{
 		// A browser's request must come from the hub's own origin, or
 		// another site could subscribe with the viewer's sign-on. The
@@ -174,12 +191,12 @@ func (h *Hub) serveWebSocket(w http.ResponseWriter, r *http.Request, t tasks.Tas
 				}
 				cancel()
 			}()
-			sn, err := h.subscribe(ctx, t, from)
+			follow, err := open(ctx)
 			if err != nil {
 				h.logf("live: subscribing to task %s: %v", t.ID, err)
 				return
 			}
-			why, err := h.follow(ctx, sn, func(e Event) error {
+			why, err := follow(ctx, func(e Event) error {
 				return websocket.JSON.Send(c, e)
 			}, nil)
 			if err == nil && why == whyEnd {

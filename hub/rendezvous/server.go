@@ -76,6 +76,9 @@ type Server struct {
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
 	closing string // why Shutdown is ending every connection, once called
+
+	clientOnce sync.Once
+	client     *http.Client // Get's, to the other pods' internal listeners
 }
 
 type nodeConn struct {

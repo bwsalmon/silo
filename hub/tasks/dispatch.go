@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/notify"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/internal/logsafe"
 )
@@ -81,6 +82,10 @@ type Dispatcher struct {
 	// Finished, when set, is told of each task the dispatcher records as
 	// over: done, failed or cancelled. live.Hub.Finished.
 	Finished func(t Task)
+	// Bus, when set, carries Wake and Cancel to the dispatcher of
+	// whichever pod holds the lease (docs/hub.md §2.2.4), which hears
+	// them through Notice. Without one they stay in this process.
+	Bus *notify.Bus
 
 	once sync.Once
 	wake chan struct{}
@@ -159,8 +164,26 @@ func (d *Dispatcher) retry() time.Duration {
 }
 
 // Wake asks the dispatcher to look at the queue again: a task was
-// submitted or requeued.
+// submitted or requeued. With a Bus, the dispatcher on whichever pod
+// holds the lease is asked.
 func (d *Dispatcher) Wake() {
+	d.wakeLocal()
+	if d.Bus != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+			defer cancel()
+			if err := d.Bus.Notify(ctx, notify.Message{Wake: true}); err != nil {
+				d.logf("tasks: waking the dispatcher on the other pods: %v; it looks again within %s", err, d.retry())
+			}
+		}()
+	}
+}
+
+// notifyTimeout bounds sending a notice on the Bus.
+const notifyTimeout = 5 * time.Second
+
+// wakeLocal wakes this process's dispatcher, if it is running.
+func (d *Dispatcher) wakeLocal() {
 	d.init()
 	select {
 	case d.wake <- struct{}{}:
@@ -213,9 +236,41 @@ func (d *Dispatcher) Cancel(ctx context.Context, id, reason string) (Task, error
 	if l != nil {
 		l.signal()
 	} else if t.CancelPending {
-		d.Wake()
+		d.wakeLocal()
+	}
+	if d.Bus != nil {
+		// The dispatcher with the task's stream may be another pod's.
+		nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
+		defer cancel()
+		if err := d.Bus.Notify(nctx, notify.Message{Cancel: id}); err != nil {
+			d.logf("tasks: telling the other pods %s is cancelled: %v; the dispatcher tells its node within %s", id, err, d.retry())
+		}
 	}
 	return t, nil
+}
+
+// Notice is a notice from the Bus, handed to it by the hub
+// (docs/hub.md §2.2.4): a wake-up wakes the dispatcher, if it runs in
+// this process, and so does the bus reconnecting, since a notice may
+// have been lost meanwhile; a cancel signals the task's stream, if this
+// dispatcher has it open, and otherwise wakes it, for a cancel to
+// deliver to a node that is back. A registry change wakes it through
+// the registry's Changes, once the mirror is refilled.
+func (d *Dispatcher) Notice(m notify.Message) {
+	switch {
+	case m.Wake || m.Reconnected:
+		d.wakeLocal()
+	case m.Cancel != "":
+		d.init()
+		d.mu.Lock()
+		l := d.live[m.Cancel]
+		d.mu.Unlock()
+		if l != nil {
+			l.signal()
+		} else {
+			d.wakeLocal()
+		}
+	}
 }
 
 // pass looks at every task the dispatcher has something to do for.
@@ -509,7 +564,7 @@ func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind 
 			d.mu.Lock()
 			delete(d.live, t.ID)
 			d.mu.Unlock()
-			d.Wake()
+			d.wakeLocal()
 		}()
 		if kind == TypeCancel {
 			d.deliverCancel(ctx, t)
