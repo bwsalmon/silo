@@ -3,9 +3,9 @@
 This is the runbook for a hub that is already deployed
 ([deploy.md](deploy.md) is how it gets there): upgrading it, rotating
 its secrets, restoring its database, and reading its dashboard and
-alerts. The hub's design is [hub.md](hub.md); §2.2 there is why it runs
-one replica, how long each kind of failure keeps it down, and the
-staged design for several replicas.
+alerts. The hub's design is [hub.md](hub.md); §2.2 there is how it
+runs several replicas, and how long each kind of failure keeps it, or
+one of its pods, down.
 
 The commands assume the cluster's credentials
 (`eval "$(terraform -chdir=deploy/terraform/hub output -raw get_credentials)"`),
@@ -15,23 +15,24 @@ database `silo`.
 
 ## 1. What the hub keeps, and where
 
-| What | Where | Lost with the pod? |
+| What | Where | Lost with a pod? |
 | --- | --- | --- |
 | Teams, members, repositories, team settings, node tokens (hashes) | PostgreSQL: `teams`, `team_members`, `team_repos`, `team_settings`, `node_tokens` | no |
 | The backlog | PostgreSQL: `tasks` | no |
 | Stored events (lifecycle and conversation) | PostgreSQL: `task_events` | no |
-| The node registry: who is connected, their slots and heartbeats | memory, published to PostgreSQL for the other pods: `hub_pods` (each pod's lease) and `hub_nodes` (each node's owner, pod and connection) (hub.md §2.2.2) | the connections, yes: rebuilt as nodes reconnect, within their backoff (at most a minute). A node's owner, no |
-| Token-stream rings, live subscribers | memory | yes: subscribers reconnect from their cursor; ring events older than the restart are not replayed |
-| Open task streams | memory | yes: on start, offered tasks are requeued and running ones are `lost` until their nodes resume them (hub.md §6.2) |
-| The dispatcher's lease | PostgreSQL: an advisory lock held by the dispatching pod's session; `hub_leases` numbers its terms and names the holder | released: the next pod to start takes it (hub.md §2.2.1) |
+| The node registry: who is connected, their slots and heartbeats | memory, published to PostgreSQL for the other pods: `hub_pods` (each pod's lease) and `hub_nodes` (each node's owner, pod and connection) (hub.md §2.2.2) | that pod's connections, yes: rebuilt as its nodes reconnect to another pod, within their backoff (at most a minute). A node's owner, no |
+| Token-stream rings, live subscribers | memory | that pod's, yes: subscribers reconnect from their cursor; ring events older than the pod's loss are not replayed |
+| Open task streams | memory | the dispatcher's, if it ran on that pod: the next term requeues offered tasks and marks running ones `lost` until their nodes resume them (hub.md §6.2) |
+| The dispatcher's lease | PostgreSQL: an advisory lock held by the dispatching pod's session; `hub_leases` numbers its terms and names the holder | released: another pod takes it within five seconds (hub.md §2.2.1) |
 
 Backing up the database is therefore backing up the hub.
 
 ## 2. Upgrades
 
-The Deployment is one replica rolled with `Recreate` (hub.md §2.2):
-the old pod stops before the new one starts, and nothing is served in
-between.
+The Deployment runs two replicas and rolls them with `RollingUpdate`,
+`maxSurge: 1` and `maxUnavailable: 0` (hub.md §2.2.5): a new pod starts
+and becomes ready before an old one stops, so a pod is always serving,
+and the hub is never wholly down.
 
 1. Build and push the new image (deploy.md §3), set `newTag` in the
    overlay, and check what changes:
@@ -41,32 +42,41 @@ between.
 3. `kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev`, then
    `kubectl -n silo-hub rollout status deploy/silo-hub`.
 
-What happens, and how node connections are drained:
+What happens, one pod at a time, and how node connections are drained:
 
+- A new pod starts, its proxy first, then its `migrate` container
+  (below), then the hub, which joins the shared registry and becomes
+  ready. Only then does Kubernetes stop an old pod.
 - Kubernetes sends the old pod SIGTERM. The hub turns `/readyz` to 503
   at once, so the load balancer stops sending it new requests, and
   answers new node connections 503, which nodes retry.
 - It writes `{"type":"goodbye","error":"the hub is shutting down"}` on
   every node's control stream and waits for the nodes to close their
   connections (hub-interface.md); a node logs the reason and
-  reconnects with its backoff (1s, doubling to a minute). It ends the
-  open event subscriptions, which reconnect from their cursor, stops
-  the dispatcher and closes the database, all within 20 seconds
-  (`-shutdown-grace`). The pod's `terminationGracePeriodSeconds` (40)
-  leaves the Cloud SQL proxy, a native sidecar, running until the hub
-  has gone.
-- The new pod starts, its proxy first. It takes the dispatcher's
-  lease, which the old pod released as it stopped (if the old pod is
-  gone without releasing it, PostgreSQL frees it when the old session
-  ends, about ten seconds later). Its dispatcher marks every
-  running task `lost` and requeues every offered one; as each node
-  reconnects, its lost tasks are resumed on it. No team's lost-task
-  grace (hub.md §6.3) can expire for a task that was running at the
-  upgrade: the grace is at least five minutes, and for those tasks it
-  is measured from the restart.
+  reconnects with its backoff (1s, doubling to a minute), through the
+  load balancer to a pod that is ready. It ends the open event
+  subscriptions, which reconnect from their cursor to another pod,
+  stops the dispatcher if it ran here, leaves the registry and closes
+  the database, all within 20 seconds (`-shutdown-grace`). The pod's
+  `terminationGracePeriodSeconds` (40) leaves the Cloud SQL proxy, a
+  native sidecar, running until the hub has gone.
+- If the old pod held the dispatcher's lease, it releases it as it
+  stops, and another pod takes it within five seconds (if the old pod
+  is gone without releasing it, PostgreSQL frees it when the old
+  session ends, about ten seconds later). The new term's dispatcher
+  marks every running task `lost` and requeues every offered one, and
+  resumes each lost task on its node at once, since the node is still
+  connected to some pod, or as soon as it has reconnected. No team's
+  lost-task grace (hub.md §6.3) can expire for a task that was running
+  at the upgrade: the grace is at least five minutes, and for those
+  tasks it is measured from the new term.
+- Then the next pod. A node whose pod stops reconnects to whichever
+  pod is ready, which may be the other old pod, so a node can
+  reconnect twice in one roll, and the lease can move twice.
 
-Check afterwards: `silo_hub_ready` is 1, the online node count is back
-to where it was (it takes up to a minute, the nodes' longest backoff),
+Check afterwards: **Hub pods ready** reads 2, one pod reports
+`silo_hub_dispatcher_leader` 1, the online node count is back to where
+it was (it takes up to a minute, the nodes' longest backoff),
 and the backlog's `lost` count falls back to what it was before.
 
 **Schema changes.** The pod's `migrate` init container runs `silo hub
@@ -76,19 +86,30 @@ EXISTS`), so a new table (such as `team_settings`) appears on the first
 start of the version that adds it, and the hub's runtime role is
 granted its rows (deploy.md, "The database's two roles"). The hub
 itself cannot change the schema. If the `migrate` container fails, the
-pod does not start and the old one is already gone (`Recreate`): read
-`kubectl -n silo-hub logs deploy/silo-hub -c migrate`. There is no down-migration: to roll back past a version that
-changed a table, restore the database from before the upgrade (§4) as
+new pod does not start and the roll stops there, the old pods still
+serving (`maxUnavailable: 0`): read
+`kubectl -n silo-hub logs deploy/silo-hub -c migrate`, and fix forward
+or roll back. Because the new pod's `migrate` runs while the old pods
+serve, a schema change has to be one the old version still works
+with: a new table or a new nullable column, never a column dropped,
+renamed or retyped in the same release that stops using it. Split
+such a change over two releases. There is no down-migration: to roll
+back past a version that changed a table, restore the database from before the upgrade (§4) as
 well as the image. Take an on-demand backup before such an upgrade:
 `gcloud sql backups create --instance=silo-hub --project=bsalmon-gke-dev`.
 
 **Rolling back** is the same apply with the previous tag.
 
-**Never scale the Deployment.** The dispatcher's lease (hub.md
-§2.2.1) keeps two pods from both dispatching, but a node's connection,
-its events and the streams to it still live on the one pod holding it:
-a second pod would not see half the nodes (hub.md §2.2, stages R2 to
-R5). `validate.sh` refuses manifests that do.
+**Scaling.** Any number of pods serves (hub.md §2.2): the registry is
+shared through the database, streams and live events reach a node's
+pod over the internal listener, and the dispatcher runs on one pod at
+a time, under its lease. Set `replicas` in the manifests rather than
+with `kubectl scale`, which the next apply undoes, and set terraform's
+`hub_replicas` to match, so the pod-down warning (§5.4) expects that
+many, and `validate.sh`, which checks the manifests' two. Fewer than
+two makes a roll, a crash or a GKE node's loss an outage again. A pod costs a database
+connection pool of its own and a `LISTEN` connection, so mind the
+instance's connection limit before going far past a handful.
 
 ## 3. Rotating secrets
 
@@ -161,9 +182,9 @@ kubectl -n silo-hub rollout restart deploy/silo-hub
 
 The running hub is untouched by the apply: it does not use the
 password. Only the next pod start needs the new one, so if the Secret
-still holds the old password then, the `migrate` container fails and
-the pod does not start; the restart above checks it while you are
-watching.
+still holds the old password then, the `migrate` container fails, the
+new pod does not start and the roll stops there with the old pods
+serving; the restart above checks it while you are watching.
 
 To cut the hub off from the database (a leaked pod, say), remove
 `roles/cloudsql.instanceUser` from its service account, or delete its
@@ -188,10 +209,11 @@ kubectl -n silo-hub create secret generic silo-hub-internal \
 kubectl -n silo-hub rollout restart deploy/silo-hub
 ```
 
-The hub reads the key when it starts. With one replica that is all;
-with several, pods on the old key and the new one refuse each other's
-streams until the roll is done, so views, node UIs and offers to a node
-on a pod of the other key fail for the roll's duration, and are retried.
+The hub reads the key when it starts, so pods on the old key and the
+new one refuse each other's streams until the roll is done: views,
+node UIs, forwarded subscriptions and offers to a node on a pod of the
+other key fail for the roll's duration (a minute or two), and are
+retried.
 
 ## 4. Backups and restoring
 
@@ -207,7 +229,7 @@ up with:
 | Point-in-time recovery | on, with `point_in_time_recovery_days` (7) of write-ahead log |
 | Backup location | `backup_location`; Cloud SQL's default multi-region when unset |
 | Deletion protection | terraform's and Cloud SQL's own (`deletion_protection`) |
-| Availability | `database_availability_type`: `ZONAL` (the default, no standby) or `REGIONAL` (a standby in another zone, failover in about a minute, about twice the cost; hub.md §2.2) |
+| Availability | `database_availability_type`: `REGIONAL` (the default, a standby in another zone, failover in about a minute, about twice the cost; hub.md §2.2) or `ZONAL` (no standby, for a development hub) |
 
 So the database can be put back to any second in the last seven days,
 or to any of the last fourteen daily backups. Check the backups exist:
@@ -320,10 +342,13 @@ instance when the instance's settings change.
    --role=ROLE --condition='expression=resource.name == "projects/bsalmon-gke-dev/instances/<the restored instance>",title=silo-hub-restored'`
    for each ROLE.
 2. Set the overlay's `CLOUD_SQL_INSTANCE` to
-   `bsalmon-gke-dev:us-central1:<the restored instance>` and apply.
-   With `Recreate`, the old pod stops first, so the two never write at
-   once. The `migrate` container grants the runtime role again on the
-   restored tables.
+   `bsalmon-gke-dev:us-central1:<the restored instance>`. Stop every
+   pod first, so pods on the old instance and the new never write (or
+   dispatch) at once, as a rolling apply would have them:
+   `kubectl -n silo-hub scale deploy/silo-hub --replicas=0`, wait for
+   `kubectl -n silo-hub get pods` to show none, then apply, which sets
+   the replicas back. The hub is down in between. The `migrate`
+   container grants the runtime role again on the restored tables.
 3. Watch the hub start: `kubectl -n silo-hub logs deploy/silo-hub -c migrate`
    and `-c hub`, then `silo_hub_ready` and `silo_hub_database_up` on
    the dashboard.
@@ -346,7 +371,7 @@ default) makes:
 
 - a Cloud Monitoring dashboard, **Silo hub** (Monitoring → Dashboards),
   from `dashboards/hub.json`;
-- six alert policies (Monitoring → Alerting), each notifying
+- seven alert policies (Monitoring → Alerting), each notifying
   `alert_notification_channels` and linking to this section.
 
 They read what GKE's Managed Service for Prometheus scrapes from the
@@ -356,7 +381,15 @@ the cluster. Queries select `namespace="silo-hub",job="silo-hub"`.
 Managed collection must be on in the cluster (it is by default on GKE
 1.27 and later; terraform's `check "cluster"` warns if not). To look
 at the raw metrics:
-`kubectl -n silo-hub port-forward deploy/silo-hub 9091 && curl -s localhost:9091/metrics | grep ^silo_hub`.
+`kubectl -n silo-hub port-forward deploy/silo-hub 9091 && curl -s localhost:9091/metrics | grep ^silo_hub`
+(one pod's; `port-forward pod/<name>` for another).
+
+Each pod is scraped on its own. The counters and `silo_hub_ready`,
+`silo_hub_subscribers` and `silo_hub_dispatcher_leader` are the pod's
+own, and are summed across pods; the gauges read from the database or
+the shared registry (nodes, team nodes and free slots, the backlog,
+the event store) are the whole hub's on every pod, and are taken as the
+max across pods.
 
 Cloud Monitoring and not Grafana: the scraped metrics are already in
 Cloud Monitoring, which alerts and charts them with PromQL and with
@@ -392,7 +425,11 @@ scrape's own `up`.
 
 ### 5.3 Reading the dashboard
 
-Top row: **Hub ready** and **Database up** should both read 1.
+Top row: **Hub pods ready** should read the replicas (2; yellow
+below, red at none) and **Database up** 1. **Hub pods up, ready and
+dispatching**, at the bottom, is the same over time, with the pods
+holding the dispatcher's lease: always 1, a dip of seconds when a roll
+moves the lease.
 
 - **Nodes by status** and **Online nodes and free slots by team**: how
   much capacity there is, and for whom. Stale nodes are connected but
@@ -421,13 +458,24 @@ Top row: **Hub ready** and **Database up** should both read 1.
 
 ### 5.4 The alerts, and what to do
 
-**Hub down or not ready** (critical). No scrape, a failed scrape, or
-`silo_hub_ready` 0 for 5 minutes.
-`kubectl -n silo-hub get pods`, then `describe` the pod and read
-`logs -c hub` and `logs -c cloud-sql-proxy`. Not ready with a running
-pod is almost always the database (next alert); a pod that never starts
-is the image, the config map or the proxy. A pod stuck terminating
-is a node that will not close; deleting the pod is safe.
+**Hub down or not ready** (critical). No pod is ready: no scrape at
+all, every scrape failing (the sum of `up` over the pods is 0), or no
+pod reporting `silo_hub_ready` 1, for 5 minutes.
+`kubectl -n silo-hub get pods`, then `describe` the pods and read
+`logs -c hub` and `logs -c cloud-sql-proxy`. Every pod running and
+none ready is almost always the database (see Database errors); pods
+that never start are the image, the config map or the proxy, and pods
+that are not scheduled are the cluster (`describe` says why).
+
+**Hub pod down** (warning). Fewer pods than `hub_replicas` have been
+ready for 10 minutes while at least one serves. Nothing is lost: the
+missing pod's nodes reconnected to the others. But one more loss is an
+outage, so find out why: `kubectl -n silo-hub get pods -o wide`, then
+`describe` and `logs` of the pod that is not ready. A pod `Pending` is
+the topology spread finding no GKE node apart from the other pod's
+(the cluster needs two nodes, or more room); a pod crash-looping, or
+ready on and off, is its logs; a pod stuck terminating is a node
+connection that will not close, and deleting the pod is safe.
 
 **Team has queued work and no online node** (warning). For 15 minutes
 a team has had queued tasks and no online node that serves any of its
@@ -441,7 +489,8 @@ room refuses the task (check the task: `GET /v1/tasks/{id}` shows
 `excluded` and the last refusal as `reason`; `POST
 /v1/tasks/{id}/requeue` clears the exclusions), the task's constraints
 match no node, or the dispatcher is wedged (no `accepted` dispatch
-events at all while tasks are queued: restart the pod).
+events at all while tasks are queued: delete the pod reporting
+`silo_hub_dispatcher_leader` 1, and another takes the lease).
 
 **Hub error rate** (warning). Over 5% of requests answered 5xx (not
 counting `/readyz` while draining, the view-through's 503 for an
@@ -449,18 +498,19 @@ offline node, or requests to nodes' own UIs, route `node-ui`) for 5
 minutes. The dashboard's route breakdown says
 which API; the hub's logs say why. Usually it is the database.
 
-**Not dispatching** (critical). The hub has been up for 5 minutes and
+**Not dispatching** (critical). A hub pod has been up for 5 minutes and
 no pod reports `silo_hub_dispatcher_leader` 1: no task is placed,
-resumed or cancelled. Read the pod's log for `lease dispatcher:`
-lines. A term that fails at once (`recovering the backlog`) is the
+resumed or cancelled. Read every pod's log for `lease dispatcher:`
+lines (`kubectl -n silo-hub logs -l app=silo-hub -c hub --prefix`). A term that fails at once (`recovering the backlog`) is the
 database; see the next alert. No term at all means another session
 holds the lease: `SELECT holder, epoch, taken_at FROM hub_leases` names
 the last pod to take it, and `SELECT pid, backend_start FROM pg_locks
 JOIN pg_stat_activity USING (pid) WHERE locktype = 'advisory' AND
 classid = 1936288879` the session holding it (1936288879 is "silo").
 If that session belongs to no running pod, `SELECT
-pg_terminate_backend(pid)` frees the lease, and the hub takes it
-within five seconds.
+pg_terminate_backend(pid)` frees the lease, and a pod takes it within
+five seconds. If it belongs to a running pod that is not dispatching,
+deleting that pod frees it.
 
 **Database errors** (critical). The database did not answer, or the
 stores failed, for 5 minutes. Check the proxy's logs, the instance in
