@@ -1,0 +1,26 @@
+# The Silo hub on GKE behind IAP (docs/deploy.md). An overlay sets the
+# project's values; bsalmon-gke-dev/ is the one for that project.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: silo-hub
+labels:
+  - pairs:
+      app.kubernetes.io/name: silo-hub
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - deployment.yaml
+  - services.yaml
+  - gateway.yaml
+  - policies.yaml
+configMapGenerator:
+  - name: silo-hub-config
+    literals:
+      # The IAP-enabled backend service's audience (docs/deploy.md
+      # says how to read it once the Gateway has made the backend).
+      - SILO_HUB_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID
+      # Hub admins, comma-separated emails or groups.
+      - SILO_HUB_ADMINS=
+      # The Cloud SQL instance, PROJECT:REGION:INSTANCE.
+      - CLOUD_SQL_INSTANCE=PROJECT:REGION:INSTANCE

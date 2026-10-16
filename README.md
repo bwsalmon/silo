@@ -38,10 +38,14 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `hub/directory` | The team directory in SQLite or PostgreSQL (hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
 | `hub/tasks` | The task backlog in SQLite or PostgreSQL, its intake API, and the dispatcher (hub.md §6). The dispatcher places tasks on nodes per team, offers each one over a task stream, requeues a refused task without the node that refused it, marks a task lost when its node goes away mid-run and resumes it when the node returns, and cancels tasks down the stream. |
 | `hub/live` | Live events (hub.md §7): the event streams nodes open per task, the classification by schema (lifecycle and conversation stored, the token stream in an in-memory ring, node-only events kept as references), fan-out over SSE and WebSocket from a cursor, and the view-through to a node's diffs and tool logs. |
+| `hub/server` | The hub as one HTTP server over one database (hub.md §2.1): every part above wired together, `/healthz` and `/readyz`, and a graceful shutdown that says goodbye to nodes. |
+| `cmd/silo` | The `silo` command: `silo hub serve`, and `silo hub team` and `silo hub token` to bootstrap a hub's database. |
+| `Dockerfile`, `deploy/` | The hub's image, its GKE manifests (`deploy/kubernetes/hub`) and terraform (`deploy/terraform/hub`), for GKE behind IAP: the runbook is [`docs/deploy.md`](docs/deploy.md). |
 | `events` | The schema of the events a node streams to the hub for each task (hub.md §7.1), copied from the retired runner's `old/events`. |
 | `internal/tunnel/mux` | The stream multiplexer the rendezvous carries, copied from grain's `pkg/tunnel/mux`. |
 | `internal/pgtest` | Throwaway PostgreSQL servers for tests. |
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
+| `docs/deploy.md` | How to deploy the hub on GKE behind IAP, in `bsalmon-gke-dev`. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
 | `docs/ui.md` | A proposal, not decided: the hub's human web UI (hub.md §9, stage 2.6). |
 | `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |
@@ -49,7 +53,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 ## Building and testing
 
 ```sh
-gofmt -l hub internal events
+gofmt -l cmd hub internal events
 go build ./... && go vet ./... && go test -race ./...
 ```
 
@@ -58,3 +62,14 @@ store tests run against PostgreSQL as well as SQLite where PostgreSQL's
 server binaries are installed; CI installs them and sets
 `SILO_REQUIRE_POSTGRES=1`, which turns a missing server into a
 failure.
+
+`.grain/workflows/deploy.yml` builds the image, validates the
+manifests on a kind cluster (`deploy/kubernetes/hub/validate.sh`) and
+runs `terraform validate` and `terraform test` (mock providers) in
+`deploy/terraform/hub`. Nothing is applied anywhere.
+
+To run a hub locally:
+
+```sh
+go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db -dev-user-header X-User -admins me@example.com
+```

@@ -6,7 +6,9 @@ registry and the rendezvous (stage 2.1, `hub/registry` and
 `hub/rendezvous`), identity and teams (stage 2.2, §5, `hub/identity`
 and `hub/directory`), task intake and dispatch (stage 2.3, §6,
 `hub/tasks`), and live events with the SILO_ONLY view-through (stage
-2.4, §7, `hub/live`). Its deployment is a later stage (§9).
+2.4, §7, `hub/live`), and the `silo hub serve` command that runs them
+as one server, with its deployment on GKE behind IAP (stage 2.5, §2.1,
+`hub/server`, `deploy/`, [deploy.md](deploy.md)).
 
 ## 1. What the hub is
 
@@ -116,9 +118,53 @@ more. It holds teams, the backlog and the event metadata. The
 when the node connects, so it would only go stale in a database. A hub
 that restarts relearns its nodes within one reconnect backoff.
 
-The hub is deployed on **GKE behind IAP**: a GKE Ingress or Gateway
-fronts it with Google's HTTPS load balancer, and IAP is enabled on that
-load balancer's backend service (§4.1, §5.1).
+The hub is deployed on **GKE behind IAP**: a GKE Gateway fronts it
+with Google's HTTPS load balancer, and IAP is enabled on that load
+balancer's backend service for humans (§4.1, §5.1).
+
+### 2.1 Serving and deployment (built: `hub/server`, `cmd/silo`, `deploy/`)
+
+`silo hub serve` (`hub/server`) runs every part above as one HTTP
+server over one database: the directory, the backlog and its
+dispatcher, and the event store, each in its own tables of the same
+PostgreSQL database (SQLite only for local development), with the
+registry and rendezvous in memory. It is configured by flags or their
+`SILO_HUB_*` environment variables, and needs exactly one human
+sign-on: an IAP audience, an OIDC issuer, or, for development only, a
+header taken on trust. `/healthz` is liveness; `/readyz` answers 200
+while the database answers and the hub is not shutting down.
+
+On SIGTERM the hub turns unready, sends each node a `goodbye` on its
+control stream saying it is shutting down (§4.3), ends open event
+subscriptions (which reconnect from their cursor), stops the
+dispatcher and closes the stores, within 20 seconds. The node's client
+logs the reason and reconnects with its usual backoff, and the new
+hub's dispatcher resumes the node's running tasks (§6.2).
+`silo hub team` and `silo hub token` bootstrap a new hub straight in
+its database, before anyone can reach its API.
+
+**Why GKE and not Cloud Run.** The node WebSocket lives as long as the
+load balancer's backend timeout allows: a day, as deployed, where Cloud
+Run ends every request at 60 minutes. The client reconnects cleanly
+either way, because pods roll. GKE also leaves room for several
+replicas later (§10): session affinity, and a registry that records
+which pod holds each node. The shape is grain's own load balancer and
+IAP setup (grain's `deploy/terraform/gcp/iap.tf`, and
+`deploy/terraform/relay` with `iap_mode = "load_balancer"`). Cloud
+Run remains possible for a small hub that accepts hourly reconnects:
+it would serve the same image, with the node path left public and IAP
+on the rest through a serverless NEG behind the same kind of load
+balancer. It is not built.
+
+**One replica.** The deployment runs one pod and rolls it with
+`Recreate`, because the dispatcher assumes it is the only one (§6.2):
+two overlapping pods would both recover the backlog. A roll therefore
+costs nodes a reconnect of a few seconds. Several replicas are §10's
+question, not this stage's.
+
+[deploy.md](deploy.md) is the runbook: the terraform
+(`deploy/terraform/hub`), the manifests (`deploy/kubernetes/hub`) and
+how a Grain is pointed at the hub.
 
 ## 3. The node registry (built: `hub/registry`)
 
@@ -222,7 +268,12 @@ node → hub  {"type":"hello","node":{"id":"ws-1","repos":["bwsalmon/silo"],"slo
 hub → node  {"type":"welcome","owner":"alice@example.com","heartbeat_seconds":15}
             or {"type":"error","error":"registry: node belongs to another owner: ws-1"}, then close
 node → hub  {"type":"heartbeat","free":1}       every heartbeat_seconds
+hub → node  {"type":"goodbye","error":"the hub is shutting down"}, then close
 ```
+
+`goodbye` is `Server.Shutdown`: the hub is going away, and the node
+should reconnect (to its replacement) as after any drop. While it shuts
+down, the hub answers new connections 503.
 
 The node has 30s after the handshake to say hello. A heartbeat updates
 `free` and `last_seen`. The node goes offline when the connection ends,
@@ -309,11 +360,40 @@ A node cannot do an interactive sign-in for every connection. Instead:
    the node's live connection at once (`Server.Disconnect`), and its
    reconnect is refused.
 
-`ConnectPath` sits outside IAP's browser enforcement but still behind
-the HTTPS load balancer. As an alternative, a node on GCP could present
-a Google-signed ID token for its service account, and the hub would map
-that token's email to an owner the team directory has registered. That
-alternative is not built yet.
+### 5.2.1 Getting a node past IAP
+
+A node authenticates with its node token, not a human's IAP sign-in,
+so `ConnectPath` has to get past IAP. There were two ways:
+
+- **(a) A path with IAP off.** The Gateway routes exactly
+  `/v1/nodes/connect` to a second Service over the same pods, whose
+  backend service has IAP off and a day's timeout; every other path
+  goes to the IAP-enabled backend. The hub checks the node token
+  itself, before it upgrades (§4.2).
+- **(b) A Google identity as well.** The node presents a Google-signed
+  ID token for a service account IAP admits, and its node token beside
+  it.
+
+**The choice is (a).** The hub already proves a node's identity from
+its token, bound to one node ID and revocable at once (§5.2), so IAP
+in front of it would add a second credential, not a stronger check.
+(b) would make every node owner hold a Google credential IAP admits:
+a workstation or a VM outside GCP would need a service-account key,
+which is what nobody should be minting, or an OAuth client of its own
+to refresh a user's ID token, and IAP's access list would duplicate the
+team directory as a second place to grant a node. IAP also takes the
+`Authorization` header for its own token, so the node token would move
+to another header. With (a) the only cost is the routing: one more
+Service, `GCPBackendPolicy` and `HealthCheckPolicy`, and an exact path
+match, which the Gateway API expresses directly.
+
+What stays protected: the node backend serves only that one exact path,
+so no human API is reachable without IAP; the hub refuses an
+unauthenticated handshake with 401 before any WebSocket exists; and on
+every other path the hub still verifies `X-Goog-IAP-JWT-Assertion`
+against the IAP-enabled backend service's audience, so a request that
+reached a pod some other way is refused too. (b) can still be layered
+on later for nodes that run on GCP, without changing (a).
 
 ### 5.3 Teams
 
@@ -628,7 +708,7 @@ anything leaves it.
 | 2.2 | Human sign-on (IAP JWT verification and OIDC, `hub/identity`). Node tokens, the team directory, `Admit` and per-team visibility, in a store (`hub/directory`). | here, built |
 | 2.3 | The backlog and its store, the intake API, the dispatcher (per-team ordering, constraints, admission rechecked, refusal, lost nodes, resume, cancel) and the task-stream protocol (`hub/tasks`). `registry.ClaimFor`. | here, built |
 | 2.4 | Event streaming up (`Hub.NodeStream`), the classification by schema (`live.Classify`), the event store, the token-stream ring, fan-out to SSE and WebSocket from a cursor, and the view-through (`hub/live`). | here, built |
-| 2.5 | A `silo hub serve` command and its deployment (GKE behind IAP) | silo |
+| 2.5 | `silo hub serve` (`hub/server`, `cmd/silo`): every part above as one server, health and readiness, graceful shutdown with `goodbye`. Its image, GKE manifests and terraform for GKE behind IAP (§2.1, §5.2.1, `deploy/`, [deploy.md](deploy.md)). | here, built (not applied to any project) |
 | 2.6 | Future, not decided: the hub's human web UI for filing, approving and watching tasks across teams. [ui.md](ui.md) compares a new UI in silo with grain's UI pointed at the hub. | silo, or bwsalmon/grain |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 
@@ -641,4 +721,47 @@ anything leaves it.
   need the registry to say which replica holds each node's connection,
   so that `Server.Open` can be routed. The leader or lease machinery in
   v1's store (deleted from this repository; it is in git history) is
-  the obvious basis.
+  the obvious basis. As deployed (§2.1) the hub is one pod, rolled with
+  `Recreate`.
+
+## 11. The relay and the hub
+
+grain's UI can be reached from outside a node's machine through
+grain's relay (`grain-relay`, on Cloud Run): the node holds an outbound
+connection to the relay, and the relay carries a viewer's requests to
+the node's UI through it. Once a node also holds a rendezvous
+connection to the hub, it keeps two outbound tunnels that do the same
+thing: a reverse path from a cloud service to the node.
+
+**The hub could carry the relay's traffic.** The rendezvous is
+already a multiplexed reverse tunnel. `Server.Open` opens a stream to
+any connected node, and the view-through (§7.2) is a request carried
+over such a stream to the node, whose bytes are copied to the viewer
+and never kept. A UI view-through is the same with HTTP inside: the
+hub opens a stream of a new kind, `{"type":"http"}`, writes the
+viewer's request, and copies the node's response back, WebSocket
+upgrades included. The node answers it only for its own UI, and only
+if it has turned the UI view-through on. That would give:
+
+- **One outbound connection per node**, one credential (the node
+  token) and one place to revoke it.
+- **One sign-on and one access check.** IAP and the team directory
+  decide who may open a node's UI (to begin with, its owner; §5.3's
+  `SeesNode` for read-only views later), instead of the relay's own
+  configuration.
+- **No 60-minute cap.** The relay on Cloud Run ends every request at an
+  hour, as §2.1 says of the hub; the hub on GKE does not.
+
+What it costs: the hub carries every UI byte, so its bandwidth and the
+one replica's capacity matter (§10); a hub outage takes the UIs with
+it, where today the relay and the hub fail separately; and the node
+side has to serve the UI over a mux stream, which is grain's change.
+The no-code-at-rest rule (§1) holds, since nothing is stored, but more
+code passes through the hub than the artifact view-through carries.
+
+**Recommendation: fold the relay into the hub,** after Grain embeds the
+rendezvous client (§9), and retire `grain-relay` for nodes that use a
+hub, keeping it for nodes that do not. A follow-up proposal covers the
+hub side (the `http` stream, its access check and route) and the
+Grain side (answering it from the node's UI server); it is not built
+here.

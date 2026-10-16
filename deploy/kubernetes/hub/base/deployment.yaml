@@ -1,0 +1,104 @@
+# One hub replica. The dispatcher assumes it is the only one
+# (docs/hub.md §6.2, §10), so the rollout is Recreate: the old pod says
+# goodbye to its nodes and stops before the new one starts, and nodes
+# reconnect within their backoff. Several replicas are out of scope.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: silo-hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: silo-hub
+  template:
+    metadata:
+      labels:
+        app: silo-hub
+    spec:
+      serviceAccountName: silo-hub
+      # The hub's own shutdown grace (20s) and the proxy's, inside it.
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # The Cloud SQL Auth Proxy as a native sidecar: it starts before
+        # the hub and stops after it, so the hub's shutdown can still
+        # write to the database.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.1
+          restartPolicy: Always
+          args:
+            - --port=5432
+            - --structured-logs
+            - --health-check
+            - --http-address=0.0.0.0
+            - --exit-zero-on-sigterm
+            - $(CLOUD_SQL_INSTANCE)
+          env:
+            - name: CLOUD_SQL_INSTANCE
+              valueFrom:
+                configMapKeyRef:
+                  name: silo-hub-config
+                  key: CLOUD_SQL_INSTANCE
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9090
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: hub
+          image: silo-hub
+          args: ["hub", "serve", "-addr=:8080"]
+          envFrom:
+            - configMapRef:
+                name: silo-hub-config
+          env:
+            # postgres://silo-hub:PASSWORD@127.0.0.1:5432/silo?sslmode=disable,
+            # through the proxy (docs/deploy.md).
+            - name: SILO_HUB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: silo-hub-db
+                  key: url
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

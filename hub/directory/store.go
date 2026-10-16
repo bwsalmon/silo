@@ -107,6 +107,9 @@ func Open(ctx context.Context, url string) (*Store, error) {
 // Close closes the store.
 func (s *Store) Close() error { return s.db.Close() }
 
+// Ping checks that the database answers: the hub's readiness.
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 const schema = `
 CREATE TABLE IF NOT EXISTS teams (
 	id TEXT PRIMARY KEY,
