@@ -107,9 +107,11 @@ a time, under its lease. Set `replicas` in the manifests rather than
 with `kubectl scale`, which the next apply undoes, and set terraform's
 `hub_replicas` to match, so the pod-down warning (§5.4) expects that
 many, and `validate.sh`, which checks the manifests' two. Fewer than
-two makes a roll, a crash or a GKE node's loss an outage again. A pod costs a database
-connection pool of its own and a `LISTEN` connection, so mind the
-instance's connection limit before going far past a handful.
+two makes a roll, a crash or a GKE node's loss an outage again. Each
+pod takes up to about 85 database connections (§5.3, Database
+connections by store), and a roll runs one pod more than `replicas`,
+so the instance's `max_connections` has to allow about 85 times
+`replicas` plus one.
 
 ## 3. Rotating secrets
 
