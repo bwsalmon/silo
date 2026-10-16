@@ -75,3 +75,38 @@ jobs:
         env:
           SILO_REQUIRE_POSTGRES: "1"
         run: go test -race -timeout 15m ./...
+
+  # The stores that run on Cloud Spanner's PostgreSQL dialect, against
+  # Spanner's emulator behind PGAdapter (docs/spanner-evaluation.md), so
+  # they stay Spanner-compatible. hub/notify and hub/server are not run:
+  # Spanner has no LISTEN/NOTIFY or advisory locks, which the bus and
+  # the dispatcher's lease are, and their tests skip or fail there.
+  spanner:
+    name: spanner
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 20
+    steps:
+      # One container runs both the emulator and PGAdapter, which creates
+      # each database a test connects to (autoConfigEmulator). No GCP
+      # project or credential is involved.
+      - name: Start the Spanner emulator and PGAdapter
+        infrastructure: true
+        run: |
+          docker run -d --name spanner-pg -p 127.0.0.1:5433:5432 -p 127.0.0.1:9020:9020 gcr.io/cloud-spanner-pg-adapter/pgadapter-emulator
+          for i in $(seq 60); do
+            docker logs spanner-pg 2>&1 | grep -q "Server started on port 5432" && exit 0
+            sleep 1
+          done
+          docker logs spanner-pg
+          exit 1
+
+      - name: Test
+        env:
+          SILO_TEST_SPANNER: "127.0.0.1:5433"
+        run: go test -count=1 -timeout 10m ./hub/directory ./hub/tasks ./hub/registry ./hub/lease

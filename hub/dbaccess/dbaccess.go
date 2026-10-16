@@ -130,3 +130,13 @@ func LeastPrivileged(ctx context.Context, db *sql.DB, role string) error {
 	}
 	return nil
 }
+
+// Spanner reports whether db is a Cloud Spanner PostgreSQL-dialect
+// database, reached through PGAdapter (docs/spanner-evaluation.md),
+// rather than PostgreSQL or SQLite. Only Spanner has the
+// database_dialect option.
+func Spanner(ctx context.Context, db *sql.DB) bool {
+	var dialect string
+	err := db.QueryRowContext(ctx, `SELECT option_value FROM information_schema.database_options WHERE option_name = 'database_dialect'`).Scan(&dialect)
+	return err == nil && dialect == "POSTGRESQL"
+}

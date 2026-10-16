@@ -301,24 +301,21 @@ func closeConn(c *pgx.Conn) {
 }
 
 // Take bumps the epoch of the lease name for holder, which has just
-// taken it, and returns the new epoch.
+// taken it, and returns the new epoch. It is one statement, so that two
+// Takes never read the same epoch, under PostgreSQL's READ COMMITTED as
+// under Spanner's serializable transactions, which abort one of two
+// that conflict, and InTx runs it again.
 func (s *Store) Take(ctx context.Context, name, holder string) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	var epoch int64
+	err := dbaccess.InTx(ctx, s.db, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, s.q(`INSERT INTO hub_leases (name, epoch, holder, taken_at) VALUES (?, 1, ?, ?)
+		ON CONFLICT (name) DO UPDATE SET epoch = hub_leases.epoch + 1, holder = excluded.holder, taken_at = excluded.taken_at
+		RETURNING epoch`), name, holder, time.Now().UnixMilli()).Scan(&epoch)
+	})
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
-	epoch, err := current(ctx, tx, s.q, name)
-	if err != nil {
-		return 0, err
-	}
-	epoch++
-	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO hub_leases (name, epoch, holder, taken_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (name) DO UPDATE SET epoch = excluded.epoch, holder = excluded.holder, taken_at = excluded.taken_at`),
-		name, epoch, holder, time.Now().UnixMilli()); err != nil {
-		return 0, err
-	}
-	return epoch, tx.Commit()
+	return epoch, nil
 }
 
 // Holder is the lease name's current epoch and the holder that took
@@ -333,15 +330,6 @@ func (s *Store) Holder(ctx context.Context, name string) (int64, string, error) 
 		return 0, "", nil
 	}
 	return epoch, holder, err
-}
-
-func current(ctx context.Context, tx *sql.Tx, q func(string) string, name string) (int64, error) {
-	var n int64
-	err := tx.QueryRowContext(ctx, q(`SELECT epoch FROM hub_leases WHERE name = ?`), name).Scan(&n)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	return n, err
 }
 
 // Term is one hold of a lease, from taking it to losing it.
