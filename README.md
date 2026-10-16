@@ -1,68 +1,60 @@
 # Silo
 
-Silo is a system of nested virtual clouds. A silo is a node in a tree.
-Inside one, a tenant gets a GCE-compatible `compute/v1` API (the
-facade), fenced so that everything it makes stays inside its silo. The
-control plane, `silod`, keeps the tree, the allocators, the grants and
-the audit log in a database (SQLite or PostgreSQL).
+Silo is the **collection hub that links standalone Grain nodes
+together**. The design is [`docs/hub.md`](docs/hub.md).
 
-Silo v2, a fresh and smaller design under construction, lives in [`v2/`](v2/README.md).
+A **Grain node** is a single-tenant execution engine on one workstation
+or VM. It holds that machine's checkouts, runs the sandboxes and the
+agent, owns its own merge queue, and is complete on its own. It is the
+Policy Enforcement Point: it checks the claims on each incoming task
+against its own local policy.
 
-The specification is [`docs/silo/`](docs/silo/README.md); its README is
-the overview and wins on any conflict. Requirement headings there carry
-stable ids, `{#SV-n}`, which code and commits cite.
+**Silo** is the multi-tenant coordination plane above the nodes, and
+the Policy Decision Point that signs task claims. It handles:
+
+- **Identity:** who a human (IAP or OIDC sign-on) or a node (a node
+  token) is.
+- **Teams:** which team owns which repositories, and so which nodes may
+  serve them and who may see their tasks.
+- **The backlog:** tasks not yet placed on a node, and dispatch to a
+  node that can run them (`hub/tasks`).
+- **Routing and events:** reaching a node behind NAT or a firewall over
+  the connection the node opened, and relaying its events to viewers
+  (`hub/live`).
+
+Silo **holds no source at rest, runs no sandboxes and makes no git
+checkouts**. Once a task is placed, the node's grain owns it; the hub
+only mirrors its lifecycle (hub.md §1.1).
 
 ## Layout
 
+The repository root is one Go module, `github.com/bwsalmon/silo`.
+
 | Path | What it is |
 | --- | --- |
-| `cmd/silo` | The `silo` CLI: install, proxy, agents, links, exports |
-| `cmd/silod` | The control plane: `silod serve`, `gateway`, `migrate`, `pause`, `harness-init`, and its container images |
-| `cmd/silo-tools` | The MCP tool server agents' tool VMs run |
-| `pkg/...` | Everything they are built from |
-| `pkg/facade/<cloud>/<service>` | The cloud APIs tenants call inside a silo, such as `facade/gcp/gce`, the `compute/v1` facade ([`docs/silo/facades.md`](docs/silo/facades.md)) |
-| `pkg/backend/<cloud>/<service>` | silod's own clients of the real cloud, with their fakes, such as `backend/gcp/gce` |
-| `docs/silo/` | The specification |
-| `docs/test-runs/` | Reports of end-to-end test runs |
+| `hub/registry` | The in-memory node directory (hub.md §3): registration, ownership of node IDs, status, slot claims. |
+| `hub/rendezvous` | The node's outbound WebSocket to the hub and its reverse tunnel (hub.md §4): authentication bound to a node ID, admission, heartbeats, streams both ways, the per-caller filtered directory. |
+| `hub/identity` | Human sign-on (hub.md §5.1): IAP assertion and OIDC ID-token verification against the issuer's JWKS, and the OIDC relying party (code flow with PKCE, signed session cookie). |
+| `hub/directory` | The team directory in SQLite or PostgreSQL (hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
+| `hub/tasks` | The task backlog in SQLite or PostgreSQL, its intake API, and the dispatcher (hub.md §6). The dispatcher places tasks on nodes per team, offers each one over a task stream, requeues a refused task without the node that refused it, marks a task lost when its node goes away mid-run and resumes it when the node returns, and cancels tasks down the stream. |
+| `hub/live` | Live events (hub.md §7): the event streams nodes open per task, the classification by schema (lifecycle and conversation stored, the token stream in an in-memory ring, node-only events kept as references), fan-out over SSE and WebSocket from a cursor, and the view-through to a node's diffs and tool logs. |
+| `events` | The schema of the events a node streams to the hub for each task (hub.md §7.1), copied from the retired runner's `old/events`. |
+| `internal/tunnel/mux` | The stream multiplexer the rendezvous carries, copied from grain's `pkg/tunnel/mux`. |
+| `internal/pgtest` | Throwaway PostgreSQL servers for tests. |
+| `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
+| `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
+| `docs/ui.md` | A proposal, not decided: the hub's human web UI (hub.md §9, stage 2.6). |
+| `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |
 
 ## Building and testing
 
 ```sh
-make            # gofmt check, build into bin/, vet, go test -race
-make silod-image silod-harness-image
+gofmt -l hub internal events
+go build ./... && go vet ./... && go test -race ./...
 ```
 
-The store's PostgreSQL tests start a throwaway server per test from
-Debian's `postgresql` binaries, and skip when those are not installed
-unless `SILO_REQUIRE_POSTGRES` is set. CI is grain's
-(`.grain/workflows/tests.yml`).
-
-## History
-
-Silo was developed inside
-[bwsalmon/grain](https://github.com/bwsalmon/grain) under `pkg/silo`,
-`cmd/silo*` and `docs/silo`, and moved here with that layout. The
-packages have since been flattened: commits and test reports from
-before then (including grain's, and `docs/test-runs/`) cite
-`pkg/silo/<x>`, which now lives at `pkg/<x>`. Its earlier history is
-grain's.
-
-For spec verification of the `SV-N` ids in `docs/silo`, which needs
-grain's history as well as this repository's (grain's classification
-is `docs/test-runs/2026-10-12-silo-sv-classification.md` there):
-
-- Commit 97e94df here moved Silo out of grain at grain `c2044e70f`.
-  The `Design-Item: docs/silo/...` trailers for 115 of the 123 ids are
-  in grain: `git log c2044e70f --grep='Design-Item: docs/silo/'`. Only
-  SV-96, SV-97, SV-108, SV-110, SV-113, SV-114, SV-121 and SV-122 have
-  trailers in this repository.
-- Every implementing commit cites
-  `Design-Rev: 33a3b9ef35042788edacccde067fa790fb9d07e8`, a grain
-  commit from before the ids were added in grain `604dd85aa`. That
-  commit changes only heading id markers, so read `604dd85aa` in
-  `33a3b9e`'s place; otherwise `designdoc.Classify` reports all 123
-  ids as "changed, done".
-- Three commits edited `docs/silo` sections together with code but
-  carry no `Design-Item` trailers: 22f863e (SV-37), 17a84d1 (SV-108,
-  SV-118) and 7027ed7 (SV-4, 24, 26, 56, 65, 66, 70, 71, 72, 75, 76,
-  101, 104, 105, 122).
+grain CI runs the same in `.grain/workflows/hub.yml`. `hub/directory`'s
+store tests run against PostgreSQL as well as SQLite where PostgreSQL's
+server binaries are installed; CI installs them and sets
+`SILO_REQUIRE_POSTGRES=1`, which turns a missing server into a
+failure.

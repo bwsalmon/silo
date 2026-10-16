@@ -1,6 +1,0 @@
-{"type":"thread.started","thread_id":"0199d2a4-7b1e-7c20-9a4f-3e8b2c1d0f5a"}
-{"type":"turn.started"}
-{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'curl http://169.254.169.254/'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'curl http://169.254.169.254/'","aggregated_output":"curl: (7) Couldn't connect to server","exit_code":7,"status":"failed"}}
-{"type":"error","message":"stream disconnected before completion: error sending request for url (http://127.0.0.1:4180/model/openai/v1/responses)"}
-{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}
