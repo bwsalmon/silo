@@ -575,6 +575,11 @@ func (c *Cluster) Verify() {
 	if want <= 0 {
 		want = 1
 	}
+	// A task's result and its events reach the hub by different streams,
+	// so a task can be done while the last of its events are still on
+	// their way (a slow or lossy link, a loaded runner): its events are
+	// given until eventsBy to be stored, then checked.
+	eventsBy := time.Now().Add(30 * time.Second)
 	for _, id := range c.Ledger.Submitted() {
 		if s := c.State(id); s != tasks.Done {
 			var reason string
@@ -585,19 +590,15 @@ func (c *Cluster) Verify() {
 		if runs := c.Ledger.Runs(id); len(runs) != 1 {
 			c.t.Errorf("task %s ran %d times, on %v; want once", id, len(runs), runs)
 		}
-		rows, err := c.DB.Query(`SELECT seq, type FROM task_events WHERE task = $1 ORDER BY seq`, id)
+		seqs, last, err := c.events(id)
+		for err == nil && len(seqs) < want+1 && time.Now().Before(eventsBy) {
+			time.Sleep(200 * time.Millisecond)
+			seqs, last, err = c.events(id)
+		}
 		if err != nil {
 			c.t.Errorf("task %s's events: %v", id, err)
 			continue
 		}
-		var seqs []int64
-		var last string
-		for rows.Next() {
-			var seq int64
-			rows.Scan(&seq, &last)
-			seqs = append(seqs, seq)
-		}
-		rows.Close()
 		stride := int64(1 + c.Opts.Grain.Tokens)
 		ok := len(seqs) == want+1 && last == "result"
 		for i := 0; ok && i < want; i++ {
@@ -614,6 +615,22 @@ func (c *Cluster) Verify() {
 		s := c.States()
 		return c.AllOnline() == nil && s[tasks.Offered] == 0 && s[tasks.Running] == 0 && s[tasks.Lost] == 0
 	})
+}
+
+// events is task id's stored events' seqs, in order, and the last one's
+// type.
+func (c *Cluster) events(id string) (seqs []int64, last string, err error) {
+	rows, err := c.DB.Query(`SELECT seq, type FROM task_events WHERE task = $1 ORDER BY seq`, id)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int64
+		rows.Scan(&seq, &last)
+		seqs = append(seqs, seq)
+	}
+	return seqs, last, rows.Err()
 }
 
 // Ledger is what the Grains ran, and what the tests saw, against which
