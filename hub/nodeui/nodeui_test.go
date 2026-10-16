@@ -21,6 +21,7 @@ import (
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
+	"github.com/bwsalmon/silo/internal/testlog"
 )
 
 func check(t *testing.T, err error) {
@@ -54,6 +55,9 @@ func newHarness(t *testing.T) *harness {
 	dir, err := directory.Open(context.Background(), "sqlite::memory:")
 	check(t, err)
 	t.Cleanup(func() { dir.Close() })
+	// The hub's servers can log after the test returns: httptest does
+	// not wait for hijacked connections.
+	logf := testlog.Logf(t)
 	rv := &rendezvous.Server{
 		Registry: registry.New(),
 		Authenticate: func(r *http.Request) (rendezvous.Identity, error) {
@@ -64,14 +68,14 @@ func newHarness(t *testing.T) *harness {
 			return rendezvous.Identity{Owner: tok}, nil
 		},
 		Heartbeat: time.Second,
-		Logf:      t.Logf,
+		Logf:      logf,
 	}
 	ui := &Server{
 		Domain:    domain,
 		Registry:  rv.Registry,
 		Directory: &directory.API{Store: dir, Auth: headerAuth{}},
 		Open:      rv.Open,
-		Logf:      t.Logf,
+		Logf:      logf,
 	}
 	rvs := httptest.NewServer(rv.Handler())
 	t.Cleanup(rvs.Close)
