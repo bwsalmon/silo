@@ -151,7 +151,9 @@
                     "suite",
                     "include",
                     "exclude",
-                    "asset"
+                    "asset",
+                    "capability",
+                    "capability-base"
                   ]
                 },
                 "description": "Object kinds; asset also covers files that are not objects (docs/task-repos.md §2.2)"

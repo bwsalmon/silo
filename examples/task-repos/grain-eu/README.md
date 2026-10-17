@@ -46,6 +46,11 @@ This README is metadata only. The Grain's objects are files:
   (§5.2).
 - `templates/hub.md` includes the hub team's templates, pinned, and
   through them the org's, less the one template the team excludes.
+- `capabilities/hub.md` includes the hub team's capability objects:
+  available to request here, granted only if `eu`'s local policy admits
+  them. `capabilities/bases/` holds `eu`'s declarations of the base
+  capabilities it implements, which `eu` writes from its provider code
+  (docs/task-repos.md §5.7).
 - `tasks/` holds the tasks the owner writes for this Grain alone.
 - `runs/` holds one execution record (`kind: run`) per task this Grain
   took on, from either lane, with its thread in `comments/`.

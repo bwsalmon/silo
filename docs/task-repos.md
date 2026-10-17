@@ -70,6 +70,30 @@ this conflicts with the amendments above, this one wins:*
   grain's task and comment attachments migrated to assets beside their
   objects (§2.2, §13).*
 
+*Amended a fifth time 2026-10-16 (task 4456), as the owner settled. Where
+this conflicts with the amendments above, this one wins:*
+
+- *capabilities become objects. A **base capability** is implemented by
+  the Grain in trusted provider code, and declares the most it can grant,
+  what it materialises and what it implies. A **capability object**
+  (`kind: capability`) is a reference to a base plus an ordered chain of
+  **reducers** that only narrow it: effective authority is base ∩
+  reducer₁ ∩ reducer₂ ∩ …, on the model of macaroons. Objects can narrow
+  other objects across repos (§5.7);*
+- *reducers are written in **Anselm**, a language this design names and
+  deliberately does not specify. It will come from another project and
+  be adopted when ready. Until then, a small set of built-in reducer
+  types serves as an interim, and a `language: anselm` reducer is
+  carried, but refuses the request on a Grain that cannot evaluate it
+  (§5.7);*
+- *including a capability object makes it available to request, and
+  never grants it. A task requests one in `context:` with `mode: use`.
+  The Grain's local policy allowlists base types and definition sources,
+  and checks the effective capability and everything it implies (repos,
+  egress, tools) before it materialises anything. Approval, secrets by
+  name and CI's `capabilities:` all map onto the same model (§5.7,
+  §8.17, §11.27–§11.35, §13.2).*
+
 This design stores grain's **tasks, schedules, templates and design docs**
 as self-contained Markdown files in a **graph of plain-git repositories**
 ("task repos"). Each object is one file, and the repos link to each other
@@ -176,10 +200,10 @@ rules keep the split clean:
 | Git-backed | Runtime only (database) |
 | --- | --- |
 | task: `title`, body (the prompt), `team`, `context` (§5.6), its `attachments/` | the attempt list, attempt numbers, sandboxes, leases |
-| task: `submitter`, `approved_by`, `approved_at`, `origin`, `filed_by`, `state` (proposed, approved, rejected, cancelled), `cancel` | the live `running` sub-states (sandboxing, agent turn, waiting for CI) |
-| task: `template` (+ `inputs`, `rev`), `schedule`, `depends_on`, `implements`, `capabilities`, `constraints` | events, `seq`, transcripts, tool calls, diffs, logs |
+| task: `submitter`, `approved_by`, `approved_at`, `capability_approvals`, `origin`, `filed_by`, `state` (proposed, approved, rejected, cancelled), `cancel` | the live `running` sub-states (sandboxing, agent turn, waiting for CI) |
+| task: `template` (+ `inputs`, `rev`), `schedule`, `depends_on`, `implements`, `constraints`; capability objects and Grains' base declarations (§5.7) | events, `seq`, transcripts, tool calls, diffs, logs |
 | backlog reference: `to`, `spec_rev`, `rank`, `priority`, `expedite`, `attestation`, who added it and when | heartbeats, slot counts, offer timers |
-| execution record: `task`, `from`, `state` at the coarse grain of §5.3, timestamps, `refusal`, `superseded`, `previous` | the dispatcher's claim, `refused_by` lists, offer counts |
+| execution record: `task`, `from`, `state` at the coarse grain of §5.3, timestamps, `refusal`, `superseded`, `previous`, the `capabilities` it used (§5.7) | the dispatcher's claim, `refused_by` lists, offer counts; secret material, minted credentials and the per-use decision log (audit events) |
 | execution record: `closed`: outcome, change link, merge commit, summary, requirement revisions | merge-queue position, CI run ids, cost and token counts (summarised into `closed` if wanted) |
 
 A coarse state change, such as a run going `accepted → running → done`,
@@ -192,7 +216,8 @@ between `---` lines, then a **Markdown body**. Every file declares:
 
 - `kind:`, one of `repo`, `task`, `ref`, `run`, `comment`, `template`,
   `schedule`, `suite`, `trigger`, `design`, `moved`, `include`,
-  `exclude` or `asset` (a sidecar, §2.2);
+  `exclude`, `asset` (a sidecar, §2.2), `capability` or
+  `capability-base` (§5.7);
 - `schema:`, as in `grain/task@v1` (§10).
 
 There is **no `id:` field.** An object is named by where it is (§2.1).
@@ -220,6 +245,8 @@ schedules/silo.md                          kind: include (the team schedules Sil
 schedules/no-<name>.md                     kind: exclude (a cut, §3.3)
 schedules/<name>.md                        kind: schedule (its own)
 templates/<name>.md                        kind: include (a shared template set) or kind: template
+capabilities/<name>.md                     kind: include (a capability catalog, §5.7) or kind: capability (its own)
+capabilities/bases/<type>.md               kind: capability-base (written by the Grain from its providers)
 tasks/<name>/task.md                       kind: task    (its owner's own work)
 runs/<name>/run.md                         kind: run     (one execution record)
 runs/<name>/comments/<utc>-<author>.md     kind: comment (the run's thread)
@@ -247,6 +274,7 @@ templates/partials/<name>.md               kind: template (include-only, inputs 
 templates/<name>.md                        kind: include or kind: exclude (another shared set, and cuts from it)
 schedules/<name>.md                        kind: schedule (or, in an intake, kind: include: an adopted schedule)
 designs/<name>.md                          kind: design
+capabilities/<name>.md                     kind: capability (a team's or org's definitions, §5.7)
 designs/img/<file>                         an asset      (an image the design embeds)
 designs/img/<file>.md                      kind: asset   (its optional sidecar, §2.2)
 <an old path>                              kind: moved   (a tombstone, §2.1)
@@ -548,7 +576,7 @@ writers:                           # write ownership; whatever is not allowed is
     kinds: [task, asset]               # asset: the new task's attachments (§2.2)
     paths: [tasks/**]
     where: {state: proposed}
-    fields: [kind, schema, title, team, context, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
+    fields: [kind, schema, title, team, context, state, submitter, submitted_via, origin, depends_on, implements, template, constraints, labels, created_at, body]
     bind: {submitter: $pusher}
   - who: [team:hub#approver]
     may: update
@@ -1193,6 +1221,8 @@ sidecars, and `aka` → path.
 | repo → its new URL | README `moved_to` | a repo-level redirect |
 | task → what its sandbox holds | `context: [{ref, mode, path, depth}]` | **the only edge that materialises anything** (§5.6); a relative entry reads the task's own commit |
 | comment → its attachments | `attachments: [<ref>]` | assets beside the comment (§2.2) |
+| capability → its base | `base: {capability: <ref>}`, or `{type: <base type>}` | narrows that object further; a chain is resolved with cycle detection and a depth limit, and every link must be a sanctioned source (§5.7) |
+| task → a capability it requests | `context: [{ref, mode: use, reducers}]` | a request, never a grant: the Grain's policy decides (§5.7) |
 | sidecar → its asset | `asset: <ref>`, or `external: {url, sha256}` | metadata only (§2.2) |
 
 ## 5. Tasks, backlogs, execution records and comments
@@ -1252,9 +1282,11 @@ Each state has one writer:
 On a standalone Grain, the Grain and its owner hold every role.
 
 **After approval, the spec is frozen.** The hook refuses any change to
-`title`, the body, `context`, `template`, `depends_on`,
-`implements`, `capabilities` or `constraints`, and any change to the
-task's `attachments/` (§2.2). An attestation's
+`title`, the body, `context` (its capability requests included, §5.7),
+`template`, `depends_on`, `implements` or `constraints`, and any change
+to the task's `attachments/` (§2.2). `capability_approvals` is not spec:
+like `approved_by`, it is an approval, appended after the task's own
+(§5.7). An attestation's
 `spec_digest` therefore stays true, and a changed request is a new task
 with `supersedes:`.
 
@@ -1730,10 +1762,11 @@ given. Other names were weighed:
 | Field | Meaning |
 | --- | --- |
 | `ref` | what to materialise: a repo (a git URL or alias with no path), a folder (a path ending in `/`), or a file (an object or an asset, §2.2), with an optional `@ref` (§4) |
-| `mode` | `read` (the default) or `write`. **`write` is valid only for a repo or a repo folder**, and means the run may push **its own task branch** to that repo, based on the entry's `@ref`, and nothing else (below). Every other target is read-only |
+| `mode` | `read` (the default), `write` or `use`. **`write` is valid only for a repo or a repo folder**, and means the run may push **its own task branch** to that repo, based on the entry's `@ref`, and nothing else (below). Every other target is read-only. **`use` is valid only for a `kind: capability` object**, and requests that capability: nothing of the file lands, only what the capability materialises (§5.7) |
 | `path` | optional: where it lands, relative to the sandbox's working root. Otherwise the default layout below |
 | `depth` | optional, file entries only: also materialise the files this one's Markdown body links to, `n` links deep (below). The default is `0` |
 | `input` | in a template only, in place of `ref`: take the reference from a template input of type `ref` (§6.1) |
+| `reducers` | `use` entries only: reducers of the task's own, applied after the capability's chain, which can only narrow it further (§5.7) |
 
 **Which ref an entry reads:**
 
@@ -1893,7 +1926,9 @@ before the Grain reads a byte of it**, including those reached through
   or `read` and `write`;
 - a file against `repos:` for `read`;
 - an external artefact's host against the policy's `network`, and its
-  store's credential against `capabilities`;
+  store's credential against `capabilities` (§5.7);
+- a `use` entry's whole capability chain, its effective authority and
+  everything it implies (§5.7);
 - LFS content against `repos:` and `network` for the LFS endpoint's host.
 
 The Grain resolves outside the sandbox, with its own credential, into a
@@ -1902,8 +1937,12 @@ has passed. **Nothing enters the sandbox until the whole set has
 passed**, and then the git proxy's scope is set to exactly that set.
 This generalises grain task 4303's fix, which made the policy check the
 repositories a capability implies: no repo, file or URL reaches a sandbox
-unseen by policy, and **a capability no longer implies a repo**. A
-`repo-write:<repo>` capability becomes a `write` entry (§13).
+unseen by policy. *Amended by 4456:* a capability may still imply a repo,
+but **only by declaring it** in its base's `implies`, and the policy
+checks each declared repo as it checks an entry, before anything is
+materialised (§5.7). There is no hidden route. A task's
+`repo-write:<repo>` capability becomes a `write` entry (§13), and a
+workflow's becomes reducers over the git base (§5.7).
 
 **Refusal fails closed, naming the entry.** A listed entry that the
 policy refuses, that does not resolve, or that is over a limit, stops
@@ -2037,13 +2076,598 @@ materialise(task, grain):
                   + push: refs/heads/grain/<grain>/<run> in each write repo, paths ⊆ its write folders
     for repos and folders: clone through the proxy (partial, sparse for folders); abort over L.checkout_bytes
     for files: copy from staging, read-only, executable bits cleared; external: download, verify sha256
+    caps  = [effective_capability(e, task, grain) for e in task.context if e.mode == use]   # §5.7
+    if any is refused:                   return refuse(task, entry = its index, its reason)
+    # Repo and folder entries are uses of git@v1, and the proxy scope below is that capability.
+    for c in caps: resolve its secrets from grain's store; missing → refuse(task, entry, secret)
+    for c in caps: mint c's credentials, narrowed; load its use reducers into its proxies
     record run.context = {entries: plan with commits and paths, skipped, limits used}
+    record run.capabilities = [chain with commits, digest, effective, implies, materialised, secret names]
 ```
 
 `refuse` is the record of the PEP section above: `refused` for a placed
 task, `waiting` for one from the Grain's own lane. Silo uses the same
 resolver to show a task's context in its views and to check it on push,
 with the pusher's rights as the gate (§8.1).
+
+### 5.7 Capabilities: base capabilities, and objects that only narrow them
+
+A **capability** is authority a run uses beyond its files: a cloud
+credential, a model API, a throwaway GitHub repo, tools that read the
+Grain's own logs. In grain today these are opaque names: `gcp-key`,
+`gemini-key`, `github-sandbox`, `self-debug`, `grain-ci`,
+`package-publish`, and `repo-read:`/`repo-write:` in workflows. Their
+behaviour is in Go providers in bwsalmon/grain (`pkg/capability/...`,
+`docs/ci-capabilities.md`), and what one *implies* is in code the local
+policy cannot read. `model.CapabilityRepos` maps a name to the repos it
+reaches, and nothing showed that to the policy until grain task 4303
+found a repo reaching a sandbox by that route.
+
+This section makes capabilities things the policy can read. There are
+three layers, and a grant is a fourth step, which only the Grain takes:
+
+| Layer | What it is | Who writes it | Where it lives |
+| --- | --- | --- | --- |
+| **base capability** | trusted provider code with a declared surface: the most it can grant, what it materialises, what it implies | the Grain's implementer | in the Grain's code. The Grain publishes a `kind: capability-base` declaration of it in its root |
+| **capability object** | a reference to a base, plus an ordered chain of **reducers**, each of which only narrows | anyone, in any task repo; a Grain honours it only from a source its policy sanctions | `kind: capability`, usually in a team's or org's shared repo |
+| **request** | a `context:` entry with `mode: use` | the task's author, frozen on approval | the task |
+| **grant** | the Grain's decision to materialise the effective capability for one run | the Grain's local policy, after Silo's claim | the run's record |
+
+**The core rule is monotonicity.** The effective authority of a
+capability object is
+
+```
+effective(C) = maximum(base type, on this Grain) ∩ reducer₁ ∩ reducer₂ ∩ … ∩ reducerₙ
+```
+
+with the reducers of every object in its chain applied base-most first.
+**A reducer can never add.** Nothing in a capability object, or in a
+task, can name authority the base does not have.
+
+**Macaroons are the reference model** (Birgisson, Politz, Erlingsson,
+Taly, Vrable and Lentczner, *Macaroons: Cookies with Contextual Caveats
+for Decentralized Authorization in the Cloud*, NDSS 2014). A macaroon is
+a bearer credential to which any holder may append **caveats**, each of
+which restricts it further. The verifier checks every caveat, and one
+it cannot discharge means deny. This design borrows the same rules:
+anyone may attenuate without asking the issuer, attenuation is
+append-only and ordered, and an unknown restriction fails closed. It
+differs in where the chain lives. A macaroon carries its caveats inside
+the token, chained by HMAC so that none can be removed. Here the chain is
+a set of files in git, named by path (§2.1). The Grain, which holds the
+base and so plays the issuer's and the verifier's part, re-resolves the
+chain itself. Integrity comes from the commit and the policy's
+definition-source allowlist, not from a MAC. Where a provider's own
+credentials support attenuation, credential reducers compile into it
+(below).
+
+#### Base capabilities
+
+A **base type** has a name and a contract version, `gcp-service-account@v1`.
+The type is the contract: its **dimensions** (the axes its authority is
+measured on), the shape of what it materialises, and what it implies. A
+Grain that implements a type publishes a declaration of **its**
+implementation in its root, at `capabilities/bases/<type>.md`, written by
+the Grain from its provider code
+([`grain-eu/capabilities/bases/gcp-service-account.md`](../examples/task-repos/grain-eu/capabilities/bases/gcp-service-account.md),
+schema [`capability-base.schema.json`](../examples/task-repos/schemas/capability-base.schema.json)):
+
+```yaml
+---
+kind: capability-base
+schema: grain/capability-base@v1
+type: gcp-service-account@v1
+grain: eu
+provider: {code: "https://github.com/bwsalmon/grain.git//pkg/capability/gcp/", rev: <sha>}
+dimensions:                                # each: kind, maximum on this Grain, where it can be narrowed
+  accounts: {kind: set, maximum: ["grain-sb-agent-*@bsalmon-fun-sandbox.iam.gserviceaccount.com", "widgets-preview@acme-widgets.iam.gserviceaccount.com"], narrow: [credential], required: true}
+  projects: {kind: set, maximum: [bsalmon-fun-sandbox, acme-widgets], narrow: [credential], required: true}
+  roles: {kind: set, maximum: ["*"], narrow: [credential]}
+  token_lifetime: {kind: quantity, unit: seconds, maximum: 3600, narrow: [credential]}
+  calls: {kind: set, maximum: ["*"], narrow: [use]}
+materialises:                              # everything it puts in a sandbox, and nothing else
+  files: [{path: .gcp-credentials.json, holds: "a credential config naming eu's token endpoint; no key"}]
+  env: {GOOGLE_APPLICATION_CREDENTIALS: .gcp-credentials.json}
+implies:                                   # what using it reaches, checked by the policy
+  egress: [oauth2.googleapis.com, sts.googleapis.com, "*.googleapis.com"]
+  repos: []
+  tools: []
+proxies: [token-endpoint, google-api-proxy]
+approval: none                             # none | required | local
+---
+```
+
+- **`dimensions`** are what reducers narrow. A `set` narrows to a
+  subset, a `quantity` to a lower bound, a `time` to an earlier end.
+  `narrow` says where the Grain can enforce a reducer on that dimension:
+  on the **credential** it mints, on each **use** at one of its proxies,
+  or both. `required` means that if the dimension is narrowed to empty,
+  the capability is empty and the request is refused.
+- **`materialises`** lists every file, environment variable and MCP tool
+  the base puts in a sandbox. Credential files are files in the
+  sandbox's working root, as they are today (`~/.gcp-service-account.json`,
+  `~/.github-sandbox-token`).
+- **`implies`** is what a use reaches: **repos**, network **egress** and
+  **tools**. It is either a fixed list, or `{from: <dimension>}` for a
+  dimension's narrowed values. The git base's repos are its `repos`
+  dimension, so narrowing the dimension narrows the implication. This is
+  `model.CapabilityRepos` made a declared part of the contract.
+- **`secrets`** lists the slots a base fills from the Grain's secret
+  store (below), and **`approval`** says whether a human must approve
+  its use (below).
+
+**The declaration is published, never trusted by its own Grain.** The
+Grain decides from its providers, and regenerates the file whenever
+they change. Silo reads it to place a task only on Grains that implement
+what it requests, and to show what a capability would be on each Grain.
+Readers use it to compute the effective capability by hand. A Grain
+never reads its own declaration, or anyone else's, to decide what to
+grant, so a commit to the file cannot widen anything.
+
+**A custom Grain** either implements a base type, with that type's
+dimensions, materialisation and implications, or refuses tasks that
+need it. Its waiting reason says so: "`gcp-service-account@v1` is not
+implemented by this Grain". **The declared surface is the contract**:
+a type's `v1` dimensions mean the same on every Grain, and only the
+maximums differ. Its own extensions are a new type, or a `v2`.
+
+The bases sketched so far are not exhaustive or final:
+
+| Base type | Dimensions (maximum on the Grain) | Materialises | Implies | Narrowed on |
+| --- | --- | --- | --- | --- |
+| `gcp-service-account@v1` | `accounts`, `projects`, `roles`, `token_lifetime` (≤ 1h), `calls` | a credential config naming the Grain's token endpoint (no key), `GOOGLE_APPLICATION_CREDENTIALS` | egress to Google's token and API hosts | credential: which account is minted for (only one whose roles in the remaining projects are all within `roles`), and the token's lifetime; use: each API call at the Grain's Google API proxy |
+| `git@v1` | `repos`, `folders`, `operations` (`fetch`, `push`), `push_refs`, `lifetime` | `~/.git-credentials` naming the git proxy, and `insteadOf` rules | `repos: {from: repos}`. Its only egress is the proxy | use: every fetch and push, at the git proxy. credential: a run-scoped proxy token |
+| `model-api@v1` | `providers`, `models`, `tokens`, `spend` | the model proxy's address and a run token | egress to the model proxy only | credential: the token's budget; use: each request |
+| `github-sandbox-repo@v1` | one fresh repo in the sandbox org, for the run's lifetime | `~/.github-sandbox-repo`, `~/.github-sandbox-token` | egress to `github.com` and `api.github.com`; that repo | credential: the token's scope and lifetime |
+| `self-debug@v1` | `tools` (`read_grain_source`, `list_grain_source`, the Grain's logs) | those MCP tools | `repos: [https://github.com/bwsalmon/grain.git]` for fetch (task 3204's grant); `tools` | use: each tool call |
+
+#### Capability objects
+
+A capability object names a base and narrows it
+([`hub-shared/capabilities/widgets-deployer.md`](../examples/task-repos/hub-shared/capabilities/widgets-deployer.md),
+schema [`capability.schema.json`](../examples/task-repos/schemas/capability.schema.json)):
+
+```yaml
+---
+kind: capability
+schema: grain/capability@v1
+title: Deploy widgets previews to Cloud Run (acme-widgets), 1-hour tokens
+base:
+  capability: "org-caps:gcp/acme-widgets.md@v1"   # or {type: gcp-service-account@v1}
+reducers:                                         # applied in order, after the base's own chain
+  - {language: builtin, id: roles, type: subset, dimension: roles, allow: [roles/run.developer, roles/iam.serviceAccountUser]}
+  - {language: builtin, id: lifetime, type: limit, dimension: token_lifetime, max: 1h}
+  - language: anselm
+    id: preview-services-only
+    "on": use
+    version: "0"
+    body: |
+      <opaque Anselm source: not interpreted until Anselm is adopted>
+secrets: {}                                       # slot: <secret name>, for bases that have slots
+approval: {by: ["team:hub#approver"], scope: task}  # optional, and only ever adds a condition
+---
+```
+
+- **`base`** is exactly one of `{type: <base type>}`, a base the Grain
+  implements, or `{capability: <ref>}`, another capability object to
+  narrow (below).
+- **`reducers`** is an ordered list. Each has a `language`, `builtin`
+  for the interim types or `anselm`, and may say `on: credential` or
+  `on: use`. Front matter quotes `"on"`, for the reason given in §12.1.
+  An `id` labels it in the audit log; it is always also named by its
+  index.
+- **`secrets`** binds the base's secret slots to names in the Grain's
+  store (below). **`approval`** opts in to a human's approval (below).
+- A capability object has **no field that grants**: no `maximum`, no
+  `implies`, no `grants`. The schema refuses them.
+
+**Reducers act on the credential, on each use, or both.**
+
+- **On the credential**, where the provider can narrow what it mints:
+  a shorter token lifetime, a narrower scope, a budget, a more limited
+  account. This is applied once, at materialisation, and the sandbox
+  only ever holds the narrower credential. Where a provider has native
+  attenuation (macaroon-based tokens, or a cloud's downscoped
+  credentials), the Grain compiles the reducer into it.
+- **On each use**, for a capability exercised through one of the
+  Grain's proxies: the git proxy, the model proxy, the Google API proxy,
+  the token endpoint, the MCP tool gateway. The proxy evaluates the
+  chain's `use` reducers on every request, allows or denies it, and logs
+  the decision.
+- **A reducer the base can enforce neither way is refused**, whichever
+  language it is written in: a dimension the base does not declare, or
+  `on: credential` for a dimension that narrows only on use. Ignoring a
+  reducer would widen the capability, so the request fails closed and
+  the reducer is named.
+
+#### Anselm: the reducer language
+
+The language reducers are written in is named **Anselm**, after the
+artist Anselm Kiefer. **Its syntax and semantics are deliberately not
+specified here.** The owner expects Anselm to come from another project
+that is in flight now, and this design adopts it once it is ready.
+Until then the design names it, reserves `language: anselm` in the
+schema, and fixes only what any implementation must provide, so that
+files written now stay valid when it arrives.
+
+**What an Anselm implementation must provide:**
+
+- **Inputs.**
+  - *The capability being narrowed:* its base type and declared
+    dimensions, the values those dimensions hold after every earlier
+    reducer in the chain, and its implications.
+  - *For an `on: use` reducer, the request:* the shape the base's proxy
+    sees (for git: repo, operation, ref, paths; for a model: model and
+    tokens; for an HTTP API: method, host, path and the call's name),
+    plus the run's context (Grain, run, task, the request's time). Secret
+    material is never an input.
+  - *Its own body.*
+- **Output.** For `on: credential`, a **narrowed capability**: for every
+  dimension, a value within its input. For `on: use`, **allow or deny**,
+  with a reason for the log.
+- **Required properties:**
+  1. **Monotonic narrowing only.** An output is never wider than its
+     input. The Grain checks this on every result, and treats a result
+     that is not within its input as a deny and a reducer bug, which it
+     reports.
+  2. **Deterministic.** The same inputs give the same output: no clock
+     except the request's time, no randomness, nothing that depends on
+     where or when it is evaluated.
+  3. **Sandboxed, with no side effects.** No network, no filesystem, no
+     state kept between evaluations, and no calls back into the Grain.
+  4. **Bounded cost.** A size limit on the body, and an evaluation
+     budget (steps, memory, time) the Grain sets. Running out is a deny.
+  5. **Auditable.** Every decision is logged with the reducer that made
+     it: the capability's canonical identity and commit, the link of the
+     chain, the reducer's index and `id`, the decision, its reason, and
+     a digest of its inputs.
+
+  An evaluation error is a deny. A body declares the Anselm `version`
+  it is written for, and a Grain that cannot evaluate that version
+  refuses the request.
+
+Examples in this design use a **neutral pseudo-notation**. It is
+illustrative only, and is **not** Anselm syntax:
+
+```
+# illustrative pseudo-notation, NOT Anselm syntax
+restrict projects to {acme-widgets}
+restrict repos to those under https://github.com/acme/
+token lifetime ≤ 1h
+operations: fetch only, no push
+on each use: allow only Cloud Run calls on services named preview-*, in europe-west1
+```
+
+**Before Anselm exists: built-in reducers, as an interim.** A small,
+fixed set of reducer types with parameters, `language: builtin`, covers
+the common narrowings. Each is monotone by construction, so the Grain
+can apply it without a general evaluator:
+
+| `type` | Parameters | Meaning | Enforced |
+| --- | --- | --- | --- |
+| `subset` | `dimension`, `allow: [<value or glob>]` | a set dimension keeps only what `allow` admits | wherever the base enforces that dimension |
+| `limit` | `dimension`, `max` (a number in the dimension's unit, or a duration: `30m`, `1h`) | a quantity dimension becomes `min(current, max)` | as `subset` |
+| `not_after` | `at` (a time) | the capability is valid until `at` at the latest | credential, and each use |
+| `require_approval` | `by: [<principal>]`, `scope: task \| run` | adds a human's approval as a condition of use (below). It only makes the capability harder to use | at materialisation |
+
+These are first-party caveats with fixed predicates, in macaroon
+terms. They are flagged **interim** throughout: the schema accepts them
+in `grain/capability@v1`, and nothing new is added to the set while
+Anselm is pending.
+
+**A `language: anselm` reducer written now** is valid, is carried, and is
+covered by digests and approvals like any other. But a Grain that cannot
+evaluate Anselm **refuses a request whose chain contains one**, naming
+it: "capability entry 2, `shared:capabilities/widgets-deployer.md`,
+reducer 3 (`preview-services-only`) is `language: anselm`, which `eu`
+cannot evaluate yet". It **never skips it**, because skipping a reducer
+widens the capability. Teams should not depend on Anselm reducers before
+adoption. The example's placeholder is there to show that the files stay
+valid.
+
+**When Anselm arrives:**
+
+1. **`builtin` stays valid.** Loaders keep every decoder they ever
+   accepted (§10), so a `builtin` chain keeps working and nothing has to
+   be rewritten.
+2. **Each built-in type gets a defined Anselm equivalent,** shipped with
+   the adoption. The meanings are fixed now (the table above), so each
+   equivalent is checked against its built-in on the examples and a
+   fixture set, as the Jinja subset is checked against Python (§6.1).
+3. **A chain may mix languages.** `grain capabilities convert` may
+   rewrite built-ins as Anselm in one reviewed commit, which changes each
+   digest (below) and so needs any approval again. Converting is
+   optional.
+4. **Anselm bodies written before adoption** that do not parse under the
+   adopted version fail closed: the request is refused, never widened.
+
+#### Composition across repos
+
+A capability object's base may be **another capability object**, so a
+broad definition can be narrowed in layers, each kept by whoever owns
+that layer:
+
+- the org's `org-caps:gcp/acme-widgets.md` is `gcp-service-account@v1`
+  with `subset projects [acme-widgets]`, released at tag `v1`;
+- the hub team's `shared:capabilities/widgets-deployer.md` takes that
+  object, pinned at `v1`, as its base, and narrows it to two roles,
+  1-hour tokens and a per-use check;
+- a task's `use` entry may narrow it once more, with `reducers:` of its
+  own: 30-minute tokens, valid for a week.
+
+**Each layer only tightens.** A team cannot get more than the org
+defined, and a task cannot get more than the team defined. The chain is
+resolved with the reference rules of §4 (path identity, aliases, git
+URLs and `@ref`, `moved_to` and tombstones with the hop limit), plus
+cycle detection and a depth limit:
+
+```
+CAPABILITY_LIMITS = {chain: 8, reducers: 32, task_reducers: 8}
+
+effective_capability(entry, task, grain):           # entry: a context: entry with mode: use
+    chain, seen, ref, from = [], [], entry.ref, task @ spec_rev
+    loop:
+        C = resolve(ref, from, grain.cred, gate = sanctioned_source)   # §4: redirects, hops, tombstones
+        if C is dangling or refused:     return refuse(entry, C.reason)  # refused before C's repo is read
+        if C is not a kind: capability:  return refuse(entry, "not a capability")
+        if C.id in seen:                 return refuse(entry, "capability cycle: " + seen + C.id)
+        seen += C.id; chain = [C] + chain              # base-most first
+        if |chain| > CAPABILITY_LIMITS.chain: return refuse(entry, "chain longer than 8")
+        if C.base.type: break
+        ref, from = C.base.capability, C               # a relative base reads C's commit, as includes do
+    B = grain.providers[chain[0].base.type]            # the Grain's code, never a published file
+    if B is missing:                     return refuse(entry, "base not implemented")
+    if B.type not in grain.policy.capabilities.bases:  return refuse(entry, "base not allowed")
+    for C in chain:
+        if not grain.policy.sanctions(C.source, B.type):       return refuse(entry, link = C, "unsanctioned source")
+        if C.secrets names one the source may not bind:        return refuse(entry, link = C, "secret not allowed")
+    if chain[-1].id not in grain.namespace:            return refuse(entry, "not offered here")  # catalog
+    cap = B.maximum
+    for r in reducers of chain (base-most first) + entry.reducers:
+        if r.language is not evaluable here:           return refuse(entry, reducer = r, "cannot evaluate")
+        if r is not enforceable by B (dimension, on):  return refuse(entry, reducer = r, "not enforceable")
+        if r.on is use:  cap.use_checks += r; continue # evaluated by the proxy, per request
+        next = apply(r, cap)
+        if not (next ⊆ cap):                           return refuse(entry, reducer = r, "reducer widened")
+        cap = next
+        if a required dimension of cap is empty:       return refuse(entry, reducer = r, "empty")
+    implied = B.implies(cap)                           # repos, egress, tools, as narrowed
+    for x in implied: if not grain.policy.admits(x):   return refuse(entry, implication = x)
+    approvals = B.approval + every approval and require_approval in the chain
+    secrets   = B's slots, bound by the chain or by B's defaults
+    digest    = sha256(canonical(B.type, B's declaration rev, [(C.id, C.commit) for C in chain], entry.reducers))
+    return Effective(chain, cap, implied, approvals, secrets, digest)
+```
+
+- **Cycles** are detected over canonical identities, so a loop through an
+  alias, a URL and a tombstone is still one loop. A cycle, or a chain
+  over the limit, refuses the request. It is never truncated, because a
+  truncated chain has lost reducers.
+- **Pins.** Each link reads the commit its own reference names, as an
+  include does (§3.3). A team should pin the org object it builds on
+  (`@v1`). Tracking it is safe, because each link still narrows, but
+  every upstream change changes the digest.
+- **Monotonic within one resolution, not over time.** The org can edit
+  its object and drop a reducer, and that widens every object built on
+  it. That is the org's right, as a template's author may edit a
+  template. The **digest** is what holds an approved task to what was
+  approved: Silo's grant and any approval name the digest, and a Grain
+  that computes a different one refuses the claim (below; §11.28).
+
+#### Catalog and grant
+
+**Including a capability object makes it available to request, and
+never grants it.** A Grain's include of `shared:capabilities/` with
+`kinds: [capability]`
+([`grain-eu/capabilities/hub.md`](../examples/task-repos/grain-eu/capabilities/hub.md))
+puts those objects in its namespace (§3.3). That is the **catalog**:
+Silo shows it, a task's author picks from it, and the Grain offers what
+it holds. The bases of their chains need not be in the namespace. They
+are read when a chain is resolved, and are not offered on their own.
+
+**A task requests a capability in `context:`**, alongside its repos and
+files (§5.6), with `mode: use`:
+
+```yaml
+context:
+  - ref: "https://git.example.com/hub/widgets.git@main"
+    mode: write
+  - ref: "shared:capabilities/widgets-deployer.md"
+    mode: use                                     # request it; nothing of the file lands
+    reducers:                                     # optional: the task's own, only narrowing
+      - {language: builtin, type: limit, dimension: token_lifetime, max: 30m}
+      - {language: builtin, type: not_after, at: "2026-10-24T00:00:00Z"}
+```
+
+- **`mode: use` is valid only for a file that resolves to a
+  `kind: capability`.** A bare string is `mode: read`, so a capability
+  object listed as a bare string is only a copy of its definition, with
+  no authority: nothing becomes a grant by accident.
+- A `use` entry takes no `path` or `depth`. What lands is what the base
+  materialises, at the paths its declaration names.
+- **One list, one check.** A task's grain-era `capabilities:` field is
+  gone, as `reads` and `writes` went: each name becomes a `use` entry
+  (§13.2). The entry is part of the spec, so the approver reads it, the
+  hook freezes it, and `spec_digest` covers it (§5.1, §11.7).
+- **Repo and folder entries are uses of the git base.** A `read` entry
+  is `git@v1` narrowed to that repo or folder, its commit and
+  `operations: [fetch]`. A `write` entry adds `push` and
+  `push_refs: [refs/heads/grain/<grain>/<run>]`, with folders for a
+  `write` folder. The proxy's scope in §5.6 is exactly that effective
+  capability, so the `context:` resolver and the capability resolver are
+  the same check.
+
+**The Grain's local policy grants.** It allowlists **base types** and
+**definition sources**: which repos and folders may define capability
+objects it will honour, and for which bases. So an included Silo or team
+folder cannot introduce authority the owner did not sanction:
+
+```yaml
+# Grain eu's local policy: its own configuration, not a task-repo file
+capabilities:
+  bases: [git@v1, gcp-service-account@v1, model-api@v1, self-debug@v1]
+  sources:                                   # who may define capability objects eu honours
+    - source: "https://silo.example.com/git/grains/eu.git//"           # its own root (always, implicitly)
+      bases: "*"
+    - source: "https://silo.example.com/git/org/capabilities.git//"
+      bases: [gcp-service-account@v1]
+    - source: "https://silo.example.com/git/hub/shared.git//capabilities/"
+      bases: [gcp-service-account@v1, model-api@v1]
+      secrets: []                            # the secret names objects from here may bind
+  approval: {local: [github-sandbox-repo@v1]}  # bases only eu's owner may approve, per run
+  anselm: none                               # no Anselm evaluator yet
+repos: …                                     # §5.6, unchanged
+network: {egress: [oauth2.googleapis.com, sts.googleapis.com, "*.googleapis.com", …]}
+tools: …
+```
+
+**Every link of the chain must come from a sanctioned source, for that
+base.** A sanctioned team object built on an unsanctioned base object is
+refused. The base object is where the authority is defined, so a
+sanctioned folder cannot launder a definition the owner never accepted.
+
+**Before materialising anything, the policy checks the effective
+capability and everything it implies:** the base type, every source in
+the chain, every secret name, and each implied repo against `repos:`
+(for the narrowed operations), each egress host against `network`, and
+each tool against `tools`. This is the general form of what grain
+approximates today with `model.CapabilityRepos`. A refusal fails closed,
+before any credential is minted or file written, and names the entry,
+the link of the chain, and the reducer or implication that decided, in
+`refusal.entry` or `waiting.entry` (§5.6).
+
+#### Approval
+
+A capability can require a human's approval before it is used:
+
+- **a base** whose declaration says `approval: required`. This is
+  grain's *escalated capabilities* today, such as package publishing;
+- **an object or a reducer** that opts in, with `approval: {by, scope}`
+  or `type: require_approval`. Adding an approval only narrows: it can
+  make a capability harder to use, never easier.
+
+`by` names principals (`team:hub#approver`, `user:…`). `scope` is `task`
+(once per task, the default) or `run` (before every run).
+
+**How it meets Silo's approval flow:**
+
+1. **The task's own approval may be enough.** If the task's `approved_by`
+   is among the principals the capability's approval names, that one
+   approval covers both, and Silo records it as such.
+2. **Otherwise it is a second approval, after the task's.** A principal
+   the capability names appends an entry to the task's
+   **`capability_approvals`**: `{ref, digest, by, at}`. The intake's
+   rules let only such a principal append it, with `by` bound to the
+   pusher and never equal to the submitter, after the task is `approved`
+   ([`hub-intake/README.md`](../examples/task-repos/hub-intake/README.md)).
+   It is the approval, like `approved_by`, and not part of the frozen
+   spec. Until it is there, Silo shows the task as "waiting: capability
+   approval of `<ref>` by `<by>`", and does not place it.
+3. **The claim travels in the attestation.** Silo's placement attestation
+   carries `granted_capabilities: [{ref, digest, approved_by,
+   approved_at}]` beside `approved_by` and `spec_digest` (hub.md §6.4).
+   The Grain re-resolves the chain, recomputes the digest, and refuses
+   the claim if they differ. An approval is of one resolved chain, and
+   any change to any link is a new approval.
+4. **`scope: run`, or a base the Grain's policy lists under
+   `approval.local`, is approved by the Grain's owner only,** and
+   before each run. Silo's claim never satisfies it. The run waits with
+   `waiting: {on: human, entry}`, and the owner approves in the node UI
+   or through Silo's relay of their reply. The Grain records
+   `approved: {by, at, via: local}` in the run's `capabilities`.
+
+What a Grain trusts here is §11.8's accepted risk: Silo's claim that an
+approver approved. Signed commits are the upgrade for
+`capability_approvals` as for `approved_by`, and `local` approval is the
+owner's option when they would rather not trust it at all (§11.34).
+
+#### Secrets never go in git
+
+A capability object **names** a secret, and never holds it:
+
+- **Slots and names.** A base declares slots (`secrets: [{slot: token,
+  required: true}]`), and an object binds them, as in
+  `secrets: {token: ghcr/publish-token}`. A name is `<secret>` or
+  `<secret>/<key>`, grain's secret-store naming today (`github-app/app-id`).
+  A base may give a slot a default name, so most objects bind nothing.
+- **Resolved at materialisation,** from the materialising Grain's own
+  store, into the file the base's declaration names, and nowhere else:
+  not into git, `run.md`, events, logs or Silo. The run's record lists
+  the names only. **Names are per Grain**: one object, run on two
+  Grains, resolves to each Grain's own material.
+- **Naming a secret is a source of authority** that the base's maximum
+  does not bound, because the material can do whatever it can. So the
+  policy allowlists the names each definition source may bind
+  (`sources[].secrets`), and an object binding a name its source may not
+  is refused.
+- **A missing secret refuses, with a clear waiting reason.** Nothing is
+  materialised in part. A placed task's run is `refused` with
+  `refusal: {reason, entry, secret}`; one from the Grain's own lane goes
+  to `waiting: {on: secret, entry, secret}`. Silo shows "waiting: `eu`
+  has no secret `ghcr/publish-token` (slot `token` of
+  `github-packages@v1`, capability entry 3)". The owner sets it, as
+  grain's request-secret flow does today, and the Grain re-checks
+  whenever its store changes.
+
+#### CI
+
+Grain CI jobs declare capabilities in workflow files today
+(`capabilities: [gcp-key, repo-read:bwsalmon/grain]`). Workflows stay
+YAML (§12.2), and the key keeps its shape. Each item is resolved by the
+Grain into a capability object and checked as a `use` entry would be:
+
+- **a reference to a capability object** (`"caps:gcp/ci-deployer.md"`,
+  resolved from the workflow's governing README), which is new;
+- **a legacy name** (`gcp-key`, `self-debug`, `github-sandbox`, …),
+  which resolves to that name's legacy capability object (§13.2);
+- **`repo-read:<owner/name>` and `repo-write:<owner/name>` become
+  reducers over the base git capability.** They are shorthand, and the
+  Grain expands them without anyone writing a file:
+  - `repo-read:o/n` is `git@v1` with `subset repos [<forge URL of o/n>]`
+    and `subset operations [fetch]`;
+  - `repo-write:o/n` is the same with `operations [fetch, push]`, and
+    `push_refs` as grain CI allows a job to push today.
+
+  The job's own checkout is the same base, narrowed to the job's repo
+  and commit.
+
+**The trust rules of grain CI become policy over the effective
+capability**, not lists of names. A scheduled run is untrusted: today it
+gets no write-scoped capability (`repo-write:*`, `package-publish`,
+`github-sandbox`) and no live provider secret, and a job that declares
+one errors with "this deployment does not provide it". With objects, the
+policy for untrusted runs refuses any effective capability that includes
+`push`, binds a secret, or uses a base marked write-scoped. The same
+names are refused for the same reason, and a new capability is covered
+by what it can do, not by whether someone remembered to add its name to
+a list. A workflow in a code repo names capability objects only from
+sources the policy sanctions. Its `repo-read:` or `repo-write:` of
+another repo is still the settings-owned grant it is today (§12.1).
+
+#### What a run records
+
+The run's `running` commit records each capability it materialised,
+beside its `context:` (§5.6):
+
+```yaml
+capabilities:
+  - entry: 2
+    ref: "shared:capabilities/widgets-deployer.md"
+    chain:                                          # base-most first, each at the commit used
+      - {ref: "https://silo.example.com/git/org/capabilities.git//gcp/acme-widgets.md@v1", rev: <commit>}
+      - {ref: "https://silo.example.com/git/hub/shared.git//capabilities/widgets-deployer.md", rev: <commit>}
+    base: {type: gcp-service-account@v1, declaration: {ref: "capabilities/bases/gcp-service-account.md", rev: <commit>}}
+    digest: "sha256:…"
+    effective: {accounts: [widgets-preview@acme-widgets.iam.gserviceaccount.com], projects: [acme-widgets], roles: [roles/run.developer, roles/iam.serviceAccountUser], token_lifetime: 1800, not_after: "2026-10-24T00:00:00Z"}
+    implies: {egress: [oauth2.googleapis.com, sts.googleapis.com, "*.googleapis.com"]}
+    materialised: [.gcp-credentials.json]
+    secrets: []                                     # names only
+```
+
+At close, the Grain adds each capability's count of per-use `denials`.
+The decisions themselves are events in the Grain's audit log (runtime,
+§1.2): every credential narrowing and every per-use decision, with the
+reducer that made it.
 
 ## 6. Templates and schedules
 
@@ -3156,6 +3780,204 @@ Grain commits the comment and its file, at
 `runs/<name>/comments/<utc>-<author>/<file name>`, and drops both into
 the sandbox's `thread/`.
 
+### 8.17 Worked flows for capabilities
+
+**A task requests a narrowed GCP capability, defined by a team on top of
+an org definition.** `intake:tasks/2026-10-17-widgets-preview-deploy/task.md`
+asks for the widgets repo at `main` to write, and for
+`shared:capabilities/widgets-deployer.md` with `mode: use`, narrowed
+further to 30-minute tokens valid until 2026-10-24 (§5.7). It is placed
+on `eu`.
+
+1. **The catalog.** `eu:capabilities/hub.md` includes
+   `shared:capabilities/@main` with `kinds: [capability]`, so the team's
+   object is in `eu`'s namespace. That made it offerable. It granted
+   nothing.
+2. **Approval and placement.** The approver approved the task, reading
+   its `context:`. The capability asks for no approval of its own. Silo
+   resolves the chain as `eu` would, using `eu`'s published base
+   declarations. It places the task on `eu`, whose declarations include
+   `gcp-service-account@v1`, with an attestation that carries
+   `granted_capabilities: [{ref, digest}]`.
+3. **Resolve the chain.** `eu` resolves entry 2 with its node credential.
+   Before each read, the gate checks that the link's source is
+   sanctioned. The team's object is in `hub/shared`'s `capabilities/`,
+   which `eu`'s policy sanctions for `gcp-service-account@v1`. Its base
+   is `org-caps:gcp/acme-widgets.md@v1`, in the org's capabilities repo,
+   which is sanctioned for that base too. That object's base is
+   `{type: gcp-service-account@v1}`, so the chain ends: two links, no
+   cycle, and the type is in `eu`'s `bases`.
+4. **Narrow.** Starting from `eu`'s maximum for the base (its providers,
+   which its declaration mirrors):
+   - the org's `subset projects [acme-widgets]` leaves one project, and
+     so only `widgets-preview@acme-widgets.iam.gserviceaccount.com` of
+     `eu`'s accounts;
+   - the team's `subset roles` keeps `roles/run.developer` and
+     `roles/iam.serviceAccountUser`. That account's roles in
+     `acme-widgets` are within them, so it still qualifies;
+   - the team's `limit token_lifetime 1h`, then the task's 30 minutes,
+     leave 1800 seconds; the task's `not_after` ends it on 2026-10-24;
+   - the team's third reducer, `preview-services-only`, is
+     `language: anselm`, `on: use`.
+5. **Today, before Anselm, `eu` stops here.** It cannot evaluate Anselm,
+   so it refuses the placement, naming the reducer:
+
+   ```yaml
+   state: refused
+   refusal:
+     reason: "reducer 3 (preview-services-only) is language: anselm, which eu cannot evaluate yet"
+     entry: {index: 2, ref: "shared:capabilities/widgets-deployer.md", mode: use, link: "shared:capabilities/widgets-deployer.md", reducer: 3, rule: capabilities.anselm}
+   ```
+
+   Silo shows that as the task's waiting reason. Placing it elsewhere
+   does not help, because no Grain evaluates Anselm yet. The team can
+   drop the reducer, which is a new digest and, for an approved task, a
+   new task with `supersedes:` (§5.1), or wait. `eu` never skips the
+   reducer.
+6. **Once `eu` evaluates Anselm,** the reducer is loaded into the Google
+   API proxy as a per-use check. The implications are egress to
+   `oauth2.googleapis.com`, `sts.googleapis.com` and `*.googleapis.com`,
+   with no repos and no tools, and `eu`'s `network` allows them. The
+   digest matches the attestation's. `eu` mints nothing yet. It writes
+   `.gcp-credentials.json`, a credential config naming its token
+   endpoint, and records the run's `capabilities` (§5.7).
+7. **Use.** The agent runs `gcloud run deploy preview-schema-v2 --region
+   europe-west1`. The token endpoint mints a 30-minute token for the one
+   account. Each API call passes the proxy, the Anselm reducer allows
+   it, and each decision is logged with the reducer that made it.
+   `check.py` computes the same effective capability from the example
+   files and prints it.
+
+Commits: **eu**, the run's own. Nothing in the org's or the team's repo.
+
+**A refused request: the definition comes from an unsanctioned
+source.** The widgets repo's grain folder gains
+`.grain/capabilities/widgets-admin.md`: `gcp-service-account@v1`, project
+`acme-widgets`, no other reducers. A task in the intake requests it with
+`mode: use`, and the team's approver approves it.
+
+1. Silo places it on `eu`. `eu` resolves entry 2, and the gate checks the
+   first link's source **before reading it**: `https://git.example.com/hub/widgets.git//.grain/capabilities/`
+   is not in `eu`'s `capabilities.sources`. Nothing is read from the
+   widgets repo for it, and nothing is minted.
+2. `eu` commits `refused`, with `refusal.entry: {index: 2, ref, mode:
+   use, link: <that ref>, rule: capabilities.sources}`. Silo shows:
+   "refused by `eu`: capability entry 2 is defined in
+   `widgets:.grain/capabilities/`, which `eu` does not sanction for
+   `gcp-service-account@v1`".
+3. **Laundering does not help.** Suppose the team's maintainers instead
+   add `shared:capabilities/widgets-admin.md`, a sanctioned source, with
+   `base: {capability: "widgets:.grain/capabilities/widgets-admin.md"}`.
+   The first link passes, and the second is refused for the same reason.
+   Every link must be sanctioned, because the base-most link is where
+   the authority is defined (§11.30).
+
+Commits: **eu**, 1 (`refused`).
+
+**A refused request: implied egress the policy does not allow.** A task
+placed on `us` requests `shared:capabilities/sandbox-repo.md`, an object
+over `github-sandbox-repo@v1` that narrows its lifetime to the run.
+`us`'s policy sanctions the base and the source. Its `network`, though,
+allows only the git and model proxies.
+
+1. The chain resolves and narrows without trouble. `us` then checks the
+   implications: `github-sandbox-repo@v1` declares egress to
+   `github.com` and `api.github.com`, which no reducer can remove,
+   because the capability is a GitHub repo.
+2. `api.github.com` is not in `us`'s `network`, so `us` refuses before
+   creating the throwaway repo or writing a token:
+
+   ```yaml
+   state: refused
+   refusal:
+     reason: "capability entry 3 implies egress to api.github.com:443, which us's network policy does not allow"
+     entry: {index: 3, ref: "shared:capabilities/sandbox-repo.md", mode: use, rule: network.egress}
+   ```
+
+3. Silo may place the task on a Grain whose policy allows that egress
+   (§8.8). Silo can tell from the Grains' published declarations which
+   bases they implement, but a Grain's policy stays its own, so a
+   refusal is how Silo learns it.
+
+Commits: **us**, 1 (`refused`).
+
+**A capability that needs approval.** The weekly GHCR prune
+(`shared:schedules/prune-packages.md`) has `auto-approve-proposals: true`.
+After migration its template's `capabilities: [package-publish]` becomes
+a `use` entry for `shared:capabilities/legacy/package-publish.md`, over
+`github-packages@v1`. That base is one of grain's escalated
+capabilities, so its declaration says `approval: required`, and the
+object adds `approval: {by: ["team:hub#approver"], scope: task}`.
+
+1. **The firing.** Silo files
+   `intake:tasks/scheduled/prune-packages/<fired_at>/task.md`, and the
+   schedule's auto-approval approves the task (`approved_by:
+   silo:schedule`). That approves the task, not the capability.
+   `silo:schedule` is not a human, and not among the principals the
+   approval names, so Silo does not place the task. It shows "waiting:
+   capability approval of `shared:capabilities/legacy/package-publish.md`
+   by a `team:hub#approver`".
+2. **The approval.** An approver reads the task in Silo's UI and approves
+   the capability. Silo commits, for them,
+   `capability_approvals: [{ref, digest, by: "user:approver@example.com",
+   at}]` on the task, under the intake's rule: `by` bound to the pusher,
+   never the submitter (§5.7). A push of the same field by the approver
+   is the same commit.
+3. **The claim.** Silo places the task on `eu`. The attestation's
+   `granted_capabilities` carries the ref, the digest and `approved_by`.
+4. **The check.** `eu` resolves the chain and recomputes the digest,
+   which matches. It checks that the approver is a principal the
+   approval names. That rests on Silo's claim, the accepted risk of
+   §11.8, or on a signed approval commit where `eu` requires one. `eu`'s
+   policy does not list `github-packages@v1` under `approval.local`, so
+   no owner approval is needed. It resolves the slot `token` to its own
+   secret `ghcr/publish-token`, writes the token file, and records
+   `approved: {by: "user:approver@example.com", at, via: attestation}`.
+5. **Had the owner listed the base under `approval.local`,** `eu` would
+   also wait, `waiting: {on: human, entry: {index: 2, …}}`, until its
+   owner approved the run in the node UI. Silo's claim cannot satisfy
+   that.
+6. **Had the secret been missing,** the run would be `refused` with
+   `refusal.secret: ghcr/publish-token`, and Silo would show "`eu` has no
+   secret `ghcr/publish-token`".
+
+Commits: **intake**, 2 (the firing, the capability approval); **eu**,
+the run's own.
+
+**A per-use denial, logged by a proxy.** The run of
+`intake:tasks/2026-10-16-reject-dangling-refs/task.md` on `eu` has
+grain's `pkg/daemon/` at `candidate` to read, entry 2 (§8.16). That
+entry is `git@v1` narrowed to that repo and folder, the resolved commit
+and `operations: [fetch]`. The agent commits a fix in `work/grain/` and
+runs `git push origin HEAD:refs/heads/fix-daemon`.
+
+1. The git proxy receives a `receive-pack` request for
+   `https://github.com/bwsalmon/grain.git`. It evaluates the run's
+   effective git capability: the `repos` reducers allow grain, and the
+   `operations` reducer from entry 2's `mode: read` allows only `fetch`.
+   It denies the push with 403, "denied by context entry 2
+   (`grain-code:pkg/daemon/@candidate`, read): push is not in
+   operations {fetch}".
+2. The proxy logs the decision to `eu`'s audit log:
+
+   ```json
+   {"at": "2026-10-16T18:02:11Z", "grain": "eu", "run": "runs/2026-10-16-reject-dangling-refs/run.md",
+    "use": {"base": "git@v1", "proxy": "git-proxy", "operation": "push", "repo": "https://github.com/bwsalmon/grain.git", "ref": "refs/heads/fix-daemon"},
+    "capability": {"entry": 2, "ref": "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate", "digest": "sha256:…"},
+    "decision": "deny",
+    "reducer": {"link": "context entry 2", "index": 2, "language": "builtin", "type": "subset", "dimension": "operations", "allow": ["fetch"]},
+    "reason": "push ∉ {fetch}"}
+   ```
+
+3. The run goes on. A denial is an answer to one request, not a
+   refusal of the run. At close, `eu` records `denials: 1` for that
+   entry in the run's `capabilities`, and the hub's run view links the
+   audit entry. An Anselm `use` reducer's denial is logged the same way,
+   with `language: anselm`, its `id`, and a digest of its inputs.
+
+Commits: **eu**, none for the denial; the count goes in with the run's
+close.
+
 ## 9. How the task interface reduces
 
 
@@ -3180,6 +4002,8 @@ The contract becomes:
 - the layout of Silo's folder for a Grain: `backlog/` and `schedules/`;
 - a task's `context:`, its resolution and limits, and the sandbox layout
   (§5.6);
+- capability objects, their chains and reducers, the base types a Grain
+  implements and its published base declarations (§5.7);
 - the `pull` notification.
 
 A customised Grain conforms by reading and writing those files. Until
@@ -3206,7 +4030,18 @@ no `transitive` field, because includes are always transitive (§3.3).
 carry `context`. `run` gains `context` (what was materialised and
 skipped) and `waiting`, and `refusal` gains `entry`. `comment` gains
 `attachments`. `asset` is new: a sidecar (§2.2). The shared definition of
-a `context:` entry is in `common`.
+a `context:` entry is in `common`. *For 4456:* `capability` is new: a base
+reference, a reducer chain (`language: builtin` with `type` and
+parameters, or `language: anselm` with an opaque `version` and `body`),
+an optional `approval`, and secret slots bound by name. So is
+`capability-base`, the declaration a Grain publishes for each base it
+implements: its dimensions with their maximums and where each narrows,
+what it materialises, what it implies, its proxies, its secret slots and
+its approval. A `context:` entry gains `mode: use` and `reducers`; `task`
+loses `capabilities` and gains `capability_approvals`; `include`'s
+`kinds` accept `capability`; `run` gains `capabilities`, and its
+`refusal` and `waiting` name a capability's link, reducer or secret
+(§5.7).
 
 - **Every file names its schema** (`grain/task@v1`). A minor addition,
   an optional field, keeps `v1`. Readers ignore fields they do not know
@@ -3270,12 +4105,15 @@ messages to commits plus notifications.
    - What remains is prompt injection into the agent. That is the
      existing TB7 concern, bounded by the Grain's local policy.
 6. **Secrets are never stored.**
-   - `capabilities: [gcp-key, repo-write:bwsalmon/grain]` and
+   - A capability object's `secrets: {token: ghcr/publish-token}`, a
+     workflow's `capabilities: [gcp-key, repo-write:bwsalmon/grain]` and
      `secret: github-app/app-id` are **names**. They resolve only in the
-     Grain's local policy and secret store, or in Silo's grant table.
-   - A capability in a task file is a **request**. Its grant is Silo's
-     claim, carried in the attestation's `granted_capabilities`, and the
-     Grain's local policy has the last word.
+     Grain's local policy and secret store, or in Silo's grant table
+     (§5.7, item 33).
+   - A capability in a task file is a **request**, a `use` entry in its
+     `context:`. Its grant is Silo's claim, carried in the attestation's
+     `granted_capabilities` with the digest of its resolved chain, and the
+     Grain's local policy has the last word (items 27–35).
    - The hook rejects files that match secret patterns.
 7. **How a Grain verifies a file came from Silo.**
    - It fetches over TLS from the URL its own config names.
@@ -3369,7 +4207,9 @@ messages to commits plus notifications.
       with `reads`, `writes`, `grants` or `target`, or with a `context:`
       entry or `ref` input naming another repo, is refused (§12.1). A
       capability named in a homed task is a request, granted only in
-      Silo's attestation (item 6).
+      Silo's attestation (item 6). A capability object it adds under
+      `.grain/` is honoured by no Grain whose policy does not sanction
+      that folder as a source (item 30).
     - **Flood a team.** A schedule naming a team the team has not adopted
       never fires (§6.2). Firings never land in the code repo itself. A
       design edit files at most a capped number of proposals (item 10).
@@ -3472,8 +4312,9 @@ messages to commits plus notifications.
     it, and before anything enters the sandbox (§5.6). A listed entry it
     refuses stops the run with the entry named; a reached one it refuses
     is skipped and recorded. Neither is fetched. This is task 4303's fix
-    made general: a capability no longer implies a repo, so there is no
-    second route by which a repo reaches a sandbox.
+    made general: a capability reaches a repo only by declaring it, and
+    the declared repo is checked as an entry is (item 31), so there is no
+    second, unseen route by which a repo reaches a sandbox.
 22. **`write` is the task's branch, and nothing else.** A `write` entry
     lets the run push `grain/<grain>/<run name>` to that repo, created
     from the entry's base branch. The proxy refuses any other ref, any
@@ -3530,7 +4371,102 @@ messages to commits plus notifications.
     long as the placement exists, and no more. A repo on another host is
     read with the Grain's own credential, which its policy already
     governs.
-
+27. **Monotonicity is the core invariant.** A capability's effective
+    authority is its base's maximum on this Grain, intersected with every
+    reducer in its chain and in the task's entry (§5.7). Nothing in git
+    adds authority. Only two things are sources of it: **base
+    capabilities**, which are code the Grain runs, and **secrets**, which
+    are the Grain's own and which policy allowlists by name (item 33).
+    - The schema gives a capability object no field that grants
+      (`maximum`, `implies`, `grants`).
+    - Built-in reducers are monotone by construction. Every Anselm
+      result is checked to be within its input, and one that is not is a
+      deny and a reported bug.
+    - A reducer that cannot be evaluated (an unknown language or
+      version, Anselm before adoption) or cannot be enforced (an
+      undeclared dimension, or the wrong `on`) **refuses the request**.
+      Skipping a reducer would widen the capability, so no reducer is
+      ever skipped, truncated or approximated.
+    - A Grain never reads a published base declaration, its own
+      included, to decide what to grant. Its providers decide, so a
+      commit to `capabilities/bases/` cannot widen anything.
+28. **Monotonic within a resolution, bound over time by the digest.** An
+    upstream owner can widen their own object later, as a template's
+    author can change a template. What stops that reaching an approved
+    task unseen is the **digest** of the resolved chain: the base type,
+    its declaration's commit, every link's identity and commit, and the
+    entry's reducers. Silo's `granted_capabilities` and every
+    `capability_approvals` entry name it. A Grain that computes a
+    different digest refuses the claim, so a changed chain needs a new
+    grant, and a new approval where one is required. A policy may also
+    require pinned links (`capabilities.require_pinned`).
+29. **Including never grants.** An include of capability objects puts
+    them in a namespace, and so in the catalog Silo shows and a Grain
+    offers (§3.3, item 14). It decides what a Grain *offers*, never what
+    it *allows*. A grant needs all of these: a task's `use` entry, frozen
+    on approval; Silo's claim for a placed task; and the Grain's policy
+    admitting the base, every source in the chain, every secret and every
+    implication. An object reached only as a link of some chain is not
+    offered on its own.
+30. **Definition sources are allowlisted, for every link.** The Grain's
+    policy lists the repos and folders whose capability objects it
+    honours, and for which bases (`capabilities.sources`). Only the
+    Grain's own root is sanctioned by default. Every link of a chain
+    must pass, checked before its repo is read, so a sanctioned folder
+    cannot launder a definition from an unsanctioned one (§8.17). A code
+    repo's grain folder, Silo's placements and a team's intake are not
+    sources unless the owner says so. A compromised shared repo can only
+    redefine the capabilities it was sanctioned to define, within the
+    bases it was sanctioned for, and every such change alters the digests
+    of the chains that use it (item 28).
+31. **Implications are declared and checked.** A base's declaration names
+    the repos, egress and tools a use reaches, as narrowed by the
+    capability. The policy checks each one with `repos:`, `network` and
+    `tools` before anything is minted or materialised, and refuses
+    closed, naming the implication. This replaces `model.CapabilityRepos`,
+    a mapping the policy could not see, with part of the contract. A
+    base that reaches something its declaration does not name is a bug
+    in the base, and the proxies' scopes are built from the declared
+    implications, so it cannot reach it through them.
+32. **Every decision is auditable.** Each credential narrowing at
+    materialisation, and each per-use allow or deny at a proxy, is
+    logged to the Grain's audit log with the run, the capability's
+    canonical identity, digest and link, the reducer's index, `id` and
+    language, the decision, its reason, and a digest of the request. It
+    never includes secret material. The run's record keeps the summary
+    (its `capabilities`, and `denials` at close), and the log stays
+    runtime, as events do (§1.2). Silo's views link a refusal or denial
+    to the reducer that made it.
+33. **Secrets are resolved by name, at materialisation, by the Grain.**
+    Capability objects name secret slots' bindings, and never hold
+    material. The hook's secret-pattern scan (§8.1) applies to them as to
+    every file. The Grain resolves the names from its own store when it
+    materialises, into the file its base declares, and nowhere else: not
+    git, not `run.md`, not events, not Silo. Because a secret is
+    authority the base's maximum does not bound, the policy allowlists
+    the names each source may bind. A missing secret refuses the run with
+    the name, never part of it (§5.7).
+34. **What a Grain trusts Silo for, and what it does not.** Today a Grain
+    trusts Silo's claims (item 8, hub.md §1.2). For capabilities, Silo's
+    claim covers **who approved**: the task's `approved_by`, its
+    `capability_approvals`, and the `granted_capabilities` in the
+    attestation. It does not cover **what authority exists**. The Grain
+    resolves the chain itself, from git, under its own source
+    allowlist, against its own providers, so a compromised Silo cannot
+    make a Grain honour a base, source, secret or implication its policy
+    does not admit. A compromised Silo could still claim an approval
+    nobody gave, for a capability the Grain does admit. That is the
+    existing accepted risk. Signed commits upgrade it here as for
+    `approved_by` (item 8). For the bases where the owner will not accept
+    it, the policy's `approval.local` makes the Grain's owner the only
+    approver, per run, and Silo's claim never satisfies that.
+35. **Reducers run sandboxed and bounded.** A per-use reducer runs inside
+    the Grain's proxies, on every request, so the properties §5.7
+    requires of Anselm are security properties: no side effects, no
+    network or filesystem, determinism, a size limit and an evaluation
+    budget whose exhaustion denies. A hostile reducer can therefore only
+    deny, which a run's author can already do by not requesting the
+    capability. Its only cost is the budget, which the Grain sets.
 
 ## 12. Grain folders in code repos: `.grain/` and `docs/design/`
 
@@ -3573,6 +4509,10 @@ The Go loader, on YAML 1.2, accepts both.
   and values, name only its own repo (§5.6). The schemas say so, and readers enforce it on every object
   in a code repo's grain folder, whatever its README says (§8.13). A job
   that needs another repo's access stays a settings-owned row.
+- **A code repo may define capability objects** in its grain folder
+  (`.grain/capabilities/`), and they grant nothing there either: a Grain
+  honours one only if its policy sanctions that folder as a source, and
+  no policy does by default (§5.7, §8.17).
 - **One parser.** The `taskrepo` package's front-matter reader (§16)
   serves `pkg/repodecl` for `.md` declarations, Silo's code-repo reader,
   and `grain declarations check`.
@@ -3701,7 +4641,8 @@ they are**. Nothing moves:
   | `Target: owner/name`, `Base: b` | `{ref: "<forge URL of owner/name>@b", mode: write}`, first, so it is the primary repo |
   | each `Writes[i]: {repo, base}` | `{ref: "<URL>@<base, or Base>", mode: write}` |
   | each `Reads[i]: owner/name` | `{ref: "<URL>", mode: read}`, unpinned |
-  | a `repo-write:owner/name` capability | a `write` entry for that repo, if none exists, and the capability is dropped: a capability no longer implies a repo |
+  | a `repo-write:owner/name` capability | a `write` entry for that repo, if none exists, and the capability is dropped: a repo reaches a sandbox only as an entry, or as a declared implication (§5.7) |
+  | each other capability name (`gcp-key`, …) | a `use` entry for that name's legacy capability object (§13.2) |
   | each attachment | an asset beside the task and a `read` entry for it (§2.2) |
   | no `Target` (team-targeted) | no `write` entry |
 
@@ -3783,6 +4724,47 @@ and **both forms stay readable throughout**:
 Workflows are never converted (§12.2). Design docs gain front matter
 whenever their owners choose (§12.3); until then they are referenceable
 as plain files.
+
+### 13.2 Capabilities
+
+Today's capability names become base capabilities, and capability
+objects over them, with nothing about what a run gets changing on the
+day of the switch:
+
+| grain today | Becomes | Declared implications |
+| --- | --- | --- |
+| `gcp-key` (a key from a pool of service accounts, `~/.gcp-service-account.json`) | base `gcp-service-account@v1`, at first in its **legacy key mode**: the same key file, which cannot narrow `token_lifetime`, so a reducer on it is refused. The token-endpoint mode of §5.7 follows | egress to Google's APIs |
+| `gemini-key` (`~/.gemini-api-key`) | an object over base `api-key@v1` (a secret materialised as a file), binding the deployment's Gemini secret and `subset hosts [generativelanguage.googleapis.com]`; later `model-api@v1` through the model proxy | egress to that host |
+| `github-sandbox` (`~/.github-sandbox-repo`, `~/.github-sandbox-token`) | base `github-sandbox-repo@v1` | egress to `github.com`, `api.github.com`; the throwaway repo |
+| `self-debug` | base `self-debug@v1`: `read_grain_source`, `list_grain_source` and the Grain's log tools | `repos: [https://github.com/bwsalmon/grain.git]`, fetch only: task 3204's grant, until now a `model.CapabilityRepos` entry |
+| `grain-ci` | base `grain-ci@v1`: the CI tools (`wait_for_checks`, `retrigger_ci`, …) | the Grain's own CI service; no egress |
+| `package-publish` | base `github-packages@v1`, with a secret slot `token`, marked `approval: required` | egress to `ghcr.io`, `api.github.com` |
+| `repo-read:o/n`, `repo-write:o/n` | in a task, a `context:` entry (§13); in a workflow, `git@v1` with built-in reducers (§5.7) | `repos: {from: repos}` |
+| `model.CapabilityRepos` | each base's declared `implies.repos` | |
+| `docs/ci-capabilities.md` | the base declarations, generated from the providers, which the doc then indexes | |
+| escalated capabilities | `approval: required` in the base's declaration, or `approval.local` in the Grain's policy | |
+
+- **Legacy objects.** For each name, `grain tasks export` writes one
+  capability object with no reducers over that name's base. It writes them
+  in the Grain's root at `capabilities/legacy/<name>.md`, and, for a
+  linked Grain, in the team's shared repo
+  (`shared:capabilities/legacy/<name>.md`), so that an intake task
+  requests a team-level definition every Grain resolves against its own
+  base. Each carries the old name in `aka:`. A workflow's bare legacy
+  name resolves to the Grain's own legacy object.
+- **The policy that matches today.** Export also writes the matching
+  policy: the bases the deployment provides, the Grain's root and the
+  team's `capabilities/legacy/` as sanctioned sources, and the current
+  rules for scheduled runs as policy over effective authority (§5.7,
+  CI). A run of a migrated task gets what it got before, and narrowing
+  becomes possible.
+- **A task's `capabilities:`** becomes `use` entries after its other
+  `context:` entries, in the old order. A template's `capabilities:`
+  stays in the file, as §12.1 keeps declaration keys verbatim, and
+  filing turns each name into a `use` entry in the task.
+- **Silo's grant table** names capability objects by reference instead of
+  bare names, and its attestation's `granted_capabilities` gains each
+  one's digest (§5.7).
 
 ## 14. Running Silo as a git host
 
@@ -3892,6 +4874,12 @@ as plain files.
 | A sidecar for every asset | Metadata most assets do not need: an image in a design has its alt text in the link. Sidecars are optional, and are where an asset needs a license, provenance, or an external location (§2.2) |
 | Attachments inline in front matter (base64) | Front matter is for review; a megabyte of base64 is not. Every diff, digest and parse would carry it. A file beside the object is plain git, and renders in any forge (§2.2) |
 
+| Opaque capability names (`gcp-key`, `self-debug`, the status quo) | What a name grants and implies lives in provider code (`model.CapabilityRepos`), invisible to the local policy, which is how task 4303's repo reached a sandbox. A name cannot be narrowed (one `gcp-key` for every project and role), composed across an org and a team, or explained to an approver. Objects over declared bases make the surface readable and the narrowing explicit (§5.7) |
+| Capability objects able to grant beyond their base (an `extra_roles:`, or a reducer that adds) | Breaks monotonicity, the one property that makes every other check local: with it, effective authority depends on every object in the chain, the policy must re-derive the maximum, and an included folder could escalate any capability built on it. Authority comes only from bases and allowlisted secrets; everything else narrows (§11.27) |
+| Granting on include (a Grain honours whatever capability objects it includes) | Makes every include of a shared folder a grant, so a team repo's maintainer could hand any Grain that includes it new authority. A catalog decides what a Grain offers; the policy's source allowlist decides what it honours (§11.29, §11.30) |
+| A separate `capabilities:` list on tasks | A second list beside `context:`, with its own check: the split 4453 removed for reads and writes. One list, with `mode: use` for a request, is one check, and the approver reads one thing (§5.6, §5.7) |
+| Choosing a reducer language now: **CEL** (Google's Common Expression Language), **WASM** modules, **Rego** (Open Policy Agent), or **macaroon caveat strings** (and Biscuit's Datalog caveats) | The owner's decision: Anselm comes from a project in flight, and this design fixes only the contract any implementation must meet (§5.7). These are the prior art Anselm will be compared against. CEL is non-Turing-complete, side-effect free and cost-bounded, but has no notion of narrowing: monotonicity would be checked by the Grain, not given. WASM sandboxes anything and bounds it with fuel, at the price of opaque binaries in a review-first format. Rego is a mature policy language with partial evaluation, but evaluates against a data document rather than narrowing a capability, and is larger than a reducer needs. Macaroon caveat strings are the model itself, but first-party caveats are an uninterpreted string for each verifier to parse, and so are not a language. Biscuit's Datalog is attenuation-native, the closest prior art. The built-in reducers are a deliberately small interim, not a candidate |
+| Skipping reducers a Grain cannot evaluate (best effort until Anselm) | Skipping a narrowing widens. Two Grains would grant one object differently, and a placeholder would silently be a no-op. A Grain that cannot evaluate a reducer refuses, naming it (§5.7) |
 
 ## 16. Staged implementation plan
 
@@ -3904,6 +4892,7 @@ as plain files.
 | **5. Shared definitions and planning** | templates and schedules fired in Silo; the design index, planning and flood control; the review-branch gate | render shared templates locally; `implements`/`closed.design_revs`; trailers from refs |
 | **5b. Code repos and task homes** | the code-repo reader (webhook or poll) with validation on read (§8.13); schedule adoption; designs planned in place; `task_home`: landing a task by direct push or a change through grain's merge queue, the pending-change record, the tombstone and reference rewrite, `silo task promote`; cancels of homed tasks | `propose_promotion`; inline firings; local policy for code repos a Grain trusts |
 
+| **5c. Capabilities** | the `capability` and `capability-base` schemas; the chain resolver with cycle detection, digests and the built-in reducers in `taskrepo`; Silo's catalog view, placement against Grains' published bases, `capability_approvals` in the intake's rules, and digests in `granted_capabilities`; the legacy objects of §13.2 in each team's shared repo | providers declare their bases and the Grain publishes them; the policy's `capabilities` (bases, sources, secrets, `approval.local`) and the implication check, replacing `model.CapabilityRepos`; credential narrowing in the GCP, git and model providers; per-use reducers in the git, model and Google API proxies, with the audit log; CI's `capabilities:` resolved to objects, `repo-read`/`repo-write` as git reducers. **Anselm** is adopted only when that project is ready, as a later stage of its own |
 | **6. Signed commits** | keys in README rules; verifying signatures in the hook | verifying the approver's signature against policy (`require_signed`) |
 
 Each stage is a design-item set to be filed after this review. None is

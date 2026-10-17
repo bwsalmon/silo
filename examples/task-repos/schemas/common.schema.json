@@ -146,7 +146,7 @@
       "default": "normal"
     },
     "contextEntry": {
-      "description": "One thing a run's sandbox holds (docs/task-repos.md §5.6): a repo, a repo folder (a path ending in /), or a file (an object or an asset), by reference. A bare string is {ref: <string>, mode: read}",
+      "description": "One thing a run's sandbox holds (docs/task-repos.md §5.6): a repo, a repo folder (a path ending in /), or a file (an object or an asset), by reference; or, with mode: use, a capability the run requests (§5.7). A bare string is {ref: <string>, mode: read}, so a bare string never requests a capability",
       "oneOf": [
         {
           "$ref": "#/$defs/refString"
@@ -165,10 +165,11 @@
             "mode": {
               "enum": [
                 "read",
-                "write"
+                "write",
+                "use"
               ],
               "default": "read",
-              "description": "write: push the run's own branch, based on the entry's @<branch>; only for a repo or a repo folder"
+              "description": "write: push the run's own branch, based on the entry's @<branch>; only for a repo or a repo folder. use: request the kind: capability object the ref names; nothing of the file itself lands, only what the capability materialises (§5.7)"
             },
             "path": {
               "type": "string",
@@ -180,6 +181,14 @@
               "minimum": 0,
               "maximum": 3,
               "description": "Files only: also materialise what the Markdown body links to, this many links deep, under the caps"
+            },
+            "reducers": {
+              "type": "array",
+              "items": {
+                "$ref": "capability.schema.json#/$defs/reducer"
+              },
+              "maxItems": 8,
+              "description": "use only: reducers of the task's own, applied after the capability's chain. They can only narrow it further"
             }
           },
           "oneOf": [
