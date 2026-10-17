@@ -1,0 +1,367 @@
+// Command fakegrain is a scripted Grain node for the hub UI's browser
+// suite (ui/e2e): a rendezvous client that accepts every task the hub
+// offers it and then does nothing on its own. What the task does is
+// driven over a small HTTP control API on -control, so that a
+// Playwright spec can say exactly which events the hub sees, and when:
+//
+//	GET  /state                 {"online","refused","connects","tasks":[{"id","node_task","received":[...]}]}
+//	POST /tasks/{id}/emit       a JSON array of events, without seq or task, which the node numbers and sends up
+//	POST /tasks/{id}/finish     {"state":"done"|"failed","reason":"..."}: the task's result, on its task stream
+//	PUT  /artifacts/{ref}       the body is what the view-through serves for ref, until the node goes offline
+//	POST /offline, /online      drop the connection and stay away, or come back
+//
+// "received" is every message the hub wrote down the task's stream
+// after the offer (approve, message, cancel), in order, which is how a
+// spec sees an answer reach the node. A node whose token is refused
+// stops trying and reports refused.
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/bwsalmon/silo/hub/live"
+	"github.com/bwsalmon/silo/hub/registry"
+	"github.com/bwsalmon/silo/hub/rendezvous"
+	"github.com/bwsalmon/silo/hub/tasks"
+)
+
+type task struct {
+	ID       string          `json:"id"`
+	NodeTask string          `json:"node_task"`
+	Received []tasks.Message `json:"received"`
+	seq      int64
+	stream   *tasks.Stream
+}
+
+type grain struct {
+	cl *rendezvous.Client
+
+	mu        sync.Mutex
+	conn      *rendezvous.Conn
+	offline   bool
+	refused   bool
+	connects  int
+	tasks     map[string]*task
+	order     []string
+	artifacts map[string][]byte
+	wake      chan struct{}
+}
+
+func main() {
+	hub := flag.String("hub", "", "the hub's URL")
+	tokenFile := flag.String("token-file", "", "the file holding the node's token")
+	id := flag.String("id", "", "the node's ID")
+	repos := flag.String("repos", "", "comma-separated repositories the node serves")
+	slots := flag.Int("slots", 2, "the node's slots")
+	interactive := flag.Bool("interactive", false, "list the interactive feature")
+	control := flag.String("control", "127.0.0.1:0", "the address to serve the control API on")
+	addrFile := flag.String("addr-file", "", "write the control API's address here once it listens")
+	flag.Parse()
+	tok, err := os.ReadFile(*tokenFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	node := registry.Node{ID: *id, Repos: strings.Split(*repos, ","), Slots: *slots, Version: "fakegrain"}
+	if *interactive {
+		node.Features = []string{registry.FeatureInteractive}
+	}
+	g := &grain{
+		cl: &rendezvous.Client{
+			Hub:   *hub,
+			Token: func(context.Context) (string, error) { return strings.TrimSpace(string(tok)), nil },
+			Node:  node,
+		},
+		tasks:     map[string]*task{},
+		artifacts: map[string][]byte{},
+		wake:      make(chan struct{}, 1),
+	}
+	l, err := net.Listen("tcp", *control)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *addrFile != "" {
+		if err := os.WriteFile(*addrFile+".tmp", []byte(l.Addr().String()), 0o644); err != nil {
+			log.Fatal(err)
+		}
+		if err := os.Rename(*addrFile+".tmp", *addrFile); err != nil {
+			log.Fatal(err)
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	go http.Serve(l, g.routes())
+	g.run(ctx)
+}
+
+// run keeps the node connected, unless it is told to stay offline or
+// its token is refused.
+func (g *grain) run(ctx context.Context) {
+	for ctx.Err() == nil {
+		g.mu.Lock()
+		away := g.offline || g.refused
+		g.mu.Unlock()
+		if away {
+			select {
+			case <-ctx.Done():
+				return
+			case <-g.wake:
+			}
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		c, err := g.cl.Connect(cctx)
+		cancel()
+		if err != nil {
+			log.Printf("fakegrain: connect: %v", err)
+			if errors.Is(err, rendezvous.ErrRefused) {
+				g.mu.Lock()
+				g.refused = true
+				g.mu.Unlock()
+				continue
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		g.mu.Lock()
+		g.conn = c
+		g.connects++
+		g.mu.Unlock()
+		stop := context.AfterFunc(ctx, func() { c.Close() })
+		for {
+			st, err := c.Accept()
+			if err != nil {
+				break
+			}
+			go g.handle(st)
+		}
+		stop()
+		g.mu.Lock()
+		g.conn = nil
+		g.mu.Unlock()
+		log.Printf("fakegrain: connection ended (goodbye %q)", c.Goodbye())
+	}
+}
+
+// bufConn is a stream whose first line has been read through r.
+type bufConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b bufConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+// handle answers one stream the hub opened: a task stream or a view.
+func (g *grain) handle(c net.Conn) {
+	r := bufio.NewReaderSize(c, 4096)
+	line, err := r.ReadBytes('\n')
+	if err != nil {
+		c.Close()
+		return
+	}
+	var head struct {
+		Type string `json:"type"`
+	}
+	json.Unmarshal(line, &head)
+	if head.Type == live.TypeView {
+		var m live.ViewMessage
+		json.Unmarshal(line, &m)
+		live.ServeView(c, m, g.view)
+		return
+	}
+	var m tasks.Message
+	if err := json.Unmarshal(line, &m); err != nil || m.Task == nil {
+		c.Close()
+		return
+	}
+	st := tasks.NewStream(bufConn{c, r})
+	g.mu.Lock()
+	t := g.tasks[m.Task.ID]
+	switch m.Type {
+	case tasks.TypeOffer, tasks.TypeResume:
+		if t == nil {
+			t = &task{ID: m.Task.ID, NodeTask: fmt.Sprintf("local-%d", len(g.tasks)+1), Received: []tasks.Message{}}
+			g.tasks[t.ID] = t
+			g.order = append(g.order, t.ID)
+		}
+		t.stream = st
+	default:
+		if t != nil {
+			t.Received = append(t.Received, m)
+		}
+		g.mu.Unlock()
+		st.Close()
+		return
+	}
+	g.mu.Unlock()
+	if err := st.Write(tasks.Message{Type: tasks.TypeAccept, NodeTask: t.NodeTask}); err != nil {
+		st.Close()
+		return
+	}
+	for {
+		m, err := st.Read()
+		if err != nil {
+			return
+		}
+		m.Attestation = ""
+		g.mu.Lock()
+		t.Received = append(t.Received, m)
+		g.mu.Unlock()
+	}
+}
+
+func (g *grain) view(m live.ViewMessage) (io.ReadCloser, error) {
+	g.mu.Lock()
+	b, ok := g.artifacts[m.Ref]
+	g.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no artifact %q", m.Ref)
+	}
+	return io.NopCloser(strings.NewReader(string(b))), nil
+}
+
+// emit numbers evs and sends them up on an event stream of their own,
+// waiting for the hub to have read them all.
+func (g *grain) emit(id string, evs []map[string]any) error {
+	g.mu.Lock()
+	t, c := g.tasks[id], g.conn
+	if t == nil || c == nil {
+		g.mu.Unlock()
+		return fmt.Errorf("no task %s here, or no connection", id)
+	}
+	var b strings.Builder
+	for _, e := range evs {
+		t.seq++
+		e["v"], e["seq"], e["task"] = 1, t.seq, id
+		if _, ok := e["time"]; !ok {
+			e["time"] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		line, err := json.Marshal(e)
+		if err != nil {
+			g.mu.Unlock()
+			return err
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	g.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, err := c.Open(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if _, err := io.WriteString(st, b.String()); err != nil {
+		return err
+	}
+	if cw, ok := st.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+	done := make(chan error, 1)
+	go func() { _, err := io.Copy(io.Discard, st); done <- err }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *grain) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		ts := []*task{}
+		for _, id := range g.order {
+			ts = append(ts, g.tasks[id])
+		}
+		writeJSON(w, map[string]any{"online": g.conn != nil, "refused": g.refused, "connects": g.connects, "tasks": ts})
+	})
+	mux.HandleFunc("POST /tasks/{id}/emit", func(w http.ResponseWriter, r *http.Request) {
+		var evs []map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&evs); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := g.emit(r.PathValue("id"), evs); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, map[string]any{})
+	})
+	mux.HandleFunc("POST /tasks/{id}/finish", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			State  tasks.State `json:"state"`
+			Reason string      `json:"reason"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		g.mu.Lock()
+		t := g.tasks[r.PathValue("id")]
+		g.mu.Unlock()
+		if t == nil || t.stream == nil {
+			http.Error(w, "no task stream", http.StatusConflict)
+			return
+		}
+		if err := t.stream.Write(tasks.Message{Type: tasks.TypeResult, State: req.State, Reason: req.Reason}); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, map[string]any{})
+	})
+	mux.HandleFunc("PUT /artifacts/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		g.mu.Lock()
+		g.artifacts[r.PathValue("ref")] = b
+		g.mu.Unlock()
+		writeJSON(w, map[string]any{})
+	})
+	mux.HandleFunc("POST /offline", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		g.offline = true
+		c := g.conn
+		g.mu.Unlock()
+		if c != nil {
+			c.Close()
+		}
+		writeJSON(w, map[string]any{})
+	})
+	mux.HandleFunc("POST /online", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		g.offline = false
+		g.mu.Unlock()
+		select {
+		case g.wake <- struct{}{}:
+		default:
+		}
+		writeJSON(w, map[string]any{})
+	})
+	return mux
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}

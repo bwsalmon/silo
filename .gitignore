@@ -2,3 +2,6 @@
 /silo
 /hub/ui/static/app/
 /ui/node_modules/
+/ui/e2e/.bin/
+/ui/test-results/
+/ui/playwright-report/

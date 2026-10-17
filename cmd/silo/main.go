@@ -187,6 +187,9 @@ func serve(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := server.CheckDevSignOn(*devHeader, os.Getenv); err != nil {
+		return err
+	}
 	var pems [][]byte
 	for _, f := range list(*claimsKeys) {
 		b, err := os.ReadFile(f)
