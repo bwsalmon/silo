@@ -350,3 +350,30 @@ func TestAPISameOrigin(t *testing.T) {
 		t.Errorf("same-origin submit: %d, want 201", got)
 	}
 }
+
+// A submission may depend only on tasks its submitter sees, and the
+// dependencies are kept with it.
+func TestAPIDependsOn(t *testing.T) {
+	h := newAPIHub(t)
+	infra := h.submit(t, "alice@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "first"})
+	web := h.submit(t, "bob@example.com", map[string]any{"repo": "bwsalmon/web", "prompt": "bob's"})
+
+	got := h.submit(t, "dave@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "then", "depends_on": []string{infra.ID}})
+	if len(got.DependsOn) != 1 || got.DependsOn[0] != infra.ID {
+		t.Errorf("depends_on %v", got.DependsOn)
+	}
+	read, err := h.store.Get(context.Background(), got.ID)
+	check(t, err)
+	if len(read.DependsOn) != 1 || read.DependsOn[0] != infra.ID {
+		t.Errorf("stored depends_on %v", read.DependsOn)
+	}
+	for name, deps := range map[string][]string{
+		"unseen":    {web.ID},
+		"missing":   {"t-0123456789abcdef"},
+		"malformed": {"web"},
+	} {
+		if code, b := h.do(t, "dave@example.com", "POST", TasksPath, map[string]any{"repo": "bwsalmon/silo", "prompt": "x", "depends_on": deps}); code != http.StatusBadRequest {
+			t.Errorf("%s dependency: %d %s, want 400", name, code, b)
+		}
+	}
+}
