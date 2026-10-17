@@ -151,3 +151,96 @@ func TestSubmitterCannotBeSpoofed(t *testing.T) {
 		}
 	}
 }
+
+// fileFrom files a task from node n on its control stream, as an agent
+// on its Grain proposing work does (docs/hub-interface.md).
+func fileFrom(t *testing.T, n *fakeNode, f tasks.Filing) (tasks.Task, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := n.conn.FileTask(ctx, f)
+	if err != nil {
+		return tasks.Task{}, err
+	}
+	var tk tasks.Task
+	if err := json.Unmarshal(raw, &tk); err != nil {
+		t.Fatal(err)
+	}
+	return tk, nil
+}
+
+// TestAgentFilingLaunders: an agent filing a task through its Grain
+// (task 4233, T-TB1-7) gets no approval it did not have. The task is
+// filed for the human its run was for, with the Grain recorded beside
+// them; an approval of the task it was filed from is never carried
+// over; it is proposed unless that human and the Grain's owner are
+// both in the team; and only a member of the team other than that
+// human approves it.
+func TestAgentFilingLaunders(t *testing.T) {
+	hb := startHub(t, options{})
+	hb.teams()
+	tok, _ := hb.mint(alice, "ws-a")
+	n := connectNode(t, hb, tok, "ws-a", repoA)
+
+	// pat's proposal, approved by dave, runs on alice's Grain.
+	prop := hb.file(pat, map[string]string{"repo": repoA, "prompt": "pat's idea"})
+	hb.must(hb.user(dave), "POST", tasks.TasksPath+"/"+prop.ID+"/approve", nil, http.StatusOK, nil)
+	eventually(t, "pat's task running", func() bool { got, _ := hb.task(hb.user(dave), prop.ID); return got.State == tasks.Running })
+
+	// Its agent files into alice's own team's repository: proposed, as
+	// pat's, however much alice's Grain is team A's.
+	inA, err := fileFrom(t, n, tasks.Filing{Repo: repoA, Prompt: "more of pat's idea", OriginTask: prop.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inA.State != tasks.Proposed || inA.Submitter != pat || inA.ApprovedBy != "" || inA.FiledBy != "ws-a" || inA.FiledByOwner != alice || inA.OriginTask != prop.ID {
+		t.Errorf("pat's agent's filing into team A: %+v", inA)
+	}
+	// Into team B: proposed for team B.
+	inB, err := fileFrom(t, n, tasks.Filing{Repo: repoB, Prompt: "and for B", OriginTask: prop.ID, NodeTask: "local-wait"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inB.State != tasks.Proposed || inB.Team != teamB || inB.Submitter != pat || inB.ApprovedBy != "" {
+		t.Errorf("pat's agent's filing into team B: %+v", inB)
+	}
+	// pat may not approve what their agent filed; nor may alice for team B.
+	if code, _, _ := hb.do(hb.user(pat), "POST", tasks.TasksPath+"/"+inA.ID+"/approve", nil); code != http.StatusForbidden {
+		t.Errorf("pat approving their agent's filing: %d, want 403", code)
+	}
+	if code, _, _ := hb.do(hb.user(alice), "POST", tasks.TasksPath+"/"+inB.ID+"/approve", nil); code == http.StatusOK {
+		t.Error("alice approved team B's proposal")
+	}
+	var approved tasks.Task
+	hb.must(hb.user(dave), "POST", tasks.TasksPath+"/"+inA.ID+"/approve", nil, http.StatusOK, &approved)
+	if approved.ApprovedBy != dave {
+		t.Errorf("approved as %+v", approved)
+	}
+	if c := attestation(t, n, inA.ID); c.ApprovedBy != dave || c.Requester != pat {
+		t.Errorf("the approved filing attested as %+v", c)
+	}
+
+	// The Grain cannot say whose filing it is, nor file from a task it
+	// does not run.
+	if _, err := fileFrom(t, n, tasks.Filing{Repo: repoA, Prompt: "p", Node: "ws-b"}); err == nil {
+		t.Error("a filing naming another node was filed")
+	}
+	other := hb.file(bob, map[string]string{"repo": repoB, "prompt": "bob's"})
+	if _, err := fileFrom(t, n, tasks.Filing{Repo: repoA, Prompt: "p", OriginTask: other.ID}); err == nil {
+		t.Error("a filing from another node's task was filed")
+	}
+
+	// Team B turns it down; the Grain waiting on it is told so.
+	hb.must(hb.user(bob), "POST", tasks.TasksPath+"/"+inB.ID+"/reject", map[string]string{"reason": "no"}, http.StatusOK, nil)
+	eventually(t, "dependency_done for "+inB.ID, func() bool {
+		st := n.taskStream(inB.ID)
+		return st != nil && st.saw(tasks.TypeDependencyDone)
+	})
+	st := n.taskStream(inB.ID)
+	st.mu.Lock()
+	m := st.in[0]
+	st.mu.Unlock()
+	if m.State != tasks.Rejected || m.NodeTask != "local-wait" {
+		t.Errorf("dependency_done %+v", m)
+	}
+}

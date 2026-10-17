@@ -316,7 +316,18 @@ agents, what records `approved_by` decides whether this is closed.
 (O-4): an agent- or node-filed task enters the hub as `proposed` with
 a non-human requester, and only a signed-in human other than the
 requester may approve it (ui.md U3), recorded as `approved_by`.
-INV-17.
+INV-17. *As built for 4233* (hub.md §6.6): a node-filed task's
+requester is the submitter of the hub task it was filed from, or the
+node's owner, with the node recorded as its filer (`filed_by`). It is
+`proposed` unless that requester and the node's owner are both members
+of its team; an origin task's `approved_by` is never carried over; and
+only a team member other than the requester approves it. A filing
+queued for a team both are in carries no `approved_by`, as a member's
+own submission does not, so grain files it for local approval
+(GSA1-11) rather than taking it as approved. Tested by
+`TestAgentFilingLaunders`. The hub's `depends_on` only orders tasks,
+and carries no task's output into another's prompt, so the dependency
+route (4235, a dependency's output fed to the next task) remains.
 
 **T-TB1-8 (D) A user exhausting the hub.** *Mitigation:* bodies are
 bounded (`readJSON`: 64 KiB for the directory, the prompt limit plus
@@ -701,9 +712,15 @@ capability credentials are placed per run. *Residual:* a host-directory
 sandbox runs as the Grain's user and can read them. *Status:* covered
 by O-8.
 
-**T-TB7-3 (E) An agent filing or approving work.** *Mitigation:* no
-hub path exists for it today. *Residual:* tasks 4233 and 4235 add one.
-*Status:* open, design-time (O-4, T-TB1-7).
+**T-TB7-3 (E) An agent filing or approving work.** *Mitigation:* an
+agent files work through its Grain's control stream only
+(`file_task`, hub.md §6.6), rate limited per node, as the human its
+run was for and never with an approval (T-TB1-7); it has no path to
+approve a task or answer an approval request. *Residual:* a Grain
+can still propose work on its submitter's behalf to any team, at its
+rate limit, which the team's members see as proposals. *Status:*
+mitigated for filing (4233); open for 4235's feeding of one task's
+output into another (O-4).
 
 **T-TB7-4 (E) Sandbox escape.** Out of this document's scope: grain's
 sandbox design (grain `docs/design.md`) is its own threat model; this

@@ -185,3 +185,43 @@ func TestCredentialsStayOnTheirSide(t *testing.T) {
 		t.Errorf("connecting with only a human's assertion: %d, want 401", code)
 	}
 }
+
+// TestNodeFilingRateLimited: a node files at most tasks.DefaultFileBurst
+// tasks at once (task 4233); past that the hub refuses, and the refusal
+// does not end its connection.
+func TestNodeFilingRateLimited(t *testing.T) {
+	hb := startHub(t, options{})
+	hb.teams()
+	tok, _ := hb.mint(alice, "ws-a")
+	c, err := dial(t, hb, tok, "ws-a", repoA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := c.FileTask(ctx, tasks.Filing{Repo: repoB, Prompt: "for team B"})
+		return err
+	}
+	for i := range tasks.DefaultFileBurst {
+		if err := file(); err != nil {
+			t.Fatalf("filing %d: %v", i, err)
+		}
+	}
+	err = file()
+	if !errors.Is(err, rendezvous.ErrFileRefused) || !strings.Contains(err.Error(), "too fast") {
+		t.Errorf("filing past the limit: %v, want refused as too fast", err)
+	}
+	select {
+	case <-c.Done():
+		t.Error("the refusal ended the node's connection")
+	case <-time.After(500 * time.Millisecond):
+	}
+	ts, err := hb.h.Backlog.List(context.Background(), tasks.Filter{Teams: []string{teamB}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ts) != tasks.DefaultFileBurst {
+		t.Errorf("%d tasks filed, want %d", len(ts), tasks.DefaultFileBurst)
+	}
+}

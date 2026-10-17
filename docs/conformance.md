@@ -94,7 +94,7 @@ They run in this order. Each passes, fails, or is skipped:
 | `approve` | Optional, `approvals`. An `approve` task sends its `approval_request`. Answered `allow` it ends `done`; answered `deny`, `failed`. |
 | `interactive` | Optional, `interactive`. An interactive `interactive` session sends `awaiting_reply` `waiting`. A message posted to it comes back as a `message` event with its ID, then `awaiting_reply` `resumed` naming it, and the session closes `done`. |
 | `restart` | With a `hold` task running, the hub shuts down (saying `goodbye`) and starts again on the same address and database. The Grain reconnects and keeps the task as the same `node_task`, its events continuing past the last `seq` the hub had. It says `silo-conformance: started` only once (no second run), and reports one slot busy. |
-| `filing` | Upward filing and dependencies (task 4233). The hub does not implement these yet, so this is always skipped, and says whether the Grain lists `filing`. |
+| `filing` | Upward filing and dependencies ([hub-interface.md](hub-interface.md), filing a task). The hub takes them, but the kit does not check a Grain's yet, so this is always skipped, and says whether the Grain lists `filing`. |
 
 The **optional features** are the ones a Grain lists in its `hello`'s
 `features`. The hub reads `interactive` (it offers sessions only to a
@@ -115,7 +115,7 @@ pass  register     102ms   node conformance-grain, version "refgrain", 2 slots, 
 pass  heartbeat    1.019s  heartbeats every 1s, 2 of 2 slots free while idle
 pass  refuse       70ms    refused task t-213328df3a2be3d8 in conformance/outside
 ...
-skip  filing       0s      this hub does not implement upward filing and dependencies yet (task 4233); ...
+skip  filing       0s      the kit does not check upward filing and dependencies yet; ...
 
 CONFORMS: 11 passed, 0 failed, 1 skipped
 ```
