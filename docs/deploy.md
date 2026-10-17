@@ -30,6 +30,15 @@ signed assertion too (hub.md §5.2.1). The nodes' UI hosts
 (`<node>.nodes.<domain>`, §8) have a route of their own, every path on
 them to the `silo-hub` Service and so behind the same IAP.
 
+The store is **PostgreSQL on Cloud SQL**, in every deployment, one
+replica or several: Cloud SQL's managed backups, point-in-time
+recovery, on-demand backups before each schema migration and storage
+that grows by itself are how the hub's data is kept
+([hub-operations.md](hub-operations.md) §4). SQLite is for local
+development and tests only: `silo hub serve` refuses a `sqlite:`
+database unless `-dev` (or the development user header) says it is
+local development, and on Kubernetes refuses it whatever is set.
+
 ## 1. Prerequisites
 
 - **The cluster.** A GKE cluster in `bsalmon-gke-dev` with:
@@ -87,8 +96,9 @@ hub then opens its tables without creating anything, and says to run
 `silo hub migrate` if one is missing.
 
 Locally, none of this is needed: `silo hub serve -database
-sqlite:hub.db` (or one `postgres://` URL) creates its own tables as
-before, since `-migrate` defaults to true.
+postgres://...` (or, for development and tests only, `-dev -database
+sqlite:hub.db`) creates its own tables as before, since `-migrate`
+defaults to true.
 
 ## 2. Terraform
 
@@ -103,6 +113,48 @@ terraform apply -var-file=bsalmon-gke-dev.tfvars
 State: the module declares no backend, so state is local. For anything
 longer-lived than a trial, add a `backend "gcs"` block for a bucket in
 the project first.
+
+The Cloud SQL instance it makes, each setting a variable shown at its
+default in `bsalmon-gke-dev.tfvars` ([hub-operations.md](hub-operations.md)
+§4.1 has the full table):
+
+- **Availability** `REGIONAL`: a standby in another zone and automatic
+  failover in about a minute, billed as a second instance and disk, so
+  about twice a `ZONAL` instance's cost. A development hub may set
+  `database_availability_type = "ZONAL"`.
+- **Storage** 10 GB of SSD that grows by itself before it fills
+  (`database_disk_autoresize`), without a limit unless
+  `database_disk_autoresize_limit_gb` sets one; terraform leaves the
+  size it has grown to alone.
+- **Backups** daily, 14 kept, and point-in-time recovery over 7 days;
+  **deletion protection**, terraform's and Cloud SQL's, on.
+- **Query Insights** on (no client addresses or application tags), and
+  a **maintenance window** of Sunday 05:00 UTC on the `stable` track.
+- **Connections** TLS only (`ssl_mode = ENCRYPTED_ONLY`), and no
+  authorized networks: only the Cloud SQL Auth Proxy, authorized by
+  IAM, reaches the instance. The hub logs in with **IAM database
+  authentication** as its service account (no password); only the
+  `migrate` container uses the schema owner's password (§1, "The
+  database's two roles"). Between the hub and the proxy, on the pod's
+  loopback, the URL's `sslmode=disable` is right: the proxy carries
+  the connection on to Cloud SQL over TLS.
+- **Private IP**, off by default. With `database_private_ip = true`
+  the instance also gets an address on the cluster's VPC, through
+  private services access, and terraform makes that access (a reserved
+  /20 peered to `servicenetworking.googleapis.com`). It is off because
+  a VPC has one such peering, shared by every Google service on it,
+  and making it replaces the ranges it already has; where the VPC has
+  it already, also set `database_private_ip_peering = false`. To use
+  the private address alone, set `database_public_ip = false` and add
+  `--private-ip` to the proxy's arguments in the overlay. The public
+  address is not open: it has no authorized networks, and the proxy
+  authorizes every connection with IAM.
+- **Backup operators** (`backup_operators`): who may take the
+  on-demand backup before an upgrade (§7) without broader rights: a
+  custom role of `cloudsql.backupRuns.create`, `.get`, `.list` and
+  `cloudsql.instances.get`, on the hub's instance alone. Restoring
+  needs `cloudsql.instances.restoreBackup` (`roles/cloudsql.admin`),
+  which it does not grant.
 
 Then, unless `dns_zone` was set, create the records
 `terraform output dns_records` lists: for the hub's host and for the
@@ -261,7 +313,13 @@ and how node connections drain, rotating the IAP, node-token and
 database secrets, backups and restoring them, and the dashboard and
 alerts. In short:
 
-- **Upgrades:** push a new tag, set `newTag`, `kubectl apply -k`. The
+- **Upgrades:** take an on-demand backup of the database first
+  (`gcloud sql backups create --instance=silo-hub
+  --project=bsalmon-gke-dev --description="before silo-hub TAG"`), since
+  the new pods' `migrate` container may change the schema and there is
+  no down-migration; rolling back past it is restoring that backup
+  ([hub-operations.md](hub-operations.md) §2). Then push a new tag, set
+  `newTag`, `kubectl apply -k`. The
   Deployment rolls its two pods one at a time (`RollingUpdate`,
   `maxSurge: 1`, `maxUnavailable: 0`): a new pod is ready before an old
   one says goodbye to its nodes and stops, so nodes reconnect to a pod
@@ -275,7 +333,8 @@ alerts. In short:
   seven alert policies are terraform's (`monitoring.tf`), notifying
   `alert_notification_channels`.
 - **Backups:** daily, 14 kept, with 7 days of point-in-time recovery
-  (terraform's `backup_*` and `point_in_time_recovery_days`).
+  (terraform's `backup_*` and `point_in_time_recovery_days`), and an
+  on-demand one before each upgrade.
 - **Two replicas.** Any pod serves any request, with no session
   affinity: the registry is shared through the database, streams and
   live events reach a node's pod over the internal listener, and the

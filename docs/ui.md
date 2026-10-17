@@ -265,7 +265,8 @@ it on the requests it proxies.
 With Node 20.19 or later:
 
 ```sh
-# The hub, on SQLite, signing callers in from a header.
+# The hub, on SQLite and signing callers in from a header: both for
+# local development only (-dev-user-header allows the SQLite).
 go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db \
     -dev-user-header X-Silo-User -admins user:dev@example.com
 

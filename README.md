@@ -36,8 +36,8 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `hub/registry` | The in-memory node directory (hub.md §3): registration, ownership of node IDs, status, slot claims. |
 | `hub/rendezvous` | The node's outbound WebSocket to the hub and its reverse tunnel (hub.md §4): authentication bound to a node ID, admission, heartbeats, streams both ways, the per-caller filtered directory. |
 | `hub/identity` | Human sign-on (hub.md §5.1): IAP assertion and OIDC ID-token verification against the issuer's JWKS, and the OIDC relying party (code flow with PKCE, signed session cookie). |
-| `hub/directory` | The team directory in SQLite or PostgreSQL (hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
-| `hub/tasks` | The task backlog in SQLite or PostgreSQL, its intake API, and the dispatcher (hub.md §6). The dispatcher places tasks on nodes per team, offers each one over a task stream, requeues a refused task without the node that refused it, marks a task lost when its node goes away mid-run and resumes it when the node returns, and cancels tasks down the stream. |
+| `hub/directory` | The team directory in PostgreSQL (SQLite in development and tests; hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
+| `hub/tasks` | The task backlog in PostgreSQL (SQLite in development and tests), its intake API, and the dispatcher (hub.md §6). The dispatcher places tasks on nodes per team, offers each one over a task stream, requeues a refused task without the node that refused it, marks a task lost when its node goes away mid-run and resumes it when the node returns, and cancels tasks down the stream. |
 | `hub/live` | Live events (hub.md §7): the event streams nodes open per task, the classification by schema (lifecycle and conversation stored, the token stream in an in-memory ring, node-only events kept as references), fan-out over SSE and WebSocket from a cursor, and the view-through to a node's diffs and tool logs. |
 | `hub/notify` | The hub's wake-ups and event notices between its pods (hub.md §2.2.4): PostgreSQL `NOTIFY silo_hub`, listened for on a connection of each pod's own. |
 | `hub/server` | The hub as one HTTP server over one database (hub.md §2.1): every part above wired together, `/healthz` and `/readyz`, and a graceful shutdown that says goodbye to nodes. |
@@ -65,11 +65,15 @@ gofmt -l cmd hub internal events
 go build ./... && go vet ./... && go test -race ./...
 ```
 
-grain CI runs the same in `.grain/workflows/hub.yml`. `hub/directory`'s
-store tests run against PostgreSQL as well as SQLite where PostgreSQL's
-server binaries are installed; CI installs them and sets
-`SILO_REQUIRE_POSTGRES=1`, which turns a missing server into a
-failure.
+grain CI runs the same in `.grain/workflows/hub.yml`. The hub's store
+is PostgreSQL on Cloud SQL in every deployment
+([`docs/deploy.md`](docs/deploy.md)); SQLite is for local development
+and tests only. The stores' tests (`hub/directory`, `hub/tasks`,
+`hub/live`, `hub/registry`, `hub/lease`, `hub/notify`, `hub/server`)
+run against a throwaway PostgreSQL (`internal/pgtest`) as well as
+SQLite where PostgreSQL's server binaries are installed; CI installs
+them and sets `SILO_REQUIRE_POSTGRES=1`, which turns a missing server
+into a failure rather than a skip.
 
 `.grain/workflows/ui.yml` builds and tests the web UI (`ui/`, Node 20.19
 or later): `npm ci`, `npm run build` (tsc and Vite), `npm test`
@@ -91,8 +95,8 @@ stand in for. The job reads bwsalmon/grain through the git proxy
 `main` twice: once as it is, with the silo client it pins, and once
 against this commit's hub packages. It runs on every push and pull
 request, and takes about two and a half minutes.
-`scripts/grain-interop.sh` does the work. It starts `silo hub serve`
-on SQLite, signing a test user in through a fake OIDC provider
+`scripts/grain-interop.sh` does the work. It starts `silo hub serve
+-dev` on SQLite, signing a test user in through a fake OIDC provider
 (`internal/fakeoidc`), and starts a grain daemon pointed at it. The
 daemon runs with a local policy and a fake GitHub API
 (`scripts/fake-github.py`), and with no sandboxes and no CI, so no
@@ -120,8 +124,13 @@ The retired runner in `old/` is not tested by default: its workflow,
 (`workflow_dispatch`), and nothing on a push or pull request builds it
 ([`old/README.md`](old/README.md)).
 
-To run a hub locally:
+To run a hub locally, on SQLite and signing callers in from a header
+(both refused outside local development, and always on Kubernetes):
 
 ```sh
 go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db -dev-user-header X-User -admins user:me@example.com
 ```
+
+`silo hub serve` takes a `sqlite:` database only with `-dev`
+(`SILO_HUB_DEV`) or the development header; anything else needs
+`-database postgres://...`.

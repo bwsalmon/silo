@@ -26,7 +26,9 @@ database `silo`.
 | Open task streams | memory | the dispatcher's, if it ran on that pod: the next term requeues offered tasks and marks running ones `lost` until their nodes resume them (hub.md §6.2) |
 | The dispatcher's lease | PostgreSQL: an advisory lock held by the dispatching pod's session; `hub_leases` numbers its terms and names the holder | released: another pod takes it within five seconds (hub.md §2.2.1) |
 
-Backing up the database is therefore backing up the hub.
+Backing up the database is therefore backing up the hub. The database
+is always PostgreSQL on Cloud SQL (deploy.md); SQLite is for local
+development and tests only, and the hub refuses it on Kubernetes.
 
 ## 2. Upgrades
 
@@ -40,7 +42,28 @@ and the hub is never wholly down.
    `kubectl diff -k deploy/kubernetes/hub/bsalmon-gke-dev`.
 2. Look at the dashboard (§5) first: an upgrade during an incident
    hides it. Note the online node count.
-3. `kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev`, then
+3. **Take an on-demand backup**, every time: the new pods' `migrate`
+   container runs before they serve and may change the schema, and
+   there is no down-migration, so this backup is what a roll back past
+   the upgrade restores ("Rolling back past a schema change", below).
+   It waits until the backup is done, a minute or two:
+
+   ```sh
+   gcloud sql backups create --instance=silo-hub --project=bsalmon-gke-dev \
+     --description="before silo-hub $NEW_TAG, from $OLD_TAG"
+   gcloud sql backups list --instance=silo-hub --project=bsalmon-gke-dev \
+     --filter="type=ON_DEMAND" --limit=1   # note its ID, and that it is SUCCESSFUL
+   ```
+
+   This needs `cloudsql.backupRuns.create` on the instance: a project
+   Owner or `roles/cloudsql.editor` has it, and so does anyone in
+   terraform's `backup_operators`, who get a custom role of exactly
+   `cloudsql.backupRuns.create`, `.get`, `.list` and
+   `cloudsql.instances.get` on the hub's instance alone (deploy.md §2).
+   On-demand backups are not deleted with the automated ones' retention:
+   delete old ones (`gcloud sql backups delete ID --instance=silo-hub`)
+   once the release after them has settled.
+4. `kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev`, then
    `kubectl -n silo-hub rollout status deploy/silo-hub`.
 
 What happens, one pod at a time, and how node connections are drained:
@@ -95,11 +118,38 @@ serve, a schema change has to be one the old version still works
 with: a new table or a new nullable column, never a column dropped,
 renamed or retyped in the same release that stops using it. Split
 such a change over two releases. There is no down-migration: to roll
-back past a version that changed a table, restore the database from before the upgrade (§4) as
-well as the image. Take an on-demand backup before such an upgrade:
-`gcloud sql backups create --instance=silo-hub --project=bsalmon-gke-dev`.
+back past a version that changed a table, restore the backup taken in
+step 3 as well as the image (below).
 
-**Rolling back** is the same apply with the previous tag.
+**Rolling back** is the same apply with the previous tag, when the
+release changed no table: the old version works with the schema the
+new one left (a new table or nullable column it does not read).
+
+**Rolling back past a schema change**, or after a migration that went
+wrong, is restoring the backup from step 3 with the previous image.
+Everything written since that backup is lost from the hub (§4.2 says
+what nodes do about it), so do it only when the new schema cannot be
+fixed forward:
+
+```sh
+# 1. Stop every pod, so nothing writes while the database is replaced.
+kubectl -n silo-hub scale deploy/silo-hub --replicas=0
+kubectl -n silo-hub get pods            # until there are none
+# 2. Restore the pre-upgrade backup over the instance. This replaces
+#    all of its data, and needs cloudsql.instances.restoreBackup
+#    (roles/cloudsql.admin); backup_operators cannot.
+gcloud sql backups restore BACKUP_ID --restore-instance=silo-hub \
+  --backup-instance=silo-hub --project=bsalmon-gke-dev
+# 3. The previous image: set newTag back, and apply, which sets the
+#    replicas back too.
+kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev
+kubectl -n silo-hub rollout status deploy/silo-hub
+```
+
+The restore keeps the instance, its users, its IAM grants and its
+automated backups, so nothing else changes. To keep the broken state
+to look at, restore into a new instance instead (§4.3) and point the
+hub at it (§4.7).
 
 **Scaling.** Any number of pods serves (hub.md §2.2): the registry is
 shared through the database, streams and live events reach a node's
@@ -233,6 +283,11 @@ up with:
 | Backup location | `backup_location`; Cloud SQL's default multi-region when unset |
 | Deletion protection | terraform's and Cloud SQL's own (`deletion_protection`) |
 | Availability | `database_availability_type`: `REGIONAL` (the default, a standby in another zone, failover in about a minute, about twice the cost; hub.md §2.2) or `ZONAL` (no standby, for a development hub) |
+| On-demand backups | before each upgrade (§2), by hand; kept until deleted |
+| Storage | `database_disk_size_gb` (10) of SSD to start, grown by Cloud SQL before it fills (`database_disk_autoresize`, on), up to `database_disk_autoresize_limit_gb` (0: no limit) |
+| Query Insights | `database_query_insights`, on; no client addresses or application tags |
+| Maintenance | `maintenance_window_day` and `_hour`, Sunday 05:00 UTC, on `maintenance_update_track` `stable` |
+| Connections | TLS only, no authorized networks; the hub by IAM database authentication; a private IP with `database_private_ip` (deploy.md §2) |
 
 So the database can be put back to any second in the last seven days,
 or to any of the last fourteen daily backups. Check the backups exist:
