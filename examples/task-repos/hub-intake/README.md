@@ -28,10 +28,10 @@ task_home:
 writers:
   - who: [authenticated]
     may: create
-    kinds: [task]
+    kinds: [task, asset]             # asset: the new task's attachments/ (docs/task-repos.md §2.2)
     paths: ["tasks/**"]
     where: {state: proposed}
-    fields: [kind, schema, title, team, repo, base, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
+    fields: [kind, schema, title, team, context, state, submitter, submitted_via, origin, depends_on, implements, template, capabilities, constraints, labels, created_at, body]
     bind: {submitter: $pusher}
     note: Anyone signed in may add a new proposal, and nothing else.
   - who: ["team:hub#approver"]

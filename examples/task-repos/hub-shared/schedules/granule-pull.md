@@ -4,13 +4,11 @@ schema: grain/schedule@v1
 aka: ["sched-1"]
 title: Nightly granule pull
 template: ../templates/granule-pull.md
-inputs: {}
+inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
 daily: {at: "06:00"}
 overlap: skip
 enabled: true
-base: candidate
 team: hub
-repo: https://github.com/bwsalmon/grain.git
 fires_in: grain
 auto_approve_proposals: false
 created_at: "2026-10-02T18:30:00Z"

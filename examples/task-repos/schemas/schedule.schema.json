@@ -40,15 +40,11 @@
     "enabled": {
       "type": "boolean"
     },
-    "base": {
-      "type": "string"
-    },
+    "base": false,
     "team": {
       "type": "string"
     },
-    "repo": {
-      "type": "string"
-    },
+    "repo": false,
     "derived_from": {
       "$ref": "common.schema.json#/$defs/refString",
       "description": "Provenance only: the schedule this one was customised from, which the same root excludes (§6.2). A reference: it adds no name to any namespace and inherits nothing"
@@ -73,6 +69,10 @@
     "last_run_at": false,
     "moved_from": {
       "$ref": "common.schema.json#/$defs/movedFrom"
+    },
+    "context": {
+      "$ref": "common.schema.json#/$defs/context",
+      "description": "Entries added after the template's; no input: entries (§5.6)"
     }
   },
   "required": [

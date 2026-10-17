@@ -2,8 +2,8 @@
 kind: task
 schema: grain/task@v1
 title: Tidy the closing notes of this Grain's October runs
-repo: https://github.com/bwsalmon/silo.git
-base: main
+context:
+  - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write}
 state: approved
 submitter: "user:bsalmon@google.com"
 approved_by: "user:bsalmon@google.com"

@@ -6,8 +6,8 @@ title: "Draft release notes for changes since {{ since }}"
 inputs:
   - {name: since, type: string, required: true, label: The tag the notes start from}
 team: hub
-repo: https://git.example.com/hub/widgets.git
-base: main
+context:
+  - {ref: "https://git.example.com/hub/widgets.git@main", mode: write}   # its own repo only (§12.1)
 auto_merge: false
 created_at: "2026-10-16T18:05:00Z"
 ---

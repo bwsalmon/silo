@@ -35,6 +35,12 @@ puts claims on each task it dispatches. Each Grain is a Policy
 Enforcement Point. It takes those claims on trust and holds every task to
 a local policy that only its owner can edit (hub.md §1.2).
 
+![Silo signs a placement's attestation; the Grain verifies it against
+silo_issuer before it accepts the run.](img/claims-flow.png)
+
+grain's side of the claims is in
+[`pkg/daemon/`](grain-code:pkg/daemon/).
+
 ## Requirements
 
 ### Intake records its submitter from sign-on {#HS-1}

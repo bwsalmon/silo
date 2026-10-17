@@ -14,7 +14,18 @@
     "state": {"enum": ["accepted", "running", "waiting", "done", "failed", "refused", "cancelled", "superseded"]},
     "accepted_at": {"$ref": "common.schema.json#/$defs/time"},
     "started_at": {"$ref": "common.schema.json#/$defs/time"},
-    "refusal": {"type": "object", "properties": {"reason": {"type": "string"}, "at": {"type": "string"}}, "required": ["reason"]},
+    "refusal": {"type": "object", "properties": {"reason": {"type": "string"}, "at": {"type": "string"}, "entry": {"$ref": "#/$defs/entryRef"}}, "required": ["reason"]},
+    "waiting": {"type": "object", "description": "Why a run is held (§5.3); on: policy names the context entry the Grain's policy refused (§5.6)", "properties": {"on": {"enum": ["dependency", "human", "gate", "policy"]}, "entry": {"$ref": "#/$defs/entryRef"}, "reason": {"type": "string"}}, "required": ["on"]},
+    "context": {
+      "description": "What the Grain materialised in the sandbox, and what it skipped, written with the running commit (§5.6)",
+      "type": "object",
+      "properties": {
+        "entries": {"type": "array", "items": {"type": "object", "properties": {"ref": {"$ref": "common.schema.json#/$defs/refString"}, "via": {"$ref": "common.schema.json#/$defs/refString"}, "mode": {"enum": ["read", "write"]}, "rev": {"$ref": "common.schema.json#/$defs/sha"}, "path": {"type": "string"}, "branch": {"type": "string"}, "bytes": {"type": "integer"}}, "required": ["ref", "mode", "rev", "path"]}},
+        "skipped": {"type": "array", "items": {"type": "object", "properties": {"ref": {"type": "string"}, "via": {"$ref": "common.schema.json#/$defs/refString"}, "reason": {"type": "string"}}, "required": ["ref", "reason"]}},
+        "limits": {"type": "object"}
+      },
+      "required": ["entries"]
+    },
     "superseded": {
       "description": "Written by the Grain itself, the only writer of its root, once it sees that Silo withdrew the run's placement (§8.8). Until then readers treat the open run as fenced",
       "type": "object",
@@ -29,13 +40,8 @@
         "at": {"$ref": "common.schema.json#/$defs/time"},
         "summary": {"type": "string"},
         "change": {
-          "type": "object",
-          "properties": {
-            "url": {"type": "string"},
-            "branch": {"type": "string"},
-            "merge_commit": {"$ref": "common.schema.json#/$defs/sha"},
-            "commits": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/sha"}}
-          }
+          "description": "The change in the primary repo; a list, one per repo, when the run pushed to several write entries (§5.6)",
+          "oneOf": [{"$ref": "#/$defs/change"}, {"type": "array", "items": {"$ref": "#/$defs/change"}}]
         },
         "design_revs": {
           "type": "array",
@@ -46,10 +52,24 @@
       "required": ["outcome", "at"]
     }
   },
+  "$defs": {
+    "change": {
+      "type": "object",
+      "properties": {
+        "repo": {"type": "string"},
+        "url": {"type": "string"},
+        "branch": {"type": "string"},
+        "merge_commit": {"$ref": "common.schema.json#/$defs/sha"},
+        "commits": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/sha"}}
+      }
+    },
+    "entryRef": {"type": "object", "description": "A context entry, by its 1-based index in the task's context: and its reference", "properties": {"index": {"type": "integer", "minimum": 1}, "ref": {"type": "string"}, "mode": {"enum": ["read", "write"]}, "rule": {"type": "string"}}, "required": ["index", "ref"]}
+  },
   "required": ["kind", "schema", "task", "from", "grain", "state", "accepted_at"],
   "allOf": [
     {"if": {"properties": {"state": {"const": "refused"}}}, "then": {"required": ["refusal"]}},
     {"if": {"properties": {"state": {"const": "superseded"}}}, "then": {"required": ["superseded"]}},
+    {"if": {"properties": {"state": {"const": "waiting"}}}, "then": {"required": ["waiting"]}},
     {"if": {"properties": {"state": {"enum": ["done", "failed", "cancelled"]}}}, "then": {"required": ["closed"]}}
   ]
 }

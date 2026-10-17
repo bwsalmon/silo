@@ -5,8 +5,9 @@ moved_from:
   - "https://silo.example.com/git/hub/intake.git//tasks/2026-10-16-widget-schema-v2/task.md"
 title: Read every widget format version, and add widgets migrate
 team: hub
-repo: https://git.example.com/hub/widgets.git
-base: main
+context:
+  - {ref: "https://git.example.com/hub/widgets.git@main", mode: write}
+  - {ref: /docs/design/widgets.md}
 state: approved
 submitter: "user:bsalmon@google.com"
 submitted_via: ui
