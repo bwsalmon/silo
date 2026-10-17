@@ -630,7 +630,7 @@ node's connection, which is what revoking its token does.
 The node opens the first stream, and it carries JSON lines:
 
 ```
-node → hub  {"type":"hello","node":{"id":"ws-1","repos":["bwsalmon/silo"],"slots":2,"version":"..."}}
+node → hub  {"type":"hello","node":{"id":"ws-1","repos":["bwsalmon/silo"],"slots":2,"version":"...","features":["interactive"]}}
 hub → node  {"type":"welcome","owner":"alice@example.com","heartbeat_seconds":15}
             or {"type":"error","error":"registry: node belongs to another owner: ws-1"}, then close
 node → hub  {"type":"heartbeat","free":1}       every heartbeat_seconds
@@ -897,6 +897,9 @@ in. The web UI uses only these routes and §6.1's, as any client can.
   line.
 - **submitter:** the principal who submitted it, from the caller's
   sign-on (§5.1), never from the request body.
+- Optional **kind**: `"interactive"` for a session, a task that stays
+  open across many turns and takes its humans' messages (§6.5). Absent
+  for a task that runs to its result.
 - Optional **constraints**: node labels (`{"labels":{"zone":"eu"}}`,
   each of which the node must carry with that value), or a node ID
   (`{"node":"ws-1"}`).
@@ -963,7 +966,7 @@ The intake API (`tasks.API`) uses the directory's sign-on and
 visibility (§5.3):
 
 ```
-POST /v1/tasks {"repo" | "team", "title", "prompt", "constraints"}
+POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints"}
 GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
 GET  /v1/tasks/{id}
 POST /v1/tasks/{id}/cancel {"reason"}                        its submitter, a team admin or a hub admin
@@ -972,6 +975,8 @@ POST /v1/tasks/{id}/approve                                  a member of its tea
 POST /v1/tasks/{id}/reject {"reason"}                        the same: a proposal turned down
 GET  /v1/tasks/{id}/approvals                                the answers to its approval requests
 POST /v1/tasks/{id}/approvals/{request_id} {"decision","reason"}   a member of its team: allow or deny one
+GET  /v1/tasks/{id}/messages                                 the messages sent to an interactive task (§6.5)
+POST /v1/tasks/{id}/messages {"id","text","attachments"}     its submitter or a member of its team: send it one
 ```
 
 The list holds the caller's teams' tasks and the tasks they submitted.
@@ -994,7 +999,9 @@ each task:
 
 1. `ClaimFor(repos, ok)`: the task's repository, or every repository
    its team owns. `ok` passes over nodes that do not meet the
-   constraints, and nodes that refused the task. If no node has a free
+   constraints, nodes that refused the task, and, for an interactive
+   task, nodes whose `hello` did not list the `interactive` feature
+   (§6.5). If no node has a free
    slot, the task waits.
 2. `Admit` is checked again for the node's owner, against the
    repositories the task may run in, because the owner may have left
@@ -1051,6 +1058,12 @@ has not been sent because its stream ended first is sent after the
 node's next `accept` of the task, when it resumes it. None is sent
 after the task's cancel.
 
+A message to an interactive task (§6.5) is written down the same
+stream as `{"type":"message","task":{"id":...},"message":{...}}`, the
+same way: at once by the dispatcher holding the stream, told through
+the bus's `{"message":"<task>"}` notice, and otherwise after the
+node's next `accept`.
+
 The whole stream protocol, one JSON message per line:
 
 ```
@@ -1059,6 +1072,7 @@ hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}
             {"type":"attest","task":{"id":...},"requester_attestation":"<JWT>"}
             {"type":"cancel","task":{"id":...}}
             {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"...","reason":"..."}
+            {"type":"message","task":{"id":...},"message":{"id":"...","text":"...","attachments":[...],"sender":"...","sent_at":"..."}}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
@@ -1240,6 +1254,65 @@ attestation to `policy.ApplySiloClaims`, records it with
 files the body as above; that is grain's follow-up.
 
 
+### 6.5 Interactive sessions
+
+An **interactive** task (`"kind":"interactive"`) is a session with an
+agent, like a Grain's own chat tasks: it stays open across many turns,
+and ends only when a human cancels it (the UI's way to end a session)
+or its node closes it with `result`. Between turns its node does not
+send `result`. When its agent needs a human it sends `awaiting_reply`
+`{"state":"waiting","question":...}` (§7.1), and when it goes on,
+`{"state":"resumed","message_id":...}`.
+
+**Placement.** A Grain says it runs interactive tasks by listing
+`"interactive"` in its `hello`'s `features` (§4), kept with the node in
+the registry (`hub_nodes.features`). The dispatcher places an
+interactive task only on such a node, and a message is sent only for an
+interactive task, so a Grain that does not list the feature is never
+sent one. An interactive task waits in the queue while no such node is
+free.
+
+**Messages.** `POST /v1/tasks/{id}/messages {"id","text","attachments"}`
+sends the session a message. Who may post: the task's **submitter**,
+or a **member of the task's team** in either role, which is
+`directory.Access.Teams[team] != ""` (by `user:<email>` or through a
+group). A hub admin who is not in the team, and a team given only the
+repository's history, may watch the session (§7) but not post (403); a
+caller who may not see the task gets 404. The hub records the sender
+from the caller's sign-on, never from the body, and keeps the message
+in `tasks.task_messages` with the time it was sent.
+
+- **Delivery.** A message is written down the task's stream as
+  `message` (§6.2). One posted to a task that is `queued` or
+  `offered`, or `lost` (its node offline), is **queued**: kept, and
+  sent after the node's next `accept` of the task. One posted to a task
+  that is finished, still `proposed`, or not interactive is refused
+  with **409**. Delivery is at least once: a message is marked sent
+  once written, and a node may see it again after a resume, so the
+  Grain deduplicates by its `id`.
+- **Retries.** `id` names the message within the task: the client's,
+  or the hub's (`m-<hex>`) if it sends none. A post retried with the
+  same `id`, sender and text answers 200 with the message already kept,
+  and nothing is sent again; the same `id` with other words is 409.
+- **Attachments are references only.** The hub stores no code or file
+  content (§1), so it keeps no file a human uploads: an attachment is
+  `{"name","ref","media_type","size"}`, where `ref` is an `https` URL
+  or one of the task's own artifact refs, which the Grain resolves
+  under its own policy. At most 16, of 2 KiB each.
+- **In the conversation.** When the session takes a message in, the
+  Grain sends a `message` event naming its `id` (§7.1). The hub keeps
+  and broadcasts its own record of that message (text, attachments,
+  sender, time) in its place, and drops an echo of an `id` it never
+  sent for the task. A message so appears in the event stream as a
+  conversation turn where the session actually took it in, with the
+  sender the hub recorded; a message not yet taken in is listed by
+  `GET /v1/tasks/{id}/messages` with `delivered`.
+
+A proposal's submitter outside the team may post once the proposal is
+approved, but does not see the session's events (§7, §6.1). A
+message's `sender` is the hub's claim, as `approved_by` is, which the
+Grain takes on trust (§1.2).
+
 ## 7. Live events and privacy (built: `hub/live`)
 
 ### 7.1 Streaming up
@@ -1251,8 +1324,8 @@ added. The hub sorts each event by class:
 
 | Class | Examples | Stored by the hub | Broadcast live |
 | --- | --- | --- | --- |
-| Lifecycle | `status`, `result` (exit, reason), usage totals | yes | yes |
-| Conversation | chat turns, `approval_request`, assistant final text | yes | yes |
+| Lifecycle | `status`, `result` (exit, reason), usage totals, `awaiting_reply` | yes | yes |
+| Conversation | chat turns (`message`), `approval_request`, assistant final text | yes | yes |
 | Token stream | `transcript` assistant text and thinking deltas | no: an in-memory ring per task, for late joiners | yes |
 | Node-only (SILO_ONLY) | diffs, file contents, `tool_call` arguments and results, sandbox and tool logs | **never** | as a reference only |
 
@@ -1272,9 +1345,12 @@ As built (`hub/live`):
   start: an event at or below the task's last `seq` is a duplicate and
   is dropped. The node keeps a task's `seq` increasing across the
   sessions it runs for it.
-- **The classes.** `status`, `usage`, `resumable` and `result` are
-  lifecycle. `approval_request` is conversation, and a member of the
-task's team answers it through the hub (§6.1). A `transcript` item of
+- **The classes.** `status`, `usage`, `resumable`, `result` and
+  `awaiting_reply` are lifecycle. `approval_request` is conversation,
+  and a member of the task's team answers it through the hub (§6.1).
+  `message` is conversation: the hub keeps its own record of the
+  message the event names, not what the node sent, and rejects one
+  naming a message it never sent the task (§6.5). A `transcript` item of
   kind `text`, `thinking` or `error` is the token stream. Everything
   else is node-only: `tool_call`, transcript `tool_call` and
   `tool_result` items, `artifact`, any type the hub does not know, and

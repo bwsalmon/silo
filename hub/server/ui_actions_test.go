@@ -173,6 +173,19 @@ func TestWebUIActions(t *testing.T) {
 	ui(404, bob, "POST", "/v1/tasks/"+byBob+"/approvals/r-1", map[string]string{"decision": "allow"})
 	ui(200, bob, "GET", "/v1/tasks/"+byBob+"/approvals", nil)
 
+	// Sessions: starting one, and replying, its submitter or infra's
+	// members; it is queued, so the message is kept for its node.
+	session := file(201, bob, map[string]any{"team": "infra", "kind": "interactive", "prompt": "Pair with me."})
+	refused("POST", "/v1/tasks/"+session+"/messages", map[string]string{"text": "hi"})
+	ui(404, carol, "POST", "/v1/tasks/"+session+"/messages", map[string]string{"text": "hi"})
+	ui(403, root, "POST", "/v1/tasks/"+session+"/messages", map[string]string{"text": "hi"})
+	ui(201, alice, "POST", "/v1/tasks/"+session+"/messages", map[string]string{"id": "m-1", "text": "hi"})
+	ui(200, alice, "POST", "/v1/tasks/"+session+"/messages", map[string]string{"id": "m-1", "text": "hi"})
+	ui(409, bob, "POST", "/v1/tasks/"+byBob+"/messages", map[string]string{"text": "hi"})
+	if b := ui(200, bob, "GET", "/v1/tasks/"+session+"/messages", nil); !strings.Contains(string(b), `"sender":"alice@example.com"`) {
+		t.Errorf("messages: %s", b)
+	}
+
 	// Cancel and requeue: the submitter, a team admin or a hub admin.
 	refused("POST", "/v1/tasks/"+byBob+"/cancel", map[string]string{"reason": "x"})
 	refused("POST", "/v1/tasks/"+byBob+"/requeue", nil)
