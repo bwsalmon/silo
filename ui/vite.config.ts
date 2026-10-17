@@ -11,6 +11,11 @@
 // signs the caller in. The proxy also gives each request the hub's own
 // Origin, since the hub accepts a write only from its own origin
 // (identity.SameOrigin) and the browser's is the dev server's.
+//
+// The UI reaches the API only through the client SDK, sdk/ts, which it
+// builds from source as @silo/hub-sdk (tsconfig.json's paths say the
+// same to tsc).
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -20,6 +25,9 @@ const user = process.env.SILO_DEV_USER ?? 'dev@example.com';
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: { '@silo/hub-sdk': fileURLToPath(new URL('../sdk/ts/src/index.ts', import.meta.url)) },
+  },
   build: {
     outDir: '../hub/ui/static/app',
     emptyOutDir: true,
@@ -27,6 +35,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 1024,
   },
   server: {
+    fs: { allow: ['.', '../sdk/ts/src'] },
     proxy: {
       '/v1': { target: hub, changeOrigin: true, headers: { [header]: user, Origin: new URL(hub).origin } },
     },

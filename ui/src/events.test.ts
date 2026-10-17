@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { HubEvent } from './api';
-import { addEvent, streamURL } from './events';
+import { addEvent, type HubEvent } from './api';
 import { parseRoute, routePath } from './router';
 
 const ev = (seq: number): HubEvent => ({ v: 1, seq, time: '', type: 'status', task: 't-1' });
@@ -10,14 +9,6 @@ describe('addEvent', () => {
     let es: HubEvent[] = [];
     for (const s of [1, 3, 2, 3, 1, 5]) es = addEvent(es, ev(s));
     expect(es.map((e) => e.seq)).toEqual([1, 2, 3, 5]);
-  });
-});
-
-describe('streamURL', () => {
-  // A cursor in the URL would win over Last-Event-ID and replay the
-  // whole stream at every reconnect.
-  it('names no cursor', () => {
-    expect(streamURL('t/1')).toBe('/v1/tasks/t%2F1/events');
   });
 });
 

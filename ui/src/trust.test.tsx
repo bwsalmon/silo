@@ -108,7 +108,9 @@ describe('the task page’s view-through', () => {
   });
 });
 
-// The UI's own code names no storage API at all, and the built bundle
+// The UI's own code, and the client SDK it builds in from source
+// (sdk/ts/src, through vite.config.ts's alias), name no storage API at
+// all, and the built bundle
 // (when `npm run build` has made one) registers no service worker.
 describe('the bundle', () => {
   const storage = /\b(localStorage|sessionStorage|indexedDB|serviceWorker|caches\.)/;
@@ -120,6 +122,9 @@ describe('the bundle', () => {
       );
     const files = walk(__dirname);
     expect(files.length).toBeGreaterThan(5);
+    const sdk = walk(join(__dirname, '../../sdk/ts/src'));
+    expect(sdk.map((f) => f.split('/').pop())).toContain('client.ts');
+    files.push(...sdk);
     for (const f of files) expect([f, storage.test(readFileSync(f, 'utf8'))]).toEqual([f, false]);
   });
 

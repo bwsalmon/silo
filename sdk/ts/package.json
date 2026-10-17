@@ -1,0 +1,31 @@
+{
+  "name": "@silo/hub-sdk",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A TypeScript client for the Silo hub's public API (docs/hub.md), for browsers and Node. Not published yet: README.md, Publishing.",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

@@ -876,6 +876,8 @@ PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin; principal is 
 DELETE /v1/teams/{team}/members/{principal}            team admin
 PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history": true}]   hub admin; history also gives the team the repository's earlier tasks
 DELETE /v1/teams/{team}/repos/{owner}/{name}           team admin
+GET    /v1/teams/{team}/settings                       its members (§6.3)
+PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds"}   team admin (§6.3)
 GET    /v1/node-tokens                                 the caller's (all, for a hub admin)
 POST   /v1/node-tokens {"node"}                        mint one for the caller
 DELETE /v1/node-tokens/{id}                            its owner, or a hub admin
@@ -884,7 +886,10 @@ DELETE /v1/node-tokens/{id}                            its owner, or a hub admin
 `GET /v1/teams/{team}` was added for the web UI's team page
 ([ui.md](ui.md) §8), which would otherwise list every team to show one;
 like every other route, it answers 404 for a team the caller is not
-in. The web UI uses only these routes and §6.1's, as any client can.
+in. The web UI uses only these routes, §6.1's, `GET /v1/nodes` (§4.2)
+and §7's, as any client can, and calls them only through the
+TypeScript client SDK (`sdk/ts`, [ui.md](ui.md) §11), whose tests fail
+on a route this document does not name.
 
 ## 6. Task intake and federation (built: `hub/tasks`)
 
