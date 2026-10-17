@@ -88,7 +88,7 @@ They run in this order. Each passes, fails, or is skipped:
 | `refuse` | An offer of a `run` task in `SILO_CONFORMANCE_OUTSIDE_REPO` is refused: the hub excludes the node, and the Grain never accepts it. This is skipped when the Grain does not register for that repository (so the hub never offers it there) or `-outside-repo -` is given. |
 | `run` | A `run` task is accepted, with a `node_task`, and runs to the result `done`, with a `result` event streamed. |
 | `events` | That task's events arrive with strictly increasing `seq`, and include a `status`, an `artifact` and the `result`, ending with the `result`. |
-| `view` | The run's diff is streamed only by reference (an `artifact` event with `kind` `diff` and a `ref`). Viewing that ref through `GET /v1/tasks/{id}/artifacts?ref=` reaches the Grain on the view stream, which serves exactly the workload's diff, of the size the event gave. |
+| `view` | The run's diff, SILO_ONLY content ([hub.md](hub.md) §7.2), is streamed only by reference (an `artifact` event with `kind` `diff` and a `ref`). Viewing that ref through `GET /v1/tasks/{id}/artifacts?ref=` reaches the Grain on the view stream, which serves exactly the workload's diff, of the size the event gave. |
 | `capacity` | `slots` `hold` tasks all run at once. The Grain then reports `free` 0, and a further task is not run while the slots are full. |
 | `cancel` | Cancelling one held task is delivered, and its slot is freed: the waiting task runs. Cancelling the rest returns `free` to `slots`. |
 | `approve` | Optional, `approvals`. An `approve` task sends its `approval_request`. Answered `allow` it ends `done`; answered `deny`, `failed`. |
@@ -143,7 +143,7 @@ was wrong.
 The kit sees what the hub's public API shows, which brings some limits:
 
 - It cannot see what the Grain sent but the hub dropped. The hub keeps
-  only a reference for a node-only event whatever the line carried
+  only a reference for a node-only (SILO_ONLY) event whatever the line carried
   (hub-interface.md, the event stream). So a Grain that sends a diff's
   content inline is not caught, though its view of the ref must still
   serve the diff.
