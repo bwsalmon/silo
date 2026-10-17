@@ -42,7 +42,8 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `hub/notify` | The hub's wake-ups and event notices between its pods (hub.md §2.2.4): PostgreSQL `NOTIFY silo_hub`, listened for on a connection of each pod's own. |
 | `hub/server` | The hub as one HTTP server over one database (hub.md §2.1): every part above wired together, `/healthz` and `/readyz`, and a graceful shutdown that says goodbye to nodes. |
 | `hub/ui`, `ui/` | The hub's web UI ([`docs/ui.md`](docs/ui.md), stage U1): its React source in `ui/`, built into `hub/ui/static/app` and embedded by `hub/ui`, which serves it at `/`. Without a built bundle the hub embeds a placeholder page. |
-| `cmd/silo` | The `silo` command: `silo hub serve`, `silo hub migrate` (create the tables as the schema's owner and grant the role the hub serves as its rows), and `silo hub team` and `silo hub token` to bootstrap a hub's database. |
+| `hub/conformance` | The task-interface conformance kit ([`docs/conformance.md`](docs/conformance.md)): it runs a hub, drives a Grain under test through scripted scenarios over the hub's public API, and reports a verdict per scenario. Its conformance workloads are in `hub/conformance/workload`, and `hub/conformance/refgrain` is the reference fake Grain that passes it. |
+| `cmd/silo` | The `silo` command: `silo hub serve`, `silo hub migrate` (create the tables as the schema's owner and grant the role the hub serves as its rows), and `silo hub team` and `silo hub token` to bootstrap a hub's database, and `silo conformance` and `silo conformance grain`, the conformance kit and the reference Grain. |
 | `Dockerfile`, `deploy/` | The hub's image, its GKE manifests (`deploy/kubernetes/hub`) and terraform (`deploy/terraform/hub`), for GKE behind IAP: the runbook is [`docs/deploy.md`](docs/deploy.md). |
 | `events` | The schema of the events a node streams to the hub for each task (hub.md §7.1), copied from the retired runner's `old/events`. |
 | `internal/tunnel/mux` | The stream multiplexer the rendezvous carries, copied from grain's `pkg/tunnel/mux`. |
@@ -51,6 +52,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
 | `docs/deploy.md` | How to deploy the hub on GKE behind IAP, in `bsalmon-gke-dev`. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
+| [`docs/conformance.md`](docs/conformance.md) | The conformance kit: how to check that a Grain speaks the task interface, the scenarios, and the report. |
 | [`docs/grainfiles.md`](docs/grainfiles.md), [`docs/grainfiles-spec.md`](docs/grainfiles-spec.md) | Grainfiles: Grain's work as plain git in grain folders on ordinary forges. The design, and **The Grainfile Format**, its normative spec, with the schemas in `schemas/grainfiles/`, the `grainlint` validator in `tools/grainfiles/` (the `grainfiles` CI job) and the worked example in `examples/grainfiles/`. |
 | `docs/ui.md` | The hub's human web UI (hub.md §9, stage 2.6): the options, the chosen one, its stages, and how to run it locally (§7.1). |
 | [`docs/threat-model.md`](docs/threat-model.md) | The threat model of the Grain + Silo system: assets, actors, trust boundaries, threats, the numbered security invariants (`INV-`) that audits and security tests cite, and the audit plan. |
