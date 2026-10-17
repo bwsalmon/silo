@@ -122,8 +122,13 @@ with its messages as built in `hub/rendezvous` and `hub/tasks`:
  +----------------------------------------------------------------------+
 ```
 
-The **store** is a database: SQLite for one replica, PostgreSQL for
-more. It holds teams, the backlog and the event metadata. The
+The **store** is a database: PostgreSQL on Cloud SQL in every
+deployment, one replica or several, for its managed backups,
+point-in-time recovery, on-demand snapshots and storage that grows
+(docs/deploy.md, docs/hub-operations.md). SQLite stands in for it only
+in local development and tests, and `silo hub serve` refuses it
+otherwise (`-dev`, §2.1). It holds teams, the backlog and the event
+metadata. The
 **registry** is in memory, on each pod, for the connections that pod
 holds, and published to the database for the other pods (§2.2.2).
 Everything but a node's owner is restated by each node when the node
@@ -139,12 +144,16 @@ balancer's backend service for humans (§4.1, §5.1).
 `silo hub serve` (`hub/server`) runs every part above as one HTTP
 server over one database: the directory, the backlog and its
 dispatcher, and the event store, each in its own tables of the same
-PostgreSQL database (SQLite only for local development), with the
+PostgreSQL database, on Cloud SQL, with the
 rendezvous in memory and the registry in memory and published to the
 database (§2.2.2). It is configured by flags or their
 `SILO_HUB_*` environment variables, and needs exactly one human
 sign-on: an IAP audience, an OIDC issuer, or, for development only, a
-header taken on trust. `/healthz` is liveness; `/readyz` answers 200
+header taken on trust. A `sqlite:` database is for local development
+and tests only: `silo hub serve` refuses it unless `-dev`
+(`SILO_HUB_DEV`) or the development header is set, and refuses it on
+Kubernetes whatever is set (`server.CheckDatabase`), as it refuses the
+header there (`server.CheckDevSignOn`). `/healthz` is liveness; `/readyz` answers 200
 while the database answers and the hub is not shutting down.
 
 On SIGTERM the hub turns unready, sends each node a `goodbye` on its
@@ -264,8 +273,9 @@ before 689c3a2):
   connection every two seconds and gives the lease up on the first ping
   that fails or takes longer than two seconds; PostgreSQL frees the lock
   when the holder's session ends, which the connection's TCP keepalive
-  makes about ten seconds after the holder is cut off. On SQLite, which
-  is one process, the lease is taken at once.
+  makes about ten seconds after the holder is cut off. On SQLite
+  (development and tests only), which is one process, the lease is
+  taken at once.
 - **A term** is one hold of the lease. Taking it bumps the lease's
   epoch, a row in `hub_leases` (name, epoch, holder, taken_at), so the
   terms are numbered and the holder is visible in the database. The
@@ -367,8 +377,8 @@ Each rule of §3 moves into a conditional statement:
   every heartbeat interval, which they already are. A write that fails
   is logged: a registration is then not refused but dropped, so the
   node retries, and a heartbeat's is retried by the next one.
-- **SQLite**, one process, uses the same tables, so ownership outlives
-  a restart there too.
+- **SQLite** (development and tests only), one process, uses the same
+  tables, so ownership outlives a restart there too.
 
 The alternative, gossiping registries between pods, was rejected: the
 database is already shared, consistent and the thing every pod must
@@ -440,8 +450,8 @@ at the next five-second refill anyway). A notice lost while the
 listening connection was down costs at most one `Retry` (30s): the
 dispatcher's pass still runs on its timer, and a reconnecting listener
 wakes the dispatcher once and refills the mirror. A notice that cannot
-be sent is logged, and costs the same. SQLite, one process, keeps the
-in-memory signals.
+be sent is logged, and costs the same. SQLite (development and tests
+only), one process, keeps the in-memory signals.
 
 **Sending.** No caller waits on the database for a wake-up, a `node`
 or an `event` notice: each is queued (`Bus.Post`), and one goroutine a
@@ -779,8 +789,8 @@ on later for nodes that run on GCP, without changing (a).
 
 ### 5.3 Teams
 
-The store (`directory.Store`, SQLite for one replica, PostgreSQL for
-more) holds:
+The store (`directory.Store`: PostgreSQL; SQLite in development and
+tests) holds:
 
 - `teams(id, name)`.
 - `team_members(team, principal, role: member | admin)`. A principal
@@ -974,8 +984,8 @@ written to the node down the task's stream as an `approve` message
 (§6.2), as a cancel is. A Grain that does not support it never sends
 `approval_request`.
 
-The store (`tasks.Store`: SQLite for one replica, PostgreSQL for more,
-and possibly the same database as the directory) keeps the task, its
+The store (`tasks.Store`: PostgreSQL, the same database as the
+directory; SQLite in development and tests) keeps the task, its
 state, the node it was placed on, the node's own ID for the task, the
 reason for its state, the nodes that refused it, and the number of
 offers made. It never stores a checkout, a diff or a log. Each update

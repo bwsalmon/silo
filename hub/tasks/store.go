@@ -25,8 +25,8 @@ import (
 // (docs/test-runs/2026-10-16-hub-load.md).
 const maxConns = 16
 
-// Store is the backlog: SQLite for one hub replica, PostgreSQL for
-// several, as the team directory's store is.
+// Store is the backlog: PostgreSQL, as the team directory's store is
+// (SQLite only in local development and tests).
 type Store struct {
 	db       *sql.DB
 	postgres bool

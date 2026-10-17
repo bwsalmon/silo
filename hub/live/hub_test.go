@@ -23,6 +23,7 @@ import (
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
+	"github.com/bwsalmon/silo/internal/pgtest"
 	"github.com/bwsalmon/silo/internal/testlog"
 	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
@@ -860,8 +861,12 @@ func TestViewOnlyListedRefs(t *testing.T) {
 
 // TestViewListedBeforeRestart is a ref listed before the hub restarted,
 // its ring gone with it: still viewable, and an unlisted one still not.
+// On PostgreSQL, the production store, and on SQLite.
 func TestViewListedBeforeRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.db")
+	eachURL(t, "sqlite:"+filepath.Join(t.TempDir(), "events.db"), testViewListedBeforeRestart)
+}
+
+func testViewListedBeforeRestart(t *testing.T, path string) {
 	ctx := context.Background()
 	store, err := Open(ctx, path)
 	check(t, err)
@@ -887,9 +892,22 @@ func TestViewListedBeforeRestart(t *testing.T) {
 }
 
 // TestRefsBound is the bound on a task's kept refs: the newest MaxRefs.
+// On PostgreSQL, the production store, and on SQLite.
 func TestRefsBound(t *testing.T) {
+	eachURL(t, "sqlite::memory:", testRefsBound)
+}
+
+// eachURL runs f against a fresh PostgreSQL database (internal/pgtest:
+// skipped where its binaries are not installed, and failed then in CI,
+// which sets SILO_REQUIRE_POSTGRES), then against sqlite.
+func eachURL(t *testing.T, sqlite string, f func(t *testing.T, url string)) {
+	t.Run("postgres", func(t *testing.T) { f(t, pgtest.Start(t).URL) })
+	t.Run("sqlite", func(t *testing.T) { f(t, sqlite) })
+}
+
+func testRefsBound(t *testing.T, url string) {
 	ctx := context.Background()
-	store, err := Open(ctx, "sqlite::memory:")
+	store, err := Open(ctx, url)
 	check(t, err)
 	defer store.Close()
 	for i := 1; i <= MaxRefs+2; i++ {

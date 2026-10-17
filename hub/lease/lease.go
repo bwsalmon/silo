@@ -12,8 +12,8 @@
 // every Retry, the holder pings its connection every two seconds and
 // gives the lease up on the first ping that fails or takes longer than
 // two seconds, and PostgreSQL frees the lock when the holder's session
-// ends. On SQLite, which is one process, a lease is a semaphore in the
-// Store.
+// ends. On SQLite (local development and tests only), which is one
+// process, a lease is a semaphore in the Store.
 //
 // Each hold of the lease is a term. Taking it bumps the lease's epoch,
 // a row in hub_leases that also names the holder, so terms are

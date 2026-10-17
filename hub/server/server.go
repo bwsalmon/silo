@@ -233,6 +233,33 @@ func (c *Config) auth() (identity.Authenticator, http.Handler, []string, error) 
 	}
 }
 
+// IsPostgres reports whether url names a PostgreSQL database, as the
+// stores read it: anything else is SQLite.
+func IsPostgres(database string) bool {
+	return strings.HasPrefix(database, "postgres://") || strings.HasPrefix(database, "postgresql://")
+}
+
+// CheckDatabase refuses a SQLite Database outside local development
+// and tests: the hub's production store is always PostgreSQL on Cloud
+// SQL (docs/deploy.md), for its backups, point-in-time recovery and
+// storage that grows. `silo hub serve` checks it before serving. SQLite
+// is allowed only when dev is set (-dev, or the development user
+// header), and never on Kubernetes, read through getenv as
+// CheckDevSignOn does, so that a production pod cannot start on a disk
+// of its own whatever its flags say.
+func CheckDatabase(database string, dev bool, getenv func(string) string) error {
+	if IsPostgres(database) {
+		return nil
+	}
+	if getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return fmt.Errorf("server: database %q is SQLite, which is refused on Kubernetes: the hub's production store is PostgreSQL on Cloud SQL (docs/deploy.md); give -database postgres://...", database)
+	}
+	if !dev {
+		return fmt.Errorf("server: database %q is SQLite, which is for local development and tests only: give -database postgres://..., or pass -dev to run on SQLite locally", database)
+	}
+	return nil
+}
+
 // CheckDevSignOn refuses a DevUserHeader sign-on where the hub is
 // deployed for real: on Kubernetes (docs/deploy.md), which sets
 // KUBERNETES_SERVICE_HOST in every pod, read through getenv. `silo hub
@@ -296,8 +323,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(cfg.Database, "postgres://") && !strings.HasPrefix(cfg.Database, "postgresql://") {
-		cfg.logf("hub: using SQLite (%s): for local development only", cfg.Database)
+	if !IsPostgres(cfg.Database) {
+		cfg.logf("hub: using SQLite (%s): for local development and tests only", cfg.Database)
 	}
 	h := &Hub{cfg: cfg}
 	h.metrics = newMetrics(h)

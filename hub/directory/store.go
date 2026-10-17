@@ -1,7 +1,8 @@
 // Package directory is the Silo hub's team directory (docs/hub.md §5):
 // which teams exist, who is in each, which team owns each repository,
-// and the node tokens the hub has minted. It lives in a store, SQLite
-// for one replica and PostgreSQL for several, and it decides:
+// and the node tokens the hub has minted. It lives in a store,
+// PostgreSQL (on Cloud SQL, in every deployment; SQLite only in local
+// development and tests), and it decides:
 //
 //   - whom a node's token proves it to be (Authenticate, for
 //     rendezvous.Server.Authenticate);

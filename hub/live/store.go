@@ -47,8 +47,8 @@ const MaxRefs = 4096
 // connection.
 const maxConns = 32
 
-// Store is the event store: SQLite for one hub replica, PostgreSQL for
-// several, as the backlog is. It holds events as the hub classified
+// Store is the event store: PostgreSQL, as the backlog is (SQLite only
+// in local development and tests). It holds events as the hub classified
 // them (Classify), one row per event.
 type Store struct {
 	db       *sql.DB

@@ -54,6 +54,42 @@ run "defaults" {
     condition     = google_sql_database_instance.hub.settings[0].availability_type == "REGIONAL"
     error_message = "the database has a standby by default"
   }
+  assert {
+    condition     = google_sql_database_instance.hub.deletion_protection && google_sql_database_instance.hub.settings[0].deletion_protection_enabled
+    error_message = "the database is protected from deletion by default"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].disk_autoresize && google_sql_database_instance.hub.settings[0].disk_autoresize_limit == 0
+    error_message = "the database's disk grows by itself, without a limit, by default"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].insights_config[0].query_insights_enabled && !google_sql_database_instance.hub.settings[0].insights_config[0].record_client_address
+    error_message = "Query Insights is on, without client addresses"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].maintenance_window[0].day == 7 && google_sql_database_instance.hub.settings[0].maintenance_window[0].hour == 5
+    error_message = "maintenance is on Sundays at 05:00 UTC by default"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].ip_configuration[0].ssl_mode == "ENCRYPTED_ONLY" && length(google_sql_database_instance.hub.settings[0].ip_configuration[0].authorized_networks) == 0
+    error_message = "the database takes only encrypted connections, from no authorized network"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].ip_configuration[0].ipv4_enabled && google_sql_database_instance.hub.settings[0].ip_configuration[0].private_network == null && length(google_service_networking_connection.private_ip) == 0
+    error_message = "the database has a public IP alone by default, and no peering is made"
+  }
+  assert {
+    condition     = one([for f in google_sql_database_instance.hub.settings[0].database_flags : f.value if f.name == "cloudsql.iam_authentication"]) == "on"
+    error_message = "the hub logs in with IAM database authentication"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].edition == "ENTERPRISE"
+    error_message = "the instance is Enterprise, which the db-custom tier needs"
+  }
+  assert {
+    condition     = length(google_project_iam_custom_role.backup) == 0 && length(google_project_iam_member.backup) == 0
+    error_message = "no backup operators, no backup role"
+  }
 
   assert {
     condition     = length(google_iap_web_iam_member.access) == 0 && length(google_iap_web_backend_service_iam_member.access) == 0
@@ -366,4 +402,124 @@ run "bad_availability_type" {
   }
 
   expect_failures = [var.database_availability_type]
+}
+
+run "disk_limit_and_maintenance" {
+  command = apply
+
+  variables {
+    database_disk_size_gb             = 20
+    database_disk_autoresize_limit_gb = 200
+    maintenance_window_day            = 2
+    maintenance_window_hour           = 9
+    maintenance_update_track          = "canary"
+    database_query_insights           = false
+  }
+
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].disk_autoresize_limit == 200
+    error_message = "the disk grows to database_disk_autoresize_limit_gb at most"
+  }
+  # The instance was made by an earlier run, at 10 GB: terraform does
+  # not change the size of a disk autoresize may have grown.
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].disk_size == 10
+    error_message = "terraform leaves the size of an existing instance's disk alone"
+  }
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].maintenance_window[0].day == 2 && google_sql_database_instance.hub.settings[0].maintenance_window[0].hour == 9 && google_sql_database_instance.hub.settings[0].maintenance_window[0].update_track == "canary"
+    error_message = "the maintenance window follows its variables"
+  }
+  assert {
+    condition     = !google_sql_database_instance.hub.settings[0].insights_config[0].query_insights_enabled
+    error_message = "database_query_insights = false turns Query Insights off"
+  }
+}
+
+run "disk_limit_below_size" {
+  command = plan
+
+  variables {
+    database_disk_size_gb             = 50
+    database_disk_autoresize_limit_gb = 20
+  }
+
+  expect_failures = [google_sql_database_instance.hub]
+}
+
+run "bad_maintenance_window" {
+  command = plan
+
+  variables {
+    maintenance_window_day   = 0
+    maintenance_window_hour  = 24
+    maintenance_update_track = "preview"
+  }
+
+  expect_failures = [var.maintenance_window_day, var.maintenance_window_hour, var.maintenance_update_track]
+}
+
+run "private_ip" {
+  command = apply
+
+  variables {
+    database_private_ip      = true
+    database_public_ip       = false
+    database_private_network = "projects/bsalmon-gke-dev/global/networks/default"
+  }
+
+  assert {
+    condition     = google_sql_database_instance.hub.settings[0].ip_configuration[0].private_network == "projects/bsalmon-gke-dev/global/networks/default" && !google_sql_database_instance.hub.settings[0].ip_configuration[0].ipv4_enabled
+    error_message = "database_private_ip puts the instance on the VPC, and database_public_ip = false takes its public IP away"
+  }
+  assert {
+    condition     = google_service_networking_connection.private_ip[0].network == "projects/bsalmon-gke-dev/global/networks/default" && google_compute_global_address.private_ip[0].purpose == "VPC_PEERING"
+    error_message = "the VPC's private services access is made"
+  }
+}
+
+run "private_ip_existing_peering" {
+  command = plan
+
+  variables {
+    database_private_ip         = true
+    database_private_ip_peering = false
+    database_private_network    = "projects/bsalmon-gke-dev/global/networks/default"
+  }
+
+  assert {
+    condition     = length(google_service_networking_connection.private_ip) == 0 && length(google_compute_global_address.private_ip) == 0
+    error_message = "database_private_ip_peering = false uses the VPC's peering as it is"
+  }
+}
+
+run "no_address" {
+  command = plan
+
+  variables {
+    database_public_ip = false
+  }
+
+  expect_failures = [google_sql_database_instance.hub]
+}
+
+run "backup_operators" {
+  command = apply
+
+  variables {
+    backup_operators = ["group:silo-oncall@example.com"]
+  }
+
+  assert {
+    condition     = toset(google_project_iam_custom_role.backup[0].permissions) == toset(["cloudsql.backupRuns.create", "cloudsql.backupRuns.get", "cloudsql.backupRuns.list", "cloudsql.instances.get"])
+    error_message = "the backup role may take, list and read backups, and nothing else"
+  }
+  assert {
+    condition     = google_project_iam_member.backup["group:silo-oncall@example.com"].role == google_project_iam_custom_role.backup[0].name
+    error_message = "backup_operators are granted the backup role"
+  }
+  assert {
+    condition     = strcontains(google_project_iam_member.backup["group:silo-oncall@example.com"].condition[0].expression, "projects/bsalmon-gke-dev/instances/silo-hub")
+    error_message = "the backup role is granted on the hub's instance alone"
+  }
 }

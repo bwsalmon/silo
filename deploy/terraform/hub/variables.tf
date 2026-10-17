@@ -69,13 +69,115 @@ variable "database_tier" {
 }
 
 variable "database_availability_type" {
-  description = "REGIONAL (a standby in another zone, failover in about a minute, at about twice the cost) or ZONAL (no standby: a zone's failure is a restore by hand, for a development hub). docs/hub.md §2.2."
+  description = "REGIONAL (a standby in another zone and automatic failover in about a minute, at about twice the instance's and disk's cost: the standby is billed as a second instance) or ZONAL (no standby: a zone's failure is a restore by hand, for a development hub). docs/hub.md §2.2."
   type        = string
   default     = "REGIONAL"
   validation {
     condition     = contains(["ZONAL", "REGIONAL"], var.database_availability_type)
     error_message = "database_availability_type must be ZONAL or REGIONAL."
   }
+}
+
+variable "database_edition" {
+  description = "The Cloud SQL edition. ENTERPRISE takes the db-custom tiers database_tier names; ENTERPRISE_PLUS needs a db-perf-optimized-N-* tier and allows up to 35 days of point-in-time recovery."
+  type        = string
+  default     = "ENTERPRISE"
+  validation {
+    condition     = contains(["ENTERPRISE", "ENTERPRISE_PLUS"], var.database_edition)
+    error_message = "database_edition must be ENTERPRISE or ENTERPRISE_PLUS."
+  }
+}
+
+variable "database_disk_size_gb" {
+  description = "The database disk's size when the instance is made, in GB (SSD). With database_disk_autoresize it then grows by itself, and terraform ignores the size it has grown to."
+  type        = number
+  default     = 10
+  validation {
+    condition     = var.database_disk_size_gb >= 10
+    error_message = "database_disk_size_gb must be at least 10."
+  }
+}
+
+variable "database_disk_autoresize" {
+  description = "Whether Cloud SQL grows the database disk before it fills. Off, a full disk stops the hub's writes until it is grown by hand."
+  type        = bool
+  default     = true
+}
+
+variable "database_disk_autoresize_limit_gb" {
+  description = "The size, in GB, database_disk_autoresize grows the disk to at most; 0 is no limit. A disk never shrinks, so a limit bounds what a runaway table can cost."
+  type        = number
+  default     = 0
+  validation {
+    condition     = var.database_disk_autoresize_limit_gb >= 0 && floor(var.database_disk_autoresize_limit_gb) == var.database_disk_autoresize_limit_gb
+    error_message = "database_disk_autoresize_limit_gb must be a whole number of GB, or 0 for no limit."
+  }
+}
+
+variable "database_query_insights" {
+  description = "Whether Query Insights records each query's load, latency and plan (no client addresses, no application tags)."
+  type        = bool
+  default     = true
+}
+
+variable "database_public_ip" {
+  description = "Whether the instance has a public IP. It has no authorized networks, so only the Cloud SQL Auth Proxy, authorized by IAM, reaches it there. Unset it only with database_private_ip, and with the proxy given --private-ip (docs/deploy.md)."
+  type        = bool
+  default     = true
+}
+
+variable "database_private_ip" {
+  description = "Whether the instance also has a private IP on the cluster's VPC (database_private_network), through private services access. Off by default: see database_private_ip_peering."
+  type        = bool
+  default     = false
+}
+
+variable "database_private_network" {
+  description = "The VPC, projects/PROJECT/global/networks/NAME, the private IP is on; empty is the cluster's own."
+  type        = string
+  default     = ""
+}
+
+variable "database_private_ip_peering" {
+  description = "Whether to make the VPC's private services access (a reserved /20 and its peering to servicenetworking.googleapis.com) for database_private_ip. A VPC has one such peering, shared with every other service on it, and making it replaces the ranges it already has: false where the VPC has it already."
+  type        = bool
+  default     = true
+}
+
+variable "maintenance_window_day" {
+  description = "The day Cloud SQL may restart the instance for its updates: 1 (Monday) to 7 (Sunday)."
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.maintenance_window_day >= 1 && var.maintenance_window_day <= 7
+    error_message = "maintenance_window_day must be from 1 (Monday) to 7 (Sunday)."
+  }
+}
+
+variable "maintenance_window_hour" {
+  description = "The hour, UTC (0 to 23), of maintenance_window_day in which Cloud SQL may restart the instance. Away from backup_start_time."
+  type        = number
+  default     = 5
+  validation {
+    condition     = var.maintenance_window_hour >= 0 && var.maintenance_window_hour <= 23 && floor(var.maintenance_window_hour) == var.maintenance_window_hour
+    error_message = "maintenance_window_hour must be a whole hour from 0 to 23."
+  }
+}
+
+variable "maintenance_update_track" {
+  description = "When in Cloud SQL's rollout of an update the instance takes it: canary (early, for a development hub), stable, or week5 (last)."
+  type        = string
+  default     = "stable"
+  validation {
+    condition     = contains(["canary", "stable", "week5"], var.maintenance_update_track)
+    error_message = "maintenance_update_track must be canary, stable or week5."
+  }
+}
+
+variable "backup_operators" {
+  description = "Who may take, list and read on-demand backups of the hub's instance, as before a schema migration (docs/deploy.md): user:, group: or serviceAccount: members, granted a custom role of exactly that on the hub's instance alone. Empty makes no role; a project owner or roles/cloudsql.editor can take them anyway."
+  type        = list(string)
+  default     = []
 }
 
 variable "database_version" {
@@ -143,7 +245,7 @@ variable "monitoring" {
 }
 
 variable "deletion_protection" {
-  description = "Whether the Cloud SQL instance is protected from terraform destroy."
+  description = "Whether the Cloud SQL instance is protected from deletion, by terraform and by Cloud SQL itself. On for every hub whose data matters; the instance's automated backups go with it."
   type        = bool
   default     = true
 }

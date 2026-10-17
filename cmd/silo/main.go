@@ -89,6 +89,13 @@ func env(name, def string) string {
 	return def
 }
 
+// envBool is the environment's boolean value for name, false when it
+// is unset or not a boolean.
+func envBool(name string) bool {
+	b, _ := strconv.ParseBool(os.Getenv(name))
+	return b
+}
+
 // list splits a comma-separated list, dropping empty entries.
 func list(s string) []string {
 	var out []string
@@ -172,6 +179,8 @@ func serve(args []string) error {
 	issuer := fs.String("oidc-issuer", env("SILO_HUB_OIDC_ISSUER", ""), "sign humans in with OIDC: the provider's issuer URL [SILO_HUB_OIDC_ISSUER]")
 	clientID := fs.String("oidc-client-id", env("SILO_HUB_OIDC_CLIENT_ID", ""), "the OIDC client ID [SILO_HUB_OIDC_CLIENT_ID]")
 	redirect := fs.String("oidc-redirect-url", env("SILO_HUB_OIDC_REDIRECT_URL", ""), "the hub's OIDC callback URL [SILO_HUB_OIDC_REDIRECT_URL]")
+	dev := fs.Bool("dev", envBool("SILO_HUB_DEV"),
+		"local development and tests only: allow a sqlite: -database, which is refused otherwise and always on Kubernetes; -dev-user-header implies it [SILO_HUB_DEV]")
 	devHeader := fs.String("dev-user-header", env("SILO_HUB_DEV_USER_HEADER", ""),
 		"INSECURE, local development only: take the caller's email from this header, unverified [SILO_HUB_DEV_USER_HEADER]")
 	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, user:EMAIL or group:NAME [SILO_HUB_ADMINS]")
@@ -197,7 +206,13 @@ func serve(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *db == "" {
+		return errors.New("silo hub serve: -database is required: postgres://... (sqlite:PATH with -dev, for local development)")
+	}
 	if err := server.CheckDevSignOn(*devHeader, os.Getenv); err != nil {
+		return err
+	}
+	if err := server.CheckDatabase(*db, *dev || *devHeader != "", os.Getenv); err != nil {
 		return err
 	}
 	var pems [][]byte
