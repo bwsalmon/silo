@@ -6,8 +6,8 @@
   "properties": {
     "kind": {"const": "ref"},
     "schema": {"const": "grain/ref@v1"},
-    "to": {"$ref": "common.schema.json#/$defs/refString", "description": "The task, wherever it lives (an intake, a Grain repo, or a code repo's grain folder); must resolve, following tombstones, when pushed to a Silo-hosted repo. With fired_at, a schedule instead"},
-    "fired_at": {"$ref": "common.schema.json#/$defs/time", "description": "An inline firing (§6.2): to names the schedule, and the task is the schedule rendered for this firing; no task file is written"},
+    "to": {"$ref": "common.schema.json#/$defs/refString", "description": "The task, wherever it lives (an intake, a Grain repo, or a code repo's grain folder); must resolve, following tombstones, when pushed to a Silo-hosted repo. With fired_at, a trigger instead"},
+    "fired_at": {"$ref": "common.schema.json#/$defs/time", "description": "An inline firing (§6.2): to names the trigger, and the task is the trigger rendered for this firing; no task file is written"},
     "spec_rev": {"$ref": "common.schema.json#/$defs/sha", "description": "The commit of the task's repo the placement read; the attestation's spec_digest is over the task at this commit"},
     "rank": {"$ref": "common.schema.json#/$defs/rank"},
     "priority": {"$ref": "common.schema.json#/$defs/priority"},

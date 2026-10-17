@@ -22,8 +22,13 @@ This is a reviewer's aid, not the implementation. It:
   references to one task, and no reference outlives its task's close;
 - checks execution records: at most one open run per task;
 - checks code repos' grain folders: a task there came from an intake
-  (moved_from) and is not a scheduled firing, and a template there carries
-  no reads, writes, grants or target;
+  (moved_from) and is not a trigger's firing, and a template there carries
+  no reads, writes, grants or target; a gate there names no other repos,
+  and a workflow trigger's workflow exists in the same repo;
+- checks triggers and gates (§6.2, §6.3) by their schemas: a trigger
+  never carries a gate's keys nor a gate a trigger's, and a workflow
+  trigger fires in a Grain; and that the example Grains, which include
+  triggers only, have no gate in their namespaces;
 - checks context: entries (§5.6): write only on a repo or folder at a
   branch, depth only on files, input: only in templates, no overlapping
   sandbox paths, and, in a code repo, only that repo; prints each task's
@@ -241,13 +246,13 @@ def edges(fm):
             out.append((field, value, kind, pinned))
 
     kind = fm["kind"]
-    for e in (fm.get("context") or []) if kind in ("task", "template", "schedule") else []:
+    for e in context_of(fm) if kind in ("task", "template", "trigger") else []:
         e = entry(e)
         if e.get("ref"):
             add("context", e["ref"], "capability" if e["mode"] == "use" else None)
     if kind == "task":
         add("template", fm.get("template"), "template")
-        add("schedule", fm.get("schedule"), "schedule")
+        add("trigger", fm.get("trigger"), "trigger")
         for r in fm.get("depends_on") or []:
             add("depends_on", r, "task")
         for r in fm.get("implements") or []:
@@ -255,7 +260,7 @@ def edges(fm):
         add("supersedes", fm.get("supersedes"), "task")
         add("filed_by.run", (fm.get("filed_by") or {}).get("run"), "run")
     elif kind == "ref":
-        add("to", fm.get("to"), "schedule" if fm.get("fired_at") else "task")
+        add("to", fm.get("to"), "trigger" if fm.get("fired_at") else "task")
         add("previous", fm.get("previous"), "run")
     elif kind == "run":
         add("task", fm.get("task"), "task")
@@ -275,8 +280,18 @@ def edges(fm):
             add("attachments", r, ASSET)
     elif kind == "asset":
         add("asset", fm.get("asset"), ASSET)
-    elif kind == "schedule":
-        add("template", fm.get("template"), "template")
+    elif kind == "trigger":
+        fires = fm.get("fires") or {}
+        add("fires.template", fires.get("template"), "template")
+        add("fires.review.template", (fires.get("review") or {}).get("template"), "template")
+        add("derived_from", fm.get("derived_from"), "trigger")
+        for r in ((fm.get("on") or {}).get("design-change") or {}).get("designs") or []:
+            if not r.endswith("/"):
+                add("on.design-change.designs", r, "design")
+    elif kind == "gate":
+        req = fm.get("requires") or {}
+        for k in ("security_review", "second_review"):
+            add(f"requires.{k}.template", (req.get(k) or {}).get("template"), "template")
     elif kind == "include":
         add("target", fm.get("target"))
     elif kind == "capability":
@@ -284,8 +299,6 @@ def edges(fm):
     elif kind == "exclude":
         for r in fm.get("names") or []:
             add("names", r, pinned=True)  # may name what is not there (yet)
-    elif kind == "schedule":
-        add("derived_from", fm.get("derived_from"), "schedule")
     elif kind == "repo":
         for lane in (fm.get("lanes") or {}).get("order") or []:
             add("lanes", lane["lane"])
@@ -295,6 +308,13 @@ def edges(fm):
         for r in fm.get("supersedes") or []:
             add("supersedes", r, "design")
     return out
+
+
+def context_of(fm):
+    """A task's or template's context:, or a trigger's fires.context."""
+    if fm["kind"] == "trigger":
+        return (fm.get("fires") or {}).get("context") or []
+    return fm.get("context") or []
 
 
 def entry(e):
@@ -408,12 +428,12 @@ def materialise(objs, repo, path, fm):
 
 
 def check_context(objs, repo, path, fm, report):
-    """A task's, template's or schedule's context: entries (§5.6)."""
+    """A task's, template's or trigger's context: entries (§5.6)."""
     kind = fm["kind"]
     gov = governor(repo, path)
     code = bool(gov) and gov[2].get("role") == "code"
     inputs = {i["name"]: i for i in fm.get("inputs") or []}
-    entries = [entry(e) for e in fm.get("context") or []]
+    entries = [entry(e) for e in context_of(fm)]
     if len(entries) > CONTEXT_LIMITS["entries"]:
         err(f"{repo}/{path}: more than {CONTEXT_LIMITS['entries']} context entries")
     own = next(u for u, d in HOSTED.items() if d == repo)
@@ -836,8 +856,8 @@ def main():
             folder = posixpath.join(home, (th.get("path", "tasks/") if isinstance(th, dict) else "tasks/"))
             if not path.startswith(folder):
                 err(f"{repo}/{path}: a task outside {folder}, the folder task_home names")
-            if fm.get("schedule"):
-                err(f"{repo}/{path}: a scheduled firing in a code repo; firings live in an intake")
+            if fm.get("trigger") or fm.get("schedule"):
+                err(f"{repo}/{path}: a trigger's firing in a code repo; firings live in an intake or a Grain root")
             homes = [canonical(repo, path, r)[0] for r in fm.get("moved_from") or []]
             if not any(h and split(HERE / h / "README.md")[0].get("role") == "intake" for h in homes):
                 err(f"{repo}/{path}: a task in a code repo with no intake in moved_from; Silo will not place it")
@@ -845,11 +865,16 @@ def main():
             for k in ("reads", "writes", "grants", "target"):
                 if k in fm:
                     err(f"{repo}/{path}: a code repo's template may not carry {k}")
+        if fm["kind"] == "gate" and (fm.get("match") or {}).get("repos"):
+            err(f"{repo}/{path}: a gate in a code repo governs that repo only; match.repos is for shared gate sets")
+        wf = ((fm.get("fires") or {}).get("workflow") if fm["kind"] == "trigger" else None)
+        if wf and not (HERE / repo / wf.lstrip("/")).is_file():
+            err(f"{repo}/{path}: fires.workflow {wf} is not a file in this repo")
 
     # context: entries, the sandbox layout and depth (§5.6); sidecars (§2.2).
     reached = {}
     for (repo, path), (fm, body) in objs.items():
-        if fm["kind"] in ("task", "template", "schedule") and fm.get("context"):
+        if fm["kind"] in ("task", "template", "trigger") and context_of(fm):
             reached[(repo, path)] = check_context(objs, repo, path, fm, report)
         if fm["kind"] == "asset" and fm.get("asset"):
             ident, t, _ = resolve(objs, repo, path, fm["asset"])
@@ -985,14 +1010,19 @@ def main():
         ("eu", "org-templates", "templates/legacy-triage.md", False),    # the team's exclude
         ("eu", "hub-placements", "grains/eu/backlog/2026-10-16-approval-flow.md", True),
         ("eu", "hub-placements", "grains/us/backlog/2026-10-16-refuse-self-approved.md", False),
-        ("eu", "hub-shared", "schedules/prune-packages.md", False),      # eu is assigned no schedules
-        ("us", "hub-shared", "schedules/prune-packages.md", True),       # through Silo's folder
-        ("us", "hub-shared", "schedules/granule-pull.md", False),        # the root's exclude
-        ("us", "grain-us", "schedules/granule-pull-weekly.md", True),
+        ("eu", "hub-shared", "triggers/prune-packages.md", False),       # eu is assigned no triggers
+        ("us", "hub-shared", "triggers/prune-packages.md", True),        # through Silo's folder
+        ("us", "hub-shared", "triggers/plan-designs.md", True),          # listed; only Silo fires it
+        ("us", "hub-shared", "triggers/granule-pull.md", False),         # the root's exclude
+        ("us", "grain-us", "triggers/granule-pull-weekly.md", True),
         ("us", "hub-shared", "templates/granule-pull.md", False),        # referenced, never included
         ("eu", "hub-shared", "capabilities/widgets-deployer.md", True),  # available to request
         ("eu", "org-capabilities", "gcp/acme-widgets.md", False),        # a base in its chain, not offered
     ]
+    for grain, (_, _, _, names) in spaces.items():
+        for repo, path in names:
+            if objs[(repo, path)][0]["kind"] == "gate":
+                err(f"namespace {grain}: gate {repo}/{path} reached through includes that accept triggers only")
     for grain, repo, path, want in expect:
         if has(grain, repo, path) != want:
             err(f"namespace {grain}: {repo}/{path} {'missing' if want else 'present'}")

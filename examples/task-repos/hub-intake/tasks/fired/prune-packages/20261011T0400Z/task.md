@@ -6,9 +6,9 @@ team: hub
 context:
   - {ref: "https://github.com/bwsalmon/grain.git@candidate", mode: write}
 state: approved
-submitter: "silo:schedule"
-submitted_via: schedule
-approved_by: "silo:schedule"
+submitter: "silo:trigger"
+submitted_via: trigger
+approved_by: "silo:trigger"
 approved_at: "2026-10-11T04:00:01Z"
 created_at: "2026-10-11T04:00:01Z"
 auto_merge: true
@@ -16,8 +16,10 @@ template:
   ref: "shared:templates/prune-packages.md"
   rev: 4b1d0c6a3e9f27d58c0e1a6b9f3d2c7e8a5b4f10
   inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
-schedule:
-  ref: "shared:schedules/prune-packages.md"
+trigger:
+  ref: "shared:triggers/prune-packages.md"
+  "on": schedule
+  key: 20261011T0400Z
   fired_at: "2026-10-11T04:00:01Z"
 ---
 

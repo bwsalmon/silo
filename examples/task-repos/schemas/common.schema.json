@@ -24,9 +24,9 @@
       ]
     },
     "principal": {
-      "description": "Who: silo, silo:schedule, grain:<node>, user:<email>, agent:grain:<node>/<run path>, team:<name>#member|approver|admin|maintainer, authenticated",
+      "description": "Who: silo, silo:trigger, grain:<node>, user:<email>, agent:grain:<node>/<run path>, team:<name>#member|approver|admin|maintainer, authenticated",
       "type": "string",
-      "pattern": "^(silo(:schedule)?|grain:[a-z0-9][a-z0-9-]*|user:[^@\\s]+@[^@\\s]+|agent:grain:[a-z0-9-]+/[a-z0-9./-]+|team:[a-z0-9-]+#(member|approver|admin|maintainer)|authenticated)$"
+      "pattern": "^(silo(:trigger)?|grain:[a-z0-9][a-z0-9-]*|user:[^@\\s]+@[^@\\s]+|agent:grain:[a-z0-9-]+/[a-z0-9./-]+|team:[a-z0-9-]+#(member|approver|admin|maintainer)|authenticated)$"
     },
     "time": {
       "type": "string",
