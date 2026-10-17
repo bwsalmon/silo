@@ -2217,7 +2217,7 @@ context:
   input of `type: list` with `of: ref` expands to one entry per item.
 - **A relative value** resolves against the object that supplied it: the
   trigger, or the task for a task filed in Silo's UI. The API requires a
-  URL or an alias of the intake's README.
+  URL or an alias of the intake's `.grainconfig`.
 - **A trigger** supplies the values in its `fires.inputs:` (and
   `fires.bind:`, from the event), and may add entries of its own in
   `fires.context:`, after the template's. `prune-packages`'s trigger
@@ -5344,8 +5344,9 @@ messages to commits plus notifications.
 bwsalmon/grain's `.grain/` declarations (`docs/declarations.md`,
 `docs/declaration-schema.md`) **converge on the task-repo format**: each
 becomes a Markdown file with front matter, read by the same parser as
-every other object, in a grain folder governed by `.grain/README.md`
-(§3.1). Workflows are the one exception (§12.2). Templates and suites
+every other object, named with its kind suffix
+(`.grain/templates/<name>.template.md`, §3.2) in the repo's grain folder
+(§3.6). Workflows are the one exception (§12.2). Templates and suites
 keep exactly the keys `pkg/declschema` defines for them today. Schedules
 and triggers do not map one to one: a schedule becomes a `kind: trigger`
 with `on.schedule`, and a path trigger becomes a `kind: trigger` if it
@@ -5386,7 +5387,7 @@ The Go loader, on YAML 1.2, accepts both. A gate has no `on:` at all.
   kind:** a repo declaration carries no `reads`, `writes`, `grants` or
   `target`, and its `context:` entries, and its `ref` inputs' defaults
   and values, name only its own repo (§5.6). The schemas say so, and readers enforce it on every object
-  in a code repo's grain folder, whatever its README says (§8.13). A job
+  in a code repo's grain folder, whatever its `GRAINOWNERS` says (§8.13). A job
   that needs another repo's access stays a settings-owned row.
 - **A code repo may define capability objects** in its grain folder
   (`.grain/capabilities/`), and they grant nothing there either: a Grain
@@ -5425,11 +5426,14 @@ only `*.md` files with `kind:` are objects, so YAML there is never misread.
 
 Design docs already in code repos (`docs/design/*.md`, with `{#D-n}` or
 `{#HS-n}` anchors) are referenceable as `kind: design` objects **where
-they are**. Nothing moves:
+they are**, renamed in place to the `design` suffix
+(`docs/design/widgets.md` → `docs/design/widgets.design.md`, with a
+tombstone `widgets.md.moved.md`; §3.2). Nothing else moves:
 
-- The repo's `.grain/README.md` lists `/docs/design/` in its `scope`, so
-  it governs them (§3.1).
-- Each doc gains this front matter, and nothing else:
+- The planner's `design-change` trigger watches `docs/design/**`, which
+  matches both names, so bwsalmon/grain's planner keeps working while
+  docs are renamed one at a time.
+- Each renamed doc gains this front matter, and nothing else:
 
   ```yaml
   ---
@@ -5448,8 +5452,8 @@ they are**. Nothing moves:
   removed. `planning:` is added only if Silo should plan the doc (below).
   A doc that already has front matter for another tool keeps its keys,
   and gains these beside them.
-- **A doc without front matter is still referenceable** by path and
-  anchor (`grain-code:docs/design/<name>.md#D-7`), as a plain file:
+- **A doc not yet renamed is still referenceable** by path and
+  anchor (`grain-code:docs/design/<name>.md#D-7`), as an asset:
   its anchors resolve and its section hashes compute (§7.2). It is not an
   object, so readers check no ID allocation on it and Silo does not plan
   it.
@@ -5463,7 +5467,7 @@ they are**. Nothing moves:
   change before it merges.
 - **Planning is one or the other.** A design in a code repo is planned by
   the in-repo planner, now a `fires_in: grain` trigger with
-  `on: design-change` (`.grain/triggers/design-docs.md`), unless its
+  `on: design-change` (`.grain/triggers/design-docs.trigger.md`), unless its
   front matter has `planning:`. With `planning:`, the team's
   `fires_in: silo` design-change trigger plans it on each change to
   `default_ref` that Silo reads (§7.4), and the in-repo trigger skips it.
@@ -5495,8 +5499,10 @@ they are**. Nothing moves:
   exported into the team's intake from Silo's database, their open
   placements into the Grain's folder in the team's placements repo, and
   the tasks the Grain authored itself stay in its root, with references
-  in its own lane. `grain tasks export` writes the root's includes of
-  Silo's folders, as `grain tasks link` does (§8.12).
+  in its own lane. `grain tasks export` writes the root's
+  `grain.config.md`, with Silo's folders as entries, as `grain tasks link`
+  does (§8.12). Grain's memory documents and `memory.json` are exported to
+  the root's `memory/` as `*.memory.md` files (§3.3).
 - **The old backlog order becomes ranks.** The queued tasks, in the old
   dispatch order, each get a reference in `backlog/` with evenly spaced
   ranks (`"1"`, `"2"`, … `"z"`, lengthening as needed). `at_front`
@@ -5593,9 +5599,10 @@ and **both forms stay readable throughout**:
    `.yml` is used and the conflict is reported by
    `grain declarations check`. So a half-finished conversion changes
    nothing that runs.
-2. **A `.grain/` folder with no README** reads as before (§3.1). A repo
-   adds `.grain/README.md` when it wants a `scope` beyond `.grain/`, a
-   `task_home`, or aliases.
+2. **A repo with no `.grainconfig`** reads with the defaults (§3.4), and
+   its `.grain/` stays its grain folder. A repo adds `.grainconfig` when
+   it wants a `task_home`, aliases or another grain folder, and
+   `GRAINOWNERS` when it wants its ownership documented.
 3. **`grain declarations convert`** rewrites a repo's declarations in one
    commit, which lands through the repo's normal review (a `.grain/**`
    change, so human-gated where the repo says so). For each file it
@@ -5744,8 +5751,8 @@ day of the switch:
     (`eu-2026`). A rollover is not a move, so there are no tombstones and
     no `moved_to`: every old reference still resolves, because it names
     the old repo's URL. A Grain rolls its root over itself: it copies its
-    includes and its own lane's open references into the new root
-    (references and includes are pointers, so that is allowed), and the
+    `grain.config.md`, its memory and its own lane's open references into
+    the new root (references are pointers, so that is allowed), and the
     rollover waits for open runs to close. Silo's placements are not in
     the root, so they need nothing. In an
     intake, open tasks stay in the old repo until they close, and new
@@ -5763,6 +5770,15 @@ day of the switch:
 
 | Alternative | Why not |
 | --- | --- |
+| **Generic transitive includes and excludes** (4452: `kind: include`, `kind: exclude`, `kinds:` intersection, bottom-up union per space, README root markers, `kind: repo`) | Taken by 4452, replaced by 4487. Activation should be **explicit and typed**: with generic includes, what a Grain fires depended on a chain of include objects in folders other people write, intersected kinds, scoped excludes and a depth limit, so no one file said what was active. References already reach everything that is only *used*. Typed roots in `grain.config.md` say what is active in one reviewed file, and each entry is one folder (§3.1, §3.3) |
+| **Scanning front matter** to find objects (every `*.md` with `kind:`) | Every listing would read every blob in a repo, and cost would grow with the repo, not with what the Grain uses: 10k tasks read to find 400 references. A file's kind could only be known by opening it. Kind suffixes let a tree say it (§3.2, §3.7) |
+| **Index files** (a generated `index.md` per folder listing its objects) | A second source of truth that drifts from the tree, a contended file every writer must edit in the same commit, and a merge conflict on every concurrent add. A git tree already is an index, content-addressed and conflict-free (§3.7) |
+| **Explicit space files** (a `space.md` declaring a folder as a unit others can include) | Brings back a namespace notion the typed roots do not need: an entry names a folder directly, and the folder needs no declaration to be named (§3.3) |
+| **Cascading `.grainignore` files** (gitignore-style files in folders, inherited by subfolders) | A root entry's contents would depend on ancestor files the entry does not mention, so a parent folder's edit could silently change what fires for every Grain whose entry is below it. Per-entry `ignore:` keeps each entry self-describing: the folder plus that one entry (§3.3, §11.15). Ownership may cascade (`GRAINOWNERS`) because it never changes what is active |
+| **Kind only in front matter** (any `*.md` with `kind:`) | Listing a folder by kind would need every blob, defeating tree-only discovery and the listing cache; and a file's role would be invisible in `ls`, a diff or a forge's file browser. A suffix makes the kind visible and cheap, and the hook keeps the two in step (§3.2) |
+| **Root configuration in the Grain's local daemon settings** | Not versioned or reviewable: what a Grain acts on would change with no commit, no owner and no history, and Silo could not read it for its views or its orphan check. `grain.config.md` is an object, owned through `GRAINOWNERS`; the only local setting is where it is (§3.3) |
+| **`.grain/repo.yml` or README front matter for repo settings** | README front matter is the code's (forges render it), and a per-folder metadata file brings back nearest-file discovery. One `.grainconfig` at the repo root is found by one path (§3.4) |
+| **Tombstones for archival** | One tombstone per closed task, forever, which is exactly the growth archiving is meant to stop. The archive mapping is a fixed rule a resolver applies with one extra lookup (§3.8) |
 | GitHub pull requests as the proposal and approval mechanism | Needs GitHub, its accounts and its API. Approval would be a forge setting, not a team rule Silo decides. Repos on other hosts and local repos would be second class |
 | Move files between folders to change state (`queued/`, `done/`) | Splits `git log --follow` history, breaks every reference by path, and turns each state change into a delete plus an add that races with concurrent edits |
 | One repo per team, Grains included | Every Grain would fetch every other Grain's churn, and per-Grain write rules would become per-path rules in a shared repo with more contention. A root per Grain matches the single-tenant Grain. The team's placements repo is shared, but it holds only placements, which are small and few, and has one writer; the churn, execution records and threads, stays in each Grain's root |
@@ -5778,17 +5794,10 @@ day of the switch:
 | Filename-prefix ordering (`backlog/0010-…`, `backlog/0020-…`) | A reorder becomes a rename. That conflicts with path-as-identity, and makes `git log` and every record that names the reference (`from:`) follow renames |
 | Silo writes a `closed:` summary onto the task when a run closes | Makes every close a cross-repo transaction, adds a second writer to a frozen spec, and leaves two copies of the outcome to drift. The outcome is derived from execution records instead (§5.1) |
 | Re-placement as a move of the task, with a tombstone | Nothing about the task changes on re-placement, only which queue holds it. Moving it would break its address for its author, its dependents and its intake references, for no gain |
-| Includes listed in a central file, such as the root README (`includes: […]`) | Not self-contained: a line in the README means nothing without the file it names, and cannot carry its own ref mode, kinds and history. One file for every include is contended: Silo linking, the owner adding a template set and a teammate adding triggers would all edit it. Standalone include objects sit where they apply (`backlog/silo.md`), and appear and disappear as files (§3.3) |
-| Any object able to include (a template's `includes:`, a task's `brings:`) | Silent namespace widening: every kind would become a way to add names, and an object written for one purpose (a placement, a template from another team) could pull a folder into a Grain's namespace. References already reach anything; only `kind: include` adds names, so the trust grants are exactly the include objects (§11.14) |
-| Optional transitivity (`transitive: false` on an include) | A half-working copy: the included folder's own includes are part of what it means (its partials, its upstream set, its cuts), so following one level gives a set its author never had. Excluding an include object turns off one branch where that is really wanted (§3.3, rule 4) |
-| Global, unscoped excludes (an exclude anywhere in the graph cuts the name everywhere) | An included folder could hide objects from elsewhere: a placement, the root's own task, another team's template. Scoping an exclude to its own space makes an included folder able to hide only itself, and leaves the root's excludes as the final word (§11.15) |
-| Merged ranks across sources (one sort over every reference in the namespace) | Ranks are not comparable across writers: Silo's `t` and the owner's `t` were chosen against different neighbours, so a merge lets whoever picks more extreme keys win. Lanes keep each writer's order intact, and the root decides between them (§5.2) |
-| Lane priority on each include object (`lane: {priority: 20}`) | Numbers spread over files with different writers are a merged rank again, and an include deep in a branch could promote its own lane. A lane can also arrive with no include in the root. The root README holds it as metadata (§5.2) |
-| Silo writing into Grain repos (4448's placements in the Grain's `backlog/`, Silo writing `superseded`) | Two writers in one repo: field-level rules in every Grain repo's README, a hook that must tell Silo's fields from the owner's, rebases against each other's commits, and a Grain whose own history Silo can change. Silo's folder for each Grain, included by the Grain, gives the same channel with one writer per repo, and re-placement becomes one commit (§8.8) |
-| Adopting Backstage's entity envelope verbatim (`apiVersion`, `metadata.name`, `spec`, `Location`) | `metadata.name` is mandatory, at most 63 characters and slash-free, so it cannot be a path and brings back a separate id. References are `kind:namespace/name`, resolved in a catalog database rather than by location. The catalog ingests YAML documents, not Markdown with front matter. `apiVersion` and custom-kind processors are ceremony here, `relations` and `status` are computed by the catalog rather than kept in files, and `Location` has no excludes and keeps its kind rules in app config. The ideas are borrowed instead, with an optional exporter (§3.4) |
-| A grain folder at a fixed path only (`.grain/`, found by name) | The layout is loose everywhere else (§2), and a monorepo wants one folder per project. Nearest-README discovery finds the governing README wherever the folder is, and `.grain/` stays the convention |
-| Code-repo metadata in the repo's top-level `README.md` | That file belongs to the code: forges render it as the repo's front page (GitHub shows front matter as a table), documentation tools read it, and its edits are code changes. A grain folder's own README keeps grain's metadata with grain's objects |
-| A separate metadata file (`.grain/repo.yml`) | A second format, and a file that explains nothing to a human. A README with front matter is what a whole-repo task repo uses, so one rule covers both |
+| Merged ranks across sources (one sort over every reference in every lane) | Ranks are not comparable across writers: Silo's `t` and the owner's `t` were chosen against different neighbours, so a merge lets whoever picks more extreme keys win. Lanes keep each writer's order intact, and the root decides between them (§5.2) |
+| Lane priority on each lane's own folder (`lane: {priority: 20}` in a file there) | Numbers spread over files with different writers are a merged rank again, and a folder's writer (Silo, for its folder) could promote its own lane. `grain.config.md` holds it, written by the Grain's owner (§5.2) |
+| Silo writing into Grain repos (4448's placements in the Grain's `backlog/`, Silo writing `superseded`) | Two writers in one repo: field-level rules in every Grain repo's README, a hook that must tell Silo's fields from the owner's, rebases against each other's commits, and a Grain whose own history Silo can change. Silo's folder for each Grain, named as a lane by the Grain's owner, gives the same channel with one writer per repo, and re-placement becomes one commit (§8.8) |
+| Adopting Backstage's entity envelope verbatim (`apiVersion`, `metadata.name`, `spec`, `Location`) | `metadata.name` is mandatory, at most 63 characters and slash-free, so it cannot be a path and brings back a separate id. References are resolved in a catalog database rather than by location. The catalog ingests YAML documents, not Markdown with front matter. `apiVersion` and custom-kind processors are ceremony here, `relations` and `status` are computed by the catalog rather than kept in files, and `Location` discovery is transitive. The ideas are borrowed instead, with an optional exporter (§3.11) |
 | Keep `.grain/` declarations YAML for good | Two parsers, two schema sets and two spellings of every key, for the same kinds. Prompts stay in YAML block scalars, which review badly |
 | Workflows as Markdown too | Breaks GitHub Actions compatibility and the tools that read workflows, for a body workflows do not have (§12.2) |
 | Silo's hook in front of code repos (Silo as the code repo's proxy or mirror) | Silo would have to sit between developers and their forge, or the two would disagree. The forge's review already decides what lands; Silo validates what it reads instead (§8.13) |
@@ -5809,13 +5818,12 @@ day of the switch:
 
 | Opaque capability names (`gcp-key`, `self-debug`, the status quo) | What a name grants and implies lives in provider code (`model.CapabilityRepos`), invisible to the local policy, which is how task 4303's repo reached a sandbox. A name cannot be narrowed (one `gcp-key` for every project and role), composed across an org and a team, or explained to an approver. Objects over declared bases make the surface readable and the narrowing explicit (§5.7) |
 | Capability objects able to grant beyond their base (an `extra_roles:`, or a reducer that adds) | Breaks monotonicity, the one property that makes every other check local: with it, effective authority depends on every object in the chain, the policy must re-derive the maximum, and an included folder could escalate any capability built on it. Authority comes only from bases and allowlisted secrets; everything else narrows (§11.27) |
-| Granting on include (a Grain honours whatever capability objects it includes) | Makes every include of a shared folder a grant, so a team repo's maintainer could hand any Grain that includes it new authority. A catalog decides what a Grain offers; the policy's source allowlist decides what it honours (§11.29, §11.30) |
+| Granting on reference, or a capability root (a Grain honours whatever capability objects a root of it lists) | Makes naming a shared folder a grant, so a team repo's maintainer could hand any Grain that names it new authority. A definition changes what may be given, not whether anything runs, so it is a reference; the policy's source allowlist decides what it honours (§3.1, §11.29, §11.30) |
 | A separate `capabilities:` list on tasks | A second list beside `context:`, with its own check: the split 4453 removed for reads and writes. One list, with `mode: use` for a request, is one check, and the approver reads one thing (§5.6, §5.7) |
 | Choosing a reducer language now: **CEL** (Google's Common Expression Language), **WASM** modules, **Rego** (Open Policy Agent), or **macaroon caveat strings** (and Biscuit's Datalog caveats) | The owner's decision: Anselm comes from a project in flight, and this design fixes only the contract any implementation must meet (§5.7). These are the prior art Anselm will be compared against. CEL is non-Turing-complete, side-effect free and cost-bounded, but has no notion of narrowing: monotonicity would be checked by the Grain, not given. WASM sandboxes anything and bounds it with fuel, at the price of opaque binaries in a review-first format. Rego is a mature policy language with partial evaluation, but evaluates against a data document rather than narrowing a capability, and is larger than a reducer needs. Macaroon caveat strings are the model itself, but first-party caveats are an uninterpreted string for each verifier to parse, and so are not a language. Biscuit's Datalog is attenuation-native, the closest prior art. The built-in reducers are a deliberately small interim, not a candidate |
 | Skipping reducers a Grain cannot evaluate (best effort until Anselm) | Skipping a narrowing widens. Two Grains would grant one object differently, and a placeholder would silently be a no-op. A Grain that cannot evaluate a reducer refuses, naming it (§5.7) |
 | Keep a separate `kind: schedule` beside `kind: trigger` | Duplicates the trigger concept: a schedule is "when the clock says, file this", one event source among several. Two kinds would carry the same `fires`, approval, overlap, rate limits, adoption and customisation rules twice, and every reader, `kinds:` list and security rule would name both. One kind with `on.schedule` is how GitHub Actions and grain's own workflows already say it (§6.2) |
-| One `kind: trigger` that also covers merge gates (grain's `gate: true` today) | Firing work and holding a merge are different things, and mixing them is what makes today's `.grain/triggers` messy: one file shape where some keys file tasks and others block merges, so neither can be reasoned about alone. A gate must be monotone and not weakened by the machinery that customises triggers (excluding a team's trigger must never release a merge), and must be read from the base, not the change. Separate kinds let `kinds: [trigger]` admit standing work without admitting policy, and let each schema refuse the other's keys (§6.3, §11 items 38–39) |
-| Gates always non-excludable, with no opt-out for the root | Would make every include of a shared gate set mandatory, so including one to try it would bind the Grain for good, and the root's excludes would stop being the final word for one kind. Mandatory gate sources in local policy give an org the non-excludable case without taking adoption away from everyone else (§6.3) |
+| One `kind: trigger` that also covers merge gates (grain's `gate: true` today) | Firing work and holding a merge are different things, and mixing them is what makes today's `.grain/triggers` messy: one file shape where some keys file tasks and others block merges, so neither can be reasoned about alone. A gate must be monotone and not weakened by the machinery that customises triggers (excluding a team's trigger must never release a merge), and must be read from the base, not the change. Separate kinds let a trigger root admit standing work without admitting policy, and let each schema refuse the other's keys (§6.3, §11 items 38–39) |
 | Include `on: task-closed` now, for chaining | `depends_on` already chains known work. A close-fired trigger can fire itself through its own firing's close, across Grains, and needs cycle detection and a rule for whose close counts. Reserved, and refused by v1 readers, until that design exists (§6.2) |
 | Pause and next-fire time in the trigger's front matter | Runtime state in git: a commit per fire, per pause and per resume, contended between Silo, the Grain and the definition's authors. `enabled:` is the reviewed switch; the rest is in the database (§6.2, §1.2) |
 
@@ -5823,15 +5831,15 @@ day of the switch:
 
 | Stage | silo (bwsalmon/silo) | grain (bwsalmon/grain) |
 | --- | --- | --- |
-| **1. Format** | a `taskrepo` package: front-matter parse and write (field-preserving), JSON Schemas (`suite`, `trigger` with its `on.*` sources and `fires`, `gate`, `include` and `exclude` included), the reference grammar and resolver with redirects (tombstones and repo `moved_to`), nearest-README discovery and `scope`, the namespace resolver of §3.3 with its limits, the path rules, rank keys, lanes and backlog ordering, `task_home` resolution, and `writers` evaluation (principal lists, and the intake's rules); the `context:` resolver shared with namespaces, with its limits and default layout, and the `asset` kind; the Jinja subset on gonja with the Python fixture CI job | pin `taskrepo`; `grain tasks export/import` with the round-trip test on a copy of the database; `pkg/repodecl` and `grain declarations check` read `.md` declarations beside `.yml` (§13.1); `grain declarations convert`; convert bwsalmon/grain's own `.grain/` |
-| **2. Standalone Grain on a task repo** | none | a local root becomes the backlog's source of truth for git-backed fields, with the database as runtime and index: tasks, ranked references in `backlog/`, execution records in `runs/`, comments as files; triggers from the namespace (`schedule:` and `manual:` sources, `fires` of both forms, overlap, catch-up and rate limits, with last and next fire, pause and suspension in the Grain's database); gates on the Grain's merge queue, with mandatory gate sources in local policy; includes of shared folders; `context:` materialisation: the PEP before fetch, staging, the proxy's scope and push rule, the sandbox layout, and the run's `context:` record; attachments as assets |
-| **3. Silo hosts git** | `silo-git`: smart HTTP behind IAP and node tokens, the pre-receive hook, protected refs, bundles to GCS, restore drill, metrics; intake and placements repos per team; hosted Grain roots writable by the Grain only; propose and approve by push and through the API (the same commit); assets served from a user-content origin (§11.25); the threat-model boundary | `grain tasks link/unlink` as include objects; push and pull to a Silo remote; lanes |
+| **1. Format** | a `taskrepo` package: front-matter parse and write (field-preserving), JSON Schemas (`suite`, `trigger` with its `on.*` sources and `fires`, `gate`, `config` and `memory` included), the kind-suffix rule, the reference grammar and resolver with redirects (tombstones, repo `moved_to`) and the archive mapping, `.grainconfig`, `GRAINOWNERS` evaluation (the field extension, and the hook's fixed per-kind rules), the root-entry lister of §3.7 with `ignore:`, `archive/`, its limits and both caches, the path rules, rank keys, lanes and backlog ordering, `task_home` resolution, and `grain lint` with the orphan check; the `context:` resolver sharing `resolve` with references, with its limits and default layout, and the `asset` kind; the Jinja subset on gonja with the Python fixture CI job | pin `taskrepo`; `grain tasks export/import` with the round-trip test on a copy of the database; `pkg/repodecl` and `grain declarations check` read `.md` declarations beside `.yml` (§13.1); `grain declarations convert`; convert bwsalmon/grain's own `.grain/` |
+| **2. Standalone Grain on a task repo** | none | a local root becomes the backlog's source of truth for git-backed fields, with the database as runtime and index: tasks, ranked references in `backlog/`, execution records in `runs/`, comments as files; triggers from its trigger roots (`schedule:` and `manual:` sources, `fires` of both forms, overlap, catch-up and rate limits, with last and next fire, pause and suspension in the Grain's database); gates read from the merged-into repo's `.grain/` by the Grain's merge queue, with mandatory gate sources in local policy; `grain.config.md` with shared folders as trigger and memory roots; memory roots given to runs; sparse fetch; `context:` materialisation: the PEP before fetch, staging, the proxy's scope and push rule, the sandbox layout, and the run's `context:` record; attachments as assets |
+| **3. Silo hosts git** | `silo-git`: smart HTTP behind IAP and node tokens, the pre-receive hook, protected refs, bundles to GCS, restore drill, metrics; intake and placements repos per team; hosted Grain roots writable by the Grain only; propose and approve by push and through the API (the same commit); assets served from a user-content origin (§11.25); the threat-model boundary | `grain hub login` and `grain tasks link/unlink` as `grain.config.md` edits; push and pull to a Silo remote; lanes |
 | **4. Placement by commit** | the dispatcher adds, moves and removes placements in its own repo, and writes cancels on tasks, in §8.11 order; the fence on withdrawn placements; the run index and dependency resolution from execution records; the `pull` notify; WebSocket offers derived from commits behind a flag, then retired | accept, refuse and close as execution records, attestation on the reference, the removed-reference fence, upward filing through Silo; then drop `offer`/`resume` handling |
 | **5. Shared definitions and planning** | templates and triggers fired in Silo (`schedule:`, `push:`, `merge:`, `manual:`), with their runtime state and rate limits in Silo's database; the design index, and the `design-change` source with its flood control; gates on Silo-hosted repos (the hook, Silo's merge queue and its trailers); the review-branch gate | render shared templates locally; `implements`/`closed.design_revs`; trailers from refs |
 | **5b. Code repos and task homes** | the code-repo reader (webhook or poll) with validation on read (§8.13); trigger adoption; `push:`/`merge:`/`design-change` from code repos; designs planned in place by an in-repo `design-change` trigger; `task_home`: landing a task by direct push or a change through grain's merge queue, the pending-change record, the tombstone and reference rewrite, `silo task promote`; cancels of homed tasks | `propose_promotion`; inline firings; local policy for code repos a Grain trusts |
 
 | **5c. Capabilities** | the `capability` and `capability-base` schemas; the chain resolver with cycle detection, digests and the built-in reducers in `taskrepo`; Silo's catalog view, placement against Grains' published bases, `capability_approvals` in the intake's rules, and digests in `granted_capabilities`; the legacy objects of §13.2 in each team's shared repo | providers declare their bases and the Grain publishes them; the policy's `capabilities` (bases, sources, secrets, `approval.local`) and the implication check, replacing `model.CapabilityRepos`; credential narrowing in the GCP, git and model providers; per-use reducers in the git, model and Google API proxies, with the audit log; CI's `capabilities:` resolved to objects, `repo-read`/`repo-write` as git reducers. **Anselm** is adopted only when that project is ready, as a later stage of its own |
-| **6. Signed commits** | keys in README rules; verifying signatures in the hook | verifying the approver's signature against policy (`require_signed`) |
+| **6. Signed commits** | keys in `.grainconfig`; verifying signatures in the hook | verifying the approver's signature against policy (`require_signed`) |
 
 Each stage is a design-item set to be filed after this review. None is
 filed by this change.
