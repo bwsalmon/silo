@@ -15,6 +15,7 @@ is named by its path: there are no ids.
 | [`grain-us/`](grain-us/README.md) | `https://silo.example.com/git/grains/us.git` | the root of Grain `us` (a team Grain): its includes of Silo's placements and assigned schedules, one exclude, a customised schedule, and one re-placed task's record |
 | [`hub-placements/`](hub-placements/README.md) | `https://silo.example.com/git/hub/placements.git` | Silo's own repo, written only by Silo: a folder per Grain, holding its placements and the team schedules assigned to it |
 | [`org-templates/`](org-templates/README.md) | `https://silo.example.com/git/org/templates.git` | an org-wide template set, which `hub-shared` includes at `v3` and cuts one template from |
+| [`org-capabilities/`](org-capabilities/README.md) | `https://silo.example.com/git/org/capabilities.git` | org-wide capability objects: the GCP base narrowed to one project, released at `v1`, which the hub team narrows further |
 | [`ns-demo/`](ns-demo/README.md) | `https://silo.example.com/git/demo/namespaces.git` | the X/Y/Z cases of namespace resolution, as a tiny tree |
 | [`widgets-code/`](widgets-code/.grain/README.md) | `https://git.example.com/hub/widgets.git` | a code repo on a forge Silo does not host. Its top-level `README.md` is the code's; its grain folder, `.grain/`, has its own `README.md` with `scope` and `task_home: promote` |
 
@@ -152,6 +153,32 @@ repos do not exist; code-repo shas are real silo commits. The
   (§5.6, §8.16).
 - **What a run's sandbox held:** `grain-eu/runs/4310-carry-approver/run.md`
   records its `context:`, with the commit of each entry (§5.6).
+- **Two base declarations:** `grain-eu/capabilities/bases/gcp-service-account.md`
+  and `git.md`, `kind: capability-base`. Grain `eu` writes these from
+  its provider code: each base's dimensions with their maximums and where
+  each narrows, what it materialises, what it implies, and its proxies.
+  They are published for Silo and readers, and `eu` never decides from
+  them (§5.7).
+- **An org capability object, and a team's narrowing of it:**
+  `org-capabilities/gcp/acme-widgets.md` is `gcp-service-account@v1`
+  restricted to project `acme-widgets`. `hub-shared/capabilities/widgets-deployer.md`
+  takes it, pinned at `v1`, as its base, and narrows it with two interim
+  built-in reducers (roles, a 1-hour token lifetime) and one placeholder
+  `language: anselm` reducer with an opaque body (§5.7).
+- **A catalog, not a grant:** `grain-eu/capabilities/hub.md` includes
+  the team's `capabilities/` with `kinds: [capability]`, so the team's
+  object is in `eu`'s namespace and the org's is not (§5.7).
+- **A task requesting it:** `hub-intake/tasks/2026-10-17-widgets-preview-deploy/task.md`
+  lists the widgets repo to write and the team's capability with
+  `mode: use`, narrowed again to 30-minute tokens and a week's validity.
+  `check.py` resolves the chain, applies the built-in reducers to `eu`'s
+  base declaration under an illustrative policy, and prints the effective
+  capability, its implications, and the Anselm reducer that makes `eu`
+  refuse the request until Anselm is adopted (§5.7, §8.17).
+- **A capability approval rule:** `hub-intake/README.md` lets a principal
+  that a capability's approval names append to a task's
+  `capability_approvals`, bound to the pusher and never the submitter
+  (§5.7).
 - **X/Y/Z:** `ns-demo/`. X excludes Y; Z includes X and Y; Z's
   namespace contains Y. W includes and excludes Y and contributes none.
   V excludes X's include object, disabling that branch (§3.3, §8.15).
@@ -195,6 +222,13 @@ does these things:
 
 - derives each task's status from its execution records, and prints
   each lane's effective order and each Grain's next picks across lanes;
+- resolves every capability object's chain to a base type, with cycle
+  detection (and a self-test of it) and a depth limit; for each `use`
+  entry, applies the built-in reducers to the Grain's published base
+  declaration, checks an illustrative local policy (sanctioned bases and
+  definition sources for every link, implied egress and repos), checks
+  that the capability is in the Grain's namespace, prints the effective
+  capability, and reports Anselm reducers as not evaluable;
 - recomputes the requirement hashes;
 - renders the template fixture in [`fixtures/`](fixtures/) with Python
   Jinja2 under `StrictUndefined`. A Go implementation must produce the
