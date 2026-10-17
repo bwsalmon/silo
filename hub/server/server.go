@@ -61,6 +61,7 @@ import (
 	"github.com/bwsalmon/silo/hub/notify"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
+	"github.com/bwsalmon/silo/hub/route"
 	"github.com/bwsalmon/silo/hub/tasks"
 	"github.com/bwsalmon/silo/hub/ui"
 )
@@ -274,6 +275,7 @@ type Hub struct {
 	NodeUI     *nodeui.Server
 
 	handler  http.Handler
+	routes   *route.Mux
 	metrics  *metrics
 	draining atomic.Bool
 }
@@ -412,7 +414,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
 	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI, Requests: h.Events}
 
-	m := http.NewServeMux()
+	m := route.NewMux()
+	h.routes = m
 	m.HandleFunc("GET "+HealthzPath, func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
@@ -466,6 +469,52 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 
 // Handler is the hub's HTTP handler.
 func (h *Hub) Handler() http.Handler { return h.handler }
+
+// InternalHandler serves the internal listener's routes: what Serve
+// serves on InternalAddr, to the hub's other pods.
+func (h *Hub) InternalHandler() http.Handler {
+	im := route.NewMux()
+	im.Handle(rendezvous.InternalOpenPath, h.Rendezvous.InternalHandler())
+	ev := h.Live.InternalHandler()
+	im.Handle(live.InternalEventsPath, route.Wrap(ev.(route.Lister), h.Rendezvous.Internal(ev)))
+	return im
+}
+
+// Listeners the hub serves its routes on, for Route.
+const (
+	// ListenerPublic is the load balancer's: Handler.
+	ListenerPublic = "public"
+	// ListenerInternal is the other pods': InternalHandler.
+	ListenerInternal = "internal"
+	// ListenerMetrics is the scraper's: MetricsHandler.
+	ListenerMetrics = "metrics"
+	// ListenerNodeUI is every path of a node's own UI host, with
+	// NodeUIDomain set: one route, whose paths are the node's.
+	ListenerNodeUI = "node-ui"
+)
+
+// Route is one route the hub serves: a ServeMux pattern on a listener.
+type Route struct {
+	Listener string
+	Pattern  string
+}
+
+// Routes lists every route h serves, from its routers: what the
+// security suite's authorization matrix must cover (hub/security).
+func (h *Hub) Routes() []Route {
+	var out []Route
+	for _, p := range h.routes.Patterns() {
+		out = append(out, Route{ListenerPublic, p})
+	}
+	for _, p := range h.InternalHandler().(route.Lister).Patterns() {
+		out = append(out, Route{ListenerInternal, p})
+	}
+	out = append(out, Route{ListenerMetrics, "GET " + MetricsPath})
+	if h.NodeUI != nil {
+		out = append(out, Route{ListenerNodeUI, "/"})
+	}
+	return out
+}
 
 // MetricsHandler serves the hub's Prometheus metrics: what Serve serves
 // on MetricsAddr.
@@ -554,10 +603,7 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 		if h.cfg.PodAddr == "" {
 			h.Registry.PodAddr = podAddr(il.Addr())
 		}
-		im := http.NewServeMux()
-		im.Handle(rendezvous.InternalOpenPath, h.Rendezvous.InternalHandler())
-		im.Handle(live.InternalEventsPath, h.Rendezvous.Internal(h.Live.InternalHandler()))
-		isrv := &http.Server{Handler: im, ReadHeaderTimeout: 10 * time.Second}
+		isrv := &http.Server{Handler: h.InternalHandler(), ReadHeaderTimeout: 10 * time.Second}
 		go isrv.Serve(il)
 		// Its streams are hijacked, and end with the node connections
 		// they ride; its subscriptions end with this pod's hold of their
