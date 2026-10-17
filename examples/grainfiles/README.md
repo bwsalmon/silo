@@ -1,23 +1,62 @@
-# The Grainfile Format: worked example
+# The Grainfile Format: a worked example
 
-The worked example of [`docs/grainfiles-spec.md`](../../docs/grainfiles-spec.md)
-Appendix A. Each top-level folder stands in for one repository on a forge;
-[`stubs.yaml`](stubs.yaml) maps their illustrative URLs to these folders.
+Three repositories that stand in for real ones (`stubs.yaml` maps each
+illustrative URL to its folder here). Check them all with:
 
-| Folder | Spec | What it shows |
-| --- | --- | --- |
-| [`hub-intake/`](hub-intake/) | A.1, A.5 | A team intake in a subfolder (`intake/`) of the `acme/hub` repo: a **custom lifecycle**, a **definition with its own thread** (`2026-10-16-approval-flow.task/`), the tombstone of a definition that moved to a code repo, and a **folder template** (grain's release-qualification suite, converted). Definitions hold no state. |
-| [`widgets/`](widgets/) | A.2 | A **code repo** with a grain folder at `.grain/` (`role: library`): a gate, a single-task template and a definition homed there, its thread inside it. Its `src/` is outside every grain folder. |
-| [`grain-eu/`](grain-eu/) | A.3, A.5, A.6 | Deployment `eu`'s root grain folder, with two lanes. `hub/2026-10-16-approval-flow.exec/` is an **execution** with its snapshot, its own thread and **two runs**; `hub/2026-10-16-widget-schema-v2.exec/` is **superseded** by a re-placement; `hub/release-qualification-2026-10-17/` is the folder template's **instance**, one execution per member definition; `backlog/` holds an execution of eu's own definition, with a run awaiting a reply. |
-| [`grain-us/`](grain-us/) | A.6 | Deployment `us`, holding the **re-placed** execution (`previous:` names eu's). |
-| [`registry/`](registry/) | A.4 | The hub's **registry**, itself a grain folder (`role: registry`). |
-
-Check them all:
-
-```sh
-sudo apt-get install -y python3-yaml python3-jsonschema python3-jinja2
-python3 tools/grainfiles/grainlint.py examples/grainfiles
-python3 tools/grainfiles/grainlint.py --instantiate examples/grainfiles \
-  examples/grainfiles/hub-intake/intake/templates/release-qualification/release-qualification.template.md candidate=v1.2
-python3 tools/grainfiles/grainlint.py --self-test   # also every broken fixture
 ```
+python3 tools/grainfiles/grainlint.py examples/grainfiles
+```
+
+See [`docs/grainfiles-spec.md`](../../docs/grainfiles-spec.md),
+Appendix A.
+
+## `commons/`: a shared library
+
+- `grain.config.md`: `format: 1` and the folder's owner.
+- `capabilities/gcp-key.capability/`: the `gcp-key` capability, an
+  opaque name. `capability.md` has a title and a description;
+  `assets/main.tf` is the Terraform that provisions the accounts behind
+  it, which no grainfile reader interprets.
+- `lifecycles/reviewed.lifecycle.md`: a state-machine definition that
+  definitions may name.
+
+Other folders pin commons through a versioned alias whose `sha256` is
+the `h1:` hash of this tree (`grainlint.py --dirhash commons`).
+
+## `widgets/`: a code repository with `.grain/`
+
+- `.grain/grain.config.md`: pins commons as `commons:` at `v1.4.0`.
+- `.grain/designs/widget-schema.design.md`: a design whose two
+  requirements carry their hashes.
+- `.grain/tasks/2026-10-16-widget-schema-v2.task/`: a definition that
+  implements requirement WS-2 (its `implements` edge carries WS-2's
+  hash) and requests `gcp-key`, with a `thread/` of two comments, one
+  replying to the other.
+- `.grain/gates/schema.gate.md`: a merge gate on the schema.
+- `.grain/GRAINOWNERS`: forge identities; anyone may add a comment to a
+  thread, and only `@acme/security` may change a definition's
+  `capabilities`.
+
+## `grain-eu/`: a deployment's folder
+
+- `grain.config.md`: pins commons through the same versioned alias,
+  makes pinning required, names the deployment's forge account
+  `@acme-grain-eu`, offers `gcp-key`, and carries grain's own settings
+  (opaque to the format).
+- `templates/release-qualification/`: a folder template (grain's
+  release-qualification suite): a smoke member that loops over a
+  `platforms` list input and includes `partials/report-footer.md`, and
+  a report member that depends on it. Render it with
+  `grainlint.py --render examples/grainfiles grain-eu/templates/release-qualification/smoke.task.md platforms=…`.
+- `templates/tidy.template.md`: a single-task template with an enum
+  input.
+- `triggers/nightly-qualification.trigger.md`: a cron trigger in a
+  named time zone that fires the folder template.
+- `records/`: two execution records written by `@acme-grain-eu`. One
+  `succeeded`, with a pull-request link, ran the widgets definition at a
+  pinned commit; one `failed`, ran the smoke member with its inputs and
+  names the trigger. Each has its process log in `comments/`; the failed
+  one also has a comment a person appended afterwards.
+
+What eu's backlog holds, and the live state of anything it is running,
+are in grain's own database: not in this format.

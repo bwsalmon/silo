@@ -1,287 +1,83 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/config.schema.json",
-  "title": "grain/config@v1: grain.config.md: a grain folder's root definition (\u00a710)",
+  "title": "grain.config.md (docs/grainfiles-spec.md §10)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "config"
-    },
-    "schema": {
-      "const": "grain/config@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
-    "role": {
-      "enum": [
-        "deployment",
-        "registry",
-        "library"
-      ]
+    "format": {
+      "type": "integer"
     },
     "title": {
       "type": "string"
     },
     "owner": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
+    },
+    "aliases": {
       "type": "object",
-      "properties": {
-        "user": {
-          "type": "string"
-        },
-        "team": {
-          "type": "string"
-        }
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$"
       },
-      "additionalProperties": false,
-      "minProperties": 1
-    },
-    "lifecycle": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "ignore": {
-      "type": "array",
-      "items": {
-        "type": "string"
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^h1:[A-Za-z0-9+/]{43}=$"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "source"
+        ]
       }
     },
-    "limits": {
-      "$ref": "common.schema.json#/$defs/limits"
+    "check": {
+      "type": "object",
+      "properties": {
+        "pinning": {
+          "enum": [
+            "warn",
+            "required"
+          ]
+        },
+        "limits": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
     },
     "deployment": {
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9-]*$"
+        "account": {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
         },
-        "hub": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "additionalProperties": false
-    },
-    "backlog": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "enum": [
-            "strict",
-            "weighted",
-            "round_robin"
-          ]
-        },
-        "expedite": {
-          "enum": [
-            "lane",
-            "global"
-          ]
-        },
-        "lanes": {
+        "offers": {
           "type": "array",
           "items": {
-            "allOf": [
-              {
-                "$ref": "common.schema.json#/$defs/rootEntry"
-              }
-            ],
-            "required": [
-              "name"
-            ]
+            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
           }
         }
       },
+      "additionalProperties": false,
       "required": [
-        "lanes"
-      ],
-      "additionalProperties": false
+        "account"
+      ]
     },
-    "triggers": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/rootEntry"
-      }
-    },
-    "memory": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/rootEntry"
-      }
-    },
-    "registry": {
-      "type": "object",
-      "properties": {
-        "hub": {
-          "type": "string"
-        },
-        "poll_interval": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "hub"
-      ],
-      "additionalProperties": false
-    },
-    "folders": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "at": {
-            "type": "string"
-          },
-          "team": {
-            "type": "string"
-          },
-          "role": {
-            "enum": [
-              "deployment",
-              "registry",
-              "library"
-            ]
-          }
-        },
-        "required": [
-          "name",
-          "at"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "views": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "folders": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "kinds": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "categories": {
-            "type": "array",
-            "items": {
-              "$ref": "common.schema.json#/$defs/category"
-            }
-          },
-          "states": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "name",
-          "folders"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "task_home": false,
-    "lanes": false,
-    "id": false
+    "settings": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/settings"
+    }
   },
+  "required": [
+    "format",
+    "owner"
+  ],
   "patternProperties": {
     "^x_": {}
   },
-  "additionalProperties": false,
-  "required": [
-    "kind",
-    "schema",
-    "role",
-    "owner"
-  ],
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "role": {
-            "const": "deployment"
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "deployment"
-        ],
-        "properties": {
-          "registry": false,
-          "folders": false,
-          "views": false
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "role": {
-            "const": "registry"
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "registry",
-          "folders"
-        ],
-        "properties": {
-          "deployment": false,
-          "backlog": false,
-          "triggers": false,
-          "memory": false
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "role": {
-            "const": "library"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "deployment": false,
-          "backlog": false,
-          "triggers": false,
-          "memory": false,
-          "registry": false,
-          "folders": false,
-          "views": false
-        }
-      }
-    }
-  ]
+  "additionalProperties": false
 }

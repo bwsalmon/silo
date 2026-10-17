@@ -1,8 +1,7 @@
 ---
-kind: task
-schema: grain/task@v1
 title: T
-submitter: user:a@example.com
+submitter: "@alice"
 created_at: "2026-10-16T09:00:00Z"
+capabilities: [../caps/k.capability.md]
 ---
 Do it.

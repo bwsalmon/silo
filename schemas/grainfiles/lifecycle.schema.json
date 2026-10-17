@@ -1,58 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/lifecycle.schema.json",
-  "title": "grain/lifecycle@v1: a task state machine (\u00a712)",
+  "title": "A lifecycle (docs/grainfiles-spec.md §7.9)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "lifecycle"
-    },
-    "schema": {
-      "const": "grain/lifecycle@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "title": {
       "type": "string"
     },
-    "initial": {
-      "$ref": "common.schema.json#/$defs/stateName"
-    },
     "states": {
       "type": "object",
-      "minProperties": 1,
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_-]*$"
       },
+      "minProperties": 1,
       "additionalProperties": {
         "type": "object",
         "properties": {
           "category": {
-            "$ref": "common.schema.json#/$defs/category"
+            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/category"
           },
           "title": {
             "type": "string"
           }
         },
+        "additionalProperties": false,
         "required": [
           "category"
-        ],
-        "additionalProperties": false
+        ]
       }
+    },
+    "initial": {
+      "type": "string"
     },
     "transitions": {
       "type": "array",
@@ -65,60 +43,26 @@
           "to": {
             "type": "array",
             "items": {
-              "$ref": "common.schema.json#/$defs/stateName"
-            },
-            "minItems": 1
+              "type": "string"
+            }
           }
         },
+        "additionalProperties": false,
         "required": [
           "from",
           "to"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "aliases": {
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "common.schema.json#/$defs/stateName"
-      }
-    },
-    "on_outcome": {
-      "type": "object",
-      "propertyNames": {
-        "enum": [
-          "accepted",
-          "done",
-          "failed",
-          "nothing_needed",
-          "cancelled",
-          "interrupted",
-          "failure_streak"
         ]
-      },
-      "additionalProperties": {
-        "$ref": "common.schema.json#/$defs/stateName"
       }
-    },
-    "self_approval": {
-      "type": "boolean"
-    },
-    "stalled_after": {
-      "type": "string",
-      "pattern": "^[0-9]+[mhd]$"
-    },
-    "id": false
+    }
   },
-  "patternProperties": {
-    "^x_": {}
-  },
-  "additionalProperties": false,
   "required": [
-    "kind",
-    "schema",
     "title",
     "states",
     "initial",
     "transitions"
-  ]
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false
 }

@@ -1,46 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/common.schema.json",
-  "title": "Definitions shared by every kind (docs/grainfiles-spec.md \u00a76)",
+  "title": "Definitions shared by every kind (docs/grainfiles-spec.md §6)",
   "$defs": {
-    "refString": {
+    "ref": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[^\\s\\\\]+$",
-      "not": {
-        "pattern": "^[^/:@]+@[^/:]+:"
-      }
+      "pattern": "^[^\\s\\\\]+$"
     },
-    "edge": {
-      "type": "object",
-      "properties": {
-        "ref": {
-          "$ref": "#/$defs/refString"
-        }
-      },
-      "required": [
-        "ref"
-      ]
-    },
-    "principal": {
+    "pinnedRef": {
       "type": "string",
-      "pattern": "^(user:[^@\\s]+@[^@\\s]+|team:[a-z0-9-]+#(member|approver|admin|maintainer)|(deployment|grain):[a-z][a-z0-9-]*|agent:(grain:)?[a-z][a-z0-9-]*/[A-Za-z0-9./_-]+|hub(:trigger)?|silo(:trigger)?|authenticated)$"
+      "pattern": "^git::(https|file)://[^\\s?#]+\\?ref=[0-9a-f]{40}(#[A-Za-z0-9_.-]+)?$"
+    },
+    "identity": {
+      "type": "string",
+      "pattern": "^@([a-z0-9.-]+:)?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$"
     },
     "time": {
       "type": "string",
-      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(\\.\\d+)?Z$"
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
     },
     "sha": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
-    "rank": {
-      "type": "string",
-      "pattern": "^[0-9a-z]*[1-9a-z]$"
-    },
-    "stateName": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_-]*$"
+    "settings": {
+      "type": "object",
+      "description": "Opaque, executor-owned (§6.4): never validated."
     },
     "category": {
       "enum": [
@@ -52,29 +38,48 @@
         "cancelled"
       ]
     },
-    "by": {
+    "inputDecl": {
       "type": "object",
       "properties": {
-        "by": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "integer",
+            "boolean",
+            "enum",
+            "list",
+            "ref"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "default": {},
+        "options": {
+          "type": "array",
+          "items": {}
+        },
+        "description": {
           "type": "string"
         },
-        "at": {
-          "$ref": "#/$defs/time"
-        },
-        "reason": {
+        "title": {
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
-        "by",
-        "at"
+        "name"
       ]
     },
     "contextEntry": {
       "type": "object",
       "properties": {
         "ref": {
-          "$ref": "#/$defs/refString"
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
         },
         "input": {
           "type": "string"
@@ -82,23 +87,11 @@
         "mode": {
           "enum": [
             "read",
-            "write",
-            "use"
+            "write"
           ]
         },
         "path": {
           "type": "string"
-        },
-        "depth": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 3
-        },
-        "rev": {
-          "$ref": "#/$defs/sha"
-        },
-        "reducers": {
-          "type": "array"
         }
       },
       "additionalProperties": false,
@@ -114,107 +107,6 @@
           ]
         }
       ]
-    },
-    "context": {
-      "type": "array",
-      "maxItems": 64,
-      "items": {
-        "$ref": "#/$defs/contextEntry"
-      }
-    },
-    "input": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_]*$"
-        },
-        "type": {
-          "enum": [
-            "string",
-            "text",
-            "int",
-            "bool",
-            "enum",
-            "list",
-            "ref"
-          ]
-        },
-        "required": {
-          "type": "boolean"
-        },
-        "default": {},
-        "options": {
-          "type": "array"
-        },
-        "of": {
-          "type": "string"
-        },
-        "ref_kind": {
-          "enum": [
-            "repo",
-            "folder",
-            "file"
-          ]
-        },
-        "label": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "type"
-      ],
-      "additionalProperties": false
-    },
-    "rootEntry": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "$ref": "#/$defs/refString"
-        },
-        "ref_mode": {
-          "enum": [
-            "track",
-            "pin"
-          ]
-        },
-        "ignore": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "name": {
-          "type": "string"
-        },
-        "weight": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/refString"
-        },
-        "write": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "additionalProperties": false
-    },
-    "limits": {
-      "type": "object",
-      "properties": {
-        "objects_per_entry": {
-          "type": "integer"
-        },
-        "objects": {
-          "type": "integer"
-        }
-      },
-      "additionalProperties": false
     }
   }
 }

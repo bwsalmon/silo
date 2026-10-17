@@ -1,9 +1,7 @@
 ---
-kind: task
-schema: grain/task@v1
 title: T
-submitter: user:a@example.com
+submitter: "@alice"
 created_at: "2026-10-16T09:00:00Z"
-depends_on: ["two words.task.md"]
+capabilities: ["https://github.com/acme/lib.git//caps/k.capability.md"]
 ---
 Do it.

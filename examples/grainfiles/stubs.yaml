@@ -1,6 +1,5 @@
 # The example repositories' illustrative URLs, mapped to the folders that stand in for them.
-https://github.com/acme/hub.git: hub-intake
-https://github.com/acme/grain-eu.git: grain-eu
-https://github.com/acme/grain-us.git: grain-us
+# The linter resolves any ?ref= to the folder's working tree.
+https://github.com/acme/commons.git: commons
 https://github.com/acme/widgets.git: widgets
-https://github.com/acme/registry.git: registry
+https://github.com/acme/grain-eu.git: grain-eu

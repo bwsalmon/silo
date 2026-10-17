@@ -1,3 +1,3 @@
 ---
-kind: widget
+title: x
 ---

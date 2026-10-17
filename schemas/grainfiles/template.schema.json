@@ -1,191 +1,49 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/template.schema.json",
-  "title": "grain/template@v1: a single-task template, a folder-template manifest, or a partial (\u00a77.5, \u00a713)",
+  "title": "A template (docs/grainfiles-spec.md §7.4)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "template"
-    },
-    "schema": {
-      "const": "grain/template@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "form": {
       "enum": [
         "task",
-        "folder",
-        "partial"
+        "folder"
       ]
     },
     "title": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "inputs": {
       "type": "array",
       "items": {
-        "$ref": "common.schema.json#/$defs/input"
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/inputDecl"
       }
     },
     "context": {
-      "$ref": "common.schema.json#/$defs/context"
-    },
-    "lifecycle": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "team": {
-      "type": "string"
-    },
-    "model": {
-      "type": "string"
-    },
-    "network": {},
-    "nothing_needed": {},
-    "auto_merge": {
-      "type": "boolean"
-    },
-    "auto-merge": {
-      "type": "boolean"
-    },
-    "base": {
-      "type": "string"
-    },
-    "run": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "enum": [
-            "count",
-            "until-clean"
-          ]
-        },
-        "count": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_passes": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max-passes": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "require_approval": {
-          "type": "boolean"
-        },
-        "require-approval": {
-          "type": "boolean"
-        },
-        "auto_merge": {
-          "type": "boolean"
-        },
-        "auto-merge": {
-          "type": "boolean"
-        },
-        "auto_approve_proposals": {
-          "type": "boolean"
-        },
-        "auto-approve-proposals": {
-          "type": "boolean"
-        },
-        "team": {
-          "type": "string"
-        },
-        "repo": false,
-        "target": false
-      },
-      "additionalProperties": false
-    },
-    "target": {
-      "enum": [
-        "lane",
-        "path"
-      ]
-    },
-    "labels": {
       "type": "array",
       "items": {
-        "type": "string"
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/contextEntry"
       }
     },
-    "created_at": {
-      "$ref": "common.schema.json#/$defs/time"
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+      }
     },
-    "reads": false,
-    "writes": false,
-    "grants": false,
-    "capabilities": false,
-    "id": false
+    "lifecycle": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+    },
+    "settings": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/settings"
+    }
   },
+  "required": [
+    "title"
+  ],
   "patternProperties": {
     "^x_": {}
   },
-  "additionalProperties": false,
-  "required": [
-    "kind",
-    "schema"
-  ],
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "form": {
-            "const": "task"
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "title"
-        ]
-      }
-    },
-    {
-      "if": {
-        "not": {
-          "required": [
-            "form"
-          ]
-        }
-      },
-      "then": {
-        "required": [
-          "title"
-        ]
-      }
-    },
-    {
-      "if": {
-        "required": [
-          "run"
-        ]
-      },
-      "then": {
-        "properties": {
-          "form": {
-            "const": "folder"
-          }
-        },
-        "required": [
-          "form"
-        ]
-      }
-    }
-  ]
+  "additionalProperties": false
 }

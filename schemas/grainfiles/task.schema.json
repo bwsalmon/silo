@@ -1,181 +1,79 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/task.schema.json",
-  "title": "grain/task@v1: a task definition, what to do; holds no state and no runs (spec \u00a77.1)",
+  "title": "A task definition (docs/grainfiles-spec.md §7.1)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "task"
-    },
-    "schema": {
-      "const": "grain/task@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "title": {
-      "type": "string"
-    },
-    "lifecycle": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "team": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "submitter": {
-      "$ref": "common.schema.json#/$defs/principal"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
     },
     "created_at": {
-      "$ref": "common.schema.json#/$defs/time"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
     },
-    "submitted_via": {
-      "enum": [
-        "git",
-        "api",
-        "ui",
-        "cli",
-        "trigger",
-        "gate",
-        "agent",
-        "template"
-      ]
+    "inputs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/inputDecl"
+      }
     },
     "context": {
-      "$ref": "common.schema.json#/$defs/context"
+      "type": "array",
+      "items": {
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/contextEntry"
+      }
     },
-    "template": {
-      "allOf": [
-        {
-          "$ref": "common.schema.json#/$defs/edge"
-        }
-      ],
-      "properties": {
-        "ref": {
-          "$ref": "common.schema.json#/$defs/refString"
-        },
-        "rev": {
-          "$ref": "common.schema.json#/$defs/sha"
-        },
-        "inputs": {
-          "type": "object"
-        }
-      },
-      "additionalProperties": false
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+      }
     },
     "depends_on": {
       "type": "array",
       "items": {
-        "$ref": "common.schema.json#/$defs/refString"
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
       }
     },
     "implements": {
       "type": "array",
       "items": {
-        "allOf": [
-          {
-            "$ref": "common.schema.json#/$defs/edge"
-          }
-        ],
+        "type": "object",
         "properties": {
           "ref": {
-            "$ref": "common.schema.json#/$defs/refString"
-          },
-          "rev": {
-            "$ref": "common.schema.json#/$defs/sha"
+            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
           },
           "hash": {
             "type": "string",
             "pattern": "^sha256:[0-9a-f]{64}$"
           }
         },
+        "additionalProperties": false,
         "required": [
-          "rev",
-          "hash"
-        ],
-        "additionalProperties": false
+          "ref"
+        ]
       }
     },
-    "constraints": {
-      "type": "object",
-      "properties": {
-        "labels": {
-          "type": "object"
-        },
-        "deployment": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false
-    },
-    "filed_by": {
-      "type": "object",
-      "properties": {
-        "deployment": {
-          "type": "string"
-        },
-        "run": {
-          "$ref": "common.schema.json#/$defs/refString"
-        },
-        "principal": {
-          "$ref": "common.schema.json#/$defs/principal"
-        }
-      },
-      "additionalProperties": false
+    "lifecycle": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     },
     "supersedes": {
-      "$ref": "common.schema.json#/$defs/refString"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     },
-    "origin": {
-      "type": "string"
-    },
-    "labels": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "auto_merge": {
-      "type": "boolean"
-    },
-    "repo": false,
-    "base": false,
-    "reads": false,
-    "writes": false,
-    "capabilities": false,
-    "closed": false,
-    "placement": false,
-    "id": false,
-    "state": false,
-    "thread": false,
-    "runs": false,
-    "placements": false,
-    "approved_by": false,
-    "approved_at": false,
-    "cancel": false,
-    "rejection": false
+    "settings": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/settings"
+    }
   },
-  "patternProperties": {
-    "^x_": {}
-  },
-  "additionalProperties": false,
   "required": [
-    "kind",
-    "schema",
     "title",
     "submitter",
     "created_at"
-  ]
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false
 }

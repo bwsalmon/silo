@@ -1,7 +1,0 @@
-*  @user:a@example.com
-/backlog/**/*.exec/  @team:hub#member(create,move)
-/backlog/**/*.exec/exec.md:state(*->go),approved_by,approved_at  @team:sec#approver
-/backlog/**/*.exec/thread/  @authenticated(create)
-/backlog/**/*.exec/runs/  @deployment:eu
-/tasks/  @team:hub#member
-/tasks/**/thread/  @authenticated(create)

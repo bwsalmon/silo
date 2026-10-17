@@ -1,8 +1,6 @@
 ---
-kind: task
-schema: grain/task@v1
 title: T
-submitter: user:a@example.com
+submitter: "@alice"
 created_at: "2026-10-16T09:00:00Z"
 depends_on: [missing.task.md]
 ---

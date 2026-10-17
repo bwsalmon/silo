@@ -1,54 +1,29 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/moved.schema.json",
-  "title": "grain/moved@v1: a tombstone (\u00a77.12)",
+  "title": "A tombstone (docs/grainfiles-spec.md §7.10)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "moved"
-    },
-    "schema": {
-      "const": "grain/moved@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "to": {
-      "$ref": "common.schema.json#/$defs/refString"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     },
     "moved_by": {
-      "$ref": "common.schema.json#/$defs/principal"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
     },
     "moved_at": {
-      "$ref": "common.schema.json#/$defs/time"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
     },
     "reason": {
       "type": "string"
-    },
-    "id": false
+    }
   },
-  "patternProperties": {
-    "^x_": {}
-  },
-  "additionalProperties": false,
   "required": [
-    "kind",
-    "schema",
     "to",
     "moved_by",
     "moved_at"
-  ]
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false
 }

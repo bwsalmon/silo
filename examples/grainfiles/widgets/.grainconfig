@@ -1,5 +1,0 @@
-schema: grain/repo-config@v1
-default_ref: main
-enforcement: {mode: codeowners, branch: main, codeowners: compiled}
-aliases:
-  intake: https://github.com/acme/hub.git

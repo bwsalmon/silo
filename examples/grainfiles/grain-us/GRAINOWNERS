@@ -1,5 +1,0 @@
-*                                     @team:hub#admin
-/hub/**/*.exec/                       @team:hub#member(create,move)
-/**/*.exec/exec.md:state(category:ready->category:active),state(category:active->*),superseded  @deployment:us
-/**/*.exec/runs/                      @deployment:us
-/**/*.exec/thread/                    @authenticated(create)

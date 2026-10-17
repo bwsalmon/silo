@@ -1,72 +1,37 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/comment.schema.json",
-  "title": "grain/comment@v1: one append-only comment in a thread/ or run folder (\u00a77.4)",
+  "title": "A comment (docs/grainfiles-spec.md §7.2)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "comment"
-    },
-    "schema": {
-      "const": "grain/comment@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "author": {
-      "$ref": "common.schema.json#/$defs/principal"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
     },
     "at": {
-      "$ref": "common.schema.json#/$defs/time"
-    },
-    "via": {
-      "enum": [
-        "git",
-        "hub",
-        "api",
-        "forge"
-      ]
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
     },
     "in_reply_to": {
-      "$ref": "common.schema.json#/$defs/refString"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     },
     "supersedes": {
-      "$ref": "common.schema.json#/$defs/refString"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+    },
+    "record": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     },
     "attachments": {
       "type": "array",
       "items": {
-        "$ref": "common.schema.json#/$defs/refString"
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
       }
-    },
-    "question": {
-      "type": "boolean"
-    },
-    "task": false,
-    "run": false,
-    "id": false
+    }
   },
+  "required": [
+    "author",
+    "at"
+  ],
   "patternProperties": {
     "^x_": {}
   },
-  "additionalProperties": false,
-  "required": [
-    "kind",
-    "schema",
-    "author",
-    "at"
-  ]
+  "additionalProperties": false
 }
