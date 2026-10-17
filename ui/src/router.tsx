@@ -12,6 +12,7 @@ export type Route =
   | { page: 'file'; team?: string }
   | { page: 'teams' }
   | { page: 'team'; team: string }
+  | { page: 'proposals'; team: string }
   | { page: 'notfound'; path: string };
 
 export function parseRoute(path: string): Route {
@@ -21,6 +22,7 @@ export function parseRoute(path: string): Route {
   if (parts[0] === 'teams' && parts.length === 2) return { page: 'backlog', team: parts[1] };
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'members') return { page: 'team', team: parts[1] };
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'file') return { page: 'file', team: parts[1] };
+  if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'proposals') return { page: 'proposals', team: parts[1] };
   if (parts[0] === 'file' && parts.length === 1) return { page: 'file' };
   if (parts[0] === 'tasks' && parts.length === 2) return { page: 'task', id: parts[1] };
   if (parts[0] === 'nodes' && parts.length === 1) return { page: 'nodes' };
@@ -41,6 +43,8 @@ export function routePath(r: Route): string {
       return '/teams';
     case 'team':
       return `/teams/${encodeURIComponent(r.team)}/members`;
+    case 'proposals':
+      return `/teams/${encodeURIComponent(r.team)}/proposals`;
     case 'notfound':
       return r.path;
   }

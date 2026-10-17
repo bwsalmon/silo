@@ -1,13 +1,16 @@
 package tasks
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
 )
@@ -23,15 +26,38 @@ const TasksPath = "/v1/tasks"
 //	GET  /v1/tasks/{id}
 //	POST /v1/tasks/{id}/cancel {"reason"}                               its submitter, a team admin or a hub admin
 //	POST /v1/tasks/{id}/requeue                                         the same: a lost task back to the queue, or a queued one's exclusions cleared
+//	POST /v1/tasks/{id}/approve                                         a member of the task's team: a proposed task queued
+//	POST /v1/tasks/{id}/reject {"reason"}                               the same: a proposed task turned down
+//	GET  /v1/tasks/{id}/approvals                                       the answers to the task's approval requests
+//	POST /v1/tasks/{id}/approvals/{request_id} {"decision", "reason"}   a member of the task's team: allow or deny one
 //
-// The caller submits only to a repository one of their teams owns, or
-// to one of their teams, and sees only those teams' tasks. A task the
-// caller may not see answers 404, as one that does not exist.
+// The caller submits to a repository one of their teams owns, or to one
+// of their teams, and sees those teams' tasks. Any signed-in caller may
+// also propose a task in a repository a team they are not in owns: it
+// is filed proposed, and waits for a member of that team to approve it.
+// The caller sees the tasks they filed, but not, unless they are in its
+// team, a task's events or artifacts (hub/live). A task the caller may
+// not see answers 404, as one that does not exist.
+//
+// Approving, rejecting and answering an approval request are for the
+// members of the task's own team, as user:<email> or through a group,
+// in either role (member or admin): not a hub admin who is not in the
+// team, nor a team given only the repository's history. A task's
+// submitter may not approve or reject it, but may withdraw it (cancel).
 type API struct {
 	Store      *Store
 	Dispatcher *Dispatcher
 	// Directory signs the caller in and says what they may see.
 	Directory *directory.API
+	// Requests finds a task's approval requests among its stored events:
+	// *live.Store. Without it no approval request is answered.
+	Requests ApprovalRequests
+}
+
+// ApprovalRequests finds the approval_request event a task's node sent
+// with an ID, if it sent one.
+type ApprovalRequests interface {
+	ApprovalRequest(ctx context.Context, task, id string) (events.ApprovalRequest, bool, error)
 }
 
 // Handler serves the API's paths. A write a browser sent from anywhere
@@ -56,6 +82,10 @@ func (a *API) Handler() http.Handler {
 	h("GET "+TasksPath+"/{id}", a.get)
 	h("POST "+TasksPath+"/{id}/cancel", a.cancel)
 	h("POST "+TasksPath+"/{id}/requeue", a.requeue)
+	h("POST "+TasksPath+"/{id}/approve", a.approve)
+	h("POST "+TasksPath+"/{id}/reject", a.reject)
+	h("GET "+TasksPath+"/{id}/approvals", a.answers)
+	h("POST "+TasksPath+"/{id}/approvals/{request}", a.answer)
 	return identity.SameOrigin(m)
 }
 
@@ -99,11 +129,17 @@ func readJSON(r *http.Request, v any) error {
 	return nil
 }
 
-// sees is whether the caller may see t: a member of its team, or, for a
-// repository's task, of the team a hub admin transferred the repository
-// to with its history (directory.Access.SeesTask).
+// sees is whether the caller may see t: its submitter, a member of its
+// team, or, for a repository's task, of the team a hub admin transferred
+// the repository to with its history (directory.Access.SeesTask).
 func sees(acc *directory.Access, t Task) bool {
-	return acc.SeesTask(t.Team, t.Repo)
+	return strings.EqualFold(t.Submitter, acc.Email) || acc.SeesTask(t.Team, t.Repo)
+}
+
+// member is whether the caller is in t's team, in any role: who may
+// approve or reject it, and answer its approval requests.
+func member(acc *directory.Access, t Task) bool {
+	return acc.Teams[t.Team] != ""
 }
 
 // manages is whether the caller may cancel or requeue t.
@@ -123,6 +159,7 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 		return err
 	}
 	spec := Spec{Repo: req.Repo, Title: req.Title, Prompt: req.Prompt, Submitter: strings.ToLower(acc.Email), Constraints: req.Constraints}
+	propose := false
 	switch {
 	case (req.Repo == "") == (req.Team == ""):
 		return &httpError{http.StatusBadRequest, `want one target: "repo" or "team"`}
@@ -132,9 +169,12 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 			return err
 		}
 		// No team owns it: no node could be admitted to serve it.
-		if team == "" || !acc.SeesRepo(req.Repo) {
-			return &httpError{http.StatusNotFound, "no such repository in your teams: " + req.Repo}
+		if team == "" {
+			return &httpError{http.StatusNotFound, "no team owns the repository: " + req.Repo}
 		}
+		// Not one of the caller's teams': a proposal, for the team that
+		// owns it to approve.
+		propose = !acc.SeesRepo(req.Repo)
 		spec.Team = team
 	default:
 		if !acc.SeesTeam(req.Team) {
@@ -144,6 +184,13 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 			return err
 		}
 		spec.Team = req.Team
+	}
+	if propose {
+		t, err := a.Store.Propose(r.Context(), spec)
+		if err != nil {
+			return err
+		}
+		return writeJSON(w, http.StatusCreated, t)
 	}
 	t, err := a.Store.Create(r.Context(), spec)
 	if err != nil {
@@ -176,7 +223,7 @@ func (a *API) list(w http.ResponseWriter, r *http.Request, acc *directory.Access
 	if team := q.Get("team"); team != "" {
 		f.Teams = []string{team}
 	} else if !acc.HubAdmin {
-		f.Teams = []string{}
+		f.Teams, f.Submitter = []string{}, strings.ToLower(acc.Email)
 		for team := range acc.Teams {
 			f.Teams = append(f.Teams, team)
 		}
@@ -262,4 +309,118 @@ func (a *API) requeue(w http.ResponseWriter, r *http.Request, acc *directory.Acc
 		a.Dispatcher.Wake()
 	}
 	return writeJSON(w, http.StatusOK, t)
+}
+
+func (a *API) approve(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	t, err := a.task(r, acc)
+	if err != nil {
+		return err
+	}
+	if !member(acc, t) || strings.EqualFold(t.Submitter, acc.Email) {
+		return &httpError{http.StatusForbidden, "forbidden: only a member of team " + t.Team + " other than its submitter may approve the task"}
+	}
+	if t, err = a.Store.Approve(r.Context(), t.ID, acc.Email); err != nil {
+		return err
+	}
+	if a.Dispatcher != nil {
+		a.Dispatcher.Wake()
+	}
+	return writeJSON(w, http.StatusOK, t)
+}
+
+func (a *API) reject(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	t, err := a.task(r, acc)
+	if err != nil {
+		return err
+	}
+	if !member(acc, t) || strings.EqualFold(t.Submitter, acc.Email) {
+		return &httpError{http.StatusForbidden, "forbidden: only a member of team " + t.Team + " other than its submitter may reject the task"}
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			return err
+		}
+	}
+	if len(req.Reason) > maxReason {
+		return &httpError{http.StatusBadRequest, fmt.Sprintf("the reason is over %d bytes", maxReason)}
+	}
+	reason := "rejected by " + strings.ToLower(acc.Email)
+	if req.Reason != "" {
+		reason += ": " + req.Reason
+	}
+	if t, err = a.Store.Reject(r.Context(), t.ID, reason); err != nil {
+		return err
+	}
+	if a.Dispatcher != nil {
+		a.Dispatcher.finished(t)
+	}
+	return writeJSON(w, http.StatusOK, t)
+}
+
+func (a *API) answers(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	t, err := a.task(r, acc)
+	if err != nil {
+		return err
+	}
+	as, err := a.Store.Answers(r.Context(), t.ID, false)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, struct {
+		Approvals []Answer `json:"approvals"`
+	}{as})
+}
+
+// answer is a member of the task's team answering one of its approval
+// requests: one its node sent, of a task still running, before the
+// request's deadline, and only once. Anything else is refused as stale.
+func (a *API) answer(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	t, err := a.task(r, acc)
+	if err != nil {
+		return err
+	}
+	if !member(acc, t) {
+		return &httpError{http.StatusForbidden, "forbidden: only a member of team " + t.Team + " may answer the task's approval requests"}
+	}
+	var req struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return err
+	}
+	if req.Decision != Allow && req.Decision != Deny {
+		return &httpError{http.StatusBadRequest, `decision: want "allow" or "deny"`}
+	}
+	if len(req.Reason) > maxReason {
+		return &httpError{http.StatusBadRequest, fmt.Sprintf("the reason is over %d bytes", maxReason)}
+	}
+	id := r.PathValue("request")
+	if a.Requests == nil {
+		return &httpError{http.StatusNotFound, "no such approval request"}
+	}
+	ar, ok, err := a.Requests.ApprovalRequest(r.Context(), t.ID, id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return &httpError{http.StatusNotFound, "no such approval request"}
+	}
+	if t.State != Running {
+		return &httpError{http.StatusConflict, "stale approval request: task " + t.ID + " is " + string(t.State)}
+	}
+	if ar.Deadline != nil && time.Now().After(*ar.Deadline) {
+		return &httpError{http.StatusConflict, "stale approval request: its deadline has passed"}
+	}
+	ans, err := a.Store.Answer(r.Context(), Answer{Task: t.ID, Request: id, Decision: req.Decision, AnsweredBy: strings.ToLower(acc.Email), Reason: req.Reason})
+	if err != nil {
+		return err
+	}
+	if a.Dispatcher != nil {
+		a.Dispatcher.Answered(r.Context(), t.ID)
+	}
+	return writeJSON(w, http.StatusOK, ans)
 }

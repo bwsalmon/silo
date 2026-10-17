@@ -23,19 +23,21 @@ import (
 // Channel is the channel the hub's notices go out on.
 const Channel = "silo_hub"
 
-// Message is one notice. Exactly one of Wake, Cancel, Node and Event is
-// set on the wire:
+// Message is one notice. Exactly one of Wake, Cancel, Approve, Node and
+// Event is set on the wire:
 //
 //	{"wake":true}                 a task was submitted or requeued: the dispatcher looks at the queue
 //	{"cancel":"<task>"}           a task was cancelled: the dispatcher signals its stream
+//	{"approve":"<task>"}          one of a task's approval requests was answered: the dispatcher sends it
 //	{"node":"<id>"}               a node's row in the shared registry changed: refill the mirror
 //	{"event":"<task>","seq":N}    the task's event N was stored
 type Message struct {
-	Wake   bool   `json:"wake,omitempty"`
-	Cancel string `json:"cancel,omitempty"`
-	Node   string `json:"node,omitempty"`
-	Event  string `json:"event,omitempty"`
-	Seq    int64  `json:"seq,omitempty"`
+	Wake    bool   `json:"wake,omitempty"`
+	Cancel  string `json:"cancel,omitempty"`
+	Approve string `json:"approve,omitempty"`
+	Node    string `json:"node,omitempty"`
+	Event   string `json:"event,omitempty"`
+	Seq     int64  `json:"seq,omitempty"`
 
 	// Reconnected is never sent: the bus hands it to its handlers each
 	// time its listening connection is (re)established, since notices
@@ -161,6 +163,8 @@ func (b *Bus) Post(m Message) {
 		key = "e" + m.Event
 	case m.Cancel != "":
 		key = "c" + m.Cancel
+	case m.Approve != "":
+		key = "a" + m.Approve
 	default:
 		return
 	}

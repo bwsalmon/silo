@@ -67,9 +67,10 @@ Grains are admitted to serve which repositories (§5.3), and where a task
 is placed (§6.2). It puts **claims** on each task it dispatches. As
 built, the offered task (`tasks.Spec`) carries the requester
 (`submitter`, from the caller's sign-on), the `team`, and
-`approved_by`, the human other than the submitter who approved it at
-the hub (empty until the hub has an approval flow: a submission cannot
-name one). The `capabilities` the task is granted are not in
+`approved_by` and `approved_at`, the human other than the submitter
+who approved it at the hub and when: a member of the task's team
+approving a proposal (§6.1), empty for a task nobody approved there; a
+submission cannot name one. The `capabilities` the task is granted are not in
 `tasks.Spec` yet. With a signing key the hub also
 signs these claims for the node it offers the task to (§6.4).
 
@@ -424,7 +425,9 @@ cannot avoid it, since a browser and a node are different clients.
 pod: a task submitted or requeued (`Wake`), a cancel (`Cancel`, which
 signals the task's live stream) and a registry change. Each becomes a
 PostgreSQL `NOTIFY` on the channel `silo_hub`, with a short JSON
-payload (`{"wake":true}`, `{"cancel":"<task>"}`, `{"node":"<id>"}`),
+payload (`{"wake":true}`, `{"cancel":"<task>"}`, `{"node":"<id>"}`;
+and `{"approve":"<task>"}`, an approval request answered, on which the
+leader writes the task's undelivered answers down its stream, §6.2),
 and every pod `LISTEN`s on a connection of its own (`hub/notify`),
 reconnecting with backoff. The leader wakes on `wake`, and signals the
 task's stream on `cancel` (or, with no stream open, wakes, to tell a
@@ -883,10 +886,13 @@ in. The web UI uses only these routes and §6.1's, as any client can.
 
 `POST /v1/tasks` creates a task with these fields:
 
-- **target:** `{repo}` or `{team}`. The caller must be in the team
-  that owns the repository, or in the team (a hub admin may submit
-  anywhere). A repository that no team owns is refused, because no node
-  could be admitted to serve it.
+- **target:** `{repo}` or `{team}`. A caller in the team that owns the
+  repository, or in the team, files the task queued (a hub admin may
+  submit anywhere). Any other signed-in caller may still target a
+  repository a team owns: the task is filed **proposed**, for that
+  team to approve (below). A team-targeted task is for the team's own
+  members only. A repository that no team owns is refused, because no
+  node could be admitted to serve it.
 - **prompt** and **title**. The title defaults to the prompt's first
   line.
 - **submitter:** the principal who submitted it, from the caller's
@@ -903,6 +909,8 @@ Users and custom UIs submit tasks the same way, through the API or the
 SDK. The task states are:
 
 ```
+proposed → queued (a member of the team approved it)
+         → rejected (a member of the team turned it down)
 queued → offered → running → done | failed | cancelled
               ↘ queued (refused, or the node was lost before it accepted)
                           ↘ lost (the node was lost while the task ran)
@@ -910,7 +918,38 @@ queued → offered → running → done | failed | cancelled
                               → queued (the node came back without it, or a human requeued it)
 ```
 
-Any state that has not finished can be cancelled.
+Any state that has not finished can be cancelled; a proposal's
+submitter withdraws it that way.
+
+**Proposals.** A proposed task is never dispatched. A **member of the
+task's team**, in either of the directory's roles (`member` or
+`admin`), by `user:<email>` or through a group, approves it once with
+`POST /v1/tasks/{id}/approve`: the task is queued, and the approver
+and the time are recorded as its `approved_by` and `approved_at`,
+which the offer carries to the node (§6.4). The submitter may not
+approve their own task, and neither may a hub admin who is not in the
+team, or a team that was given only the repository's history. The same
+members reject it, once, with `POST /v1/tasks/{id}/reject {"reason"}`;
+a rejected task is finished. Approving or rejecting a task that is no
+longer proposed answers 409. A proposal's submitter sees it in the
+backlog and on its page, but not, unless they are in its team, its
+events or artifacts (§7). That a repository is owned by some team is
+all a proposal reveals to someone outside it, as an intake that takes
+proposals from any signed-in user must (task-repos.md §8).
+
+**Approvals inside a run.** A Grain that needs a human's approval
+before it goes on sends an `approval_request` event (§7.1), which the
+hub stores as conversation. A member of the task's team, as above,
+answers it with `POST /v1/tasks/{id}/approvals/{request_id}
+{"decision":"allow"|"deny","reason"}`. The hub answers only a request
+the task's node sent, of a task that is `running`, before the
+request's `deadline`, and only once: an unknown ID answers 404, and a
+stale one (answered already, past its deadline, or of a task no longer
+running) 409. The answer and who gave it are kept
+(`tasks.task_approvals`), listed by `GET /v1/tasks/{id}/approvals`, and
+written to the node down the task's stream as an `approve` message
+(§6.2), as a cancel is. A Grain that does not support it never sends
+`approval_request`.
 
 The store (`tasks.Store`: SQLite for one replica, PostgreSQL for more,
 and possibly the same database as the directory) keeps the task, its
@@ -929,7 +968,13 @@ GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams'
 GET  /v1/tasks/{id}
 POST /v1/tasks/{id}/cancel {"reason"}                        its submitter, a team admin or a hub admin
 POST /v1/tasks/{id}/requeue                                  the same
+POST /v1/tasks/{id}/approve                                  a member of its team, not its submitter: a proposal queued
+POST /v1/tasks/{id}/reject {"reason"}                        the same: a proposal turned down
+GET  /v1/tasks/{id}/approvals                                the answers to its approval requests
+POST /v1/tasks/{id}/approvals/{request_id} {"decision","reason"}   a member of its team: allow or deny one
 ```
+
+The list holds the caller's teams' tasks and the tasks they submitted.
 
 A task the caller may not see answers 404, as one that does not exist
 would. `requeue` returns a `lost` task to the queue. On a queued task,
@@ -997,12 +1042,22 @@ A task whose node is away when it is cancelled stays `cancel_pending`.
 When the node is back, the cancel is written as the only message on a
 stream of its own, `{"type":"cancel","task":{"id":...}}`.
 
+An answer to one of the task's approval requests (§6.1) is written down
+the same stream as `{"type":"approve","task":{"id":...},"request_id":...,
+"decision":"allow"|"deny","answered_by":...,"reason":...}`, by the
+dispatcher holding the stream: the API's pod, or, through the bus's
+`{"approve":"<task>"}` notice, another's (§2.2.4). An answer the node
+has not been sent because its stream ended first is sent after the
+node's next `accept` of the task, when it resumes it. None is sent
+after the task's cancel.
+
 The whole stream protocol, one JSON message per line:
 
 ```
 hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}
             {"type":"resume","task":{...},"requester_attestation":"<JWT>"}
             {"type":"cancel","task":{"id":...}}
+            {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"...","reason":"..."}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
@@ -1111,7 +1166,7 @@ afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
 | `hub_task_id` | the task's hub ID, `tasks.Spec.ID` |
 | `requester` | the task's `submitter`; the Grain records them as the task's creator |
 | `team` | the task's team |
-| `approved_by` | the task's `approved_by`: empty for a task nobody approved at the hub, which is every direct submission |
+| `approved_by` | the task's `approved_by`: the member of its team who approved its proposal (§6.1); empty for a task nobody approved at the hub, which is every direct submission |
 | `granted_capabilities` | `[]`: the hub grants none |
 | `network_access` | absent: left to the Grain |
 | `spec_digest` | `sha256:` and the hex SHA-256 of `{"target":repo,"base":"","reads":[],"writes":[],"title":title,"body":prompt}`, compact, in that key order (`claims.SpecDigest`, as grain's `policy.SpecDigest`) |
@@ -1152,8 +1207,8 @@ one can go once nothing it signed is still good, an hour later.
 describes `Requester` and `Approval` attestations on `RunTaskRequest`.
 This is that attestation in the JWT form grain's local policy verifies:
 `requester` and `team` are the requester attestation, `approved_by`
-the approval (the task's `approved_by`; empty until the hub has an
-approval flow), carried on the offer
+the approval (the task's `approved_by`; empty for a task nobody
+approved at the hub), carried on the offer
 (§6.2), which is the hub's `RunTaskRequest`, as
 `requester_attestation`. A Grain under `silo_issuer` refuses every hub
 offer until its `hubTasks.Start` (`pkg/daemon/hub.go`) passes the
@@ -1195,7 +1250,8 @@ As built (`hub/live`):
   is dropped. The node keeps a task's `seq` increasing across the
   sessions it runs for it.
 - **The classes.** `status`, `usage`, `resumable` and `result` are
-  lifecycle. `approval_request` is conversation. A `transcript` item of
+  lifecycle. `approval_request` is conversation, and a member of the
+task's team answers it through the hub (§6.1). A `transcript` item of
   kind `text`, `thinking` or `error` is the token stream. Everything
   else is node-only: `tool_call`, transcript `tool_call` and
   `tool_result` items, `artifact`, any type the hub does not know, and

@@ -71,6 +71,7 @@ export function Backlog({ me, team }: { me?: Me; team?: string }) {
           ))}
         </Box>
         <Box sx={{ flex: 1 }} />
+        {team && <Link to={routePath({ page: 'proposals', team })}>Proposals</Link>}
         {team && <Link to={routePath({ page: 'team', team })}>Members and repositories</Link>}
         <Link to={routePath({ page: 'file', team })}>File a task</Link>
       </Stack>

@@ -44,6 +44,8 @@ The hub opens one stream per task (hub.md §6.2):
 hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}    run this task
             {"type":"resume","task":{...},"requester_attestation":"<JWT>"}   a task you ran when the hub lost you: still yours?
             {"type":"cancel","task":{"id":...}}                              stop it
+            {"type":"approve","task":{"id":...},"request_id":"...",          a human's answer to an approval_request
+             "decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
@@ -59,12 +61,18 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 | `repo` | `owner/name`, or empty for a team-targeted task, where the Grain chooses the repository. |
 | `title`, `prompt` | What to do. |
 | `submitter` | The requester, from their sign-on to the hub. |
-| `approved_by` | The human who approved the task at the hub, never its submitter; absent for a task nobody approved there. |
+| `approved_by` | The human who approved the task at the hub: a member of the task's team, never its submitter, who approved it while it was proposed. Absent for a task nobody approved there, which is every task a member of the team filed directly. |
+| `approved_at` | When `approved_by` approved it (RFC 3339); absent with it. |
 | `constraints` | The labels or node ID the task was placed by. |
 | `created_at` | When it was submitted. |
 
 `capabilities` are not carried yet. A Grain files a task without
-`approved_by` for its own local approval.
+`approved_by` for its own local approval. A task filed at the hub by
+someone outside the team that owns its repository is *proposed*, and
+is never offered until a member of that team approves it (hub.md
+§6.1), so a Grain is only ever offered such a task with `approved_by`
+set. Whether a Grain runs a task with or without `approved_by`, and
+whose approval it accepts, is its own local policy's.
 
 An offer or resume from a hub with a signing key also carries
 `requester_attestation`: a JWT, signed for this Grain's node ID, of the
@@ -82,7 +90,7 @@ The Grain takes these claims on trust and holds the task to its own
 local policy, refusing what that policy does not allow (hub.md §1.2).
 No answer to an offer within a minute counts as a refusal. After
 `accept`, the stream stays open for the task's life: the Grain writes
-`result` there, and the hub writes `cancel` there. A cancel for a task
+`result` there, and the hub writes `cancel` and `approve` there. A cancel for a task
 with no open stream arrives as the only message on a stream of its own.
 
 A Grain that was away while it ran a task is normally sent `resume`
@@ -92,6 +100,48 @@ has been put back in the queue instead: no `resume` comes, the hub
 refuses the Grain's events for it, and its result is not recorded. A
 Grain may stop such a task when, some minutes after reconnecting, it
 has been sent neither `resume` nor `cancel` for it.
+
+### Approvals inside a run (optional)
+
+A Grain that wants a human's go-ahead before it goes on, for instance
+before a tool call its policy holds for approval, sends an
+`approval_request` event on the task's event stream (below):
+
+```
+{"type":"approval_request","seq":N,"task":"<hub id>","approval_request":{"id":"<request id>","tool":"...","args":{...},"message":"...","deadline":"<RFC 3339>"}}
+```
+
+`id` must be unique within the task; `deadline`, if set, is when the
+Grain stops waiting. A member of the task's team answers it at the hub,
+and the hub writes the answer on the task stream:
+
+```
+{"type":"approve","task":{"id":"<hub id>"},"request_id":"<request id>","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `request_id` | The `id` of the `approval_request` it answers. |
+| `decision` | `allow` or `deny`. |
+| `answered_by` | The member of the task's team who answered, from their sign-on: the hub's claim, as `approved_by` is. |
+| `reason` | Optional, the answerer's words. |
+
+The hub sends at most one `approve` for each request: it refuses a
+second answer, an answer after the request's `deadline`, and one for a
+task that is not running, and it answers only an `id` the Grain sent.
+An answer it could not write because the stream had ended is written
+after the Grain's next `accept` of the task (its resume), so a Grain
+may see an `approve` for a request it sent in an earlier session. A
+Grain ignores an `approve` for a request it is no longer waiting on,
+and applies its own local policy to the answer: an `allow` is the
+hub's decision, which the Grain may still refuse to act on.
+
+The `approve` message is not signed beyond what the stream already
+gives: it arrives on the authenticated connection the Grain dialled.
+A Grain that does not support answers simply never sends
+`approval_request`; one that sends it must expect `approve` on the
+task stream, and should treat an unknown message type there as
+ignorable.
 
 ## Stream events (the event stream)
 

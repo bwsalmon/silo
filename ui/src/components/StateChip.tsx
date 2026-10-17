@@ -8,6 +8,8 @@ import { Chip, type ChipProps } from '@mui/material';
 import type { TaskState } from '../api';
 
 const colors: Record<TaskState, ChipProps['color']> = {
+  proposed: 'secondary',
+  rejected: 'default',
   queued: 'default',
   offered: 'info',
   running: 'primary',
@@ -23,7 +25,7 @@ export function StateChip({ state, cancelPending }: { state: TaskState; cancelPe
       size="small"
       label={cancelPending ? `${state}, cancelling` : state}
       color={colors[state] ?? 'default'}
-      variant={state === 'cancelled' ? 'outlined' : 'filled'}
+      variant={state === 'cancelled' || state === 'rejected' ? 'outlined' : 'filled'}
     />
   );
 }

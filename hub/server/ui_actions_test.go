@@ -145,8 +145,33 @@ func TestWebUIActions(t *testing.T) {
 	refused("POST", "/v1/tasks", map[string]any{"repo": "acme/app", "prompt": "x"})
 	byBob := file(201, bob, map[string]any{"repo": "acme/app", "title": "Fix", "prompt": "Fix it."})
 	byAlice := file(201, alice, map[string]any{"team": "infra", "title": "Any", "prompt": "Anything.", "constraints": map[string]any{"node": "ws-1"}})
-	file(404, carol, map[string]any{"repo": "acme/app", "prompt": "x"})
 	file(404, carol, map[string]any{"team": "infra", "prompt": "x"})
+
+	// Proposals: carol, outside infra, proposes in its repository; a
+	// member of infra other than her approves or rejects, once.
+	byCarol := file(201, carol, map[string]any{"repo": "acme/app", "title": "Idea", "prompt": "An idea."})
+	other := file(201, carol, map[string]any{"repo": "acme/app", "title": "Other", "prompt": "Another."})
+	if b := ui(200, carol, "GET", "/v1/tasks/"+byCarol, nil); !strings.Contains(string(b), `"state":"proposed"`) {
+		t.Errorf("carol's proposal: %s", b)
+	}
+	refused("POST", "/v1/tasks/"+byCarol+"/approve", nil)
+	refused("POST", "/v1/tasks/"+byCarol+"/reject", map[string]string{"reason": "x"})
+	ui(403, carol, "POST", "/v1/tasks/"+byCarol+"/approve", nil)
+	ui(403, root, "POST", "/v1/tasks/"+byCarol+"/approve", nil)
+	if b := ui(200, bob, "POST", "/v1/tasks/"+byCarol+"/approve", nil); !strings.Contains(string(b), `"approved_by":"bob@example.com"`) {
+		t.Errorf("approve: %s", b)
+	}
+	ui(409, alice, "POST", "/v1/tasks/"+byCarol+"/approve", nil)
+	ui(409, alice, "POST", "/v1/tasks/"+byCarol+"/reject", nil)
+	if b := ui(200, alice, "POST", "/v1/tasks/"+other+"/reject", map[string]string{"reason": "not now"}); !strings.Contains(string(b), "rejected by alice@example.com: not now") {
+		t.Errorf("reject: %s", b)
+	}
+	// Answering an approval request: infra's members only, and only one
+	// the task's node sent.
+	refused("POST", "/v1/tasks/"+byBob+"/approvals/r-1", map[string]string{"decision": "allow"})
+	ui(404, carol, "POST", "/v1/tasks/"+byBob+"/approvals/r-1", map[string]string{"decision": "allow"})
+	ui(404, bob, "POST", "/v1/tasks/"+byBob+"/approvals/r-1", map[string]string{"decision": "allow"})
+	ui(200, bob, "GET", "/v1/tasks/"+byBob+"/approvals", nil)
 
 	// Cancel and requeue: the submitter, a team admin or a hub admin.
 	refused("POST", "/v1/tasks/"+byBob+"/cancel", map[string]string{"reason": "x"})
