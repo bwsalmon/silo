@@ -1,18 +1,13 @@
 ---
 kind: task
 schema: grain/task@v1
-title: Tidy the closing notes of this Grain's October runs
+title: Tidy the run notes in memory/
+state: active
+submitter: user:bsalmon@google.com
+created_at: "2026-10-16T09:00:00Z"
+approved_by: deployment:eu
+approved_at: "2026-10-16T09:05:00Z"
 context:
-  - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write}
-state: approved
-submitter: "user:bsalmon@google.com"
-approved_by: "user:bsalmon@google.com"
-approved_at: "2026-10-16T19:02:00Z"
-created_at: "2026-10-16T19:01:00Z"
-thread: 2026-10-16-tidy-run-notes/comments/
+  - {ref: "https://github.com/acme/grain-eu.git@main", mode: write}
 ---
-
-An illustrative task, not a real one: the owner's own work, written in
-this Grain's root and queued in its own lane. It never passes through
-Silo, so it carries no attestation and needs none; the Grain's owner is
-its approver (docs/grainfiles.md §6.1).
+Merge duplicate notes in `memory/` and keep each under 40 lines.

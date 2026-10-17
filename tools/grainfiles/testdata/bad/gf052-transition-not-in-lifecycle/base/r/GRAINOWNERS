@@ -1,0 +1,3 @@
+*  @team:hub#admin
+/tasks/  @authenticated(create) @team:hub#member
+/tasks/**/*.task.md:state(*->go)  @team:sec#approver

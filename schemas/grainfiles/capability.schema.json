@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/capability.schema.json",
+  "title": "grain/capability@v1: a capability that narrows a base (\u00a715)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "capability"
+    },
+    "schema": {
+      "const": "grain/capability@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "base": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "capability": {
+          "$ref": "common.schema.json#/$defs/refString"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "required": [
+            "capability"
+          ]
+        }
+      ]
+    },
+    "reducers": {
+      "type": "array"
+    },
+    "secrets": {
+      "type": "object"
+    },
+    "approval": {
+      "type": "object"
+    },
+    "owners": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "grants": false,
+    "implies": false,
+    "maximum": false,
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "title",
+    "base"
+  ]
+}

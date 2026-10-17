@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/task.schema.json",
+  "title": "grain/task@v1: a unit of work (spec \u00a77.1)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "task"
+    },
+    "schema": {
+      "const": "grain/task@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "common.schema.json#/$defs/stateName"
+    },
+    "lifecycle": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "team": {
+      "type": "string"
+    },
+    "submitter": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "submitted_via": {
+      "enum": [
+        "git",
+        "api",
+        "ui",
+        "cli",
+        "trigger",
+        "gate",
+        "agent",
+        "template"
+      ]
+    },
+    "approved_by": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "approved_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "context": {
+      "$ref": "common.schema.json#/$defs/context"
+    },
+    "template": {
+      "allOf": [
+        {
+          "$ref": "common.schema.json#/$defs/edge"
+        }
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "rev": {
+          "$ref": "common.schema.json#/$defs/sha"
+        },
+        "inputs": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "implements": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "common.schema.json#/$defs/edge"
+          }
+        ],
+        "properties": {
+          "ref": {
+            "$ref": "common.schema.json#/$defs/refString"
+          },
+          "rev": {
+            "$ref": "common.schema.json#/$defs/sha"
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "rev",
+          "hash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "properties": {
+        "labels": {
+          "type": "object"
+        },
+        "deployment": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "thread": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "placements": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "cancel": {
+      "$ref": "common.schema.json#/$defs/by"
+    },
+    "rejection": {
+      "$ref": "common.schema.json#/$defs/by"
+    },
+    "capability_approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "$ref": "common.schema.json#/$defs/refString"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "by": {
+            "$ref": "common.schema.json#/$defs/principal"
+          },
+          "at": {
+            "$ref": "common.schema.json#/$defs/time"
+          }
+        },
+        "required": [
+          "ref",
+          "digest",
+          "by",
+          "at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "trigger": {
+      "allOf": [
+        {
+          "$ref": "common.schema.json#/$defs/edge"
+        }
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "on": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "fired_at": {
+          "$ref": "common.schema.json#/$defs/time"
+        },
+        "event": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "on",
+        "fired_at"
+      ],
+      "additionalProperties": false
+    },
+    "filed_by": {
+      "type": "object",
+      "properties": {
+        "deployment": {
+          "type": "string"
+        },
+        "run": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "principal": {
+          "$ref": "common.schema.json#/$defs/principal"
+        }
+      },
+      "additionalProperties": false
+    },
+    "supersedes": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "origin": {
+      "type": "string"
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "auto_merge": {
+      "type": "boolean"
+    },
+    "repo": false,
+    "base": false,
+    "reads": false,
+    "writes": false,
+    "capabilities": false,
+    "closed": false,
+    "placement": false,
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "title",
+    "state",
+    "submitter",
+    "created_at"
+  ]
+}

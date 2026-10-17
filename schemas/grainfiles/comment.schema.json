@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/comment.schema.json",
+  "title": "grain/comment@v1: one append-only comment (\u00a77.4)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "comment"
+    },
+    "schema": {
+      "const": "grain/comment@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "task": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "run": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "author": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "via": {
+      "enum": [
+        "git",
+        "hub",
+        "api",
+        "forge"
+      ]
+    },
+    "in_reply_to": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "supersedes": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "question": {
+      "type": "boolean"
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "author",
+    "at"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "task"
+      ]
+    },
+    {
+      "required": [
+        "run"
+      ]
+    }
+  ]
+}

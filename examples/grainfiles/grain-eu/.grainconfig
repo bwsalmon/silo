@@ -1,13 +1,5 @@
-# Repo-wide settings for Grain eu's root repo (docs/grainfiles.md §8.1).
 schema: grain/repo-config@v1
-owner: {grain: eu, user: bsalmon@google.com, silo: https://silo.example.com}
-host: silo
 default_ref: main
-ref_policy: {protected: [main], fast_forward_only: true}
+enforcement: {mode: required-check, check: grainfiles/authorize, branch: main}
 aliases:
-  intake: https://silo.example.com/git/hub/intake.git
-  shared: https://silo.example.com/git/hub/shared.git
-  placements: https://silo.example.com/git/hub/placements.git
-  us: https://silo.example.com/git/grains/us.git
-  widgets: https://git.example.com/hub/widgets.git
-orphans: warn
+  intake: https://github.com/acme/hub.git

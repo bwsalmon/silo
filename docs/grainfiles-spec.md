@@ -233,8 +233,9 @@ the name of `4310-carry-approver.task.md`.
 
 ### 4.2 Characters, case and length
 
-- A grainfile's stem MUST match `[a-z0-9][a-z0-9._-]*` (GF001): lower
-  case ASCII, digits, `.`, `-`, `_`. **Decision:** no upper case in
+- A grainfile's stem MUST match `[a-z0-9][a-z0-9._-]*`, or begin with a
+  compact UTC time (`20261016T135830Z`) followed by `[a-z0-9._-]*`
+  (GF001): lower-case ASCII, digits, `.`, `-`, `_`. **Decision:** no upper case in
   grainfile names, so that names are identical on case-insensitive
   file systems.
 - An asset's name MAY use any Unicode in NFC except `/`, `\`, NUL and

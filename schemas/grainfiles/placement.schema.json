@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/placement.schema.json",
+  "title": "grain/placement@v1: a pointer from a task to one placement (\u00a77.14)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "placement"
+    },
+    "schema": {
+      "const": "grain/placement@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "task": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "deployment": {
+      "type": "string"
+    },
+    "ref": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "runs": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "placed_by": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "placed_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "withdrawn": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "common.schema.json#/$defs/time"
+        },
+        "by": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "replaced_by": {
+          "$ref": "common.schema.json#/$defs/refString"
+        }
+      },
+      "required": [
+        "at",
+        "by"
+      ],
+      "additionalProperties": false
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "task",
+    "deployment",
+    "ref",
+    "runs",
+    "placed_by",
+    "placed_at"
+  ]
+}

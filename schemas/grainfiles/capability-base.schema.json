@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/capability-base.schema.json",
+  "title": "grain/capability-base@v1: a base a deployment's provider implements (\u00a715)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "capability-base"
+    },
+    "schema": {
+      "const": "grain/capability-base@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*@v[0-9]+$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "deployment": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "object"
+    },
+    "dimensions": {
+      "type": "object"
+    },
+    "materialises": {},
+    "implies": {
+      "type": "object"
+    },
+    "proxies": {},
+    "secrets": {},
+    "approval": {
+      "type": "object"
+    },
+    "declared_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "type",
+    "deployment",
+    "provider",
+    "dimensions",
+    "materialises",
+    "implies"
+  ]
+}

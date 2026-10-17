@@ -1,8 +1,3 @@
-# Grain eu's root: the Grain and its owner write everything (docs/grainfiles.md §8.2).
-*                    @grain:eu @user:bsalmon@google.com
-# The root configuration is the owner's alone: the Grain cannot widen what it acts on.
-/grain.config.md     @user:bsalmon@google.com
-/.grainconfig        @user:bsalmon@google.com
-/GRAINOWNERS         @user:bsalmon@google.com
-# Execution records are the Grain's own writing.
-/runs/               @grain:eu
+*                     @user:bsalmon@google.com @deployment:eu
+/grain.config.md      @user:bsalmon@google.com
+/backlog/**/*.runs/   @deployment:eu

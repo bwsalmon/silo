@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/ref.schema.json",
+  "title": "grain/ref@v1: a ranked reference to a task in a lane (\u00a77.2)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "ref"
+    },
+    "schema": {
+      "const": "grain/ref@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "to": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "rank": {
+      "$ref": "common.schema.json#/$defs/rank"
+    },
+    "added_by": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "added_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "runs": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "spec_rev": {
+      "$ref": "common.schema.json#/$defs/sha"
+    },
+    "priority": {
+      "enum": [
+        "urgent",
+        "high",
+        "normal",
+        "low"
+      ]
+    },
+    "expedite": {
+      "type": "boolean"
+    },
+    "ranked_by": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "ranked_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "previous": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "superseded": {
+      "type": "object"
+    },
+    "attestation": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*$"
+    },
+    "fired_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "to",
+    "rank",
+    "added_by",
+    "added_at"
+  ]
+}
