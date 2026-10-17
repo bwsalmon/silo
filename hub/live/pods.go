@@ -15,6 +15,7 @@ import (
 
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/notify"
+	"github.com/bwsalmon/silo/hub/route"
 	"github.com/bwsalmon/silo/hub/tasks"
 	"github.com/bwsalmon/silo/internal/logsafe"
 )
@@ -51,7 +52,7 @@ const (
 // behind the listener's own check of the asking pod
 // (rendezvous.Server.Internal).
 func (h *Hub) InternalHandler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	m.HandleFunc("GET "+InternalEventsPath, h.serveInternalEvents)
 	return m
 }

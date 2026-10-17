@@ -143,13 +143,16 @@ const lightPalette: ThemeOptions = {
   palette: {
     mode: "light",
     primary: { main: "#8a6a2e", dark: "#6d5324", contrastText: "#ffffff" },
-    error: { main: "#d0453a" },
+    // error and success are dark enough for white text on them, and for
+    // themselves as text on an Alert's tint, at WCAG AA (4.5:1), which
+    // the browser suite's axe check holds them to (ui/e2e/a11y.spec.ts);
+    error: { main: "#b8392f" },
     // success mirrors --state-completed; warning is pulled off MUI's own
     // bright orange to a burnt one that reads as the accent's louder
     // cousin rather than fighting it; info is the one cool tone left in
     // the app, gold's complement, which is what an Alert that is only
     // telling you something should be next to all this warmth.
-    success: { main: "#1a9c53" },
+    success: { main: "#147a42" },
     warning: { main: "#a8621c" },
     info: { main: "#3f6b8a" },
     background: { default: "#f7f6f3", paper: "#ffffff" },

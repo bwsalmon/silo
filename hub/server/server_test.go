@@ -326,6 +326,27 @@ func TestConfigSignOn(t *testing.T) {
 	h.Close()
 }
 
+// TestCheckDevSignOn checks that the development user header is
+// refused on Kubernetes and allowed elsewhere.
+func TestCheckDevSignOn(t *testing.T) {
+	k8s := func(k string) string {
+		if k == "KUBERNETES_SERVICE_HOST" {
+			return "10.0.0.1"
+		}
+		return ""
+	}
+	none := func(string) string { return "" }
+	if err := CheckDevSignOn("X-User", k8s); err == nil {
+		t.Error("the dev header on Kubernetes was allowed")
+	}
+	if err := CheckDevSignOn("", k8s); err != nil {
+		t.Errorf("no dev header on Kubernetes: %v", err)
+	}
+	if err := CheckDevSignOn("X-User", none); err != nil {
+		t.Errorf("the dev header off Kubernetes: %v", err)
+	}
+}
+
 // TestReadyzWhileDraining checks that /readyz turns unready as soon as
 // shutdown starts, and that a node connecting then is turned away.
 func TestReadyzWhileDraining(t *testing.T) {

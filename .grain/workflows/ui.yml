@@ -46,3 +46,49 @@ jobs:
 
       - name: Embed
         run: go test ./hub/ui ./hub/server -run 'TestBundle|TestHandler|TestPlaceholder|TestWebUI'
+
+  # The browser suite (ui/e2e, ui/playwright.config.ts): Chromium driven
+  # by Playwright against `silo hub serve` with this bundle embedded,
+  # and scripted fake Grains (internal/fakegrain) on the real
+  # rendezvous. It runs on every push rather than nightly: the whole
+  # suite is well under a minute of tests after a two-minute build, each
+  # test makes its own team, users and nodes, and the fakes emit events
+  # only when a spec tells them to, so nothing in it waits on a clock it
+  # could flake against. A failed test's trace and screenshot are kept
+  # under ui/test-results.
+  ui-e2e:
+    name: ui e2e
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 20
+    artifacts:
+      - name: playwright-test-results
+        path: ui/test-results
+    steps:
+      - name: Check Node and Go
+        infrastructure: true
+        run: |
+          node --version
+          go version
+
+      - name: Install
+        run: cd ui && npm ci --no-audit --no-fund
+
+      # The browser and the system libraries it needs are downloads, not
+      # a verdict on this commit.
+      - name: Download Chromium
+        infrastructure: true
+        run: cd ui && NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npx playwright install --with-deps chromium
+
+      - name: Build
+        run: cd ui && npm run build && npm run e2e:typecheck
+
+      - name: Test
+        env:
+          CI: "1"
+        run: cd ui && npm run e2e
