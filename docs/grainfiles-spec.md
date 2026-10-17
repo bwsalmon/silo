@@ -366,7 +366,7 @@ Identities compare case-insensitively.
 
 6.4. **`settings:`** is one opaque mapping, allowed in `grain.config.md`
 and on definitions, templates and triggers. It belongs to executors:
-model and effort, network, `nothing_needed` behaviour, `auto_merge`, the
+model, network, `nothing_needed` behaviour, `auto_merge`, the
 base branch, sandbox sizes, run policy (count, until-clean), team,
 scheduling and limits all go here, under whatever structure the
 executor defines. Readers MUST ignore what they do not understand in
@@ -1233,9 +1233,9 @@ unchanged.
 | grain today | Grainfile Format |
 | --- | --- |
 | `.grain/templates/<name>.yml` (`title`, `body`, `fields`) | `<name>.template.md`, `form: task`: `title`, the body as Markdown, `fields` as `inputs`. Grain's `{{name}}` placeholders are valid Jinja2; braces meant literally go in `{% raw %}`. |
-| a template's `model`, `effort`, `network`, `nothing-needed`, `auto-merge`, `base`, `team`, sandbox sizes, `push` | `settings:` |
-| a template's `capabilities: [gcp-key, …]` | `capabilities:` references to capability grainfiles a library publishes; `repo-read:`/`repo-write:` become `context:` entries |
+| a template's `model`, `network`, `nothing-needed`, `auto-merge`, `base`, `team`, `sandbox` (`cpus`, `memory-mb`, `disk-gb`), `push` | `settings:` |
+| a template's `capabilities: [gcp-key, …]` | `capabilities:` references to capability grainfiles a library publishes (`gcp-key`, `package-publish`, `github-sandbox`, …); `repo-read:`/`repo-write:` (grain's `reads`/`writes`) become `context:` entries |
 | `.grain/suites/<name>.yml` | a folder template `<name>/<name>.template.md`, members from the suite's `templates:`; `mode`, `count`, `max-passes`, `require-approval`, `auto-merge`, `auto-approve-proposals`, `team` in the manifest's `settings:` |
-| `.grain/schedules/<name>.yml` with `every`/`daily`/`weekly`/`monthly` | a trigger with `on.schedule.cron` (grain's schedules are UTC: `timezone: UTC`); `overlap: skip` is the only behaviour; `base`, `workflow` and the rest per §7.5 and `settings:` |
+| `.grain/schedules/<name>.yml` with `every`/`daily`/`weekly`/`monthly` and `timezone` | a trigger with `on.schedule.cron` and the same `timezone` (grain's default is UTC, as here); `overlap: skip` is the only behaviour; `template`/`suite` become `fires.template`, `workflow` stays `fires.workflow`, `base` goes to `settings:` (or `fires.branch` for a workflow) |
 | `.grain/settings.yml` | `grain.config.md` `settings:` |
 | grain's gates | `gate` grainfiles |

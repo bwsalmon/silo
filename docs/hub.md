@@ -968,7 +968,7 @@ longer proposed answers 409. A proposal's submitter sees it in the
 backlog and on its page, but not, unless they are in its team, its
 events or artifacts (§7). That a repository is owned by some team is
 all a proposal reveals to someone outside it, as an intake that takes
-proposals from any signed-in user must (grainfiles.md §10.1).
+proposals from any signed-in user must (grainfiles.md §3).
 
 **Approvals inside a run.** A Grain that needs a human's approval
 before it goes on sends an `approval_request` event (§7.1), which the
