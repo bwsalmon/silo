@@ -13,7 +13,9 @@
 //   - handle, offer, resume and follow: the task stream (accept or
 //     refuse, cancel, approve, message, result);
 //   - pump: the event stream, with seq increasing across connections;
-//   - view: the view stream, serving only refs it listed itself.
+//   - view: the view stream, serving only refs it listed itself;
+//   - file and depended: filing a task upward, and the dependency_done
+//     that unblocks the local task waiting on it.
 package refgrain
 
 import (
@@ -44,6 +46,9 @@ const (
 	// FeatureApprovals says the Grain sends approval_request events and
 	// takes approve answers. The hub does not read it; the kit does.
 	FeatureApprovals = "approvals"
+	// FeatureFiling says the Grain files tasks upward and takes
+	// dependency_done. The hub does not read it; the kit does.
+	FeatureFiling = "filing"
 )
 
 // Views is how a Grain answers a view stream. Only ViewListed and
@@ -75,8 +80,8 @@ type Grain struct {
 	Repos, Allow []string
 	// Slots is how many tasks it runs at once.
 	Slots int
-	// Features it lists in its hello: FeatureInteractive,
-	// FeatureApprovals, or neither.
+	// Features it lists in its hello: any of FeatureInteractive,
+	// FeatureApprovals and FeatureFiling.
 	Features []string
 	// Tick is how often a held task says it is still running; a second
 	// when zero.
@@ -112,7 +117,8 @@ type task struct {
 	cancelled chan struct{}
 	approve   chan tasks.Message
 	messages  chan events.Message
-	seen      map[string]bool // message IDs taken in
+	seen      map[string]bool    // message IDs taken in
+	deps      chan tasks.Message // dependency_done for this local task
 }
 
 func (g *Grain) logf(format string, args ...any) {
@@ -257,6 +263,10 @@ func (g *Grain) handle(c net.Conn) {
 		// A cancel for a task with no open stream comes on its own.
 		g.cancel(m.Task.ID)
 		st.Close()
+	case tasks.TypeDependencyDone:
+		// So does every dependency_done, the only message on its stream.
+		g.depended(m)
+		st.Close()
 	default:
 		st.Close()
 	}
@@ -291,7 +301,8 @@ func (g *Grain) offer(st *tasks.Stream, spec tasks.Spec) {
 	g.n++
 	t = &task{spec: spec, local: fmt.Sprintf("%s-%d", g.ID, g.n), work: workload.Parse(spec.Prompt),
 		cancelled: make(chan struct{}), approve: make(chan tasks.Message, 4),
-		messages: make(chan events.Message, 16), seen: map[string]bool{}}
+		messages: make(chan events.Message, 16), seen: map[string]bool{},
+		deps: make(chan tasks.Message, 4)}
 	t.cond = sync.NewCond(&t.mu)
 	g.tasks[spec.ID] = t
 	c, gen := g.conn, g.gen
@@ -394,6 +405,71 @@ func (g *Grain) cancel(id string) {
 	if st != nil {
 		st.Close()
 	}
+}
+
+// depended hands a dependency_done to the local task it names, if this
+// Grain still has it; one for a task it no longer has is ignored.
+func (g *Grain) depended(m tasks.Message) {
+	g.mu.Lock()
+	var t *task
+	for _, c := range g.tasks {
+		if c.local == m.NodeTask {
+			t = c
+		}
+	}
+	g.mu.Unlock()
+	if t == nil {
+		g.logf("dependency_done for %q, a task this grain does not have", m.NodeTask)
+		return
+	}
+	select {
+	case t.deps <- m:
+	default:
+	}
+}
+
+// file files a task upward from t, as the File workload does, and
+// returns the hub's ID for it. The hub takes a filing from t only once
+// it has t's accept, which may not have reached it yet: a refusal is
+// tried again a few times.
+func (g *Grain) file(t *task) (string, error) {
+	f := tasks.Filing{
+		Repo:       workload.Target(t.spec.Prompt),
+		Title:      "silo conformance: " + workload.Run,
+		Prompt:     workload.Prompt(workload.Run),
+		OriginTask: t.spec.ID,
+		NodeTask:   t.local,
+	}
+	var err error
+	for try := 0; try < 5; try++ {
+		if try > 0 {
+			select {
+			case <-t.cancelled:
+				return "", errors.New("cancelled")
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		g.mu.Lock()
+		c := g.conn
+		g.mu.Unlock()
+		if c == nil {
+			err = errors.New("not connected")
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		var raw json.RawMessage
+		raw, err = c.FileTask(ctx, f)
+		cancel()
+		if err != nil {
+			continue
+		}
+		var filed tasks.Task
+		if err = json.Unmarshal(raw, &filed); err != nil || filed.ID == "" {
+			return "", fmt.Errorf("the hub's filed carried no task: %s", raw)
+		}
+		return filed.ID, nil
+	}
+	return "", err
 }
 
 // emit appends one event to t's stream, numbering it; payload sets the
@@ -524,6 +600,37 @@ func (g *Grain) work(t *task) {
 				e.AwaitingReply = &events.AwaitingReply{State: events.AwaitingResumed, MessageID: m.ID}
 			})
 			g.finish(t, tasks.Done, "took message "+m.ID)
+		}
+
+	case workload.File:
+		if !slices.Contains(g.Features, FeatureFiling) {
+			g.finish(t, tasks.Failed, "this grain does not file tasks")
+			return
+		}
+		t.status(workload.Started)
+		id, err := g.file(t)
+		if err != nil {
+			g.finish(t, tasks.Failed, fmt.Sprintf("filing a task: %v", err))
+			return
+		}
+		g.logf("filed %s from %s, for %s to wait on", id, t.spec.ID, t.local)
+		t.status(workload.Filed + " " + id)
+		for {
+			select {
+			case <-t.cancelled:
+				return
+			case m := <-t.deps:
+				if m.Task == nil || m.Task.ID != id {
+					continue // not the task this one waits on
+				}
+				if m.State != tasks.Done {
+					g.finish(t, tasks.Failed, fmt.Sprintf("dependency %s is %s", id, m.State))
+					return
+				}
+				t.status(workload.Unblocked + " " + id)
+				g.finish(t, tasks.Done, "unblocked by "+id)
+				return
+			}
 		}
 
 	default:
