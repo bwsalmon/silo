@@ -1,8 +1,9 @@
 # The hub's human UI: a new UI in silo, or grain's UI pointed at the hub
 
 Part of the [hub design](hub.md). Status: **option (a) chosen by the
-owner; stages U1 and U2 built** (`hub/ui`, `ui/`; §6, §7 for running
-it, and §8 for U2's writes).
+owner; stages U1, U2 and U3's silo side built** (`hub/ui`, `ui/`; §6,
+§7 for running it, §8 for U2's writes, and §9 for proposals and
+approvals).
 
 People need a page where they file, approve and watch tasks across
 teams. The hub (hub.md) has the APIs for it: intake (§6), the directory
@@ -23,15 +24,15 @@ from and recommends one.
 | --- | --- | --- |
 | Backlog across teams | `GET /v1/tasks?team=&state=`, filtered by `Access` | nothing |
 | Filing | `POST /v1/tasks`, `cancel`, `requeue` | nothing |
-| Proposals | none | a `proposed` state in the backlog, and `POST /v1/tasks/{id}/approve` for members of the owning team |
-| Approvals inside a run | `approval_request` is stored as conversation (§7.1) | a way to answer it: an `approve` message the hub writes to the node, on a stream like `cancel`'s |
+| Proposals | `proposed`, `POST /v1/tasks/{id}/approve` and `/reject` for members of the owning team (U3) | nothing |
+| Approvals inside a run | `approval_request` is stored as conversation (§7.1); `POST /v1/tasks/{id}/approvals/{request_id}` answers it with an `approve` message to the node, on the task stream as `cancel` is (U3) | nothing (grain's side of `approve` is its own task) |
 | Live run view | SSE / WebSocket `GET /v1/tasks/{id}/events?from=` | nothing |
 | View-through | `GET /v1/tasks/{id}/artifacts?ref=` | nothing |
 | Grain/node directory, node tokens | `GET /v1/nodes`, `/v1/node-tokens` | nothing |
 | Team admin | `/v1/me`, `/v1/teams/...` | nothing |
 
-The two gaps are API work in `hub/tasks` and `hub/live`, and both
-options need them. With them in place, the hub decides who may approve
+The two gaps were API work in `hub/tasks` and `hub/live`, which both
+options needed; U3 closed them (§9). The hub decides who may approve
 (it is the PDP, hub.md §1.2), and records the approver in the task's
 `approved_by` claim, which `tasks.Spec` carries and the offer's
 attestation signs. The node
@@ -172,7 +173,7 @@ Each stage is a candidate task, to be filed once the owner chooses.
 | --- | --- | --- |
 | U1 | `silo hub serve` serves an embedded SPA at `/`. Read-only pages: backlog, task with live events and the view-through, nodes. The frontend build in silo CI, or a committed bundle (the owner's choice). **Built:** `hub/ui` and `ui/`, built in silo CI (`.grain/workflows/ui.yml` and the image's Dockerfile); §7. | silo |
 | U2 | Filing, cancel and requeue. Team admin. Minting and revoking node tokens. **Built:** `ui/src/pages/FileTask.tsx`, `Teams.tsx`, `TeamPage.tsx`, the task page's actions and `ui/src/components/NodeTokens.tsx`, with `GET /v1/teams/{team}` added to the public API (hub.md §5.3); §8. | silo |
-| U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
+| U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. **Built (silo side):** `proposed` and `rejected` in `hub/tasks`, `approve`, `reject` and `approvals` in its API, the `approve` message on the task stream (hub.md §6.1, §6.2; [hub-interface.md](hub-interface.md)), `ui/src/pages/Proposals.tsx`, `ProposalActions.tsx` and `ApprovalPrompt.tsx`; §9. The node's side of `approve` is bwsalmon/grain's. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
 | U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. | silo |
 | U5 | A Grain's local UI shows the hub task ID and links to the hub page for tasks the hub placed. | bwsalmon/grain |
 | U6 | Future: "Open Grain UI" for team admins, a Grain's own UI proxied by the hub on its own origin, read-only unless the Grain's owner opts in. Designed in [grain-ui-proxy.md](grain-ui-proxy.md), with its own silo (S1–S5) and grain (G1–G4) stages. | silo, then bwsalmon/grain |
@@ -243,7 +244,7 @@ listing what the copy changes:
 `ui/src/components/StateChip.tsx` stays the hub's own: grain draws
 its task states with stylesheet classes over its own set of states,
 not with a component, so there is nothing that fits the hub's
-queued/offered/running/done/failed/cancelled/lost to copy; the chip
+proposed/queued/offered/running/done/failed/cancelled/rejected/lost to copy; the chip
 takes its colours from the copied palette. Grain's chat rendering
 (`TaskChat`, on `@chatscope`) is tied to grain's own task, comment and
 transcript model and is not copied; the hub's timeline
@@ -346,3 +347,42 @@ minted token is copied, dropped on dismiss and never stored.
 browser sends it, to a whole hub, and checks each reaches its endpoint
 and is allowed or refused there by the caller's role; and that a write
 signed out (401), or from another origin or site (403), never does.
+
+## 9. As built: U3 (silo side)
+
+**Proposals.** A task filed in a repository by someone outside the team
+that owns it is `proposed` (hub.md §6.1) and is not dispatched. The
+team's backlog links to *Proposals* at `/teams/{team}/proposals`
+(`GET /v1/tasks?team=&state=proposed`), where each proposal has
+*Approve* and *Reject* (with an optional reason, confirmed once):
+`POST /v1/tasks/{id}/approve` and `/reject`. The same buttons are on a
+proposed task's page. They are shown to a member of the task's team, in
+either role, who is not its submitter (`mayApprove`, `ui/src/may.ts`);
+a hub admin outside the team is not shown them, as the API refuses
+them. A proposed or rejected task's page opens no event stream, since
+no node has run it. Its submitter withdraws it with *Cancel*.
+
+**Who approved.** The task page shows `approved_by` and `approved_at`
+under *Approved by*, the claims the offer carries to the node.
+
+**Approvals inside a run.** An `approval_request` event in a running
+task's timeline shows *Allow* and *Deny*, with an optional reason, to a
+member of the task's team (`memberOf`), sent as `POST
+/v1/tasks/{id}/approvals/{request_id}`. Once answered, it shows who
+allowed or denied it, and whether the node has been sent the answer,
+from `GET /v1/tasks/{id}/approvals`, which the page reads while the
+task has a request. A request answered already, past its deadline or
+of a task no longer running is the API's 409, shown beside the
+buttons; the UI does not check it first.
+
+**Tests.** `ui/src/approvals.test.tsx` (vitest) checks each of these
+calls' method, path and body with same-origin credentials, that each
+button sends it, is shown only where `/v1/me` allows, and shows the
+API's refusal. `hub/tasks`' `approvals_test.go` checks the store (a
+proposal is never dispatchable, is approved or rejected once, not by
+its submitter), the API's rules (non-members, the submitter and a hub
+admin outside the team refused; an unknown request 404; an answered,
+expired or finished one 409), and, over the rendezvous to a test node,
+that an `approve` reaches the node on the task's stream, including an
+answer kept before the node accepted. `hub/server`'s `TestWebUIActions`
+sends approve, reject and an answer as the browser does.

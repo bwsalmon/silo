@@ -13,9 +13,9 @@
 // 403, 404, 409) is the API's, and comes back as an ApiError carrying
 // the API's own words.
 
-export type TaskState = 'queued' | 'offered' | 'running' | 'done' | 'failed' | 'cancelled' | 'lost';
+export type TaskState = 'proposed' | 'rejected' | 'queued' | 'offered' | 'running' | 'done' | 'failed' | 'cancelled' | 'lost';
 
-export const TASK_STATES: TaskState[] = ['queued', 'offered', 'running', 'done', 'failed', 'cancelled', 'lost'];
+export const TASK_STATES: TaskState[] = ['proposed', 'queued', 'offered', 'running', 'done', 'failed', 'cancelled', 'rejected', 'lost'];
 
 export interface Task {
   id: string;
@@ -25,6 +25,7 @@ export interface Task {
   prompt: string;
   submitter: string;
   approved_by?: string;
+  approved_at?: string;
   constraints?: { labels?: Record<string, string>; node?: string; node_owner?: string };
   created_at: string;
   state: TaskState;
@@ -163,6 +164,40 @@ export function cancelTask(id: string, reason?: string): Promise<Task> {
 
 export function requeueTask(id: string): Promise<Task> {
   return write<Task>('POST', `/v1/tasks/${encodeURIComponent(id)}/requeue`);
+}
+
+// Proposals and approvals (docs/hub.md §6.1): a member of a proposed
+// task's team approves or rejects it, and answers a running task's
+// approval requests.
+
+export function approveTask(id: string): Promise<Task> {
+  return write<Task>('POST', `/v1/tasks/${encodeURIComponent(id)}/approve`);
+}
+
+export function rejectTask(id: string, reason?: string): Promise<Task> {
+  return write<Task>('POST', `/v1/tasks/${encodeURIComponent(id)}/reject`, reason ? { reason } : undefined);
+}
+
+export type Decision = 'allow' | 'deny';
+
+// Approval is a human's answer to one of a task's approval requests.
+export interface Approval {
+  task: string;
+  request_id: string;
+  decision: Decision;
+  answered_by: string;
+  reason?: string;
+  answered_at: string;
+  delivered: boolean;
+}
+
+export async function listApprovals(id: string, signal?: AbortSignal): Promise<Approval[]> {
+  const r = await getJSON<{ approvals: Approval[] }>(`/v1/tasks/${encodeURIComponent(id)}/approvals`, signal);
+  return r.approvals ?? [];
+}
+
+export function answerApproval(id: string, request: string, decision: Decision, reason?: string): Promise<Approval> {
+  return write<Approval>('POST', `/v1/tasks/${encodeURIComponent(id)}/approvals/${encodeURIComponent(request)}`, reason ? { decision, reason } : { decision });
 }
 
 // The team directory (docs/hub.md §5.3).

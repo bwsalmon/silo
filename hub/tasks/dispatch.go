@@ -153,9 +153,21 @@ func (d *Dispatcher) observe(ev Event, t Task) {
 type live struct {
 	cancel chan struct{}
 	once   sync.Once
+	// approve is signalled when one of the task's approval requests is
+	// answered.
+	approve chan struct{}
 }
 
+func newLive() *live { return &live{cancel: make(chan struct{}), approve: make(chan struct{}, 1)} }
+
 func (l *live) signal() { l.once.Do(func() { close(l.cancel) }) }
+
+func (l *live) answered() {
+	select {
+	case l.approve <- struct{}{}:
+	default:
+	}
+}
 
 func (d *Dispatcher) init() {
 	d.once.Do(func() {
@@ -296,6 +308,28 @@ func (d *Dispatcher) Cancel(ctx context.Context, id, reason string) (Task, error
 	return t, nil
 }
 
+// Answered tells the node running task of an answer to one of its
+// approval requests, already kept in the store (Store.Answer): down the
+// task's stream, by whichever pod's dispatcher has it open. A node
+// without a stream for the task now is sent it when it next accepts the
+// task.
+func (d *Dispatcher) Answered(ctx context.Context, task string) {
+	d.init()
+	d.mu.Lock()
+	l := d.live[task]
+	d.mu.Unlock()
+	if l != nil {
+		l.answered()
+	}
+	if d.Bus != nil {
+		nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
+		defer cancel()
+		if err := d.Bus.Notify(nctx, notify.Message{Approve: task}); err != nil {
+			d.logf("tasks: telling the other pods %s's approval request is answered: %v", task, err)
+		}
+	}
+}
+
 // Notice is a notice from the Bus, handed to it by the hub
 // (docs/hub.md §2.2.4): a wake-up wakes the dispatcher, if it runs in
 // this process, and so does the bus reconnecting, since a notice may
@@ -316,6 +350,14 @@ func (d *Dispatcher) Notice(m notify.Message) {
 			l.signal()
 		} else {
 			d.wakeLocal()
+		}
+	case m.Approve != "":
+		d.init()
+		d.mu.Lock()
+		l := d.live[m.Approve]
+		d.mu.Unlock()
+		if l != nil {
+			l.answered()
 		}
 	}
 }
@@ -688,7 +730,7 @@ func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind,
 		d.mu.Unlock()
 		return
 	}
-	l := &live{cancel: make(chan struct{})}
+	l := newLive()
 	d.live[t.ID] = l
 	d.mu.Unlock()
 	d.wg.Add(1)
@@ -812,6 +854,10 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 		select {
 		case <-ctx.Done():
 			return
+		case <-l.approve:
+			if answered && cancelled != nil {
+				d.deliverAnswers(ctx, st, t)
+			}
 		case <-cancelled:
 			cancelled, reattest = nil, nil
 			if !answered {
@@ -869,6 +915,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					d.observe(EventResumed, t)
 				}
 				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Accept(ctx, t.ID, r.m.NodeTask) })
+				d.deliverAnswers(ctx, st, t)
 			case TypeRefuse:
 				if answered {
 					d.logf("tasks: node %s refused %s after accepting it; ignored", t.Node, t.ID)
@@ -900,6 +947,27 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 			default:
 				d.logf("tasks: node %s sent an unknown %s message for %s", t.Node, logsafe.Quote(r.m.Type), t.ID)
 			}
+		}
+	}
+}
+
+// deliverAnswers writes, down t's stream, each answer to its approval
+// requests that its node has not yet been sent. One that cannot be
+// written is left for the node's next accept of the task.
+func (d *Dispatcher) deliverAnswers(ctx context.Context, st *Stream, t Task) {
+	as, err := d.Store.Answers(ctx, t.ID, true)
+	if err != nil {
+		d.logf("tasks: reading %s's approval answers: %v", t.ID, err)
+		d.observe(EventStoreError, t)
+		return
+	}
+	for _, a := range as {
+		if err := st.Write(approveMessage(a)); err != nil {
+			return
+		}
+		d.logf("tasks: sent node %s %s's answer to %s: %s", t.Node, t.ID, logsafe.Quote(a.Request), a.Decision)
+		if err := d.Store.AnswerDelivered(ctx, t.ID, a.Request); err != nil {
+			d.logf("tasks: recording %s's answer to %s sent: %v", t.ID, logsafe.Quote(a.Request), err)
 		}
 	}
 }

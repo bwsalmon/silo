@@ -5,9 +5,13 @@
 //
 // A task targets a repository or a team, and goes through
 //
-//	queued → offered → running → done | failed | cancelled
-//	            ↘ queued (refused, or the node was lost before it accepted)
+//	(proposed →) queued → offered → running → done | failed | cancelled
+//	   ↘ rejected   ↘ queued (refused, or the node was lost before it accepted)
 //	                        ↘ lost (the node was lost while it ran)
+//
+// A task filed by someone who is not in the team that owns its
+// repository is proposed, and is not dispatched until a member of that
+// team approves it (Store.Approve), who is then its approved_by.
 //
 // The dispatcher claims a slot on a node (registry.ClaimFor), opens a
 // task stream to it (rendezvous.Server.Open) and offers the task there;
@@ -32,6 +36,12 @@ import (
 type State string
 
 const (
+	// Proposed is a task filed by someone outside its team, waiting for
+	// a member of the team to approve or reject it. It is never
+	// dispatched.
+	Proposed State = "proposed"
+	// Rejected is a proposed task a member of its team turned down.
+	Rejected State = "rejected"
 	// Queued is a task waiting for a node.
 	Queued State = "queued"
 	// Offered is a task offered to a node that has not yet answered.
@@ -51,11 +61,11 @@ const (
 )
 
 // Terminal is whether s is a state a task does not leave.
-func (s State) Terminal() bool { return s == Done || s == Failed || s == Cancelled }
+func (s State) Terminal() bool { return s == Done || s == Failed || s == Cancelled || s == Rejected }
 
 func (s State) valid() bool {
 	switch s {
-	case Queued, Offered, Running, Done, Failed, Cancelled, Lost:
+	case Proposed, Rejected, Queued, Offered, Running, Done, Failed, Cancelled, Lost:
 		return true
 	}
 	return false
@@ -93,7 +103,9 @@ type Spec struct {
 	// from the submission itself. It is empty for a task nobody has
 	// approved, which is every task submitted directly, and a node's
 	// grain files such a task for local approval (threat model INV-17).
-	ApprovedBy  string      `json:"approved_by,omitempty"`
+	ApprovedBy string `json:"approved_by,omitempty"`
+	// ApprovedAt is when ApprovedBy approved the task; absent with it.
+	ApprovedAt  *time.Time  `json:"approved_at,omitempty"`
 	Constraints Constraints `json:"constraints"`
 	Created     time.Time   `json:"created_at"`
 }
