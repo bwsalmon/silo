@@ -22,7 +22,7 @@ const TasksPath = "/v1/tasks"
 // API is the backlog over HTTP, for humans and custom UIs signed in
 // through the team directory's API (docs/hub.md §6.1):
 //
-//	POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints"}  submit a task; kind "interactive" for a session
+//	POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}  submit a task; kind "interactive" for a session
 //	GET  /v1/tasks?state=queued,running&team=infra&limit=100            the tasks the caller sees, newest first
 //	GET  /v1/tasks/{id}
 //	POST /v1/tasks/{id}/cancel {"reason"}                               its submitter, a team admin or a hub admin
@@ -41,6 +41,9 @@ const TasksPath = "/v1/tasks"
 // The caller sees the tasks they filed, but not, unless they are in its
 // team, a task's events or artifacts (hub/live). A task the caller may
 // not see answers 404, as one that does not exist.
+//
+// A task may depend on others (depends_on, hub task IDs the caller
+// sees): it is not placed until each of them is done (Spec.DependsOn).
 //
 // Approving, rejecting and answering an approval request are for the
 // members of the task's own team, as user:<email> or through a group,
@@ -172,11 +175,17 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 		Title       string      `json:"title"`
 		Prompt      string      `json:"prompt"`
 		Constraints Constraints `json:"constraints"`
+		DependsOn   []string    `json:"depends_on"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
 	spec := Spec{Repo: req.Repo, Kind: req.Kind, Title: req.Title, Prompt: req.Prompt, Submitter: strings.ToLower(acc.Email), Constraints: req.Constraints}
+	deps, err := dependencies(r.Context(), a.Store, acc, req.DependsOn)
+	if err != nil {
+		return err
+	}
+	spec.DependsOn = deps
 	propose := false
 	switch {
 	case (req.Repo == "") == (req.Team == ""):

@@ -70,7 +70,7 @@ func statuses(rep *conformance.Report) map[string]conformance.Status {
 }
 
 // The reference Grain, with every feature it has, passes every scenario
-// but upward filing, which this hub does not implement.
+// but upward filing, which the kit does not check yet.
 func TestReferenceGrain(t *testing.T) {
 	rep := run(t, []string{refgrain.FeatureInteractive, refgrain.FeatureApprovals})
 	got := statuses(rep)

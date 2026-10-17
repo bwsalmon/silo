@@ -45,8 +45,9 @@ const (
 	// takes the approve answers. The hub does not need it said: the
 	// kit does, to tell a Grain without approvals from a broken one.
 	FeatureApprovals = "approvals"
-	// FeatureFiling is upward filing and dependencies (task 4233),
-	// which this hub does not implement yet.
+	// FeatureFiling is upward filing and dependencies
+	// (docs/hub-interface.md): the hub takes them, but the kit does not
+	// check a Grain's yet.
 	FeatureFiling = "filing"
 )
 
@@ -867,5 +868,5 @@ func (k *kit) filing(ctx context.Context) (string, error) {
 	if slices.Contains(k.entry.Features, FeatureFiling) {
 		listed = "lists"
 	}
-	return "", skip("this hub does not implement upward filing and dependencies yet (task 4233); the grain %s the %q feature", listed, FeatureFiling)
+	return "", skip("the kit does not check upward filing and dependencies yet; the grain %s the %q feature", listed, FeatureFiling)
 }

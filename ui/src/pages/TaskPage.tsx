@@ -5,6 +5,8 @@
 // answering its approval requests while it runs. An interactive task's
 // page is its session: a "waiting for you" while its agent waits on a
 // human, and a reply box for its submitter and the members of its team.
+// A task a Grain filed says which, on whose behalf, and from which task;
+// a task with dependencies links to each.
 import { useState, type ReactNode } from 'react';
 import { Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Typography } from '@mui/material';
 import { ApiError, cancelTask, getTask, listApprovals, listMessages, requeueTask, type Me, type Task } from '../api';
@@ -61,6 +63,27 @@ function Lifecycle({ t }: { t: Task }) {
       {t.repo && <Field name="Repository">{t.repo}</Field>}
       {t.kind === 'interactive' && <Field name="Kind">Interactive session</Field>}
       <Field name="Submitter">{t.submitter}</Field>
+      {t.filed_by && (
+        <Field name="Filed by">
+          Grain {t.filed_by}
+          {t.filed_by_owner ? ` (${t.filed_by_owner})` : ''} on behalf of {t.submitter}
+          {t.origin_task && (
+            <>
+              , from <Link to={routePath({ page: 'task', id: t.origin_task })}>{t.origin_task}</Link>
+            </>
+          )}
+        </Field>
+      )}
+      {t.depends_on?.length ? (
+        <Field name="Depends on">
+          {t.depends_on.map((id, i) => (
+            <span key={id}>
+              {i > 0 && ', '}
+              <Link to={routePath({ page: 'task', id })}>{id}</Link>
+            </span>
+          ))}
+        </Field>
+      ) : null}
       {t.approved_by && (
         <Field name="Approved by">
           {t.approved_by}
