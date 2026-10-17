@@ -20,8 +20,11 @@ silo conformance [flags] -- <command that starts your Grain>
 ```
 
 The kit starts its hub on `127.0.0.1` (on SQLite, in a temporary
-directory). It makes a team that owns the two repositories it files in
-and mints a node token for `-node`. Then it starts the command with the
+directory). It makes a team that owns the two repositories it files in,
+and a second team, `conformance-elsewhere`, owning
+`conformance/elsewhere`, which the Grain's owner is not in and which
+the `filing` scenario files upward to. Then it mints a node token for
+`-node`. Then it starts the command with the
 Grain's settings in its environment:
 
 | Variable | Meaning |
@@ -70,7 +73,7 @@ The Grain needs something to run that does not depend on a model.
 Every task the kit files is a **conformance workload**: a prompt whose
 first line is `silo-conformance/v1 <workload>`. A Grain that recognises
 it short-circuits the task and does exactly what the workload says. The
-workloads (`run`, `hold`, `approve`, `interactive`) are part of the
+workloads (`run`, `hold`, `approve`, `interactive`, `file`) are part of the
 interface, and are specified in
 [hub-interface.md](hub-interface.md#conformance-workloads). Package
 `hub/conformance/workload` has them as Go constants. A Grain is free to
@@ -95,7 +98,7 @@ They run in this order. Each passes, fails, or is skipped:
 | `approve` | Optional, `approvals`. An `approve` task sends its `approval_request`. Answered `allow` it ends `done`; answered `deny`, `failed`. |
 | `interactive` | Optional, `interactive`. An interactive `interactive` session sends `awaiting_reply` `waiting`. A message posted to it comes back as a `message` event with its ID, then `awaiting_reply` `resumed` naming it, and the session closes `done`. |
 | `restart` | With a `hold` task running, the hub shuts down (saying `goodbye`) and starts again on the same address and database. The Grain reconnects and keeps the task as the same `node_task`, its events continuing past the last `seq` the hub had. It says `silo-conformance: started` only once (no second run), and reports one slot busy. |
-| `filing` | Upward filing and dependencies ([hub-interface.md](hub-interface.md), filing a task). The hub takes them, but the kit does not check a Grain's yet, so this is always skipped, and says whether the Grain lists `filing`. |
+| `filing` | Optional, `filing`. Upward filing and dependencies ([hub-interface.md](hub-interface.md), filing a task). A second member of the kit's team submits a `file` task naming `conformance/elsewhere`, and the Grain files a task there from it, with `origin_task` and a `node_task`, saying `silo-conformance: filed <id>`. The hub records the filed task with the Grain as `filed_by`, its owner as `filed_by_owner`, the origin's submitter (not the Grain's owner) as `submitter`, and the origin as `origin_task`. It is `proposed`, with no `approved_by`, in `conformance-elsewhere`, a team outside the submitter's. A member of that team approves it, and the kit, standing in for that team's Grain, ends it `done`. The Grain is sent `dependency_done` `done`, says `silo-conformance: unblocked <id>`, and the origin ends `done`. |
 
 The **optional features** are the ones a Grain lists in its `hello`'s
 `features`. The hub reads `interactive` (it offers sessions only to a
@@ -110,27 +113,27 @@ a feature and then gets it wrong fails.
 For a human, one line per scenario, then the verdict:
 
 ```
-Grain conformance-grain (version "refgrain"): 2 slots, repos [conformance/allowed conformance/outside], features [approvals interactive]
+Grain conformance-grain (version "refgrain"): 2 slots, repos [conformance/allowed conformance/outside], features [approvals filing interactive]
 
 pass  register     102ms   node conformance-grain, version "refgrain", 2 slots, ...
 pass  heartbeat    1.019s  heartbeats every 1s, 2 of 2 slots free while idle
 pass  refuse       70ms    refused task t-213328df3a2be3d8 in conformance/outside
 ...
-skip  filing       0s      the kit does not check upward filing and dependencies yet; ...
+pass  filing       260ms   task t-81897a9e7db47e95 filed t-da160e99e5d67948, proposed in team conformance-elsewhere for ...
 
-CONFORMS: 11 passed, 0 failed, 1 skipped
+CONFORMS: 13 passed, 0 failed, 0 skipped
 ```
 
 `-json` writes the machine-readable verdict (`conformance.Report`):
 
 ```json
 {
-  "node": {"id": "conformance-grain", "repos": ["..."], "slots": 2, "version": "refgrain", "features": ["approvals", "interactive"]},
+  "node": {"id": "conformance-grain", "repos": ["..."], "slots": 2, "version": "refgrain", "features": ["approvals", "filing", "interactive"]},
   "started_at": "2026-10-17T09:21:11Z",
   "passed": true,
   "scenarios": [
     {"name": "register", "status": "pass", "detail": "...", "duration_ns": 102000000},
-    {"name": "filing", "status": "skip", "detail": "...", "duration_ns": 0}
+    {"name": "filing", "status": "pass", "detail": "...", "duration_ns": 260000000}
   ]
 }
 ```
