@@ -46,6 +46,25 @@ const (
 	FeatureApprovals = "approvals"
 )
 
+// Views is how a Grain answers a view stream. Only ViewListed and
+// ViewClose conform; the others are for the kit's own tests.
+type Views string
+
+const (
+	// ViewListed serves a ref it listed for that task, and answers an
+	// error to any other.
+	ViewListed Views = ""
+	// ViewClose serves a ref it listed, and refuses any other by
+	// closing the stream unanswered.
+	ViewClose Views = "close"
+	// ViewNone closes every view stream unanswered, as a Grain that
+	// serves no views does.
+	ViewNone Views = "none"
+	// ViewAny serves its diff whatever ref, task or node_task it is
+	// asked for: what INV-11 forbids.
+	ViewAny Views = "any"
+)
+
 // Grain is the reference Grain.
 type Grain struct {
 	// Hub is the hub's base URL; Token the node token minted for ID.
@@ -62,7 +81,9 @@ type Grain struct {
 	// Tick is how often a held task says it is still running; a second
 	// when zero.
 	Tick time.Duration
-	Logf func(format string, args ...any)
+	// Views is how it answers a view: ViewListed when empty.
+	Views Views
+	Logf  func(format string, args ...any)
 
 	mu    sync.Mutex
 	conn  *rendezvous.Conn
@@ -203,7 +224,22 @@ func (g *Grain) handle(c net.Conn) {
 	if head.Type == live.TypeView {
 		var m live.ViewMessage
 		json.Unmarshal(line, &m)
-		live.ServeView(c, m, g.view)
+		switch g.Views {
+		case ViewNone:
+			c.Close()
+		case ViewAny:
+			live.ServeView(c, m, func(live.ViewMessage) (io.ReadCloser, error) {
+				return io.NopCloser(strings.NewReader(workload.Diff)), nil
+			})
+		case ViewClose:
+			if _, err := g.view(m); err != nil {
+				c.Close()
+				return
+			}
+			live.ServeView(c, m, g.view)
+		default:
+			live.ServeView(c, m, g.view)
+		}
 		return
 	}
 	var m tasks.Message

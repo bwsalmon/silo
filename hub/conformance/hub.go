@@ -42,6 +42,7 @@ type hub struct {
 
 	stop context.CancelFunc
 	done chan error
+	srv  *server.Hub
 }
 
 func startHub(dir, addr string, heartbeat time.Duration, logf func(string, ...any)) (*hub, error) {
@@ -66,14 +67,27 @@ func startHub(dir, addr string, heartbeat time.Duration, logf func(string, ...an
 		},
 	}
 	h.url = "http://" + h.addr
-	h.serve(l)
+	if err := h.serve(l); err != nil {
+		return nil, err
+	}
 	return h, h.healthy(30 * time.Second)
 }
 
-func (h *hub) serve(l net.Listener) {
+func (h *hub) serve(l net.Listener) error {
 	ctx, cancel := context.WithCancel(context.Background())
-	h.stop, h.done = cancel, make(chan error, 1)
-	go func() { h.done <- server.Serve(ctx, l, h.cfg) }()
+	srv, err := server.New(ctx, h.cfg)
+	if err != nil {
+		cancel()
+		l.Close()
+		return err
+	}
+	h.srv, h.stop, h.done = srv, cancel, make(chan error, 1)
+	go func() {
+		err := srv.Serve(ctx, l)
+		srv.Close()
+		h.done <- err
+	}()
+	return nil
 }
 
 func (h *hub) healthy(d time.Duration) error {
@@ -102,7 +116,7 @@ func (h *hub) Close() error {
 		return nil
 	}
 	h.stop()
-	h.stop = nil
+	h.stop, h.srv = nil, nil
 	select {
 	case err := <-h.done:
 		if errors.Is(err, context.Canceled) || errors.Is(err, http.ErrServerClosed) {
@@ -131,8 +145,19 @@ func (h *hub) Restart() error {
 	if err != nil {
 		return err
 	}
-	h.serve(l)
+	if err := h.serve(l); err != nil {
+		return err
+	}
 	return h.healthy(30 * time.Second)
+}
+
+// open opens a stream to node as the hub does, past every check the
+// hub makes first: for asking the Grain itself what the hub would not.
+func (h *hub) open(ctx context.Context, node string) (net.Conn, error) {
+	if h.srv == nil {
+		return nil, errors.New("the hub is not running")
+	}
+	return h.srv.Rendezvous.Open(ctx, node)
 }
 
 var client = &http.Client{Timeout: 30 * time.Second}

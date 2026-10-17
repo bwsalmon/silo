@@ -18,9 +18,12 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -31,6 +34,7 @@ import (
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/tasks"
+	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
 
 // Features a Grain lists in its hello that the kit reads.
@@ -129,7 +133,7 @@ type Report struct {
 // Scenarios are the scenarios' names, in the order they run.
 var Scenarios = []string{
 	"register", "heartbeat", "refuse", "run", "events", "view",
-	"capacity", "cancel", "approve", "interactive", "restart", "filing",
+	"unlisted", "capacity", "cancel", "approve", "interactive", "restart", "filing",
 }
 
 // kit is one run.
@@ -223,6 +227,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	steps := map[string]func(context.Context) (string, error){
 		"register": k.register, "heartbeat": k.heartbeat, "refuse": k.refuse,
 		"run": k.runToResult, "events": k.events, "view": k.view,
+		"unlisted": k.unlisted,
 		"capacity": k.capacity, "cancel": k.cancel, "approve": k.approve,
 		"interactive": k.interactive, "restart": k.restart, "filing": k.filing,
 	}
@@ -517,6 +522,132 @@ func (k *kit) view(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("the artifact event says %d bytes, its view served %d", art.Size, len(b))
 	}
 	return fmt.Sprintf("diff by ref %q, %d bytes served on the view stream", art.Ref, len(b)), nil
+}
+
+// unlisted asks the Grain itself, on view streams the kit opens past
+// the hub's check of listed refs (SA1-M3), for what the hub would never
+// ask: a conforming Grain serves a view only of a ref it listed for
+// that task (INV-11). A stream closed unanswered counts as a refusal.
+func (k *kit) unlisted(ctx context.Context) (string, error) {
+	evs, err := k.runEvents()
+	if err != nil {
+		return "", err
+	}
+	var ref string
+	for _, e := range evs {
+		if e.Type == live.TypeArtifact && e.Artifact != nil && e.Artifact.Ref != "" {
+			ref = e.Artifact.Ref
+		}
+	}
+	if ref == "" {
+		return "", errors.New("the run listed no artifact ref")
+	}
+	run, err := k.h.task(ctx, k.run)
+	if err != nil {
+		return "", err
+	}
+	// A task of its own, listing nothing, to ask the run's ref under.
+	other, _, err := k.submit(ctx, k.cfg.Repo, "", workload.Hold)
+	if err != nil {
+		return "", err
+	}
+	if other, err = k.await(ctx, other.ID, tasks.Running); err != nil {
+		k.h.cancel(context.WithoutCancel(ctx), other.ID)
+		return "", err
+	}
+	defer func() {
+		k.h.cancel(context.WithoutCancel(ctx), other.ID)
+		k.free(context.WithoutCancel(ctx), k.entry.Slots, k.cfg.Timeout)
+	}()
+
+	b, served, err := k.viewNode(ctx, live.ViewMessage{Type: live.TypeView, Task: run.ID, NodeTask: run.NodeTask, Ref: ref})
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("the listed ref %q: %w", ref, err)
+	case !served:
+		return "", fmt.Errorf("the listed ref %q was not served on a view stream the kit opened, so the refusals prove nothing", ref)
+	case len(b) == 0:
+		return "", fmt.Errorf("the listed ref %q was served with no bytes", ref)
+	}
+	refuse := []struct {
+		what string
+		m    live.ViewMessage
+	}{
+		{"a ref never listed", live.ViewMessage{Task: run.ID, NodeTask: run.NodeTask, Ref: "diff-999"}},
+		{"a traversal ref", live.ViewMessage{Task: run.ID, NodeTask: run.NodeTask, Ref: "../../.git-credentials"}},
+		{"a traversal past a listed ref", live.ViewMessage{Task: run.ID, NodeTask: run.NodeTask, Ref: ref + "/../../.git-credentials"}},
+		{"an absolute path", live.ViewMessage{Task: run.ID, NodeTask: run.NodeTask, Ref: "/etc/passwd"}},
+		{"another task's listed ref", live.ViewMessage{Task: other.ID, NodeTask: other.NodeTask, Ref: ref}},
+		{"a listed ref under another task's node_task", live.ViewMessage{Task: run.ID, NodeTask: other.NodeTask, Ref: ref}},
+	}
+	closed := 0
+	for _, c := range refuse {
+		c.m.Type = live.TypeView
+		b, served, err := k.viewNode(ctx, c.m)
+		switch {
+		case err != nil:
+			return "", fmt.Errorf("%s (task %s, node_task %q, ref %q): %w", c.what, c.m.Task, c.m.NodeTask, c.m.Ref, err)
+		case served:
+			return "", fmt.Errorf("%s (task %s, node_task %q, ref %q) was served, %d bytes: a Grain serves only a ref it listed for that task", c.what, c.m.Task, c.m.NodeTask, c.m.Ref, len(b))
+		case b == nil:
+			closed++
+		}
+	}
+	detail := fmt.Sprintf("listed ref %q served, %d bytes; refused %d unlisted, traversal and cross-task refs", ref, len(b), len(refuse))
+	if closed > 0 {
+		detail += fmt.Sprintf(" (%d by closing the stream unanswered)", closed)
+	}
+	return detail, nil
+}
+
+// viewNode opens a view stream to the Grain itself and sends it m. It
+// says whether the Grain answered ok, and the bytes after the answer;
+// those are nil when it refused by closing the stream unanswered. An
+// error is an answer outside the interface: no answer before the
+// timeout, a line that is not one, or bytes after an error.
+func (k *kit) viewNode(ctx context.Context, m live.ViewMessage) ([]byte, bool, error) {
+	c, err := k.h.open(ctx, k.cfg.Node)
+	if err != nil {
+		return nil, false, fmt.Errorf("opening a stream to the grain: %w", err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(k.cfg.Timeout))
+	line, _ := json.Marshal(m)
+	if _, err := c.Write(append(line, '\n')); err != nil {
+		// Closed before it was asked anything: refused, unread.
+		return nil, false, nil
+	}
+	all, err := io.ReadAll(c)
+	if err != nil && !isClosed(err) {
+		return nil, false, fmt.Errorf("reading the answer: %w", err)
+	}
+	if len(all) == 0 {
+		return nil, false, nil
+	}
+	head, rest, ok := bytes.Cut(all, []byte("\n"))
+	if !ok {
+		return nil, false, fmt.Errorf("the answer %q is not a line", truncate(string(all)))
+	}
+	var ans live.ViewMessage
+	if err := json.Unmarshal(head, &ans); err != nil {
+		return nil, false, fmt.Errorf("the answer %q: %v", truncate(string(head)), err)
+	}
+	switch ans.Type {
+	case live.TypeOK:
+		return rest, true, nil
+	case live.TypeError:
+		if len(rest) > 0 {
+			return nil, false, fmt.Errorf("answered an error, then %d bytes", len(rest))
+		}
+		return []byte{}, false, nil
+	}
+	return nil, false, fmt.Errorf("answered %q, want ok or error", ans.Type)
+}
+
+// isClosed is a read error that is the stream's end rather than a
+// failure: the Grain resetting it rather than closing it.
+func isClosed(err error) bool {
+	return errors.Is(err, mux.ErrStreamReset) || errors.Is(err, mux.ErrStreamClosed)
 }
 
 func truncate(s string) string {
