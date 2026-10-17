@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -119,7 +120,22 @@ type Spec struct {
 	// grain files such a task for local approval (threat model INV-17).
 	ApprovedBy string `json:"approved_by,omitempty"`
 	// ApprovedAt is when ApprovedBy approved the task; absent with it.
-	ApprovedAt  *time.Time  `json:"approved_at,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	// DependsOn are hub tasks that must be done before this one is
+	// placed: the dispatcher holds it queued until each of them is done,
+	// and cancels it if one of them fails or is cancelled or rejected
+	// instead (docs/hub.md §6.2). Each existed, and was visible to
+	// whoever filed this one, when it was filed.
+	DependsOn []string `json:"depends_on,omitempty"`
+	// FiledBy is the node that filed the task (docs/hub-interface.md,
+	// filing a task), and FiledByOwner the owner it was registered by
+	// then: the hub's record of who filed it, on behalf of Submitter.
+	// Both are empty for a task a human filed.
+	FiledBy      string `json:"filed_by,omitempty"`
+	FiledByOwner string `json:"filed_by_owner,omitempty"`
+	// OriginTask is the hub task whose run filed this one, if a node
+	// filed it from one: the task whose Submitter it carries.
+	OriginTask  string      `json:"origin_task,omitempty"`
 	Constraints Constraints `json:"constraints"`
 	Created     time.Time   `json:"created_at"`
 }
@@ -177,12 +193,15 @@ const (
 	maxLabels     = 32
 	maxLabelKey   = 63
 	maxLabelValue = 255
+	// maxDepends is the most dependencies a task may have.
+	maxDepends = 16
 )
 
 var (
 	teamID   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	repoName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9._-]+$`)
 	nodeID   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+	taskID   = regexp.MustCompile(`^t-[0-9a-f]{16}$`)
 )
 
 // normalize checks a submitted spec and fills in what it leaves out: a
@@ -219,6 +238,25 @@ func normalize(s Spec) (Spec, error) {
 	}
 	if utf8.RuneCountInString(s.Title) > maxTitle {
 		return s, fmt.Errorf("%w: the title is over %d characters", ErrInvalid, maxTitle)
+	}
+	if len(s.DependsOn) > maxDepends {
+		return s, fmt.Errorf("%w: over %d dependencies", ErrInvalid, maxDepends)
+	}
+	var deps []string
+	for _, id := range s.DependsOn {
+		if !taskID.MatchString(id) {
+			return s, fmt.Errorf("%w dependency %q: not a task ID", ErrInvalid, id)
+		}
+		if !slices.Contains(deps, id) {
+			deps = append(deps, id)
+		}
+	}
+	s.DependsOn = deps
+	if s.OriginTask != "" && !taskID.MatchString(s.OriginTask) {
+		return s, fmt.Errorf("%w origin task %q", ErrInvalid, s.OriginTask)
+	}
+	if n := s.FiledBy; n != "" && !nodeID.MatchString(n) {
+		return s, fmt.Errorf("%w filing node %q", ErrInvalid, n)
 	}
 	if n := s.Constraints.Node; n != "" && !nodeID.MatchString(n) {
 		return s, fmt.Errorf("%w node %q", ErrInvalid, n)

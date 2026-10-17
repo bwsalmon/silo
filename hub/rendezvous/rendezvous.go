@@ -14,7 +14,9 @@
 // hand a node work (Server.Open), the node to stream events back
 // (Server.NodeStream). When the connection drops, the node is offline.
 //
-// The control stream speaks JSON, one message per line.
+// The control stream speaks JSON, one message per line. Besides its
+// heartbeats, a node may file a task at the hub on it (TypeFileTask),
+// which the hub answers there (TypeFiled).
 package rendezvous
 
 import (
@@ -58,6 +60,14 @@ const (
 	// saying why (it is shutting down): the node reconnects, to this
 	// hub's replacement, as it would after any drop.
 	TypeGoodbye = "goodbye" // hub → node
+	// TypeFileTask is the node filing a task at the hub (docs/hub.md
+	// §6.1, Server.FileTask): Task is the filing, RequestID the node's
+	// name for it. The hub answers each with TypeFiled.
+	TypeFileTask = "file_task" // node → hub
+	// TypeFiled is the hub's answer to a file_task of the same
+	// RequestID: the task it filed, in Task, or why it filed none, in
+	// Error. Unlike error, it does not end the connection.
+	TypeFiled = "filed" // hub → node
 )
 
 // Message is one line on the control stream.
@@ -73,8 +83,13 @@ type Message struct {
 	HeartbeatSeconds int `json:"heartbeat_seconds,omitempty"`
 	// Free is the node's free slots, in heartbeat.
 	Free *int `json:"free,omitempty"`
-	// Error is the reason, in error.
+	// Error is the reason, in error, and in a filed that filed nothing.
 	Error string `json:"error,omitempty"`
+	// RequestID names a file_task, and the filed answering it.
+	RequestID string `json:"request_id,omitempty"`
+	// Task is the filing, in file_task, and the task filed, in filed:
+	// package tasks' to read and write (tasks.Filing, tasks.Task).
+	Task json.RawMessage `json:"task,omitempty"`
 }
 
 // maxLine bounds one control message.

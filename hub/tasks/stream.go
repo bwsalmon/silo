@@ -23,6 +23,8 @@ import (
 //	                                                       a human's answer to the task's approval_request event of that ID
 //	            {"type":"message","task":{"id":...},"message":{"id":"...","text":"...","attachments":[...],"sender":"<email>","sent_at":"..."}}
 //	                                                       a human's message to an interactive task's session
+//	            {"type":"dependency_done","task":{"id":...},"state":"done"|"failed"|"cancelled"|"rejected","reason":"...","node_task":"<local id>"}
+//	                                                       a hub task the node's own task waits on has ended
 //	node → hub  {"type":"accept","node_task":"<local id>"} it is running
 //	            {"type":"refuse","reason":"..."}           not here (to an offer), or not mine (to a resume)
 //	            {"type":"result","state":"done"|"failed","reason":"..."}
@@ -38,7 +40,10 @@ import (
 // hours after it accepted it. A cancel for a task with no
 // stream (its node was away when it was cancelled) is the first message
 // of a stream of its own, which the hub closes once it has written it.
-// The hub closes a stream after the task's result, or a refusal.
+// The hub closes a stream after the task's result, or a refusal. A
+// dependency_done, telling a node that filed a task (rendezvous
+// TypeFileTask) and asked to be told of its end, is likewise the only
+// message of a stream of its own, written once its task is over.
 const (
 	TypeOffer  = "offer"
 	TypeResume = "resume"
@@ -48,9 +53,12 @@ const (
 	TypeApprove = "approve"
 	// TypeMessage carries a human's message to an interactive task.
 	TypeMessage = "message"
-	TypeAccept  = "accept"
-	TypeRefuse  = "refuse"
-	TypeResult  = "result"
+	// TypeDependencyDone tells a node that a hub task its own task
+	// NodeTask waits on has ended, in State.
+	TypeDependencyDone = "dependency_done"
+	TypeAccept         = "accept"
+	TypeRefuse         = "refuse"
+	TypeResult         = "result"
 )
 
 // Message is one line on a task stream.
@@ -63,9 +71,11 @@ type Message struct {
 	// is written to (hub/claims, docs/hub.md §6.4), in offer, resume and
 	// attest; absent when the hub has no signing key.
 	Attestation string `json:"requester_attestation,omitempty"`
-	// NodeTask is the node's own ID for the task, in accept.
+	// NodeTask is the node's own ID for the task, in accept; in
+	// dependency_done, for its task waiting on Task.
 	NodeTask string `json:"node_task,omitempty"`
-	// State is the task's end, done or failed, in result.
+	// State is the task's end, done or failed, in result; in
+	// dependency_done, also cancelled or rejected.
 	State State `json:"state,omitempty"`
 	// Reason says why, in refuse, result, cancel and approve.
 	Reason string `json:"reason,omitempty"`

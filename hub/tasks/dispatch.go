@@ -439,12 +439,108 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 			d.start(ctx, t, nil, TypeCancel, "")
 		}
 	}
-	for _, t := range fair(queued) {
+	d.notifyWatchers(ctx)
+	for _, t := range fair(d.gate(ctx, queued)) {
 		if err := d.place(ctx, t, pc); err != nil {
 			d.logf("tasks: placing %s: %v", t.ID, err)
 		}
 	}
 	return nil
+}
+
+// gate returns the queued tasks whose dependencies are all done, and
+// so may be placed: a task with a dependency not over yet stays queued,
+// and one with a dependency that failed, or was cancelled or rejected,
+// or does not exist, is cancelled, saying which (docs/hub.md §6.2). A
+// backlog that cannot be read leaves every task with a dependency
+// queued until the next pass.
+func (d *Dispatcher) gate(ctx context.Context, queued []Task) []Task {
+	deps, err := d.Store.dependencies(ctx, queued)
+	if err != nil && ctx.Err() == nil {
+		d.logf("tasks: reading dependencies: %v", err)
+		d.observe(EventStoreError, Task{})
+	}
+	out := make([]Task, 0, len(queued))
+	for _, t := range queued {
+		if len(t.DependsOn) == 0 {
+			out = append(out, t)
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		wait, why := blocked(t, deps)
+		switch {
+		case why != "":
+			ct, err := d.Store.Cancel(ctx, t.ID, why)
+			if err != nil {
+				d.transition(ctx, t.ID)(ct, err)
+				continue
+			}
+			d.logf("tasks: cancelled %s: %s", t.ID, why)
+			d.finished(ct)
+		case !wait:
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// notifyWatchers tells each node waiting on a hub task that has ended,
+// and has not been told, how it ended (TypeDependencyDone): a node
+// online now, registered by the owner it was when it asked, on a stream
+// of its own, as a cancel for a task whose node was away is.
+func (d *Dispatcher) notifyWatchers(ctx context.Context) {
+	ws, err := d.Store.Unnotified(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			d.logf("tasks: reading the nodes waiting on tasks: %v", err)
+			d.observe(EventStoreError, Task{})
+		}
+		return
+	}
+	for _, w := range ws {
+		key := "watch:" + w.Task + "/" + w.Node + "/" + w.NodeTask
+		if !d.reachable(key, w.Node) || !d.bound(Task{Spec: Spec{ID: key}, Node: w.Node, NodeOwner: w.NodeOwner}) {
+			continue
+		}
+		d.mu.Lock()
+		if d.live[key] != nil {
+			d.mu.Unlock()
+			continue
+		}
+		d.live[key] = newLive()
+		d.mu.Unlock()
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			defer func() {
+				d.mu.Lock()
+				delete(d.live, key)
+				d.mu.Unlock()
+			}()
+			d.deliverDependency(ctx, key, w)
+		}()
+	}
+}
+
+// deliverDependency tells w's node that the hub task its local task
+// waits on has ended.
+func (d *Dispatcher) deliverDependency(ctx context.Context, key string, w Watcher) {
+	conn, err := d.Open(ctx, w.Node)
+	if err != nil {
+		d.holdNode(key, w.Node)
+		return
+	}
+	st := NewStream(conn)
+	defer st.Close()
+	m := Message{Type: TypeDependencyDone, Task: &Spec{ID: w.Task}, State: w.Ended.State, Reason: w.Ended.Reason, NodeTask: w.NodeTask}
+	if err := st.Write(m); err != nil {
+		d.holdNode(key, w.Node)
+		return
+	}
+	d.record(ctx, key, func() (Task, error) { return Task{}, d.Store.Notified(ctx, w) })
+	d.logf("tasks: told node %s that %s, which its %s waits on, is %s", w.Node, w.Task, logsafe.Quote(w.NodeTask), w.Ended.State)
 }
 
 // bound is whether t's node is registered now by the owner it was
@@ -1040,11 +1136,17 @@ func (d *Dispatcher) deliverMessages(ctx context.Context, st *Stream, t Task) {
 	}
 }
 
-// finished tells Finished of t if it is over.
+// finished tells Finished of t if it is over, and wakes the dispatcher:
+// a task over may be what another waits on (Spec.DependsOn), or what a
+// node's own task does (Store.Watch).
 func (d *Dispatcher) finished(t Task) {
-	if d.Finished != nil && t.State.Terminal() {
+	if !t.State.Terminal() {
+		return
+	}
+	if d.Finished != nil {
 		d.Finished(t)
 	}
+	d.Wake()
 }
 
 // transition logs a store update's error. One the task's state no

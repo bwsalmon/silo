@@ -141,6 +141,11 @@ type Config struct {
 	// ShutdownGrace bounds the shutdown; DefaultShutdownGrace when
 	// zero.
 	ShutdownGrace time.Duration
+	// FileBurst and FileEvery are the rate limit on each node's filings
+	// (tasks.Filer); tasks.DefaultFileBurst and tasks.DefaultFileEvery
+	// when zero.
+	FileBurst int
+	FileEvery time.Duration
 	// DispatchRetry is the dispatcher's Retry; tasks.DefaultRetry when
 	// zero.
 	DispatchRetry time.Duration
@@ -411,6 +416,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		h.Bus.Handle(h.Live.Notice)
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
+	filer := &tasks.Filer{Store: h.Backlog, Directory: h.Directory, Dispatcher: h.Dispatcher, Burst: cfg.FileBurst, Every: cfg.FileEvery, Logf: cfg.Logf}
+	h.Rendezvous.FileTask = filer.File
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
 	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI, Requests: h.Events}
 
