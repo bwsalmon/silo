@@ -128,6 +128,14 @@ for o in "${overlays[@]}"; do
 	grep -q 'auto-iam-authn=true$' "$f" || { echo "$o: the proxy must log the hub in as its IAM database user"; exit 1; }
 	[ "$(grep -c 'key: migrate-url$' "$f")" = 1 ] || { echo "$o: only the migrate container may have the migrate URL"; exit 1; }
 	grep -A1 'name: SILO_HUB_MIGRATE$' "$f" | grep -q "value: \"false\"$" || { echo "$o: the hub must serve with SILO_HUB_MIGRATE=false"; exit 1; }
+	# The store is PostgreSQL on Cloud SQL, through the proxy: never
+	# SQLite, which `silo hub serve` refuses on Kubernetes anyway, and
+	# never the development mode that would allow it elsewhere.
+	if grep -qiE 'sqlite|SILO_HUB_DEV|-dev([= ]|$)|-dev-user-header' "$f"; then
+		echo "$o: the hub must not run on SQLite or in development mode"; exit 1
+	fi
+	{ grep -A4 'name: SILO_HUB_DATABASE$' <<<"$dep" | grep -q 'key: url$' && grep -A4 'name: SILO_HUB_DATABASE$' <<<"$dep" | grep -q 'name: silo-hub-db$'; } ||
+		{ echo "$o: the hub's database must be the silo-hub-db Secret's postgres:// url"; exit 1; }
 	# The pod runs as a numeric non-root user, which runAsNonRoot can
 	# check: a named USER makes the kubelet refuse to start it (SA1-L9).
 	grep -q 'runAsUser: 65532$' "$f" || { echo "$o: the pod must run as user 65532"; exit 1; }

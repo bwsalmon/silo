@@ -149,8 +149,9 @@ spec:
                 name: silo-hub-config
           env:
             # postgres://silo-hub%40PROJECT.iam@127.0.0.1:5432/silo?sslmode=disable,
-            # the hub's IAM database user through the proxy
-            # (docs/deploy.md).
+            # the hub's IAM database user through the proxy, which
+            # carries it to Cloud SQL over TLS (docs/deploy.md). Always
+            # PostgreSQL: the hub refuses SQLite on Kubernetes.
             - name: SILO_HUB_DATABASE
               valueFrom:
                 secretKeyRef:

@@ -34,6 +34,7 @@ check "cluster" {
 locals {
   apis = toset([
     "sqladmin.googleapis.com",
+    "servicenetworking.googleapis.com",
     "iap.googleapis.com",
     "certificatemanager.googleapis.com",
     "artifactregistry.googleapis.com",
@@ -50,6 +51,11 @@ locals {
   # (docs/hub.md §11.2). Empty when node_ui_domain is "".
   node_ui_domain = var.node_ui_domain == null ? "nodes.${var.domain}" : var.node_ui_domain
   node_ui        = local.node_ui_domain == "" ? toset([]) : toset([local.node_ui_domain])
+  # The VPC the cluster's pods are on, which the instance's private IP
+  # is made on: projects/PROJECT/global/networks/NAME.
+  private_network = var.database_private_network != "" ? var.database_private_network : (
+    startswith(data.google_container_cluster.hub.network, "projects/") ? data.google_container_cluster.hub.network : "projects/${var.project}/global/networks/${data.google_container_cluster.hub.network}"
+  )
 }
 
 resource "google_project_service" "apis" {
@@ -69,16 +75,51 @@ resource "google_sql_database_instance" "hub" {
   deletion_protection = var.deletion_protection
 
   settings {
+    # Enterprise: the db-custom tiers, and PITR of at most 7 days. Named
+    # so that Cloud SQL's default for a new PostgreSQL 16 instance
+    # (Enterprise Plus) does not refuse the tier.
+    edition           = var.database_edition
     tier              = var.database_tier
     availability_type = var.database_availability_type
     # Cloud SQL's own guard against deleting the instance (and with it
     # its automated backups), beside terraform's.
     deletion_protection_enabled = var.deletion_protection
+    # The disk starts at database_disk_size_gb and grows by itself
+    # before it fills, up to database_disk_autoresize_limit_gb (0: no
+    # limit). It never shrinks, and terraform ignores the size it has
+    # grown to (lifecycle, below).
+    disk_type             = "PD_SSD"
+    disk_size             = var.database_disk_size_gb
+    disk_autoresize       = var.database_disk_autoresize
+    disk_autoresize_limit = var.database_disk_autoresize_limit_gb
     ip_configuration {
       # Reached only through the Cloud SQL Auth Proxy, which
-      # authorizes with IAM: no authorized networks.
-      ipv4_enabled = true
-      ssl_mode     = "ENCRYPTED_ONLY"
+      # authorizes with IAM and encrypts with TLS whichever address it
+      # dials: no authorized networks, and any connection that is not
+      # encrypted is refused. A private IP, on the cluster's VPC, when
+      # database_private_ip is set; the public one unless
+      # database_public_ip is unset.
+      ipv4_enabled                                  = var.database_public_ip
+      private_network                               = var.database_private_ip ? local.private_network : null
+      enable_private_path_for_google_cloud_services = var.database_private_ip
+      ssl_mode                                      = "ENCRYPTED_ONLY"
+    }
+    # Query Insights: each query's load, latency and plan in the
+    # console. Neither client addresses nor application tags are
+    # recorded; the hub's queries take their values as parameters, so
+    # no row data is either.
+    insights_config {
+      query_insights_enabled  = var.database_query_insights
+      query_string_length     = 1024
+      record_application_tags = false
+      record_client_address   = false
+    }
+    # Cloud SQL's own updates restart the instance (a failover, on a
+    # REGIONAL one) in this hour of this day, UTC.
+    maintenance_window {
+      day          = var.maintenance_window_day
+      hour         = var.maintenance_window_hour
+      update_track = var.maintenance_update_track
     }
     # The hub serves as its service account's IAM database user, which
     # the proxy logs in with a token rather than a password.
@@ -103,7 +144,77 @@ resource "google_sql_database_instance" "hub" {
     }
   }
 
-  depends_on = [google_project_service.apis]
+  lifecycle {
+    precondition {
+      condition     = var.database_disk_autoresize_limit_gb == 0 || var.database_disk_autoresize_limit_gb >= var.database_disk_size_gb
+      error_message = "database_disk_autoresize_limit_gb must be 0 (no limit) or at least database_disk_size_gb."
+    }
+    precondition {
+      condition     = var.database_public_ip || var.database_private_ip
+      error_message = "The instance needs an address: database_public_ip, database_private_ip or both."
+    }
+    # disk_autoresize grows the disk; terraform must not try to put it
+    # back (a disk cannot shrink).
+    ignore_changes = [settings[0].disk_size]
+  }
+
+  depends_on = [google_project_service.apis, google_service_networking_connection.private_ip]
+}
+
+# The private IP: private services access on the cluster's VPC, a
+# range of it reserved for Google's services and peered to them. A VPC
+# has one such peering, shared by every service that uses it, and
+# making it here replaces the ranges it already has: where the VPC has
+# it already, database_private_ip_peering = false uses it as it is.
+resource "google_compute_global_address" "private_ip" {
+  count         = var.database_private_ip && var.database_private_ip_peering ? 1 : 0
+  name          = "${var.name}-sql-private"
+  project       = var.project
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = 20
+  network       = local.private_network
+}
+
+resource "google_service_networking_connection" "private_ip" {
+  count                   = var.database_private_ip && var.database_private_ip_peering ? 1 : 0
+  network                 = local.private_network
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_ip[0].name]
+  depends_on              = [google_project_service.apis]
+}
+
+# On-demand backups, taken before each schema migration (docs/deploy.md
+# §6, "Upgrading"): a role that may take, list and read the hub
+# instance's backups and nothing else, narrower than
+# roles/cloudsql.editor, granted to backup_operators on the hub's
+# instance alone. Restoring one overwrites the instance and needs
+# cloudsql.instances.restoreBackup (roles/cloudsql.admin), which is
+# deliberately not part of it.
+resource "google_project_iam_custom_role" "backup" {
+  count       = length(var.backup_operators) > 0 ? 1 : 0
+  project     = var.project
+  role_id     = replace("${var.name}_backup", "-", "_")
+  title       = "Silo hub backup operator"
+  description = "Take, list and read on-demand backups of the Silo hub's Cloud SQL instance (deploy/terraform/hub)."
+  permissions = [
+    "cloudsql.backupRuns.create",
+    "cloudsql.backupRuns.get",
+    "cloudsql.backupRuns.list",
+    "cloudsql.instances.get",
+  ]
+}
+
+resource "google_project_iam_member" "backup" {
+  for_each = toset(var.backup_operators)
+  project  = var.project
+  role     = google_project_iam_custom_role.backup[0].name
+  member   = each.value
+  condition {
+    title       = "${var.name}-instance"
+    description = "The hub's Cloud SQL instance only."
+    expression  = "resource.service == \"sqladmin.googleapis.com\" && resource.name.startsWith(\"projects/${var.project}/instances/${google_sql_database_instance.hub.name}\")"
+  }
 }
 
 resource "google_sql_database" "hub" {
