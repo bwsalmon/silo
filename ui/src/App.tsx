@@ -12,6 +12,7 @@ import { Nodes } from './pages/Nodes';
 import { FileTask } from './pages/FileTask';
 import { Teams } from './pages/Teams';
 import { TeamPage } from './pages/TeamPage';
+import { Proposals } from './pages/Proposals';
 
 export function App() {
   const route = useRoute();
@@ -58,6 +59,7 @@ export function App() {
             {route.page === 'file' && <FileTask me={me.data} team={route.team} />}
             {route.page === 'teams' && <Teams me={me.data} />}
             {route.page === 'team' && <TeamPage me={me.data} team={route.team} />}
+            {route.page === 'proposals' && <Proposals me={me.data} team={route.team} />}
             {route.page === 'notfound' && <Alert severity="warning">No page at {route.path}.</Alert>}
           </>
         )}

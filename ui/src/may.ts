@@ -11,3 +11,14 @@ export function adminOf(me: Me | undefined, team: string): boolean {
 export function managesTask(me: Me | undefined, t: Task): boolean {
   return !!me && (me.email.toLowerCase() === t.submitter.toLowerCase() || adminOf(me, t.team));
 }
+
+// memberOf is whether the caller is in team, in either role: who the
+// API lets approve or reject its proposals and answer its tasks'
+// approval requests. A hub admin outside the team is not.
+export function memberOf(me: Me | undefined, team: string): boolean {
+  return !!me?.teams?.[team];
+}
+
+export function mayApprove(me: Me | undefined, t: Task): boolean {
+  return memberOf(me, t.team) && me!.email.toLowerCase() !== t.submitter.toLowerCase();
+}

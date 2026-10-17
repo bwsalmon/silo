@@ -2,30 +2,35 @@
 // §7.1): lifecycle, conversation, the token stream, and references to
 // what only the node holds. A customised Grain's events look the same
 // as a stock one's; a type the UI does not know is shown by its name.
+import type { ReactNode } from 'react';
 import { Alert, Box, Chip, Stack, Typography } from '@mui/material';
 import type { HubEvent } from '../api';
 import Markdown from './Markdown';
 import { ArtifactView } from './ArtifactView';
+
+// Answer renders, under an approval request, its answer or the means
+// to give one; the timeline itself decides nothing about either.
+export type Answer = (requestID: string) => ReactNode;
 
 function time(t: string): string {
   const d = new Date(t);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
 }
 
-export function EventRow({ e }: { e: HubEvent }) {
+export function EventRow({ e, answer }: { e: HubEvent; answer?: Answer }) {
   return (
     <Box sx={{ display: 'flex', gap: 1.5, py: 0.75, borderBottom: 1, borderColor: 'divider' }}>
       <Typography variant="caption" color="text.secondary" sx={{ minWidth: 72, pt: 0.25 }}>
         {time(e.time)}
       </Typography>
       <Box sx={{ flex: 1, minWidth: 0 }}>
-        <EventBody e={e} />
+        <EventBody e={e} answer={answer} />
       </Box>
     </Box>
   );
 }
 
-function EventBody({ e }: { e: HubEvent }) {
+function EventBody({ e, answer }: { e: HubEvent; answer?: Answer }) {
   if (e.status) {
     const s = e.status;
     return (
@@ -53,6 +58,7 @@ function EventBody({ e }: { e: HubEvent }) {
       <Alert severity="info">
         Waiting for approval of <b>{a.tool}</b>
         {a.message ? `: ${a.message}` : ''}
+        {answer?.(a.id)}
       </Alert>
     );
   }
@@ -121,7 +127,7 @@ function EventBody({ e }: { e: HubEvent }) {
   );
 }
 
-export function Timeline({ events }: { events: HubEvent[] }) {
+export function Timeline({ events, answer }: { events: HubEvent[]; answer?: Answer }) {
   if (events.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary">
@@ -132,7 +138,7 @@ export function Timeline({ events }: { events: HubEvent[] }) {
   return (
     <Box>
       {events.map((e) => (
-        <EventRow key={e.seq} e={e} />
+        <EventRow key={e.seq} e={e} answer={answer} />
       ))}
     </Box>
   );

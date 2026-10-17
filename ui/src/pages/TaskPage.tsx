@@ -1,11 +1,15 @@
 // A task: its prompt, where it is in its life, and its live events,
-// with the node-only artifacts they name viewed through the hub; and,
-// for its submitter or a team admin, cancel and requeue.
+// with the node-only artifacts they name viewed through the hub; for
+// its submitter or a team admin, cancel and requeue; and for a member of
+// its team, approving or rejecting it while it is proposed, and
+// answering its approval requests while it runs.
 import { useState, type ReactNode } from 'react';
 import { Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Typography } from '@mui/material';
-import { ApiError, cancelTask, getTask, requeueTask, type Me, type Task } from '../api';
+import { ApiError, cancelTask, getTask, listApprovals, requeueTask, type Me, type Task } from '../api';
 import { useAction } from '../action';
-import { managesTask } from '../may';
+import { managesTask, mayApprove, memberOf } from '../may';
+import { ApprovalPrompt } from '../components/ApprovalPrompt';
+import { ProposalActions } from '../components/ProposalActions';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { useEventStream, type StreamState } from '../events';
 import { useLoad } from '../load';
@@ -15,7 +19,10 @@ import Markdown from '../components/Markdown';
 import { Timeline } from '../components/Timeline';
 import { when } from './Backlog';
 
-const finished = new Set(['done', 'failed', 'cancelled']);
+const finished = new Set(['done', 'failed', 'cancelled', 'rejected']);
+
+// Never run: no node has sent it an event.
+const unplaced = new Set(['proposed', 'rejected']);
 
 const streamLabels: Record<StreamState, string> = {
   connecting: 'connecting',
@@ -50,7 +57,12 @@ function Lifecycle({ t }: { t: Task }) {
       </Field>
       {t.repo && <Field name="Repository">{t.repo}</Field>}
       <Field name="Submitter">{t.submitter}</Field>
-      {t.approved_by && <Field name="Approved by">{t.approved_by}</Field>}
+      {t.approved_by && (
+        <Field name="Approved by">
+          {t.approved_by}
+          {t.approved_at ? `, ${when(t.approved_at)}` : ''}
+        </Field>
+      )}
       {t.node && (
         <Field name="Node">
           {t.node}
@@ -93,15 +105,26 @@ function Actions({ t, onDone }: { t: Task; onDone: () => void }) {
   );
 }
 
-function Events({ id }: { id: string }) {
+function Events({ t, me }: { t: Task; me?: Me }) {
+  const id = t.id;
   const stream = useEventStream(id);
+  const asks = stream.events.some((e) => e.approval_request);
+  const approvals = useLoad((signal) => (asks ? listApprovals(id, signal) : Promise.resolve([])), [id, asks], asks ? 10000 : undefined);
+  const answers = new Map((approvals.data ?? []).map((a) => [a.request_id, a]));
+  const mayAnswer = t.state === 'running' && memberOf(me, t.team);
   return (
     <Paper sx={{ p: 2 }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
         <Typography variant="h6">Events</Typography>
         <Chip size="small" variant="outlined" label={streamLabels[stream.state]} color={stream.state === 'live' ? 'primary' : 'default'} />
       </Stack>
-      <Timeline events={stream.events} />
+      {approvals.error && <Alert severity="error">{approvals.error.message}</Alert>}
+      <Timeline
+        events={stream.events}
+        answer={(request) => (
+          <ApprovalPrompt task={id} request={request} answer={answers.get(request)} mayAnswer={mayAnswer} onDone={approvals.reload} />
+        )}
+      />
     </Paper>
   );
 }
@@ -132,10 +155,16 @@ export function TaskPage({ id, me }: { id: string; me?: Me }) {
         <Paper sx={{ p: 2, flex: 1, minWidth: 280, width: '100%' }}>
           <Typography variant="h6">Lifecycle</Typography>
           <Lifecycle t={t} />
+          {t.state === 'proposed' && mayApprove(me, t) && (
+            <Stack spacing={1} sx={{ mt: 2 }}>
+              <Typography variant="subtitle2">Proposal</Typography>
+              <ProposalActions t={t} onDone={task.reload} />
+            </Stack>
+          )}
           {managesTask(me, t) && <Actions t={t} onDone={task.reload} />}
         </Paper>
       </Stack>
-      <Events id={t.id} />
+      {!unplaced.has(t.state) && <Events t={t} me={me} />}
     </Stack>
   );
 }
