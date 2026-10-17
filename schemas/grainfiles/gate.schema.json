@@ -1,31 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/gate.schema.json",
-  "title": "grain/gate@v1: a merge gate (\u00a77.8)",
+  "title": "A merge gate (docs/grainfiles-spec.md §7.6)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "gate"
-    },
-    "schema": {
-      "const": "grain/gate@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "title": {
       "type": "string"
     },
@@ -51,50 +29,67 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "paths"
-      ],
-      "additionalProperties": false
+      ]
     },
     "requires": {
       "type": "object",
       "properties": {
         "human": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "when": {
+              "enum": [
+                "always",
+                "on-findings",
+                "never"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "when"
+          ]
         },
         "security_review": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "template": {
+              "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "template"
+          ]
         },
         "second_review": {
-          "type": "object"
-        },
-        "state": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "template": {
+              "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "template"
+          ]
         }
       },
-      "additionalProperties": false,
-      "minProperties": 1
+      "additionalProperties": false
     },
     "sensitive": {
       "type": "boolean"
-    },
-    "on": false,
-    "fires": false,
-    "template": false,
-    "reads": false,
-    "writes": false,
-    "grants": false,
-    "target": false,
-    "id": false
+    }
   },
+  "required": [
+    "match",
+    "requires"
+  ],
   "patternProperties": {
     "^x_": {}
   },
-  "additionalProperties": false,
-  "required": [
-    "kind",
-    "schema",
-    "match",
-    "requires"
-  ]
+  "additionalProperties": false
 }

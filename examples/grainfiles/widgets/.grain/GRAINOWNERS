@@ -1,3 +1,4 @@
-*                    @team:hub#maintainer
-/tasks/              @team:hub#member
-/tasks/**/thread/    @authenticated(create)
+*                         @acme/widgets
+/tasks/**/thread/         *(create)
+/tasks/:capabilities  @acme/security
+/designs/                 @acme/widgets-leads

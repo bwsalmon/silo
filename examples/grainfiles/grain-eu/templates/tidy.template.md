@@ -1,9 +1,8 @@
 ---
-kind: template
-schema: grain/template@v1
-form: task
-title: "Tidy {{ folder }}"
+title: "Tidy {{ area }}"
 inputs:
-  - {name: folder, type: string, default: memory/}
+  - {name: area, type: enum, options: [run-notes, branches], required: true}
+settings:
+  nothing_needed: close
 ---
-Tidy `{{ folder }}`: merge duplicates, drop stale notes.
+Tidy up {{ area }}: delete what is stale, and say what you removed.

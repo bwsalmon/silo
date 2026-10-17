@@ -1,31 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/design.schema.json",
-  "title": "grain/design@v1: a design document (\u00a77.10)",
+  "title": "A design (docs/grainfiles-spec.md §7.8)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "design"
-    },
-    "schema": {
-      "const": "grain/design@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "title": {
       "type": "string"
     },
@@ -40,7 +18,7 @@
     "owners": {
       "type": "array",
       "items": {
-        "$ref": "common.schema.json#/$defs/principal"
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
       }
     },
     "requirements": {
@@ -55,38 +33,32 @@
           "title": {
             "type": "string"
           },
-          "anchor": {
-            "type": "string"
+          "hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
           }
         },
+        "additionalProperties": false,
         "required": [
           "id"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
-    "applies_to": {},
     "supersedes": {
-      "$ref": "common.schema.json#/$defs/refString"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     },
     "superseded_by": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "planning": {
-      "type": "object"
-    },
-    "id": false
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+    }
   },
-  "patternProperties": {
-    "^x_": {}
-  },
-  "additionalProperties": false,
   "required": [
-    "kind",
-    "schema",
     "title",
     "status",
     "owners",
     "requirements"
-  ]
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false
 }

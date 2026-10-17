@@ -1,31 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/trigger.schema.json",
-  "title": "grain/trigger@v1: when X happens, file Y (\u00a77.6)",
+  "title": "A trigger (docs/grainfiles-spec.md §7.5)",
   "type": "object",
   "properties": {
-    "kind": {
-      "const": "trigger"
-    },
-    "schema": {
-      "const": "grain/trigger@v1"
-    },
-    "aka": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "moved_from": {
-      "type": "array",
-      "items": {
-        "$ref": "common.schema.json#/$defs/refString"
-      }
-    },
-    "instantiated_from": {
-      "type": "string",
-      "pattern": "@[0-9a-f]{40}$"
-    },
     "title": {
       "type": "string"
     },
@@ -33,45 +11,145 @@
       "type": "object",
       "properties": {
         "schedule": {
-          "type": "object"
-        },
-        "push": {
-          "type": "object"
-        },
-        "merge": {
-          "type": "object"
-        },
-        "pull_request": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "cron": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "catch_up": {
+              "enum": [
+                "latest-only",
+                "none"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "cron"
+          ]
         },
         "design-change": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "designs": {
+              "type": "array",
+              "items": {
+                "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "designs"
+          ]
         },
-        "task-state": {
-          "type": "object"
+        "manual": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
         },
-        "manual": {}
+        "push": {
+          "type": "object",
+          "properties": {
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ignore": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "paths"
+          ]
+        },
+        "merge": {
+          "type": "object",
+          "properties": {
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ignore": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "paths"
+          ]
+        },
+        "pull_request": {
+          "type": "object",
+          "properties": {
+            "branches": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ignore": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "paths"
+          ]
+        }
       },
-      "additionalProperties": false,
-      "minProperties": 1
+      "minProperties": 1,
+      "maxProperties": 1
     },
     "fires": {
       "type": "object",
       "properties": {
         "template": {
-          "$ref": "common.schema.json#/$defs/refString"
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+        },
+        "definition": {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
         },
         "workflow": {
           "type": "string"
         },
         "inputs": {
           "type": "object"
-        },
-        "bind": {
-          "type": "object"
-        },
-        "context": {
-          "$ref": "common.schema.json#/$defs/context"
         },
         "per": {
           "enum": [
@@ -81,14 +159,23 @@
             "change"
           ]
         },
-        "into": {
-          "$ref": "common.schema.json#/$defs/refString"
-        },
         "branch": {
           "type": "string"
         },
         "review": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "template": {
+              "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+            },
+            "inputs": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "template"
+          ]
         }
       },
       "additionalProperties": false,
@@ -100,61 +187,29 @@
         },
         {
           "required": [
+            "definition"
+          ]
+        },
+        {
+          "required": [
             "workflow"
           ]
         }
       ]
     },
-    "fires_in": {
-      "enum": [
-        "hub",
-        "deployment",
-        "silo",
-        "grain"
-      ]
-    },
     "enabled": {
       "type": "boolean"
     },
-    "team": {
-      "type": "string"
-    },
-    "auto_merge": {
-      "type": "boolean"
-    },
-    "auto_approve_proposals": {
-      "type": "boolean"
-    },
-    "limits": {
-      "type": "object"
-    },
-    "derived_from": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "created_at": {
-      "$ref": "common.schema.json#/$defs/time"
-    },
-    "gate": false,
-    "human": false,
-    "sensitive": false,
-    "requires": false,
-    "last_fire_at": false,
-    "next_fire_at": false,
-    "paused": false,
-    "reads": false,
-    "writes": false,
-    "grants": false,
-    "target": false,
-    "id": false
+    "settings": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/settings"
+    }
   },
+  "required": [
+    "on",
+    "fires"
+  ],
   "patternProperties": {
     "^x_": {}
   },
-  "additionalProperties": false,
-  "required": [
-    "kind",
-    "schema",
-    "on",
-    "fires"
-  ]
+  "additionalProperties": false
 }

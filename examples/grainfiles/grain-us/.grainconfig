@@ -1,5 +1,0 @@
-schema: grain/repo-config@v1
-default_ref: main
-enforcement: {mode: required-check, check: grainfiles/authorize, branch: main}
-aliases:
-  widgets: https://github.com/acme/widgets.git

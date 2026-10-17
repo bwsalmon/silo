@@ -1,5 +1,0 @@
-*                          @team:hub#admin
-/tasks/                    @authenticated(create) @team:hub#member
-/tasks/**/thread/          @authenticated(create)
-/templates/                @team:hub#member
-/lifecycles/               @team:hub#admin

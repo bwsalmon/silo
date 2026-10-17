@@ -1,6 +1,4 @@
 ---
-kind: config
-schema: grain/config@v1
-role: library
-owner: {team: hub}
+format: 1
+owner: "@owner"
 ---
