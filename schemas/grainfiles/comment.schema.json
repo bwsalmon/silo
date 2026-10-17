@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/comment.schema.json",
-  "title": "grain/comment@v1: one append-only comment (\u00a77.4)",
+  "title": "grain/comment@v1: one append-only comment in a thread/ or run folder (\u00a77.4)",
   "type": "object",
   "properties": {
     "kind": {
@@ -25,12 +25,6 @@
     "instantiated_from": {
       "type": "string",
       "pattern": "@[0-9a-f]{40}$"
-    },
-    "task": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "run": {
-      "$ref": "common.schema.json#/$defs/refString"
     },
     "author": {
       "$ref": "common.schema.json#/$defs/principal"
@@ -61,6 +55,8 @@
     "question": {
       "type": "boolean"
     },
+    "task": false,
+    "run": false,
     "id": false
   },
   "patternProperties": {
@@ -72,17 +68,5 @@
     "schema",
     "author",
     "at"
-  ],
-  "oneOf": [
-    {
-      "required": [
-        "task"
-      ]
-    },
-    {
-      "required": [
-        "run"
-      ]
-    }
   ]
 }

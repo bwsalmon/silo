@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/run.schema.json",
-  "title": "grain/run@v1: one deployment's record of one attempt (\u00a77.3)",
+  "title": "grain/run@v1: one attempt of an execution, runs/<run>/run.md (\u00a77.3)",
   "type": "object",
   "properties": {
     "kind": {
@@ -26,44 +26,6 @@
       "type": "string",
       "pattern": "@[0-9a-f]{40}$"
     },
-    "task": {
-      "allOf": [
-        {
-          "$ref": "common.schema.json#/$defs/edge"
-        }
-      ],
-      "properties": {
-        "ref": {
-          "$ref": "common.schema.json#/$defs/refString"
-        },
-        "rev": {
-          "$ref": "common.schema.json#/$defs/sha"
-        }
-      },
-      "required": [
-        "rev"
-      ],
-      "additionalProperties": false
-    },
-    "from": {
-      "allOf": [
-        {
-          "$ref": "common.schema.json#/$defs/edge"
-        }
-      ],
-      "properties": {
-        "ref": {
-          "$ref": "common.schema.json#/$defs/refString"
-        },
-        "rev": {
-          "$ref": "common.schema.json#/$defs/sha"
-        }
-      },
-      "required": [
-        "rev"
-      ],
-      "additionalProperties": false
-    },
     "deployment": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]*$"
@@ -87,9 +49,6 @@
     },
     "started_at": {
       "$ref": "common.schema.json#/$defs/time"
-    },
-    "previous": {
-      "$ref": "common.schema.json#/$defs/refString"
     },
     "waiting": {
       "type": "object",
@@ -123,7 +82,22 @@
       "type": "array"
     },
     "superseded": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "common.schema.json#/$defs/time"
+        },
+        "by": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "additionalProperties": false
     },
     "closed": {
       "type": "object",
@@ -177,6 +151,8 @@
       },
       "additionalProperties": false
     },
+    "task": false,
+    "from": false,
     "id": false
   },
   "patternProperties": {
@@ -186,8 +162,6 @@
   "required": [
     "kind",
     "schema",
-    "task",
-    "from",
     "deployment",
     "status",
     "accepted_at"

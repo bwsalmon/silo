@@ -61,9 +61,6 @@
     "limits": {
       "$ref": "common.schema.json#/$defs/limits"
     },
-    "task_home": {
-      "type": "object"
-    },
     "deployment": {
       "type": "object",
       "properties": {
@@ -171,32 +168,6 @@
         "additionalProperties": false
       }
     },
-    "lanes": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "folders": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "folders",
-          "path"
-        ],
-        "additionalProperties": false
-      }
-    },
     "views": {
       "type": "array",
       "items": {
@@ -237,6 +208,8 @@
         "additionalProperties": false
       }
     },
+    "task_home": false,
+    "lanes": false,
     "id": false
   },
   "patternProperties": {
@@ -265,8 +238,7 @@
         "properties": {
           "registry": false,
           "folders": false,
-          "views": false,
-          "lanes": false
+          "views": false
         }
       }
     },
@@ -307,8 +279,7 @@
           "memory": false,
           "registry": false,
           "folders": false,
-          "views": false,
-          "lanes": false
+          "views": false
         }
       }
     }
