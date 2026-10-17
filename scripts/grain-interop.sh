@@ -15,6 +15,15 @@
 #   cancel   a cancel on the hub closes the task on grain;
 #   result   a task that ends on grain is reported to the hub as failed.
 #
+# With a grain that checks the hub's signed claims (policy.ApplySiloClaims,
+# docs/hub.md §6.4), the round trip runs again with signing on: the hub
+# signs each offer with a P-256 key (-claims-issuer, -claims-key-file)
+# and grain's policy names it as silo_issuer, with silo_keys_url its
+# /v1/claims/keys. The same stages pass, and the accepted task's body is
+# the prompt byte for byte, with no footer, which the signed spec_digest
+# covers. A last check has a hub that signs nothing offer a task to that
+# grain, which refuses it as "an offer with no Silo attestation".
+#
 # The hub runs on SQLite and signs alice in with OIDC against a fake
 # provider (internal/fakeoidc); grain runs with a local policy, no
 # sandbox backend and no CI, against a fake GitHub API
@@ -178,10 +187,13 @@ task_settled() { # accepted (node_task set) or refused by NODE
 }
 task_state_is() { [ "$(task_field "$1" state)" = "$2" ]; }
 
+# PROMPT is every hub task's prompt.
+PROMPT="grain-interop: nothing to do"
+
 # file_task REPO TITLE prints the hub task's ID.
 file_task() {
 	local out
-	out="$(hub POST /v1/tasks "$(jq -nc --arg r "$1" --arg t "$2" '{repo: $r, title: $t, prompt: "grain-interop: nothing to do"}')")"
+	out="$(hub POST /v1/tasks "$(jq -nc --arg r "$1" --arg t "$2" --arg p "$PROMPT" '{repo: $r, title: $t, prompt: $p}')")"
 	echo "$out" | jq -er .id || { echo "POST /v1/tasks: $out" >&2; return 1; }
 }
 
@@ -204,14 +216,53 @@ grain_team() {
 		{ fail setup "could not give grain's team $id a git connection: $out"; return 1; }
 }
 
-# round_trip LABEL SILOBIN GRAINBIN runs every stage, stopping at the
-# first failure, which it leaves in FAILED_STAGE and FAILED_WHY.
+# claims_key FILE writes a P-256 private key for the hub to sign claims
+# with (docs/hub.md §6.4): openssl's, or Go's where there is no openssl.
+claims_key() {
+	if command -v openssl >/dev/null; then
+		openssl ecparam -name prime256v1 -genkey -noout -out "$1"
+		return
+	fi
+	mkdir -p "$W/keygen"
+	cat >"$W/keygen/main.go" <<-'EOF'
+		package main
+
+		import (
+			"crypto/ecdsa"
+			"crypto/elliptic"
+			"crypto/rand"
+			"crypto/x509"
+			"encoding/pem"
+			"os"
+		)
+
+		func main() {
+			k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				panic(err)
+			}
+			der, err := x509.MarshalECPrivateKey(k)
+			if err != nil {
+				panic(err)
+			}
+			pem.Encode(os.Stdout, &pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+		}
+	EOF
+	(cd "$W/keygen" && go run main.go) >"$1"
+}
+
+# round_trip LABEL SILOBIN GRAINBIN [CLAIMS] runs every stage, stopping
+# at the first failure, which it leaves in FAILED_STAGE and FAILED_WHY.
+# CLAIMS is empty for grain's policy as it was before signed claims;
+# "signed" for a hub that signs its offers and a grain whose policy
+# names it as silo_issuer; "unsigned" for that grain against a hub that
+# signs nothing, which runs only as far as the offer it refuses.
 round_trip() {
-	local label="$1" silo="$2" grain="$3"
+	local label="$1" silo="$2" grain="$3" claims="${4:-}"
 	local d="$W/$label"
 	rm -rf "$d"; mkdir -p "$d/grain"
 	FAILED_STAGE="" FAILED_WHY=""
-	say "round trip $label: $silo against $grain"
+	say "round trip $label: $silo against $grain${claims:+ (claims $claims)}"
 
 	# The hub signs humans in with OIDC, against a fake provider
 	# (internal/fakeoidc) that writes alice's ID token, which every call
@@ -221,15 +272,28 @@ round_trip() {
 	until_true 10 test -s "$d/id-token" || { fail setup "the fake OIDC provider did not come up: $(cat "$d/oidc.log")"; return 1; }
 	ID_TOKEN="$(cat "$d/id-token")"
 
+	# Signed claims: the hub signs as its own URL, and grain fetches
+	# its keys there; grain takes plain http only from a loopback host.
+	local issuer="http://127.0.0.1:$HUB_PORT"
+	local -a signing=()
+	if [ "$claims" = signed ]; then
+		claims_key "$d/claims-key.pem" 2>"$d/setup.err" || { fail setup "a P-256 key for the hub's claims: $(cat "$d/setup.err")"; return 1; }
+		signing=(-claims-issuer "$issuer" -claims-key-file "$d/claims-key.pem")
+	fi
+
 	local db="sqlite:$d/hub.db"
 	"$silo" hub team -database "$db" -id widgets -name Widgets -admin "user:$USER_EMAIL" -repo acme/widgets -repo acme/outside >/dev/null 2>"$d/setup.err" ||
 		{ fail setup "silo hub team: $(cat "$d/setup.err")"; return 1; }
 	SILO_HUB_OIDC_SESSION_KEY=grain-interop-session-key-of-32-bytes-or-more \
 		"$silo" hub serve -addr "127.0.0.1:$HUB_PORT" -database "$db" -admins user:admin@interop.test \
 		-oidc-issuer "http://127.0.0.1:$OIDC_PORT" -oidc-client-id grain-interop \
-		-oidc-redirect-url "http://127.0.0.1:$HUB_PORT/auth/callback" >"$d/hub.log" 2>&1 &
+		-oidc-redirect-url "http://127.0.0.1:$HUB_PORT/auth/callback" "${signing[@]}" >"$d/hub.log" 2>&1 &
 	PIDS+=($!)
 	until_true 30 curl -sf "http://127.0.0.1:$HUB_PORT/readyz" -o /dev/null || { fail hub "the hub did not come up"; return 1; }
+	if [ "$claims" = signed ]; then
+		curl -sf "$issuer/v1/claims/keys" | jq -e '.keys | length > 0' >/dev/null ||
+			{ fail hub "the hub publishes no claims keys at $issuer/v1/claims/keys"; return 1; }
+	fi
 
 	# The node token: `grain hub login` has the hub mint it (task 4172);
 	# a grain without it is given one `silo hub token` mints.
@@ -259,6 +323,21 @@ round_trip() {
 		repos: [acme/widgets]
 		local_requesters: [$USER_EMAIL]
 	EOF
+	# Under silo_issuer every hub task is external, and grain checks its
+	# claims: iss this hub, aud grain's -hub-node-id (silo_audience is
+	# left to default to it, which is the aud the hub signs). The hub has
+	# no approval flow yet (docs/hub.md §6.4), so approved_by is always
+	# empty and grain is told to accept unapproved external tasks.
+	# TODO: when the hub can approve a task, have a second user approve
+	# it, make them a member of grain's widgets team, and drop
+	# allow_unapproved_external, so approved_by is checked too.
+	if [ -n "$claims" ]; then
+		cat >>"$d/policy.yml" <<-EOF
+			silo_issuer: $issuer
+			silo_keys_url: $issuer/v1/claims/keys
+			allow_unapproved_external: true
+		EOF
+	fi
 	# No sandbox backend, no CI and GitHub nowhere: nothing here runs
 	# an agent or reaches the network.
 	"$grain" daemon -data-dir "$d/grain" -ui-addr "127.0.0.1:$UI_PORT" -ci=false -disable-native-sandboxes \
@@ -275,6 +354,29 @@ round_trip() {
 	until_true "$WAIT" node_online || { fail register "grain did not show online in GET /v1/nodes: $(hub GET /v1/nodes)"; return 1; }
 	hub GET /v1/nodes | jq -c '.nodes[]'
 
+	if [ "$claims" = unsigned ]; then
+		stage "$label: refuse unsigned"
+		# A hub given no -claims-* signs nothing, so its offer carries
+		# no requester_attestation, and a grain whose policy names
+		# silo_issuer refuses it.
+		local u why
+		u="$(file_task acme/widgets 'interop: unsigned')" || { fail unsigned "the hub refused the task"; return 1; }
+		until_true "$WAIT" task_settled "$u" || { fail unsigned "hub task $u was neither accepted nor refused: $(hub GET "/v1/tasks/$u")"; return 1; }
+		if [ -n "$(task_field "$u" node_task)" ]; then
+			fail unsigned "grain, under silo_issuer, accepted hub task $u, which a hub that signs nothing offered with no attestation (as grain task $(task_field "$u" node_task))"
+			return 1
+		fi
+		why="$(task_field "$u" reason)"
+		case "$why" in
+		*"an offer with no Silo attestation"*) ;;
+		*) fail unsigned "grain refused hub task $u, an offer with no attestation, but not for that: $why"; return 1 ;;
+		esac
+		say "hub task $u refused: $(hub GET "/v1/tasks/$u" | jq -c '{state, reason, excluded}')"
+		stop_all
+		say "round trip $label: ok"
+		return 0
+	fi
+
 	stage "$label: accept"
 	local a na
 	a="$(file_task acme/widgets 'interop: accept')" || { fail accept "the hub refused the task"; return 1; }
@@ -284,6 +386,19 @@ round_trip() {
 	[ "$(task_field "$a" node)" = "$NODE" ] || { fail accept "hub task $a placed on $(task_field "$a" node), not $NODE"; return 1; }
 	grainapi GET "/api/tasks/$na" | jq -e '.title == "interop: accept"' >/dev/null ||
 		{ fail accept "grain accepted hub task $a as task $na, which grain does not have: $(grainapi GET "/api/tasks/$na")"; return 1; }
+	if [ "$claims" = signed ]; then
+		# The signed spec_digest covers the body, so grain files the
+		# prompt byte for byte, with no footer naming the hub task.
+		local ta
+		ta="$(grainapi GET "/api/tasks/$na")"
+		echo "$ta" | jq -e --arg p "$PROMPT" '[.. | strings] | index($p) != null' >/dev/null ||
+			{ fail accept "grain task $na, hub task $a under signed claims, has no body that is the prompt byte for byte: $ta"; return 1; }
+		if echo "$ta" | jq -e '[.. | strings | select(contains("Placed here by the Silo hub"))] | length > 0' >/dev/null; then
+			fail accept "grain task $na, hub task $a under signed claims, carries the hub's footer: $ta"
+			return 1
+		fi
+		say "hub task $a's signed claims verified: grain task $na's body is the prompt, with no footer"
+	fi
 	say "hub task $a accepted as grain task $na ($(task_field "$a" state))"
 
 	stage "$label: refuse"
@@ -401,17 +516,17 @@ dump_logs() {
 	done
 }
 
-# rerun_build BASEDIR / rerun_trip LABEL GRAINMODE BASEDIR are what blame
-# reruns against silo's base.
+# rerun_build BASEDIR / rerun_trip LABEL GRAINMODE CLAIMS BASEDIR are
+# what blame reruns against silo's base.
 rerun_build() { build_grain_against "$1" "$W/bin/grain-base"; }
 rerun_trip() {
-	local label="$1" mode="$2" basedir="$3" g
+	local label="$1" mode="$2" claims="$3" basedir="$4" g
 	build_silo "$basedir" "$W/bin/silo-base"
 	case "$mode" in
 	pinned) g="$W/bin/grain-pinned" ;;
 	*) build_grain_against "$basedir" "$W/bin/grain-base" && g="$W/bin/grain-base" ;;
 	esac
-	round_trip "$label-base" "$W/bin/silo-base" "$g"
+	round_trip "$label-base" "$W/bin/silo-base" "$g" "$claims"
 }
 
 # ---- main -----------------------------------------------------------
@@ -434,22 +549,35 @@ else
 	trips="pinned"
 fi
 
+# Signed claims (docs/hub.md §6.4) run once grain checks them on an
+# offer: its hubTasks.Start passes the attestation to
+# policy.ApplySiloClaims (grain task 4449).
+claims_trips=""
+if grain_has 'ApplySiloClaims'; then
+	claims_trips="signed unsigned"
+else
+	say "NOTICE: grain $grain_sha does not check the hub's signed claims on an offer yet (policy.ApplySiloClaims in pkg/daemon, grain task 4449): the round trip with signing on is skipped"
+fi
+
 for t in $trips; do
 	g="$W/bin/grain-$t"
-	if ! round_trip "$t" "$W/bin/silo" "$g"; then
-		dump_logs "$t"
-		stop_all
-		case "$FAILED_STAGE" in
-		hub | grain | setup)
-			say "FAIL: this job could not set up the round trip ($FAILED_STAGE): $FAILED_WHY. That is grain's (or the hub's) own configuration API, not the task interface; grain is $grain_sha, silo $silo_sha"
+	for c in "" $claims_trips; do
+		label="$t${c:+-$c}"
+		if ! round_trip "$label" "$W/bin/silo" "$g" "$c"; then
+			dump_logs "$label"
+			stop_all
+			case "$FAILED_STAGE" in
+			hub | grain | setup)
+				say "FAIL: this job could not set up the round trip ($FAILED_STAGE): $FAILED_WHY. That is grain's (or the hub's) own configuration API, not the task interface; grain is $grain_sha, silo $silo_sha"
+				status=1
+				continue
+				;;
+			esac
+			blame "stage $FAILED_STAGE of the round trip${c:+ with $c claims} with grain ${t/head/built against this silo}: $FAILED_WHY" rerun_trip "$label" "$t" "$c"
 			status=1
-			continue
-			;;
-		esac
-		blame "stage $FAILED_STAGE of the round trip with grain ${t/head/built against this silo}: $FAILED_WHY" rerun_trip "$t" "$t"
-		status=1
-	fi
-	stop_all
+		fi
+		stop_all
+	done
 done
 
 exit "$status"
