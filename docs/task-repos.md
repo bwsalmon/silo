@@ -114,6 +114,39 @@ this conflicts with the amendments above, this one wins:*
   included folders cannot weaken them, and gates from a Grain's mandatory
   sources cannot be excluded (§6.3, §8.14, §11.36–§11.40).*
 
+*Amended a seventh time 2026-10-17 (task 4487), as the owner settled.
+Where this conflicts with the amendments above, this one wins. It
+**replaces** 4452's include and exclude objects, `kind: repo`, Grain root
+README markers, spaces and namespaces, and there are no ignore files:*
+
+- *a Grain's root configuration is **`grain.config.md`** at its root
+  path, versioned and owned like any object. It declares **typed active
+  roots**: `backlog:` lanes, `triggers:` and `memory:`, each a list of
+  entries naming one folder, live or pinned. **Being in an active root
+  means enabled**; everything else (tasks, templates, designs, capability
+  definitions, `context:` and `depends_on` targets) is reached **only by
+  reference**, read-only and never active by itself (§3.1, §3.3);*
+- *each entry is **self-describing**: it activates the matching objects in
+  its folder's subtree, minus its own optional `ignore:` patterns
+  (gitignore syntax), minus any `archive/` folder. Nothing is inherited
+  from parent folders or other files (§3.3, §3.8);*
+- *linking a Grain to Silo is the Grain's owner adding Silo's per-Grain
+  folder as a backlog lane (and a trigger root). Nothing Silo writes
+  activates anything unless the owner pointed a root at it (§8.12,
+  §11.14);*
+- *gates are not Grain roots: the merge queue reads `*.gate.md` from the
+  merged-into repo's own `.grain/` (§6.3). Capability definitions are
+  reached only from `context:` (§5.7);*
+- *every object is named **`<name>.<kind>.md`**, and its `kind:` must match
+  (§3.2). Repo-wide settings are in **`.grainconfig`** (§3.4), and write
+  ownership in **`GRAINOWNERS`**, CODEOWNERS syntax with a field
+  extension (§3.5);*
+- *discovery reads **git trees only**, parses front matter lazily, and is
+  cached by tree and blob hash, so steady-state cost is O(changes);
+  fetches are sparse; closed objects move under `archive/` by a fixed
+  mapping, with no tombstone; limits fail loudly; and an orphan check
+  flags objects nothing reaches (§3.7–§3.10).*
+
 This design stores grain's **tasks, triggers, gates, templates and design docs**
 as self-contained Markdown files in a **graph of plain-git repositories**
 ("task repos"). Each object is one file, and the repos link to each other
@@ -134,24 +167,29 @@ own task repo, which can be a purely local git repo
 (`file:///var/lib/grain/tasks.git`). That one repo holds the tasks its
 owner writes, the backlog that ranks them, and the records of their runs.
 
-Every Grain has a **root folder** (§3.2): a whole repo, or a subtree
-such as `.grain/`. Its README marks it, and the root holds the Grain's
-own objects as ordinary files: its local backlog, its execution records
-and their threads, its own triggers and templates. **Only the Grain and
-its owner write it.** What the Grain acts on is its root's
-**namespace**: the root's own objects plus whatever its `kind: include`
-objects bring in, less what `kind: exclude` objects cut (§3.3).
+Every Grain has a **root folder** (§3.3): a whole repo, or a subtree
+such as `.grain/`. Its **`grain.config.md`** says what the Grain acts on,
+as **typed active roots**: the backlog lanes whose references it runs,
+the trigger folders whose triggers it fires, and the memory folders it
+gives its runs (§3.3). The root also holds the Grain's own objects as
+ordinary files: its own lane, its execution records and their threads,
+its own triggers, tasks and memory. **Only the Grain and its owner write
+it.** Everything else a Grain uses, from a task's template to a
+capability definition, it reaches **by reference**, read-only, when
+something needs it (§3.1).
 
-**Linking a Grain to Silo is an include.** Silo keeps a folder for each
-Grain in a Silo repo (the team's `placements` repo), holding that
-Grain's **placements** (backlog references to tasks) and the team
-triggers assigned to it. The Grain's root includes that folder, live and
-restricted to those kinds (§8.12). Silo writes only its own repos; the
-Grain reads them. Silo also grants the Grain read access to the repos
-those references point into: the team's intake, where the tasks
-themselves live, and the shared repos the tasks reference.
+**Linking a Grain to Silo is an edit to `grain.config.md`.** Silo keeps a
+folder for each Grain in a Silo repo (the team's `placements` repo),
+holding that Grain's **placements** (backlog references to tasks) and the
+team triggers assigned to it. The Grain's owner adds that folder as a
+backlog lane, and its `triggers/` as a trigger root, tracking Silo's
+branch (§8.12). **Nothing Silo writes activates anything unless the
+owner pointed a root at it.** Silo writes only its own repos; the Grain
+reads them. Silo also grants the Grain read access to the repos those
+references point into: the team's intake, where the tasks themselves
+live, and the shared repos the tasks reference.
 
-**Unlinking** deletes that include. Nothing moves: the root, with all of
+**Unlinking** removes those entries. Nothing moves: the root, with all of
 its history, was the Grain's all along.
 
 A linked Grain's root is usually a repo Silo hosts, because Grains sit
@@ -173,23 +211,23 @@ offer today.
 
 ### 1.1 A graph of repos
 
-Repo **roles** are conventions recorded in each repo's metadata (§3).
-The format does not depend on them:
+Repo **roles** are conventions, recorded only in prose. The format does
+not depend on them:
 
 | Role | How many | Holds | Typical writers |
 | --- | --- | --- | --- |
-| **grain-root** | one per Grain instance: a repo, or a subtree of one | that Grain's root (§3.2): its include and exclude objects, its own lane of backlog references, its execution records and their threads, its own tasks and triggers | **that Grain and its owner only** |
-| **placements** | one per team, in Silo | a folder per Grain serving the team: its placements (`backlog/`) and the team triggers assigned to it (`triggers/`, as includes) | **Silo only**, on its own behalf and for the people who reorder through its UI |
-| **intake** | one per team, in Silo | the team's tasks: proposals, approvals and cancels; the team's ranking of unplaced work; discussion on tasks; the triggers the team adopts (as includes) | any authenticated user (new proposals only), the team's approvers, the team's members (ranks), Silo. The one role with several writers (§8.1) |
-| **shared** | any number, in Silo or elsewhere | templates, triggers, gates, design docs, template partials, and includes of other shared folders | the team's maintainers, through review branches |
-| **code** | the code repos themselves | a grain folder (`.grain/`, with its own `.grain/README.md`): templates, triggers, gates, suites and workflows, tasks homed there (§5.5), and design docs in place in `docs/design/` (§3.1, §12) | whoever the repo's own review and merge process lets land a change (§8.13) |
+| **grain-root** | one per Grain instance: a repo, or a subtree of one | that Grain's root (§3.3): `grain.config.md`, its own lane of backlog references, its execution records and their threads, its own tasks, triggers and memory | **that Grain and its owner only**; `grain.config.md` the owner's alone |
+| **placements** | one per team, in Silo | a folder per Grain serving the team: its placements (`backlog/`) and the team triggers assigned to it (`triggers/`, copies or the team's own files), each active only once the Grain's config names it | **Silo only**, on its own behalf and for the people who reorder through its UI |
+| **intake** | one per team, in Silo | the team's tasks: proposals, approvals and cancels; the team's ranking of unplaced work; discussion on tasks; the team's own triggers | any authenticated user (new proposals only), the team's approvers, the team's members (ranks), Silo. The one role with several writers (§3.5, §8.1) |
+| **shared** | any number, in Silo or elsewhere | templates, triggers, design docs, template partials, memory and capability definitions, for Grains to name in their roots or reference | the team's maintainers, through review branches |
+| **code** | the code repos themselves | a grain folder (`.grain/`): templates, triggers, gates, suites and workflows, tasks homed there (§5.5), and design docs in place in `docs/design/` (§3.6, §12) | whoever the repo's own review and merge process lets land a change (§8.13) |
 
 "Silo" is **one or more repos**, not a special store. Everything works by
 references alone:
 
 - a backlog reference in a Grain's placements, or in its root, points at
   a task in an intake, a Grain root, or a code repo's grain folder (§5.5);
-- a Grain's root includes the folders whose objects it acts on (§3.3);
+- a Grain's `grain.config.md` names the folders whose objects it acts on (§3.3);
 - an execution record points at its task and at the backlog reference it
   came from;
 - a task points at its template in a shared repo;
@@ -213,7 +251,7 @@ rules keep the split clean:
 - **State lives in front matter, never in file location.** A file is
   written once, at a stable path that is its identity (§2.1), and never
   moves to change state.
-- **Each repo or folder has one writer** (§3, §8.1), except a team's
+- **Each repo or folder has one writer** (§3.5, §8.1), except a team's
   intake, where each field has one. The databases may mirror a field for
   queries, but they never compete with git for it.
 
@@ -235,91 +273,101 @@ is a commit. A fine-grained step, such as "agent turn 14", is an event.
 Every object is one UTF-8 file. The file has **YAML front matter**
 between `---` lines, then a **Markdown body**. Every file declares:
 
-- `kind:`, one of `repo`, `task`, `ref`, `run`, `comment`, `template`,
-  `trigger`, `gate`, `suite`, `design`, `moved`, `include`,
-  `exclude`, `asset` (a sidecar, §2.2), `capability` or
-  `capability-base` (§5.7);
+- `kind:`, one of `config`, `task`, `ref`, `run`, `comment`, `template`,
+  `trigger`, `gate`, `suite`, `design`, `memory`, `moved`, `asset` (a
+  sidecar, §2.2), `capability` or `capability-base` (§5.7). It must match
+  the kind suffix of the file's name, `<name>.<kind>.md` (§3.2);
 - `schema:`, as in `grain/task@v1` (§10).
 
 There is **no `id:` field.** An object is named by where it is (§2.1).
-Every other file in a repo, an image or a CSV or Markdown without `kind:`,
-is an **asset**: referenceable the same way, but not an object (§2.2).
+Every other file in a repo, an image or a CSV or a Markdown file with no
+kind suffix, is an **asset**: referenceable the same way, but not an
+object (§2.2).
 
 The body carries what a human reads: a task's prompt, a template's text,
 a design's prose. A file means something on its own. You can read it,
 mail it or `cat` it without knowing which repo it came from.
 
-**Layout is loosely specified.** Tools find objects by **scanning front
-matter**: every `*.md` file whose front matter has `kind:`. The
-recommended folders below are conventions only. Two places where a folder
-matters: a repo's own backlog references sit in the folders its README's
-`backlog:` names, `backlog/` by default (§3), and the folder holding a
-reference is its **lane** (§5.2).
+**Layout is loosely specified.** Nothing scans for objects: a Grain
+lists the folders its `grain.config.md` names, by kind suffix, and
+resolves references to everything else (§3.7). The recommended folders
+below are conventions only. The one place where a folder matters is a
+backlog: the root entry that lists a reference is its **lane** (§5.2).
 
-A Grain's root (§3.2):
+A Grain's root (§3.3):
 
 ```
-README.md                                  kind: repo    (role: grain-root)
-backlog/silo.md                            kind: include (Silo's placements for this Grain, §8.12)
-backlog/<name>.md                          kind: ref     (the Grain's own lane)
-backlog/fired/<name>.md                    kind: ref     (its triggers' firings, a lane of their own, §5.2)
-backlog/gated/<name>.md                    kind: ref     (its merge queue's gate reviews, §6.3)
-triggers/silo.md                           kind: include (the team triggers Silo assigned it; kinds: [trigger])
-triggers/no-<name>.md                      kind: exclude (a cut, §3.3)
-triggers/<name>.md                         kind: trigger (its own)
-templates/<name>.md                        kind: include (a shared template set) or kind: template
-capabilities/<name>.md                     kind: include (a capability catalog, §5.7) or kind: capability (its own)
-capabilities/bases/<type>.md               kind: capability-base (written by the Grain from its providers)
-tasks/<name>/task.md                       kind: task    (its owner's own work)
-tasks/fired/<trigger>/<key>/task.md        kind: task    (a trigger's firing, §6.2)
-tasks/gated/<repo>/<change>-…/task.md      kind: task    (a gate's review, §6.3)
-runs/<name>/run.md                         kind: run     (one execution record)
-runs/<name>/comments/<utc>-<author>.md     kind: comment (the run's thread)
+grain.config.md                            kind: config  (its typed active roots, §3.3)
+GRAINOWNERS                                write ownership (§3.5)
+.grainconfig                               repo settings: aliases, limits (§3.4), at the repo root
+backlog/<name>.ref.md                      kind: ref     (the Grain's own lane)
+backlog/fired/<name>.ref.md                kind: ref     (its triggers' firings, §5.2)
+backlog/gated/<name>.ref.md                kind: ref     (its merge queue's gate reviews, a lane of their own, §6.3)
+triggers/<name>.trigger.md                 kind: trigger (its own; a trigger root)
+memory/<name>.memory.md                    kind: memory  (its own; the write: true memory root)
+capabilities/bases/<type>.capability-base.md  kind: capability-base (written by the Grain from its providers)
+tasks/<name>.task.md                       kind: task    (its owner's own work, referenced from backlog/)
+tasks/fired/<trigger>/<key>.task.md        kind: task    (a trigger's firing, §6.2)
+tasks/gated/<repo>/<change>-….task.md      kind: task    (a gate's review, §6.3)
+runs/<name>/<utc>.run.md                   kind: run     (one execution record of task <name>)
+runs/<name>/comments/<utc>-<author>.comment.md  kind: comment (the run's thread)
 runs/<name>/comments/<utc>-<author>/<file> an asset    (a reply's attachment, §2.2)
+runs/archive/<name>/…                      archived runs (§3.8)
 ```
 
 Silo's placements repo, one folder per Grain:
 
 ```
-README.md                                  kind: repo    (role: placements)
-grains/<grain>/backlog/<name>.md           kind: ref     (one placement)
-grains/<grain>/triggers/<name>.md          kind: include (a team trigger, or folder of them, assigned to that Grain)
+.grainconfig                               owner, aliases
+GRAINOWNERS                                * @silo
+grains/<grain>/backlog/<name>.ref.md       kind: ref     (one placement; a lane once the Grain names it)
+grains/<grain>/triggers/<name>.trigger.md  kind: trigger (a team trigger assigned to that Grain)
 ```
 
 An intake or a shared repo:
 
 ```
-README.md                                  kind: repo
-tasks/<name>/task.md                       kind: task
+.grainconfig                               owner, aliases, task_home (§3.4)
+GRAINOWNERS                                who writes what, field-level in an intake (§3.5)
+README.md                                  for humans: an asset
+tasks/<name>.task.md                       kind: task
 tasks/<name>/attachments/<file>            an asset      (attached to the task, §2.2)
-tasks/<name>/comments/<utc>-<author>.md    kind: comment (discussion of the task)
-backlog/<name>.md                          kind: ref     (one ranked reference to a task)
-templates/<name>.md                        kind: template
-templates/partials/<name>.md               kind: template (include-only, inputs declared)
-templates/<name>.md                        kind: include or kind: exclude (another shared set, and cuts from it)
-triggers/<name>.md                         kind: trigger (or, in an intake, kind: include: an adopted trigger)
-gates/<name>.md                            kind: gate    (merge gates on this repo, §6.3)
-designs/<name>.md                          kind: design
-capabilities/<name>.md                     kind: capability (a team's or org's definitions, §5.7)
+tasks/<name>/comments/<utc>-<author>.comment.md  kind: comment (discussion of the task)
+tasks/archive/…                            closed tasks (§3.8)
+backlog/<name>.ref.md                      kind: ref     (one ranked reference to a task)
+templates/<name>.template.md               kind: template
+templates/partials/<name>.template.md      kind: template (include-only, inputs declared)
+triggers/<name>.trigger.md                 kind: trigger (a trigger root for Grains that name it)
+triggers/archive/<name>.trigger.md         a retired trigger, active nowhere (§3.8)
+memory/<name>.memory.md                    kind: memory  (a read-only memory root for Grains that name it)
+designs/<name>.design.md                   kind: design
+capabilities/<name>.capability.md          kind: capability (a team's or org's definitions, §5.7)
 designs/img/<file>                         an asset      (an image the design embeds)
-designs/img/<file>.md                      kind: asset   (its optional sidecar, §2.2)
-<an old path>                              kind: moved   (a tombstone, §2.1)
+designs/img/<file>.asset.md                kind: asset   (its optional sidecar, §2.2)
+<an old path, as name.moved.md>            kind: moved   (a tombstone, §2.1)
 ```
 
 A code repo keeps the same kinds in its grain folder, beside the code
-(§3.1):
+(§3.6):
 
 ```
-README.md                                  the code's own README: no front matter needed
-.grain/README.md                           kind: repo    (scope: [/.grain/, /docs/design/])
-.grain/templates/<name>.md                 kind: template
-.grain/triggers/<name>.md                  kind: trigger (standing work: schedules, pushes, design changes, §6.2)
-.grain/gates/<name>.md                     kind: gate    (merge gates on this repo, §6.3)
-.grain/suites/<name>.md                    kind: suite
-.grain/workflows/<name>.yml                a GitHub Actions workflow: YAML, not an object (§12.2)
-.grain/tasks/<name>/task.md                kind: task    (homed here, §5.5)
-docs/design/<name>.md                      kind: design  (in place, §12.3)
+README.md                                  the code's own README: an asset
+.grainconfig                               optional (§3.4)
+.grain/templates/<name>.template.md        kind: template
+.grain/triggers/<name>.trigger.md          kind: trigger (standing work, active for Grains that name the folder, §6.2)
+.grain/gates/<name>.gate.md                kind: gate    (merge gates on this repo, read by its merge queue, §6.3)
+.grain/suites/<name>.suite.md              kind: suite
+.grain/workflows/<name>.yml                a GitHub Actions workflow: YAML, an asset (§12.2)
+.grain/tasks/<name>.task.md                kind: task    (homed here, §5.5)
+docs/design/<name>.design.md               kind: design  (in place, §12.3)
 ```
+
+**A tombstone's file name** is the old file name plus `.moved.md`:
+moving `templates/prune-packages.template.md` leaves
+`templates/prune-packages.template.moved.md`. A reference still names the
+old path; a resolver that finds nothing there looks for the tombstone
+beside it, then for the archive mapping (§3.8). Each is one
+deterministic lookup, and no index is needed.
 
 **Names.** Whoever creates an object picks its path, once:
 
@@ -332,10 +380,10 @@ docs/design/<name>.md                      kind: design  (in place, §12.3)
   `tasks/fired/<trigger>/<event key>` (§6.2), planning among them
   (§7.4);
 - a backlog reference: its target's name
-  (`backlog/2026-10-16-approval-flow.md`);
-- an include or exclude: what it is for, from its includer's side
-  (`backlog/silo.md`, `triggers/no-granule-pull.md`);
-- a comment: `<utc>-<author>`, such as `20261016T144710Z-grain-eu.md`.
+  (`backlog/2026-10-16-approval-flow.ref.md`);
+- an execution record: the UTC time it was accepted
+  (`runs/4310-carry-approver/20261016T135800Z.run.md`);
+- a comment: `<utc>-<author>`, such as `20261016T144710Z-grain-eu.comment.md`.
   Each author writes its own comments one at a time, so two authors
   appending to one thread never conflict.
 
@@ -345,13 +393,13 @@ title change leaves the path alone.
 ### 2.1 Identity is the path
 
 - **Within a repo**, an object is its repo-relative path:
-  `tasks/4310-carry-approver/task.md`.
+  `tasks/4310-carry-approver.task.md`.
 - **Globally**, it is the git URL plus that path, which is exactly the
   cross-repo reference form of §4:
-  `https://silo.example.com/git/hub/intake.git//tasks/4310-carry-approver/task.md`.
+  `https://silo.example.com/git/hub/intake.git//tasks/4310-carry-approver.task.md`.
 
-An alias (`intake:tasks/4310-carry-approver/task.md`) or a relative path
-(`../4310-carry-approver/task.md`) names the same identity once it is
+An alias (`intake:tasks/4310-carry-approver.task.md`) or a relative path
+(`../4310-carry-approver.task.md`) names the same identity once it is
 resolved. The **canonical form** is the URL form with the alias
 expanded, `.` and `..` removed, the path's leading `/` dropped, and no
 `@gitref` or `#anchor`. Two references name the same object exactly when
@@ -365,8 +413,9 @@ reference to it in Silo's folder for a Grain (§5.2), and running it adds
 an execution record in that Grain's root (§5.3).
 
 **A real move leaves a tombstone.** A rename, a reorganisation, or a
-move to another repo replaces the file at the old path with a
-`kind: moved` object:
+move to another repo leaves a `kind: moved` object beside the old path,
+named for it (`<old file name>.moved.md`, §2). Archiving is not a real
+move, and leaves none (§3.8):
 
 ```yaml
 ---
@@ -389,20 +438,23 @@ first and the tombstone second (§8.11).
 **No path reuse.** A tombstoned path is permanently that object's old
 address. Silo's hook refuses any change to a tombstone and its deletion,
 so no new object can ever be created there (§8.1). **Only backlog
-references, includes and excludes are ever deleted**: they are pointers
-and configuration, not addresses anyone keeps (§5.2, §3.3). Every other
+references are ever deleted**: they are pointers, not addresses anyone
+keeps (§5.2). Every other
 object leaves its path only by becoming a tombstone. Assets are not
 objects, and are deleted or moved like any file (§2.2), except a task's
 `attachments/`, which are frozen with its spec (§5.1).
 
 **Repo moves.** References name repos by URL, usually through an alias
-declared in the referring repo's README. Moving a repo therefore means:
+declared in the referring repo's `.grainconfig` (§3.4). Moving a repo
+therefore means:
 
-- changing the alias in the READMEs that declare it, one line each;
-- optionally setting `moved_to: <new git URL>` in the old repo's README,
-  as a **repo-level redirect**. The old repo stays readable. A reader
-  that resolves into a repo whose README has `moved_to` retries at the
-  new URL with the same path, and that counts as one hop.
+- changing the alias in the `.grainconfig` files that declare it, one
+  line each, and any root entry that names the URL directly;
+- optionally setting `moved_to: <new git URL>` in the old repo's
+  `.grainconfig`, as a **repo-level redirect**. The old repo stays
+  readable. A reader that resolves into a repo whose `.grainconfig` has
+  `moved_to` retries at the new URL with the same path, and that counts
+  as one hop.
 
 **Earlier names are kept for search, not resolution.** `aka:` lists an
 object's identities from before migration, such as `grain:eu/task/4310`,
@@ -431,10 +483,9 @@ What an asset is for, and what it is not:
 - **Materialised only when a task lists it** in `context:`, or when an
   entry's `depth:` reaches it from a Markdown file that links to it, such
   as an image embedded in a design doc by a relative link (§5.6).
-- **Never in a namespace.** Assets are not work. An include contributes
-  objects only, so an asset under an included folder adds no name, and
-  `kinds: ["*"]` means every object kind, not every file (§3.3). Nothing
-  ranks, places, fires or runs an asset.
+- **Never active.** Assets are not work. A root entry lists only its
+  type's kind suffix (§3.3), so an asset under a root's folder is never
+  listed. Nothing ranks, places, fires or runs an asset.
 - **Never executed** by Silo or a Grain: an asset is data, whatever its
   name or mode bits say (§11.24).
 
@@ -472,11 +523,11 @@ bytes: 250
 <an optional longer description, for humans and for agents>
 ```
 
-This is [`hub-shared/designs/img/claims-flow.png.md`](../examples/task-repos/hub-shared/designs/img/claims-flow.png.md).
+This is [`hub-shared/designs/img/claims-flow.png.asset.md`](../examples/task-repos/hub-shared/designs/img/claims-flow.png.asset.md).
 Schema: [`schemas/asset.schema.json`](../examples/task-repos/schemas/asset.schema.json).
 
 - **Where it lives.** By convention, beside the asset, named for it with
-  `.md` appended: `img/claims-flow.png.md` describes `img/claims-flow.png`.
+  `.asset.md` appended: `img/claims-flow.png.asset.md` describes `img/claims-flow.png`.
   A reader finds that sidecar by opening one path, with no index. A
   sidecar may live elsewhere, describing an asset in a repo its author
   cannot write. Silo's reverse index (§4) maps each asset to every
@@ -489,10 +540,8 @@ Schema: [`schemas/asset.schema.json`](../examples/task-repos/schemas/asset.schem
   reference), and optionally `bytes` and `sha256`. Silo's hook checks that
   `asset` resolves to a file that is not an object, and checks `sha256`
   and `bytes` against the blob when they are present.
-- **What it is not.** A sidecar is configuration about data, like an
-  include. It is never ranked, placed or run. It may be in a namespace
-  like any object (an include with `kinds: [asset]`), where it means
-  nothing to a Grain.
+- **What it is not.** A sidecar is metadata about data. It is never
+  ranked, placed or run, and no root type lists it.
 - **Optional.** No asset needs one. An image in a design doc needs only
   the doc's own alt text in the link.
 
@@ -1082,14 +1131,15 @@ template partials, `depends_on`, `implements`, `derived_from`.
 resolve(ref, from, reader_credential, expected_kinds):
     loc = expand(ref, aliases of from's repo .grainconfig)     # §4
     for hop in 1..LIMITS.redirects:                            # 8
-        blob = fetch_one(loc)                                  # sparse: this path only (§3.10)
-        if blob is missing:
-            loc' = archive_mapping(loc)                        # §3.8: one more lookup
-            if found at loc': return parse(loc')               # read-only, never active
-            return DANGLING                                    # reported, never widened
-        if name(loc) ends ".moved.md": loc = parsed.to; continue
-        check suffix(loc) in expected_kinds, else WRONG_KIND   # a template where a task
-        return parse(loc)                                      # was expected is an error
+        if exists(loc):                                        # sparse: this path's trees (§3.10)
+            check suffix(loc) in expected_kinds, else WRONG_KIND   # a template where a task
+            return parse(fetch_one(loc))                       # was expected is an error
+        if exists(loc + ".moved.md"):                          # the tombstone beside it (§2.1)
+            loc = resolve_relative(parse(fetch_one(loc + ".moved.md")).to); continue
+        if exists(archive_mapping(loc)):                       # §3.8: one more lookup
+            return parse(fetch_one(archive_mapping(loc)))      # read-only, never active
+        if repo's .grainconfig has moved_to: loc = same path in moved_to; continue
+        return DANGLING                                        # reported, never widened
     return TOO_MANY_HOPS
 ```
 
