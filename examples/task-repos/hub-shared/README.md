@@ -59,9 +59,9 @@ referring repo's README.
 
 - `templates/` holds task templates. Their bodies use the strict Jinja2
   subset (§6.1). `templates/partials/` holds include-only pieces, and
-  `templates/ghcr/` the GHCR ones. `templates/prune-packages.md` is the
-  tombstone the move to `ghcr/` left. `templates/org.md` includes the
-  org-wide templates at `v3`, and `templates/no-legacy-triage.md`
+  `templates/ghcr/` the GHCR ones. `templates/prune-packages.template.md` is the
+  tombstone the move to `ghcr/` left. `templates/org.template.md` includes the
+  org-wide templates at `v3`, and `templates/no-legacy-triage.template.md`
   excludes one of them from what this folder contributes (§3.3).
 - `triggers/` holds the team's triggers (`kind: trigger`, §6.2): two
   scheduled ones, and `plan-designs.md`, the planner as a
@@ -70,10 +70,10 @@ referring repo's README.
   Silo assigns it to, by including this folder from their folders in
   `hub/placements`, narrowed to `kinds: [trigger]`.
 - `designs/` holds design docs with `{#HS-n}` requirement anchors.
-  `triggers/plan-designs.md` plans them on every merge to `main`.
+  `triggers/plan-designs.trigger.md` plans them on every merge to `main`.
 - `capabilities/` holds the team's capability objects (`kind:
   capability`). `widgets-deployer.md` narrows the org's
-  `org-caps:gcp/acme-widgets.md`, pinned at `v1`, by role and token
+  `org-caps:gcp/acme-widgets.capability.md`, pinned at `v1`, by role and token
   lifetime, and with a per-use Anselm reducer. A Grain that includes this
   folder can offer them to tasks; it honours them only if its local
   policy sanctions this folder as a source (§5.7).

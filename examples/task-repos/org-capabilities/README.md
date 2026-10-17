@@ -28,5 +28,5 @@ holds; and a Grain honours a definition from here only if its own local
 policy lists this repo as a source, for that base. A task gets a
 capability only by requesting it in `context:` with `mode: use`.
 
-- [`gcp/acme-widgets.md`](gcp/acme-widgets.md): the GCP service-account
+- [`gcp/acme-widgets.capability.md`](gcp/acme-widgets.capability.md): the GCP service-account
   base, restricted to the `acme-widgets` project.

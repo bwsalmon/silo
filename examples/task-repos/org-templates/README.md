@@ -20,4 +20,4 @@ writers: ["team:platform#maintainer"]
 Templates every team may use, released as tags (`v3`). Teams include
 this folder from their own shared repo, usually pinned to a tag, and
 exclude what they do not want (`hub/shared` excludes
-`templates/legacy-triage.md`). Nothing here knows who includes it.
+`templates/legacy-triage.template.md`). Nothing here knows who includes it.

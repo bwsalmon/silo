@@ -602,7 +602,7 @@ to, and referenced from it**:
 
 | Attached to | Stored at | Referenced from |
 | --- | --- | --- |
-| a task | `tasks/<name>/attachments/<file name>` | the task's `context:`, as a `read` entry (`attachments/<file name>`), because only `context:` materialises (§5.6); and from the body, where the prompt mentions it |
+| a task | `tasks/<name>/attachments/<file name>`, in the folder named for the task beside `tasks/<name>.task.md` | the task's `context:`, as a `read` entry (`<name>/attachments/<file name>`), because only `context:` materialises (§5.6); and from the body, where the prompt mentions it |
 | a comment | `comments/<utc>-<author>/<file name>`, a folder named for the comment beside its file | the comment's `attachments:` list, references relative to the comment, and its body |
 
 - **New attachments** are commits like everything else. Silo's UI and API
@@ -714,7 +714,7 @@ folder's objects, and know each one's kind, from a git tree alone (§3.7):
 
 **Code-repo design docs become `*.design.md`.** A design doc in a code
 repo is an object as soon as it is renamed (`docs/design/hub.md` →
-`docs/design/hub.design.md`, leaving `hub.moved.md`), and an asset until
+`docs/design/hub.design.md`, leaving `hub.md.moved.md`), and an asset until
 then. bwsalmon/grain's design-doc planner keys on `docs/design/` today:
 as a `design-change` trigger its `paths` stay `docs/design/**`, which
 matches both forms, so the planner keeps working through the migration
@@ -1341,14 +1341,14 @@ anchor  = a heading slug or a requirement ID            (HS-3, D-2)
 
 Examples:
 
-- `../templates/prune-packages.md`: the same repo, relative to the
+- `../templates/prune-packages.template.md`: the same repo, relative to the
   referring file.
-- `https://silo.example.com/git/hub/shared.git//designs/hub-intake.md@main#HS-3`:
+- `https://silo.example.com/git/hub/shared.git//designs/hub-intake.design.md@main#HS-3`:
   across repos, by the repo's URL. Silo-hosted repos, GitHub, Gerrit and a
   bare `git daemon` all use the same form, because the URL is just a
   `git clone` argument. The `//` separator is the one Terraform uses, and
   it is the first `//` after the URL's `scheme://authority`.
-- `shared:designs/hub-intake.md#HS-3`: an **alias**, declared in the
+- `shared:designs/hub-intake.design.md#HS-3`: an **alias**, declared in the
   referring repo's `.grainconfig` (§3.4). It resolves to exactly the URL form. An alias
   that is not declared is an error, never a guess.
 
@@ -1469,19 +1469,19 @@ title: Carry a hub task's approver on its offer and attestation
 team: hub
 context:                    # what its sandbox holds (§5.6); the first write entry is its repo
   - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write}
-  - {ref: "shared:designs/hub-intake.md"}
+  - {ref: "shared:designs/hub-intake.design.md"}
 state: approved             # proposed | approved | rejected | cancelled (§5.1)
 submitter: user:bsalmon@google.com
 approved_by: user:approver@example.com
 approved_at: …
 implements:
-  - {ref: "shared:designs/hub-intake.md#HS-2", rev: <design commit>, hash: "sha256:…"}
+  - {ref: "shared:designs/hub-intake.design.md#HS-2", rev: <design commit>, hash: "sha256:…"}
 created_at: …
 ---
 <the prompt, in Markdown>
 ```
 
-This file is `intake:tasks/4310-carry-approver/task.md`. The full
+This file is `intake:tasks/4310-carry-approver.task.md`. The full
 examples are in [`examples/task-repos/`](../examples/task-repos/README.md),
 and `python3 examples/task-repos/check.py` checks them against the
 schemas, resolves every reference, follows the tombstones, computes each
@@ -1949,14 +1949,14 @@ context:
     mode: write                                                       # push the task's branch, based on main
   - ref: "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate" # a folder: sparse checkout
     mode: read
-  - ref: "shared:designs/hub-intake.md"                               # an object
+  - ref: "shared:designs/hub-intake.design.md"                               # an object
     depth: 1                                                          # and the files its body links to
-  - ref: attachments/dangling-ref-error.png                           # an asset beside the task (§2.2)
+  - ref: 2026-10-16-reject-dangling-refs/attachments/dangling-ref-error.png   # an asset beside the task (§2.2)
     path: context/screenshot.png                                      # optional: where it lands
 ```
 
 This is the `context:` of
-[`hub-intake/tasks/2026-10-16-reject-dangling-refs/task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-reject-dangling-refs/task.md),
+[`hub-intake/tasks/2026-10-16-reject-dangling-refs.task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-reject-dangling-refs.task.md),
 walked through in §8.16. A bare string is short for `{ref: <string>,
 mode: read}`.
 
@@ -1999,8 +1999,8 @@ given. Other names were weighed:
 
 **Which ref an entry reads:**
 
-- **A relative or `/`-rooted entry** (`attachments/x.png`,
-  `/designs/a.md`) reads **the task's own commit**, the `spec_rev` it was
+- **A relative or `/`-rooted entry** (`<name>/attachments/x.png`,
+  `/designs/a.design.md`) reads **the task's own commit**, the `spec_rev` it was
   placed at, as a relative root entry reads its `grain.config.md`'s
   (§3.3). So a
   task's attachments are exactly the ones that were approved.
@@ -2059,7 +2059,7 @@ context/<host>/<repo path>/<path>       a file entry, an object or an asset: rea
   `read` checkout is mounted read-only.
 - **`<host>`** is the URL's host (with `_<port>` if it has one), and
   `local` for `file://`. **`<repo path>`** is the URL's path without the
-  leading `/` and the `.git`: `context/silo.example.com/git/hub/shared/designs/hub-intake.md`.
+  leading `/` and the `.git`: `context/silo.example.com/git/hub/shared/designs/hub-intake.design.md`.
 - **A file inside a checkout** at the same commit is not copied again. Its
   place in the record is its path under `work/`.
 - **An external artefact** (§2.2) lands at its sidecar's path with `.md`
@@ -2074,16 +2074,16 @@ the agent. Its `context:` section is the record of what was materialised
 and what was skipped, so it is also the agent's manifest:
 
 ```yaml
-# in runs/<name>/run.md, written with the run's `running` commit
+# in runs/<name>/<utc>.run.md, written with the run's `running` commit
 context:
   entries:
     - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write, rev: <commit>, path: work/silo/, branch: grain/eu/2026-10-16-reject-dangling-refs}
     - {ref: "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate", mode: read, rev: <commit>, path: work/grain/}
-    - {ref: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/hub-intake.md", bytes: 3230}
-    - {ref: "shared:designs/img/claims-flow.png", via: "shared:designs/hub-intake.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/img/claims-flow.png", bytes: 250}
+    - {ref: "shared:designs/hub-intake.design.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/hub-intake.design.md", bytes: 3230}
+    - {ref: "shared:designs/img/claims-flow.png", via: "shared:designs/hub-intake.design.md", mode: read, rev: <commit>, path: "context/silo.example.com/git/hub/shared/designs/img/claims-flow.png", bytes: 250}
     - {ref: "intake:tasks/2026-10-16-reject-dangling-refs/attachments/dangling-ref-error.png", mode: read, rev: <commit>, path: context/screenshot.png, bytes: 150}
   skipped:
-    - {ref: "grain-code:pkg/daemon/", via: "shared:designs/hub-intake.md", reason: not a file}
+    - {ref: "grain-code:pkg/daemon/", via: "shared:designs/hub-intake.design.md", reason: not a file}
   limits: {reached_files: 1, reached_bytes: 250}
 ```
 
@@ -2385,7 +2385,7 @@ measured on), the shape of what it materialises, and what it implies. A
 Grain that implements a type publishes a declaration of **its**
 implementation in its root, at `capabilities/bases/<type>.md`, written by
 the Grain from its provider code
-([`grain-eu/capabilities/bases/gcp-service-account.md`](../examples/task-repos/grain-eu/capabilities/bases/gcp-service-account.md),
+([`grain-eu/capabilities/bases/gcp-service-account.capability-base.md`](../examples/task-repos/grain-eu/capabilities/bases/gcp-service-account.capability-base.md),
 schema [`capability-base.schema.json`](../examples/task-repos/schemas/capability-base.schema.json)):
 
 ```yaml
@@ -2460,7 +2460,7 @@ The bases sketched so far are not exhaustive or final:
 #### Capability objects
 
 A capability object names a base and narrows it
-([`hub-shared/capabilities/widgets-deployer.md`](../examples/task-repos/hub-shared/capabilities/widgets-deployer.md),
+([`hub-shared/capabilities/widgets-deployer.capability.md`](../examples/task-repos/hub-shared/capabilities/widgets-deployer.capability.md),
 schema [`capability.schema.json`](../examples/task-repos/schemas/capability.schema.json)):
 
 ```yaml
@@ -2469,7 +2469,7 @@ kind: capability
 schema: grain/capability@v1
 title: Deploy widgets previews to Cloud Run (acme-widgets), 1-hour tokens
 base:
-  capability: "org-caps:gcp/acme-widgets.md@v1"   # or {type: gcp-service-account@v1}
+  capability: "org-caps:gcp/acme-widgets.capability.md@v1"   # or {type: gcp-service-account@v1}
 reducers:                                         # applied in order, after the base's own chain
   - {language: builtin, id: roles, type: subset, dimension: roles, allow: [roles/run.developer, roles/iam.serviceAccountUser]}
   - {language: builtin, id: lifetime, type: limit, dimension: token_lifetime, max: 1h}
@@ -2594,7 +2594,7 @@ Anselm is pending.
 **A `language: anselm` reducer written now** is valid, is carried, and is
 covered by digests and approvals like any other. But a Grain that cannot
 evaluate Anselm **refuses a request whose chain contains one**, naming
-it: "capability entry 2, `shared:capabilities/widgets-deployer.md`,
+it: "capability entry 2, `shared:capabilities/widgets-deployer.capability.md`,
 reducer 3 (`preview-services-only`) is `language: anselm`, which `eu`
 cannot evaluate yet". It **never skips it**, because skipping a reducer
 widens the capability. Teams should not depend on Anselm reducers before
@@ -2623,9 +2623,9 @@ A capability object's base may be **another capability object**, so a
 broad definition can be narrowed in layers, each kept by whoever owns
 that layer:
 
-- the org's `org-caps:gcp/acme-widgets.md` is `gcp-service-account@v1`
+- the org's `org-caps:gcp/acme-widgets.capability.md` is `gcp-service-account@v1`
   with `subset projects [acme-widgets]`, released at tag `v1`;
-- the hub team's `shared:capabilities/widgets-deployer.md` takes that
+- the hub team's `shared:capabilities/widgets-deployer.capability.md` takes that
   object, pinned at `v1`, as its base, and narrows it to two roles,
   1-hour tokens and a per-use check;
 - a task's `use` entry may narrow it once more, with `reducers:` of its
@@ -2891,11 +2891,11 @@ beside its `context:` (§5.6):
 ```yaml
 capabilities:
   - entry: 2
-    ref: "shared:capabilities/widgets-deployer.md"
+    ref: "shared:capabilities/widgets-deployer.capability.md"
     chain:                                          # base-most first, each at the commit used
-      - {ref: "https://silo.example.com/git/org/capabilities.git//gcp/acme-widgets.md@v1", rev: <commit>}
-      - {ref: "https://silo.example.com/git/hub/shared.git//capabilities/widgets-deployer.md", rev: <commit>}
-    base: {type: gcp-service-account@v1, declaration: {ref: "capabilities/bases/gcp-service-account.md", rev: <commit>}}
+      - {ref: "https://silo.example.com/git/org/capabilities.git//gcp/acme-widgets.capability.md@v1", rev: <commit>}
+      - {ref: "https://silo.example.com/git/hub/shared.git//capabilities/widgets-deployer.capability.md", rev: <commit>}
+    base: {type: gcp-service-account@v1, declaration: {ref: "capabilities/bases/gcp-service-account.capability-base.md", rev: <commit>}}
     digest: "sha256:…"
     effective: {accounts: [widgets-preview@acme-widgets.iam.gserviceaccount.com], projects: [acme-widgets], roles: [roles/run.developer, roles/iam.serviceAccountUser], token_lifetime: 1800, not_after: "2026-10-24T00:00:00Z"}
     implies: {egress: [oauth2.googleapis.com, sts.googleapis.com, "*.googleapis.com"]}
@@ -2989,7 +2989,7 @@ title: Prune GHCR packages
     catch_up: {mode: latest-only}      # none | latest-only | all (with max, ≤ 24)
   manual: {}                           # "run now"; who defaults to the team's approvers
 fires:
-  template: ../templates/ghcr/prune-packages.md
+  template: ../templates/ghcr/prune-packages.template.md
   inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
 team: hub
 fires_in: silo                         # silo | grain
@@ -2998,7 +2998,7 @@ enabled: true
 ---
 ```
 
-This is [`hub-shared/triggers/prune-packages.md`](../examples/task-repos/hub-shared/triggers/prune-packages.md).
+This is [`hub-shared/triggers/prune-packages.trigger.md`](../examples/task-repos/hub-shared/triggers/prune-packages.trigger.md).
 
 **Event sources (`on:`).** A trigger names one or more. Each fires the
 same `fires:`; the task records which one did (below).
@@ -3054,7 +3054,7 @@ anything else here.
   files a review task carrying its result, from `review.template` or
   grain's built-in workflow-review template. Only a Grain runs CI, so a
   workflow trigger must say `fires_in: grain`. It is
-  [`widgets-code/.grain/triggers/nightly-ci.md`](../examples/task-repos/widgets-code/.grain/triggers/nightly-ci.md).
+  [`widgets-code/.grain/triggers/nightly-ci.trigger.md`](../examples/task-repos/widgets-code/.grain/triggers/nightly-ci.trigger.md).
 
 A workflow's own `on.schedule` stays in its YAML, where Actions reads it,
 and grain still runs it as today: it behaves as an implicit trigger of
@@ -3068,7 +3068,7 @@ change for review is a gate (§6.3).
 
 **A firing creates a task and a reference to it**, at a path derived from
 the trigger and the event, so a retried firing writes nothing new:
-`tasks/fired/<trigger>/<key>/task.md`. The key is the event's identity:
+`tasks/fired/<trigger>/<key>.task.md`. The key is the event's identity:
 
 | Source | Key |
 | --- | --- |
@@ -3390,7 +3390,7 @@ So a reflow or ID assignment does not count as a change.
 
   ```
   Design-Item: <design ref>#HS-6      (the in-repo path for a doc in the code repo,
-                                       e.g. docs/design/foo.md#D-7; the alias or URL form otherwise)
+                                       e.g. docs/design/foo.design.md#D-7; the alias or URL form otherwise)
   Design-Rev: <design commit sha>
   ```
 
@@ -3431,7 +3431,7 @@ title: Plan design-doc changes
     debounce: 5m
     max_tasks_per_change: 10
 fires:
-  template: ../templates/design-plan.md
+  template: ../templates/design-plan.template.md
   per: event                           # or requirement: the table below
   inputs: {mode: plan}
   bind: {group: event.group, paths: event.paths, from_sha: event.from_sha, to_sha: event.to_sha, branch: event.branch}
@@ -3440,7 +3440,7 @@ fires_in: silo
 ---
 ```
 
-This is [`hub-shared/triggers/plan-designs.md`](../examples/task-repos/hub-shared/triggers/plan-designs.md).
+This is [`hub-shared/triggers/plan-designs.trigger.md`](../examples/task-repos/hub-shared/triggers/plan-designs.trigger.md).
 
 **The event.** When a push to a watched design's `default_ref` is
 accepted (in Silo, on receive; for a code repo, when Silo or the Grain
@@ -3467,9 +3467,9 @@ the tasks directly, by the planner's existing table (bwsalmon/grain
 | unchanged | nothing |
 
 **Idempotency.** Each firing's key is derived from the event (§6.2):
-`tasks/fired/<trigger>/<design name>/<to_sha, 12 hex>/task.md` for
+`tasks/fired/<trigger>/<design name>/<to_sha, 12 hex>.task.md` for
 `per: event`, and
-`tasks/fired/<trigger>/<design name>/<HS-6>-<action>-<first 8 hex of the hash>/task.md`
+`tasks/fired/<trigger>/<design name>/<HS-6>-<action>-<first 8 hex of the hash>.task.md`
 for `per: requirement`. Re-running on the same push finds every path
 already there, and writes nothing new.
 
@@ -3596,7 +3596,7 @@ receives the push can. **No pull requests and no GitHub are needed.**
 ### 8.2 Propose
 
 **By git:** a user clones the team's intake repo, adds
-`tasks/<yyyy-mm-dd>-<slug>/task.md` with `state: proposed`, commits and
+`tasks/<yyyy-mm-dd>-<slug>.task.md` with `state: proposed`, commits and
 pushes.
 
 **The hook allows it** under the intake's `authenticated` rule:
@@ -3636,9 +3636,9 @@ The hook refuses the whole push, so the ref does not move:
 
 ```
 ! [remote rejected] main -> main (pre-receive hook declined)
-remote: tasks/2026-10-16-approval-by-push/task.md: field state: no writers rule lets
-remote:   user:mallory@example.com update kind task (team:hub#approver required for proposed→approved)
-remote: tasks/2026-10-16-approval-by-push/task.md: approved_by must equal the pusher (user:mallory@example.com)
+remote: tasks/2026-10-16-approval-by-push.task.md: fields state, approved_by: user:mallory@example.com
+remote:   is not an owner (GRAINOWNERS line 3: /tasks/**/*.task.md:state,approved_by,approved_at @team:hub#approver)
+remote: tasks/2026-10-16-approval-by-push.task.md: approved_by must equal the pusher (user:mallory@example.com)
 ```
 
 Commits: none. An approver who sets `state: rejected` (plus a reason) is
@@ -3684,7 +3684,7 @@ none.
    reference and its attestation (§11.7). It reads the task's tip for its state, so it sees
    a cancel (§8.7). It then holds the task to local policy, as it does
    an offer today.
-2. **Accept:** the Grain creates `runs/<yyyy-mm-dd>-<slug>/run.md` in
+2. **Accept:** the Grain creates `runs/<yyyy-mm-dd>-<slug>/<utc>.run.md` in
    its root, with `state: accepted`, `task: {ref, rev}`, `from: {ref,
    rev}`, `grain` and `accepted_at`, and pushes. When the lanes give it
    the task (§5.2) and a slot is free, it resolves the task's
@@ -3783,7 +3783,7 @@ two Grains' folders** in its own placements repo:
    repo, so this is atomic: no reader ever sees the task in both folders,
    or in neither. Across two teams' placements repos it is two commits,
    removal first.
-2. **A comment on the task, in the intake**, saying why (`2026-10-16-refuse-self-approved/comments/20261016T164600Z-silo.md`
+2. **A comment on the task, in the intake**, saying why (`2026-10-16-refuse-self-approved/comments/20261016T164600Z-silo.comment.md`
    in the examples). The old Grain's root is not Silo's to write.
 3. Silo notifies both Grains. The new Grain accepts and starts **its own**
    run, copying `previous:`.
@@ -3821,15 +3821,15 @@ root**, the new run's own commits.
 
 ### 8.9 A cross-Grain dependency completes
 
-Task B, `intake:tasks/2026-10-16-refuse-self-approved/task.md`, has
-`depends_on: [../4310-carry-approver/task.md]`, which is task A. B is
+Task B, `intake:tasks/2026-10-16-refuse-self-approved.task.md`, has
+`depends_on: [../4310-carry-approver.task.md]`, which is task A. B is
 placed on Grain `us`, and A ran on Grain `eu`.
 
 **A dependency is satisfied when the target task has an execution record
 in state `done` that is not superseded.** `failed`, `cancelled` and
 dangling dependencies keep B blocked, with the reason shown.
 
-1. Grain `eu` pushes `state: done` on `eu:runs/4310-carry-approver/run.md`.
+1. Grain `eu` pushes `state: done` on `eu:runs/4310-carry-approver/20261016T135830Z.run.md`.
 2. Silo's post-receive looks A up in its reverse indexes: B depends on
    A, and B is referenced from `us`'s backlog. It notifies `us` to pull
    `eu`.
@@ -4137,14 +4137,14 @@ placed on `eu` and run there, all with the task at
 
 **`code-repo`.** The hub team sets
 `task_home.repos: {https://git.example.com/hub/widgets.git: code-repo}`.
-A member proposes `tasks/2026-10-17-widget-lint/task.md` for the widgets
+A member proposes `tasks/2026-10-17-widget-lint.task.md` for the widgets
 repo, and an approver approves it.
 
 | Step | Intake | Code repo | Placements / root |
 | --- | --- | --- | --- |
 | propose | 1: the task, `proposed` | — | — |
 | approve | 1, by the approver | — | — |
-| place the task's file | 1, by Silo: a comment naming the pending change | 1 commit on `silo/task-home/2026-10-17-widget-lint`, adding `.grain/tasks/2026-10-17-widget-lint/task.md` with `moved_from`; the merge queue lands it as 1 merge on `main` (or 1 direct push, where the host allows it) | — |
+| place the task's file | 1, by Silo: a comment naming the pending change | 1 commit on `silo/task-home/2026-10-17-widget-lint`, adding `.grain/tasks/2026-10-17-widget-lint.task.md` with `moved_from`; the merge queue lands it as 1 merge on `main` (or 1 direct push, where the host allows it) | — |
 | place the work, without waiting | — | — | placements: 1, by Silo: a reference to the intake path |
 | the change merges | 1, by Silo: the tombstone, plus the team's reference rewritten, in one commit | — | placements: 1, by Silo: `to:` and `spec_rev` rewritten |
 | run | — | the work | root: `accepted`, `running`, the thread |
@@ -4156,7 +4156,7 @@ accepted before the merge names the intake path in `task.ref`, and keeps
 resolving it through the tombstone.
 
 **`promote`.** The example's
-`widgets:.grain/tasks/2026-10-16-widget-schema-v2/task.md`. The widgets
+`widgets:.grain/tasks/2026-10-16-widget-schema-v2.task.md`. The widgets
 repo says `task_home: promote`. The task, which implements WG-2 of the
 widgets design, was proposed and approved in the intake, and placed on
 `eu`. The agent working on a related task then proposed promoting it,
@@ -4176,16 +4176,16 @@ confirmed.
 
 A member who promotes directly skips the proposal row. In the examples,
 the tombstone is
-[`hub-intake/tasks/2026-10-16-widget-schema-v2/task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-widget-schema-v2/task.md),
+[`hub-intake/tasks/2026-10-16-widget-schema-v2.task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-widget-schema-v2.task.md),
 Silo's comment beside it records the change, and `eu`'s
-[placement](../examples/task-repos/hub-placements/grains/eu/backlog/2026-10-16-widget-schema-v2.md)
+[placement](../examples/task-repos/hub-placements/grains/eu/backlog/2026-10-16-widget-schema-v2.ref.md)
 names the code-repo path, while the other placements in that folder
 name the intake.
 
 **A gated change held for a human approver.** The promotion above is a
-change to `.grain/tasks/2026-10-16-widget-schema-v2/task.md` in the
+change to `.grain/tasks/2026-10-16-widget-schema-v2.task.md` in the
 widgets repo, and the widgets repo's
-[`.grain/gates/grain-declarations.md`](../examples/task-repos/widgets-code/.grain/gates/grain-declarations.md)
+[`.grain/gates/grain-declarations.gate.md`](../examples/task-repos/widgets-code/.grain/gates/grain-declarations.gate.md)
 matches `.grain/**`, `requires: {security_review: {}, human: {when:
 always, from: ["team:hub#approver"]}}`, `sensitive: true`. Silo opens
 the change from `silo/task-home/2026-10-16-widget-schema-v2` and puts it
@@ -4196,7 +4196,7 @@ in grain's merge queue, which Grain `eu` runs for the widgets repo:
 2. The match is sensitive, so the queue withdraws the change's
    auto-merge and labels it sensitive.
 3. It files the security review the gate requires, as `eu`'s own task:
-   `eu:tasks/gated/widgets/<change>-<head>-grain-declarations-security-review/task.md`,
+   `eu:tasks/gated/widgets/<change>-<head>-grain-declarations-security-review.task.md`,
    `approved` (`approved_by: grain:eu`, `submitted_via: gate`), with the
    change in its `context:` to read. It is the only work the gate files.
    Nothing is filed in the widgets repo.
@@ -4436,7 +4436,7 @@ shows up as the next run's `accepted` commit in the root.
 ### 8.16 Worked flows for context and assets
 
 **A task with a write repo, a read folder, a design doc and an image.**
-`intake:tasks/2026-10-16-reject-dangling-refs/task.md` is placed on
+`intake:tasks/2026-10-16-reject-dangling-refs.task.md` is placed on
 Grain `eu`. Its `context:` is the one at the top of §5.6: silo at `main`
 to write, grain's `pkg/daemon/` at `candidate` to read, the hub intake
 design with `depth: 1`, and a screenshot attached to the task, at
@@ -4471,7 +4471,7 @@ design with `depth: 1`, and a screenshot attached to the task, at
 Commits: **eu**, the run's own (§8.5). Nothing in any other repo.
 
 **A refused task: one entry is outside the policy.** The weekly granule
-pull (`us:triggers/granule-pull-weekly.md`) fires on Grain `us`, and its
+pull (`us:triggers/granule-pull-weekly.trigger.md`) fires on Grain `us`, and its
 task's `context:` is grain at `candidate` to write and
 `https://github.com/gke-labs/granule.git@main` to read (§6.2). Suppose
 `us`'s policy admits only `https://github.com/bwsalmon/*`:
@@ -4500,10 +4500,10 @@ Commits: **us**, 1 (`waiting`), then the run's own once the policy admits
 it.
 
 **A template whose input chooses the target repo.**
-`shared:templates/ghcr/prune-packages.md` declares an input `repo` of
+`shared:templates/ghcr/prune-packages.template.md` declares an input `repo` of
 type `ref`, `ref_kind: repo`, defaulting to grain at `candidate`, and has
 `context: [{input: repo, mode: write}]`. Its trigger,
-`shared:triggers/prune-packages.md`, says `fires.inputs: {repo:
+`shared:triggers/prune-packages.trigger.md`, says `fires.inputs: {repo:
 "https://github.com/bwsalmon/grain.git@candidate"}`. When it fires in
 Silo:
 
@@ -4511,7 +4511,7 @@ Silo:
    a branch. A value naming a file, or `@<tag>`, files nothing and is
    reported on the trigger.
 2. Silo writes the task at
-   `intake:tasks/fired/prune-packages/20261011T0400Z/task.md` with
+   `intake:tasks/fired/prune-packages/20261011T0400Z.task.md` with
    `context: [{ref: "https://github.com/bwsalmon/grain.git@candidate",
    mode: write}]` and `template.inputs.repo` recording the value. No
    `input:` survives into a task.
@@ -4552,9 +4552,9 @@ the sandbox's `thread/`.
 ### 8.17 Worked flows for capabilities
 
 **A task requests a narrowed GCP capability, defined by a team on top of
-an org definition.** `intake:tasks/2026-10-17-widgets-preview-deploy/task.md`
+an org definition.** `intake:tasks/2026-10-17-widgets-preview-deploy.task.md`
 asks for the widgets repo at `main` to write, and for
-`shared:capabilities/widgets-deployer.md` with `mode: use`, narrowed
+`shared:capabilities/widgets-deployer.capability.md` with `mode: use`, narrowed
 further to 30-minute tokens valid until 2026-10-24 (§5.7). It is placed
 on `eu`.
 
@@ -4572,7 +4572,7 @@ on `eu`.
    Before each read, the gate checks that the link's source is
    sanctioned. The team's object is in `hub/shared`'s `capabilities/`,
    which `eu`'s policy sanctions for `gcp-service-account@v1`. Its base
-   is `org-caps:gcp/acme-widgets.md@v1`, in the org's capabilities repo,
+   is `org-caps:gcp/acme-widgets.capability.md@v1`, in the org's capabilities repo,
    which is sanctioned for that base too. That object's base is
    `{type: gcp-service-account@v1}`, so the chain ends: two links, no
    cycle, and the type is in `eu`'s `bases`.
@@ -4595,7 +4595,7 @@ on `eu`.
    state: refused
    refusal:
      reason: "reducer 3 (preview-services-only) is language: anselm, which eu cannot evaluate yet"
-     entry: {index: 2, ref: "shared:capabilities/widgets-deployer.md", mode: use, link: "shared:capabilities/widgets-deployer.md", reducer: 3, rule: capabilities.anselm}
+     entry: {index: 2, ref: "shared:capabilities/widgets-deployer.capability.md", mode: use, link: "shared:capabilities/widgets-deployer.capability.md", reducer: 3, rule: capabilities.anselm}
    ```
 
    Silo shows that as the task's waiting reason. Placing it elsewhere
@@ -4621,7 +4621,7 @@ Commits: **eu**, the run's own. Nothing in the org's or the team's repo.
 
 **A refused request: the definition comes from an unsanctioned
 source.** The widgets repo's grain folder gains
-`.grain/capabilities/widgets-admin.md`: `gcp-service-account@v1`, project
+`.grain/capabilities/widgets-admin.capability.md`: `gcp-service-account@v1`, project
 `acme-widgets`, no other reducers. A task in the intake requests it with
 `mode: use`, and the team's approver approves it.
 
@@ -4635,8 +4635,8 @@ source.** The widgets repo's grain folder gains
    `widgets:.grain/capabilities/`, which `eu` does not sanction for
    `gcp-service-account@v1`".
 3. **Laundering does not help.** Suppose the team's maintainers instead
-   add `shared:capabilities/widgets-admin.md`, a sanctioned source, with
-   `base: {capability: "widgets:.grain/capabilities/widgets-admin.md"}`.
+   add `shared:capabilities/widgets-admin.capability.md`, a sanctioned source, with
+   `base: {capability: "widgets:.grain/capabilities/widgets-admin.capability.md"}`.
    The first link passes, and the second is refused for the same reason.
    Every link must be sanctioned, because the base-most link is where
    the authority is defined (§11.30).
@@ -4644,7 +4644,7 @@ source.** The widgets repo's grain folder gains
 Commits: **eu**, 1 (`refused`).
 
 **A refused request: implied egress the policy does not allow.** A task
-placed on `us` requests `shared:capabilities/sandbox-repo.md`, an object
+placed on `us` requests `shared:capabilities/sandbox-repo.capability.md`, an object
 over `github-sandbox-repo@v1` that narrows its lifetime to the run.
 `us`'s policy sanctions the base and the source. Its `network`, though,
 allows only the git and model proxies.
@@ -4660,7 +4660,7 @@ allows only the git and model proxies.
    state: refused
    refusal:
      reason: "capability entry 3 implies egress to api.github.com:443, which us's network policy does not allow"
-     entry: {index: 3, ref: "shared:capabilities/sandbox-repo.md", mode: use, rule: network.egress}
+     entry: {index: 3, ref: "shared:capabilities/sandbox-repo.capability.md", mode: use, rule: network.egress}
    ```
 
 3. Silo may place the task on a Grain whose policy allows that egress
@@ -4671,20 +4671,20 @@ allows only the git and model proxies.
 Commits: **us**, 1 (`refused`).
 
 **A capability that needs approval.** The weekly GHCR prune
-(`shared:triggers/prune-packages.md`) has `auto_approve_proposals: true`.
+(`shared:triggers/prune-packages.trigger.md`) has `auto_approve_proposals: true`.
 After migration its template's `capabilities: [package-publish]` becomes
-a `use` entry for `shared:capabilities/legacy/package-publish.md`, over
+a `use` entry for `shared:capabilities/legacy/package-publish.capability.md`, over
 `github-packages@v1`. That base is one of grain's escalated
 capabilities, so its declaration says `approval: required`, and the
 object adds `approval: {by: ["team:hub#approver"], scope: task}`.
 
 1. **The firing.** Silo files
-   `intake:tasks/fired/prune-packages/<key>/task.md`, and the
+   `intake:tasks/fired/prune-packages/<key>.task.md`, and the
    trigger's auto-approval approves the task (`approved_by:
    silo:trigger`). That approves the task, not the capability.
    `silo:trigger` is not a human, and not among the principals the
    approval names, so Silo does not place the task. It shows "waiting:
-   capability approval of `shared:capabilities/legacy/package-publish.md`
+   capability approval of `shared:capabilities/legacy/package-publish.capability.md`
    by a `team:hub#approver`".
 2. **The approval.** An approver reads the task in Silo's UI and approves
    the capability. Silo commits, for them,
@@ -4714,7 +4714,7 @@ Commits: **intake**, 2 (the firing, the capability approval); **eu**,
 the run's own.
 
 **A per-use denial, logged by a proxy.** The run of
-`intake:tasks/2026-10-16-reject-dangling-refs/task.md` on `eu` has
+`intake:tasks/2026-10-16-reject-dangling-refs.task.md` on `eu` has
 grain's `pkg/daemon/` at `candidate` to read, entry 2 (§8.16). That
 entry is `git@v1` narrowed to that repo and folder, the resolved commit
 and `operations: [fetch]`. The agent commits a fix in `work/grain/` and
@@ -4730,7 +4730,7 @@ runs `git push origin HEAD:refs/heads/fix-daemon`.
 2. The proxy logs the decision to `eu`'s audit log:
 
    ```json
-   {"at": "2026-10-16T18:02:11Z", "grain": "eu", "run": "runs/2026-10-16-reject-dangling-refs/run.md",
+   {"at": "2026-10-16T18:02:11Z", "grain": "eu", "run": "runs/2026-10-16-reject-dangling-refs/20261016T180000Z.run.md",
     "use": {"base": "git@v1", "proxy": "git-proxy", "operation": "push", "repo": "https://github.com/bwsalmon/grain.git", "ref": "refs/heads/fix-daemon"},
     "capability": {"entry": 2, "ref": "https://github.com/bwsalmon/grain.git//pkg/daemon/@candidate", "digest": "sha256:…"},
     "decision": "deny",
@@ -4892,7 +4892,7 @@ messages to commits plus notifications.
    the task's own repo, the repos the task references (template,
    template includes, designs), and the Grain roots holding its
    dependencies' execution records (§8.9), for as long as the placement
-   exists. Following an include is a read like any other (item 18). Silo cannot grant read on a code repo it does not host:
+   exists. Listing a root entry is a read like any other (item 18). Silo cannot grant read on a code repo it does not host:
    a Grain reads a task or definition there with its own credential, as
    it must to work on that repo anyway. The hook checks new references
 
@@ -5370,7 +5370,7 @@ The new kinds' schemas are
 [`suite.schema.json`](../examples/task-repos/schemas/suite.schema.json),
 [`trigger.schema.json`](../examples/task-repos/schemas/trigger.schema.json) and
 [`gate.schema.json`](../examples/task-repos/schemas/gate.schema.json).
-[`widgets-code/.grain/gates/grain-declarations.md`](../examples/task-repos/widgets-code/.grain/gates/grain-declarations.md)
+[`widgets-code/.grain/gates/grain-declarations.gate.md`](../examples/task-repos/widgets-code/.grain/gates/grain-declarations.gate.md)
 is bwsalmon/silo's own `.grain/triggers/grain-declarations.yml`,
 converted. One spelling needs care: front matter should quote the key
 `"on"`, because a YAML 1.1 reader (PyYAML) reads a bare `on` as `true`.
@@ -5487,12 +5487,12 @@ tombstone `widgets.md.moved.md`; §3.2). Nothing else moves:
 **Rules:**
 
 - **Stable paths, derived from the old id and a slug.** A task becomes
-  `tasks/<legacy number>-<slug>/task.md`, such as
-  `tasks/4310-carry-approver/task.md`. The slug is the title, lower-cased,
+  `tasks/<legacy number>-<slug>.task.md`, such as
+  `tasks/4310-carry-approver.task.md`. The slug is the title, lower-cased,
   with every run of other characters turned into `-`, cut to its first
   few words and at most 40 characters. Templates keep their declared
-  names (`templates/prune-packages.md`), and a schedule's becomes its
-  trigger's (`triggers/prune-packages.md`). An export run twice
+  names (`templates/prune-packages.template.md`), and a schedule's becomes its
+  trigger's (`triggers/prune-packages.trigger.md`). An export run twice
   therefore produces the same paths. The legacy id goes in `aka:`.
 - **Where tasks go.** A standalone Grain exports everything into its own
   root. For a Grain linked to Silo, tasks submitted at the hub are
@@ -5509,7 +5509,7 @@ tombstone `widgets.md.moved.md`; §3.2). Nothing else moves:
   becomes `expedite: true`, and the old priority becomes the `priority`
   band.
 - **Old runs become execution records.** Each task the Grain dispatched
-  gets one `runs/<legacy number>-<slug>/run.md`:
+  gets one `runs/<legacy number>-<slug>/<utc>.run.md`:
   - its attempts are collapsed into the record, and stay in the database;
   - `accepted_at` and `started_at` come from the first attempt;
   - `state` and `closed` come from the final attempt, the pull request
@@ -5573,16 +5573,16 @@ For every git-backed field, the database fields match.
 ```
 
 It exports as the trigger
-[`hub-shared/triggers/prune-packages.md`](../examples/task-repos/hub-shared/triggers/prune-packages.md),
+[`hub-shared/triggers/prune-packages.trigger.md`](../examples/task-repos/hub-shared/triggers/prune-packages.trigger.md),
 by the mapping in §13.1: `weekly` and `overlap` under `on.schedule`,
 `template` as `fires.template`, `target` and `base` as
 `fires.inputs.repo`, and the runtime columns dropped.
-The template exports as `templates/prune-packages.md`. The examples then
+The template exports as `templates/prune-packages.template.md`. The examples then
 move it to
-[`hub-shared/templates/ghcr/prune-packages.md`](../examples/task-repos/hub-shared/templates/ghcr/prune-packages.md),
+[`hub-shared/templates/ghcr/prune-packages.template.md`](../examples/task-repos/hub-shared/templates/ghcr/prune-packages.template.md),
 leaving a tombstone at its old path, to show one (§2.1). The
 settings-owned `template-1`/`sched-1` pair, which has `reads`, is
-[`templates/granule-pull.md`](../examples/task-repos/hub-shared/templates/granule-pull.md).
+[`templates/granule-pull.template.md`](../examples/task-repos/hub-shared/templates/granule-pull.template.md).
 Importing them yields the same rows minus the runtime columns, which the
 scheduler recomputes from the cadence.
 

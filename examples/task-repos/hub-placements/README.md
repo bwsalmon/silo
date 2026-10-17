@@ -36,7 +36,7 @@ It holds one folder per Grain that serves the hub team:
   `kinds: [trigger]`. Silo never copies a trigger.
 
 A Grain sees its folder only because its own root includes it
-(`backlog/silo.md` and `triggers/silo.md` in the Grain's repo). Linking
+(`backlog/silo.ref.md` and `triggers/silo.trigger.md` in the Grain's repo). Linking
 a Grain to Silo is adding those includes, and unlinking is deleting them
 (§8.12). People who reorder a Grain's placements do it through Silo's UI
 or API, and Silo commits with `ranked_by` set to them.

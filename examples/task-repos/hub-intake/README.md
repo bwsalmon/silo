@@ -138,7 +138,7 @@ repo, which the Grain's root includes. The Grain records what it did in
 its own `runs/`. How a task is going is read from those
 records (docs/task-repos.md §5.1).
 
-- **To propose:** add `tasks/<yyyy-mm-dd>-<slug>/task.md` with
+- **To propose:** add `tasks/<yyyy-mm-dd>-<slug>.task.md` with
   `state: proposed` and `submitter: user:<you>`, then push. You can also
   use `silo task propose` or the UI, which make the same commit.
 - **To approve** (approvers only, and never your own proposal): set
@@ -153,7 +153,7 @@ records (docs/task-repos.md §5.1).
 **Task home.** Tasks stay here by default (`task_home: intake`). The
 widgets repo is set to `promote`, which its own `.grain/README.md` also
 says. The team adopts the widgets repo's weekly release-notes trigger
-with `triggers/widgets.md`, a `kind: include` of it, so its firings are
+with `triggers/widgets.trigger.md`, a `kind: include` of it, so its firings are
 filed here, never into the widgets repo (docs/task-repos.md §5.5, §6.2).
 
 The rules above are enforced by Silo's pre-receive hook

@@ -885,7 +885,7 @@ def main():
                 if "bytes" in fm and len(data) != fm["bytes"]:
                     err(f"{repo}/{path}: bytes does not match {short(ident)}")
     want = {("hub-shared", "designs/img/claims-flow.png")}
-    got = {i for i, via in reached.get(("hub-intake", "tasks/2026-10-16-reject-dangling-refs/task.md")) or []}
+    got = {i for i, via in reached.get(("hub-intake", "tasks/2026-10-16-reject-dangling-refs.task.md")) or []}
     if got != want:
         err(f"depth: 1 reached {sorted(got)}, expected {sorted(want)}")
 
@@ -1000,24 +1000,24 @@ def main():
     def has(grain, repo, path):
         return (repo, path) in spaces[grain][3]
     expect = [
-        ("demo-z", "ns-demo", "y/templates/greeting.md", True),     # (X − Y) ∪ {Y}
-        ("demo-z", "ns-demo", "x/templates/note.md", True),
+        ("demo-z", "ns-demo", "y/templates/greeting.template.md", True),     # (X − Y) ∪ {Y}
+        ("demo-z", "ns-demo", "x/templates/note.template.md", True),
         ("demo-z", "ns-demo", "x/exclude-y.md", True),             # configuration is listed
-        ("demo-v", "ns-demo", "x/templates/note.md", True),
+        ("demo-v", "ns-demo", "x/templates/note.template.md", True),
         ("demo-v", "ns-demo", "x/include-y.md", False),            # disabled, and its name cut
-        ("demo-v", "ns-demo", "y/templates/greeting.md", False),
-        ("eu", "org-templates", "templates/security-review.md", True),   # transitive
-        ("eu", "org-templates", "templates/legacy-triage.md", False),    # the team's exclude
-        ("eu", "hub-placements", "grains/eu/backlog/2026-10-16-approval-flow.md", True),
-        ("eu", "hub-placements", "grains/us/backlog/2026-10-16-refuse-self-approved.md", False),
-        ("eu", "hub-shared", "triggers/prune-packages.md", False),       # eu is assigned no triggers
-        ("us", "hub-shared", "triggers/prune-packages.md", True),        # through Silo's folder
-        ("us", "hub-shared", "triggers/plan-designs.md", True),          # listed; only Silo fires it
-        ("us", "hub-shared", "triggers/granule-pull.md", False),         # the root's exclude
-        ("us", "grain-us", "triggers/granule-pull-weekly.md", True),
-        ("us", "hub-shared", "templates/granule-pull.md", False),        # referenced, never included
-        ("eu", "hub-shared", "capabilities/widgets-deployer.md", True),  # available to request
-        ("eu", "org-capabilities", "gcp/acme-widgets.md", False),        # a base in its chain, not offered
+        ("demo-v", "ns-demo", "y/templates/greeting.template.md", False),
+        ("eu", "org-templates", "templates/security-review.template.md", True),   # transitive
+        ("eu", "org-templates", "templates/legacy-triage.template.md", False),    # the team's exclude
+        ("eu", "hub-placements", "grains/eu/backlog/2026-10-16-approval-flow.ref.md", True),
+        ("eu", "hub-placements", "grains/us/backlog/2026-10-16-refuse-self-approved.ref.md", False),
+        ("eu", "hub-shared", "triggers/prune-packages.trigger.md", False),       # eu is assigned no triggers
+        ("us", "hub-shared", "triggers/prune-packages.trigger.md", True),        # through Silo's folder
+        ("us", "hub-shared", "triggers/plan-designs.trigger.md", True),          # listed; only Silo fires it
+        ("us", "hub-shared", "triggers/granule-pull.trigger.md", False),         # the root's exclude
+        ("us", "grain-us", "triggers/granule-pull-weekly.trigger.md", True),
+        ("us", "hub-shared", "templates/granule-pull.template.md", False),        # referenced, never included
+        ("eu", "hub-shared", "capabilities/widgets-deployer.capability.md", True),  # available to request
+        ("eu", "org-capabilities", "gcp/acme-widgets.capability.md", False),        # a base in its chain, not offered
     ]
     for grain, (_, _, _, names) in spaces.items():
         for repo, path in names:
@@ -1026,7 +1026,7 @@ def main():
     for grain, repo, path, want in expect:
         if has(grain, repo, path) != want:
             err(f"namespace {grain}: {repo}/{path} {'missing' if want else 'present'}")
-    for space, want in [(("ns-demo", "x", "folder"), {"x/templates/note.md", "x/include-y.md", "x/exclude-y.md"}),
+    for space, want in [(("ns-demo", "x", "folder"), {"x/templates/note.template.md", "x/include-y.md", "x/exclude-y.md"}),
                         (("ns-demo", "w", "folder"), {"w/include-y.md", "w/exclude-y.md"})]:
         got = {p for r, p in contribution(objs, space, None, LIMITS["depth"], [], [], [], {"spaces": 0, "repos": set(), "failed": False})}
         if got != want:
@@ -1059,7 +1059,7 @@ def main():
     loop = dict(objs)
     for a, b in (("a", "b"), ("b", "a")):
         loop[("hub-shared", f"capabilities/{a}.md")] = ({"kind": "capability", "base": {"capability": f"{b}.md"}}, "")
-    if "capability cycle" not in (chain_of(loop, "hub-shared", "x.md", "capabilities/a.md")[1] or ""):
+    if "capability cycle" not in (chain_of(loop, "hub-shared", "x.md", "capabilities/a.capability.md")[1] or ""):
         err("a capability cycle was not detected")
     got_caps = {}
     for (repo, path), (fm, body) in sorted(objs.items()):
@@ -1088,7 +1088,7 @@ def main():
                 for p in pending:
                     report.append(f"  not evaluable here: {p}; {grain} refuses the request until it can evaluate Anselm")
                 got_caps[(repo, path, n, grain)] = (dims, pending)
-    want = got_caps.get(("hub-intake", "tasks/2026-10-17-widgets-preview-deploy/task.md", 2, "eu"))
+    want = got_caps.get(("hub-intake", "tasks/2026-10-17-widgets-preview-deploy.task.md", 2, "eu"))
     if not want or want[0] == "refused" or want[0]["projects"] != ["acme-widgets"] \
             or want[0]["roles"] != ["roles/run.developer", "roles/iam.serviceAccountUser"] \
             or want[0]["token_lifetime"] != 1800 or len(want[1]) != 1:

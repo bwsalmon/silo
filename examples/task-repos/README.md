@@ -14,8 +14,8 @@ is named by its path: there are no ids.
 | [`grain-eu/`](grain-eu/README.md) | `https://silo.example.com/git/grains/eu.git` | the root of Grain `eu` (owned by bsalmon@google.com): its include of Silo's placements, its own lane, a pinned include of the team's templates, its own task and its execution records. Only the Grain and its owner write it |
 | [`grain-us/`](grain-us/README.md) | `https://silo.example.com/git/grains/us.git` | the root of Grain `us` (a team Grain): its includes of Silo's placements and assigned triggers, one exclude, a customised trigger, and one re-placed task's record |
 | [`hub-placements/`](hub-placements/README.md) | `https://silo.example.com/git/hub/placements.git` | Silo's own repo, written only by Silo: a folder per Grain, holding its placements and the team triggers assigned to it |
-| [`org-templates/`](org-templates/README.md) | `https://silo.example.com/git/org/templates.git` | an org-wide template set, which `hub-shared` includes at `v3` and cuts one template from |
-| [`org-capabilities/`](org-capabilities/README.md) | `https://silo.example.com/git/org/capabilities.git` | org-wide capability objects: the GCP base narrowed to one project, released at `v1`, which the hub team narrows further |
+| [`org-templates/`](org-templates/README.template.md) | `https://silo.example.com/git/org/templates.git` | an org-wide template set, which `hub-shared` includes at `v3` and cuts one template from |
+| [`org-capabilities/`](org-capabilities/README.capability.md) | `https://silo.example.com/git/org/capabilities.git` | org-wide capability objects: the GCP base narrowed to one project, released at `v1`, which the hub team narrows further |
 | [`ns-demo/`](ns-demo/README.md) | `https://silo.example.com/git/demo/namespaces.git` | the X/Y/Z cases of namespace resolution, as a tiny tree |
 | [`widgets-code/`](widgets-code/.grain/README.md) | `https://git.example.com/hub/widgets.git` | a code repo on a forge Silo does not host. Its top-level `README.md` is the code's; its grain folder, `.grain/`, has its own `README.md` with `scope` and `task_home: promote` |
 
@@ -27,11 +27,11 @@ copied here.
 
 | Object | File | Real source |
 | --- | --- | --- |
-| trigger (`on: schedule`) | `hub-shared/triggers/prune-packages.md` | grain/config `settings/schedules.yml` `repo:schedule:bwsalmon:grain:prune-packages` |
-| template | `hub-shared/templates/ghcr/prune-packages.md` | grain/config `settings/templates.yml` `repo:template:bwsalmon:grain:prune-packages` (body verbatim) |
-| template with `reads` | `hub-shared/templates/granule-pull.md` | grain/config `template-1` (body verbatim) |
-| template with inputs, `if`/`for` and an include | `hub-shared/templates/design-plan.md` + `partials/closing-report.md` | bwsalmon/grain `.grain/templates/design-planner.yml`, abridged |
-| design doc | `hub-shared/designs/hub-intake.md` | bwsalmon/silo `docs/hub.md` §1.2, §6.1 and §6.4, with `{#HS-n}` anchors added |
+| trigger (`on: schedule`) | `hub-shared/triggers/prune-packages.trigger.md` | grain/config `settings/schedules.yml` `repo:schedule:bwsalmon:grain:prune-packages` |
+| template | `hub-shared/templates/ghcr/prune-packages.template.md` | grain/config `settings/templates.yml` `repo:template:bwsalmon:grain:prune-packages` (body verbatim) |
+| template with `reads` | `hub-shared/templates/granule-pull.template.md` | grain/config `template-1` (body verbatim) |
+| template with inputs, `if`/`for` and an include | `hub-shared/templates/design-plan.template.md` + `partials/closing-report.md` | bwsalmon/grain `.grain/templates/design-planner.yml`, abridged |
+| design doc | `hub-shared/designs/hub-intake.design.md` | bwsalmon/silo `docs/hub.md` §1.2, §6.1 and §6.4, with `{#HS-n}` anchors added |
 | a task, run to completion with a thread | `hub-intake/tasks/4310-carry-approver/` and `grain-eu/runs/4310-carry-approver/` | grain task 4310; its change is silo commit `5623aa2` |
 | a second task on the same design | `hub-intake/tasks/4248-sign-offers/` and `grain-eu/runs/4248-sign-offers/` | grain task 4248; silo PR #140, merge `776f8e8` |
 
@@ -40,7 +40,7 @@ widgets repo's, which are illustrative. Their prompts and comments are reconstru
 commits. Migration maps grain's team `default` to the Silo team `hub`,
 grain's `target: owner/name` and `base` to a `write` entry in `context:`
 (the repo's git URL at that branch), and grain task 4310
-to the path `tasks/4310-carry-approver/task.md` (docs/task-repos.md §13).
+to the path `tasks/4310-carry-approver.task.md` (docs/task-repos.md §13).
 Commit shas *inside* the example repos are illustrative, since those
 repos do not exist; code-repo shas are real silo commits. The
 `attestation` values are JWT-shaped, but the signature is a placeholder.
@@ -54,7 +54,7 @@ repos do not exist; code-repo shas are real silo commits. The
   stays there unchanged. Placement is a `kind: ref` in the Grain's
   folder of `hub-placements/`, carrying the rank, `spec_rev` and the
   attestation (§8.3, §8.4). Silo writes nothing in the Grain's root.
-- **Linked by an include:** `grain-eu/backlog/silo.md` includes
+- **Linked by an include:** `grain-eu/backlog/silo.ref.md` includes
   `placements:grains/eu/backlog/`, tracking `main`, `kinds: [ref]`.
   Deleting it is unlinking (§8.12).
 - **Lanes:** Grain `eu` has two, Silo's placements (four references:
@@ -88,15 +88,15 @@ repos do not exist; code-repo shas are real silo commits. The
   run was fenced until `eu` came back and wrote `superseded` itself. The
   `us` run names the `eu` run as `previous` (§8.8).
 - **A cross-Grain dependency:** that task `depends_on` task 4310, which
-  is satisfied because `grain-eu/runs/4310-carry-approver/run.md` is
+  is satisfied because `grain-eu/runs/4310-carry-approver/20261016T135830Z.run.md` is
   `done`. The `us` run's comment says so (§8.9).
-- **A tombstone from a rename:** `hub-shared/templates/prune-packages.md`
+- **A tombstone from a rename:** `hub-shared/templates/prune-packages.template.md`
   is `kind: moved`, `to: ghcr/prune-packages.md`, and the template there
   lists it in `moved_from`. The trigger names the new path. The task
   fired before the move still names the old one, and resolves through
   the tombstone (§2.1, §4).
 - **Traceability:** tasks 4310, 4248 and `2026-10-16-refuse-self-approved`
-  `implements:` a requirement of `hub-shared/designs/hub-intake.md` (HS-2,
+  `implements:` a requirement of `hub-shared/designs/hub-intake.design.md` (HS-2,
   HS-3), with the section hash they were filed against. The done runs
   record the hash they were done against in `closed.design_revs` (§7.2).
 
@@ -106,7 +106,7 @@ repos do not exist; code-repo shas are real silo commits. The
   converted from bwsalmon/silo's own
   `.grain/triggers/grain-declarations.yml`; and a promoted task. Its CI
   stays YAML in `.grain/workflows/`. `.grain/README.md` governs the
-  folder and, through its `scope`, `docs/design/widgets.md`, a design doc
+  folder and, through its `scope`, `docs/design/widgets.design.md`, a design doc
   in place (§3.1, §12).
 - **A promoted task:** `widgets-code/.grain/tasks/2026-10-16-widget-schema-v2/`
   was proposed and approved in the intake, then promoted. Its intake path
@@ -117,69 +117,69 @@ repos do not exist; code-repo shas are real silo commits. The
   references pointing into the intake (§5.5).
 - **An adopted trigger:** `hub-intake/README.md` sets the team's
   `task_home` (with the widgets repo on `promote`), and
-  `hub-intake/triggers/widgets.md`, a `kind: include` with
+  `hub-intake/triggers/widgets.trigger.md`, a `kind: include` with
   `kinds: [trigger]`, adopts the widgets repo's weekly trigger, whose
   firings go to the intake and never into the code repo (§6.2).
 - **Team triggers assigned to a Grain, with one exclude:**
-  `hub-placements/grains/us/triggers/hub.md` is Silo's include of
-  `shared:triggers/`, and `grain-us/triggers/silo.md` includes that
+  `hub-placements/grains/us/triggers/hub.trigger.md` is Silo's include of
+  `shared:triggers/`, and `grain-us/triggers/silo.trigger.md` includes that
   folder, so the team's triggers reach `us` transitively, narrowed to
-  `kinds: [trigger]`. `grain-us/triggers/no-granule-pull.md` excludes
+  `kinds: [trigger]`. `grain-us/triggers/no-granule-pull.trigger.md` excludes
   the daily granule pull, and `granule-pull-weekly.md` replaces it: a new
   trigger referencing the same template, with `derived_from` naming the
   original (§6.2, §8.15).
-- **The planner as a trigger:** `hub-shared/triggers/plan-designs.md`
+- **The planner as a trigger:** `hub-shared/triggers/plan-designs.trigger.md`
   says `on: design-change` over `designs/`, and fires the design-plan
   template once per merged change, binding the event's range and paths
   to the template's inputs (§7.4).
-- **A merge gate:** `widgets-code/.grain/gates/grain-declarations.md`
+- **A merge gate:** `widgets-code/.grain/gates/grain-declarations.gate.md`
   (`kind: gate`) holds every change to `.grain/**` for a security review
   and then a hub approver. It files no work but those reviews (§6.3,
   §8.14).
-- **A transitive template set with a cut:** `hub-shared/templates/org.md`
+- **A transitive template set with a cut:** `hub-shared/templates/org.template.md`
   includes `org-templates/templates/` pinned at `v3`, and
-  `hub-shared/templates/no-legacy-triage.md` excludes one of them.
-  `grain-eu/templates/hub.md` includes the team's templates, so `eu`'s
+  `hub-shared/templates/no-legacy-triage.template.md` excludes one of them.
+  `grain-eu/templates/hub.template.md` includes the team's templates, so `eu`'s
   namespace has the org's `security-review` and `dependency-bump` and not
   `legacy-triage`, while a direct include of the org set would still
   have it (§3.3).
-- **A task's whole `context:`:** `hub-intake/tasks/2026-10-16-reject-dangling-refs/task.md`
+- **A task's whole `context:`:** `hub-intake/tasks/2026-10-16-reject-dangling-refs.task.md`
   lists silo at `main` to write, grain's `pkg/daemon/` at `candidate` to
   read (a sparse checkout), the hub intake design with `depth: 1`, and a
   screenshot attached to the task, stored beside it in `attachments/`.
   `check.py` prints its sandbox layout (§5.6, §8.16).
 - **An image asset, reached by `depth: 1`:** the design
-  `hub-shared/designs/hub-intake.md` embeds `img/claims-flow.png` by a
+  `hub-shared/designs/hub-intake.design.md` embeds `img/claims-flow.png` by a
   relative link, so that task's sandbox gets the image too, while the
   design's link to grain's `pkg/daemon/` folder is skipped and recorded
   as not a file (§5.6).
-- **A sidecar:** `hub-shared/designs/img/claims-flow.png.md`, a
+- **A sidecar:** `hub-shared/designs/img/claims-flow.png.asset.md`, a
   `kind: asset` with alt text, license and provenance, and the image's
   `sha256` and `bytes`, which `check.py` checks (§2.2).
 - **A template input choosing the target repo:**
-  `hub-shared/templates/ghcr/prune-packages.md` and
-  `templates/granule-pull.md` declare an input `repo` of `type: ref`, and
+  `hub-shared/templates/ghcr/prune-packages.template.md` and
+  `templates/granule-pull.template.md` declare an input `repo` of `type: ref`, and
   take their `write` entry from it. Their triggers set it, and the fired
   task records the concrete entry and the value in `template.inputs`
   (§5.6, §8.16).
-- **What a run's sandbox held:** `grain-eu/runs/4310-carry-approver/run.md`
+- **What a run's sandbox held:** `grain-eu/runs/4310-carry-approver/20261016T135830Z.run.md`
   records its `context:`, with the commit of each entry (§5.6).
-- **Two base declarations:** `grain-eu/capabilities/bases/gcp-service-account.md`
+- **Two base declarations:** `grain-eu/capabilities/bases/gcp-service-account.capability-base.md`
   and `git.md`, `kind: capability-base`. Grain `eu` writes these from
   its provider code: each base's dimensions with their maximums and where
   each narrows, what it materialises, what it implies, and its proxies.
   They are published for Silo and readers, and `eu` never decides from
   them (§5.7).
 - **An org capability object, and a team's narrowing of it:**
-  `org-capabilities/gcp/acme-widgets.md` is `gcp-service-account@v1`
-  restricted to project `acme-widgets`. `hub-shared/capabilities/widgets-deployer.md`
+  `org-capabilities/gcp/acme-widgets.capability.md` is `gcp-service-account@v1`
+  restricted to project `acme-widgets`. `hub-shared/capabilities/widgets-deployer.capability.md`
   takes it, pinned at `v1`, as its base, and narrows it with two interim
   built-in reducers (roles, a 1-hour token lifetime) and one placeholder
   `language: anselm` reducer with an opaque body (§5.7).
-- **A catalog, not a grant:** `grain-eu/capabilities/hub.md` includes
+- **A catalog, not a grant:** `grain-eu/capabilities/hub.capability.md` includes
   the team's `capabilities/` with `kinds: [capability]`, so the team's
   object is in `eu`'s namespace and the org's is not (§5.7).
-- **A task requesting it:** `hub-intake/tasks/2026-10-17-widgets-preview-deploy/task.md`
+- **A task requesting it:** `hub-intake/tasks/2026-10-17-widgets-preview-deploy.task.md`
   lists the widgets repo to write and the team's capability with
   `mode: use`, narrowed again to 30-minute tokens and a week's validity.
   `check.py` resolves the chain, applies the built-in reducers to `eu`'s

@@ -39,14 +39,14 @@ through the includes below.
 This README is metadata only. The Grain's objects are files:
 
 - `backlog/` is the Grain's own lane: its owner's tasks, ranked here.
-  `backlog/silo.md` is a `kind: include` of Silo's folder for this Grain,
+  `backlog/silo.ref.md` is a `kind: include` of Silo's folder for this Grain,
   `placements:grains/eu/backlog/`, tracking `main` and accepting only
   backlog references. Those placements are a second lane, with ranks of
   their own. `lanes` above weights Silo's lane 3 to 1 against the owner's
   (§5.2).
-- `templates/hub.md` includes the hub team's templates, pinned, and
+- `templates/hub.template.md` includes the hub team's templates, pinned, and
   through them the org's, less the one template the team excludes.
-- `capabilities/hub.md` includes the hub team's capability objects:
+- `capabilities/hub.capability.md` includes the hub team's capability objects:
   available to request here, granted only if `eu`'s local policy admits
   them. `capabilities/bases/` holds `eu`'s declarations of the base
   capabilities it implements, which `eu` writes from its provider code
@@ -56,5 +56,5 @@ This README is metadata only. The Grain's objects are files:
   took on, from either lane, with its thread in `comments/`.
 - Attempts, events and transcripts stay in the Grain's database.
 
-To unlink from Silo, the owner deletes `backlog/silo.md`. This repo, and
+To unlink from Silo, the owner deletes `backlog/silo.ref.md`. This repo, and
 all of its history, stays the Grain's.
