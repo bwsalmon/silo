@@ -156,15 +156,23 @@ type live struct {
 	// approve is signalled when one of the task's approval requests is
 	// answered.
 	approve chan struct{}
+	// message is signalled when a human posts the task a message.
+	message chan struct{}
 }
 
-func newLive() *live { return &live{cancel: make(chan struct{}), approve: make(chan struct{}, 1)} }
+func newLive() *live {
+	return &live{cancel: make(chan struct{}), approve: make(chan struct{}, 1), message: make(chan struct{}, 1)}
+}
 
 func (l *live) signal() { l.once.Do(func() { close(l.cancel) }) }
 
-func (l *live) answered() {
+func (l *live) answered() { poke(l.approve) }
+
+func (l *live) posted() { poke(l.message) }
+
+func poke(c chan struct{}) {
 	select {
-	case l.approve <- struct{}{}:
+	case c <- struct{}{}:
 	default:
 	}
 }
@@ -330,6 +338,28 @@ func (d *Dispatcher) Answered(ctx context.Context, task string) {
 	}
 }
 
+// Posted tells the node running task of a message posted to it,
+// already kept in the store (Store.Post): down the task's stream, by
+// whichever pod's dispatcher has it open. A node without a stream for
+// the task now, or a task not yet accepted, is sent it when the node
+// next accepts the task.
+func (d *Dispatcher) Posted(ctx context.Context, task string) {
+	d.init()
+	d.mu.Lock()
+	l := d.live[task]
+	d.mu.Unlock()
+	if l != nil {
+		l.posted()
+	}
+	if d.Bus != nil {
+		nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
+		defer cancel()
+		if err := d.Bus.Notify(nctx, notify.Message{Message: task}); err != nil {
+			d.logf("tasks: telling the other pods of a message to %s: %v", task, err)
+		}
+	}
+}
+
 // Notice is a notice from the Bus, handed to it by the hub
 // (docs/hub.md §2.2.4): a wake-up wakes the dispatcher, if it runs in
 // this process, and so does the bus reconnecting, since a notice may
@@ -358,6 +388,14 @@ func (d *Dispatcher) Notice(m notify.Message) {
 		d.mu.Unlock()
 		if l != nil {
 			l.answered()
+		}
+	case m.Message != "":
+		d.init()
+		d.mu.Lock()
+		l := d.live[m.Message]
+		d.mu.Unlock()
+		if l != nil {
+			l.posted()
 		}
 	}
 }
@@ -536,7 +574,8 @@ func (d *Dispatcher) place(ctx context.Context, t Task, pc *passCache) error {
 	}
 	for {
 		c, err := d.Registry.ClaimFor(repos, func(e registry.Entry) bool {
-			return !slices.Contains(t.Excluded, e.ID) && !d.held(t.ID, e.ID) && t.Constraints.match(e)
+			return !slices.Contains(t.Excluded, e.ID) && !d.held(t.ID, e.ID) && t.Constraints.match(e) &&
+				(t.Kind != KindInteractive || e.Supports(registry.FeatureInteractive))
 		})
 		if errors.Is(err, registry.ErrNoNode) {
 			return nil
@@ -858,6 +897,10 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 			if answered && cancelled != nil {
 				d.deliverAnswers(ctx, st, t)
 			}
+		case <-l.message:
+			if answered && cancelled != nil {
+				d.deliverMessages(ctx, st, t)
+			}
 		case <-cancelled:
 			cancelled, reattest = nil, nil
 			if !answered {
@@ -916,6 +959,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 				}
 				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Accept(ctx, t.ID, r.m.NodeTask) })
 				d.deliverAnswers(ctx, st, t)
+				d.deliverMessages(ctx, st, t)
 			case TypeRefuse:
 				if answered {
 					d.logf("tasks: node %s refused %s after accepting it; ignored", t.Node, t.ID)
@@ -968,6 +1012,30 @@ func (d *Dispatcher) deliverAnswers(ctx context.Context, st *Stream, t Task) {
 		d.logf("tasks: sent node %s %s's answer to %s: %s", t.Node, t.ID, logsafe.Quote(a.Request), a.Decision)
 		if err := d.Store.AnswerDelivered(ctx, t.ID, a.Request); err != nil {
 			d.logf("tasks: recording %s's answer to %s sent: %v", t.ID, logsafe.Quote(a.Request), err)
+		}
+	}
+}
+
+// deliverMessages writes, down t's stream, each message posted to it
+// that its node has not yet been sent, oldest first. One that cannot be
+// written is left for the node's next accept of the task.
+func (d *Dispatcher) deliverMessages(ctx context.Context, st *Stream, t Task) {
+	if t.Kind != KindInteractive {
+		return
+	}
+	ms, err := d.Store.Messages(ctx, t.ID, true)
+	if err != nil {
+		d.logf("tasks: reading %s's messages: %v", t.ID, err)
+		d.observe(EventStoreError, t)
+		return
+	}
+	for _, m := range ms {
+		if err := st.Write(messageMessage(m)); err != nil {
+			return
+		}
+		d.logf("tasks: sent node %s %s's message %s", t.Node, t.ID, logsafe.Quote(m.ID))
+		if err := d.Store.MessageDelivered(ctx, t.ID, m.ID); err != nil {
+			d.logf("tasks: recording %s's message %s sent: %v", t.ID, logsafe.Quote(m.ID), err)
 		}
 	}
 }

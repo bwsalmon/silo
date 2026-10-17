@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -53,7 +54,22 @@ type Node struct {
 	// Labels are free-form facts about the node (its zone, its machine
 	// type), for the directory and, later, for dispatch constraints.
 	Labels map[string]string `json:"labels,omitempty"`
+	// Features are the parts of the task interface the node supports
+	// beyond the ones every node speaks (docs/hub-interface.md):
+	// FeatureInteractive. The dispatcher places a task that needs one
+	// only on a node that lists it.
+	Features []string `json:"features,omitempty"`
 }
+
+// FeatureInteractive is a node that runs interactive tasks: sessions
+// that take a human's messages (tasks.KindInteractive).
+const FeatureInteractive = "interactive"
+
+// maxFeatures bounds what a node may list.
+const maxFeatures = 32
+
+// Supports is whether the node listed feature.
+func (n Node) Supports(feature string) bool { return slices.Contains(n.Features, feature) }
 
 // Status is a node's health as the directory reports it.
 type Status string
@@ -256,6 +272,9 @@ func (r *Registry) staleAfter() time.Duration {
 var (
 	idPattern   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
 	repoPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9._-]+$`)
+	// A feature name is one a node does not know is simply never asked
+	// of it, so any short name is accepted.
+	featurePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 )
 
 // Validate checks a node's registration, and returns it with its
@@ -281,6 +300,20 @@ func Validate(n Node) (Node, error) {
 	}
 	sort.Strings(repos)
 	n.Repos = repos
+	if len(n.Features) > maxFeatures {
+		return n, fmt.Errorf("%w: over %d features", ErrInvalid, maxFeatures)
+	}
+	var features []string
+	for _, f := range n.Features {
+		if !featurePattern.MatchString(f) {
+			return n, fmt.Errorf("%w: feature %q", ErrInvalid, f)
+		}
+		if !slices.Contains(features, f) {
+			features = append(features, f)
+		}
+	}
+	sort.Strings(features)
+	n.Features = features
 	return n, nil
 }
 
@@ -421,6 +454,7 @@ func (r *Registry) entry(n *node, now time.Time) Entry {
 		}
 		e.Labels = labels
 	}
+	e.Features = slices.Clone(e.Features)
 	return e
 }
 

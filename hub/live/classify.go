@@ -8,8 +8,9 @@
 // The node classifies what it sends, because only the node knows what
 // it holds; the hub enforces the classification by schema (Classify):
 //
-//	lifecycle     status, usage, resumable, result   stored, broadcast
-//	conversation  approval_request                   stored, broadcast
+//	lifecycle     status, usage, resumable, result,  stored, broadcast
+//	              awaiting_reply
+//	conversation  approval_request, message          stored, broadcast
 //	token stream  transcript text, thinking, error   an in-memory ring per task, broadcast
 //	node-only     everything else: tool_call,        a reference only, in the ring, broadcast;
 //	              transcript tool calls and results,  the payload is dropped
@@ -157,6 +158,17 @@ func Classify(line []byte) (Event, Class, error) {
 		if t.ID != "" || t.Tool != "" || t.Args != nil {
 			return Event{}, 0, rejected("transcript %s item carries a tool's fields", t.Kind)
 		}
+	case e.AwaitingReply != nil:
+		if s := e.AwaitingReply.State; s != events.AwaitingWaiting && s != events.AwaitingResumed {
+			return Event{}, 0, rejected("awaiting_reply state %q: want waiting or resumed", s)
+		}
+	case e.Message != nil:
+		// The hub shows its own record of the message, by its ID
+		// (Hub.Messages): what else the node sent is not kept.
+		if e.Message.ID == "" {
+			return Event{}, 0, rejected("message event without an id")
+		}
+		e.Message = &events.Message{ID: e.Message.ID}
 	case e.Result != nil:
 		// Paths on the node's disk: what is behind them is node-only.
 		r := e.Result
@@ -173,9 +185,9 @@ func classOf(e Event, raw map[string]json.RawMessage) Class {
 		return NodeOnly
 	}
 	switch e.Type {
-	case events.TypeStatus, events.TypeUsage, events.TypeResumable, events.TypeResult:
+	case events.TypeStatus, events.TypeUsage, events.TypeResumable, events.TypeResult, events.TypeAwaitingReply:
 		return Lifecycle
-	case events.TypeApprovalRequest:
+	case events.TypeApprovalRequest, events.TypeMessage:
 		return Conversation
 	case events.TypeTranscript:
 		var item struct {
@@ -214,6 +226,12 @@ func decodePayload(e *Event, b json.RawMessage) error {
 	case events.TypeTranscript:
 		e.Transcript = new(events.Item)
 		dst = e.Transcript
+	case events.TypeAwaitingReply:
+		e.AwaitingReply = new(events.AwaitingReply)
+		dst = e.AwaitingReply
+	case events.TypeMessage:
+		e.Message = new(events.Message)
+		dst = e.Message
 	default:
 		return fmt.Errorf("no schema for %q", e.Type)
 	}

@@ -23,18 +23,20 @@ import (
 // Channel is the channel the hub's notices go out on.
 const Channel = "silo_hub"
 
-// Message is one notice. Exactly one of Wake, Cancel, Approve, Node and
-// Event is set on the wire:
+// Message is one notice. Exactly one of Wake, Cancel, Approve, Message,
+// Node and Event is set on the wire:
 //
 //	{"wake":true}                 a task was submitted or requeued: the dispatcher looks at the queue
 //	{"cancel":"<task>"}           a task was cancelled: the dispatcher signals its stream
 //	{"approve":"<task>"}          one of a task's approval requests was answered: the dispatcher sends it
+//	{"message":"<task>"}          a human posted an interactive task a message: the dispatcher sends it
 //	{"node":"<id>"}               a node's row in the shared registry changed: refill the mirror
 //	{"event":"<task>","seq":N}    the task's event N was stored
 type Message struct {
 	Wake    bool   `json:"wake,omitempty"`
 	Cancel  string `json:"cancel,omitempty"`
 	Approve string `json:"approve,omitempty"`
+	Message string `json:"message,omitempty"`
 	Node    string `json:"node,omitempty"`
 	Event   string `json:"event,omitempty"`
 	Seq     int64  `json:"seq,omitempty"`
@@ -165,6 +167,8 @@ func (b *Bus) Post(m Message) {
 		key = "c" + m.Cancel
 	case m.Approve != "":
 		key = "a" + m.Approve
+	case m.Message != "":
+		key = "m" + m.Message
 	default:
 		return
 	}

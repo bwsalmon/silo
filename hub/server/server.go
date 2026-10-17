@@ -369,6 +369,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	h.Live = &live.Hub{
 		Log:       h.Events,
 		Tasks:     h.Backlog,
+		Messages:  h.Backlog.MessageEvent,
 		Directory: dirAPI,
 		Open:      h.Rendezvous.Open,
 		NodeOwner: func(id string) (string, bool) {

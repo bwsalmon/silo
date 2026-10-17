@@ -27,6 +27,12 @@ const (
 	TypeApprovalRequest = "approval_request"
 	TypeResumable       = "resumable"
 	TypeResult          = "result"
+	// TypeAwaitingReply is an interactive session waiting for a human's
+	// message, and then going on again.
+	TypeAwaitingReply = "awaiting_reply"
+	// TypeMessage is a human's message, sent through the hub, as the
+	// session took it in.
+	TypeMessage = "message"
 )
 
 // Event is one thing that happened in a session.
@@ -47,6 +53,8 @@ type Event struct {
 	ApprovalRequest *ApprovalRequest `json:"approval_request,omitempty"`
 	Resumable       *Resumable       `json:"resumable,omitempty"`
 	Result          *Result          `json:"result,omitempty"`
+	AwaitingReply   *AwaitingReply   `json:"awaiting_reply,omitempty"`
+	Message         *Message         `json:"message,omitempty"`
 }
 
 // Phases of a session, for Status.
@@ -160,6 +168,49 @@ type ApprovalRequest struct {
 	Deadline *time.Time `json:"deadline,omitempty"`
 }
 
+// States of an AwaitingReply.
+const (
+	// AwaitingWaiting is the session stopped until a human replies.
+	AwaitingWaiting = "waiting"
+	// AwaitingResumed is the session going on again, after a reply or
+	// for any other reason.
+	AwaitingResumed = "resumed"
+)
+
+// AwaitingReply is an interactive session's agent waiting for a human
+// (State AwaitingWaiting), with the question it asks if it asks one,
+// and the matching resume when it goes on (AwaitingResumed), with the
+// ID of the message it goes on with if a message woke it.
+type AwaitingReply struct {
+	State    string `json:"state"`
+	Question string `json:"question,omitempty"`
+	// MessageID is the Message that resumed the session.
+	MessageID string `json:"message_id,omitempty"`
+}
+
+// Attachment is a file a message refers to, by reference only: the hub
+// keeps no file a human uploads (docs/hub-interface.md).
+type Attachment struct {
+	Name string `json:"name"`
+	// Ref is where the file is: an https URL, or the ref of one of the
+	// task's own artifacts.
+	Ref       string `json:"ref"`
+	MediaType string `json:"media_type,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+}
+
+// Message is a human's message to an interactive session, sent through
+// the hub. The node reports one it has taken in by its ID; the hub
+// stores and shows its own record of the message, not the node's.
+type Message struct {
+	ID          string       `json:"id"`
+	Text        string       `json:"text,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	// Sender is who sent it, the hub's claim from their sign-on.
+	Sender string    `json:"sender,omitempty"`
+	SentAt time.Time `json:"sent_at,omitzero"`
+}
+
 // Resumable is the CLI's own session id, which resumes the
 // conversation (claude --resume, codex exec resume).
 type Resumable struct {
@@ -249,7 +300,8 @@ func Unmarshal(b []byte, e *Event) error {
 
 func known(t string) bool {
 	switch t {
-	case TypeStatus, TypeTranscript, TypeToolCall, TypeUsage, TypeApprovalRequest, TypeResumable, TypeResult:
+	case TypeStatus, TypeTranscript, TypeToolCall, TypeUsage, TypeApprovalRequest, TypeResumable, TypeResult,
+		TypeAwaitingReply, TypeMessage:
 		return true
 	}
 	return false
@@ -271,6 +323,10 @@ func (e *Event) payload() any {
 		return nilIf(e.Resumable)
 	case TypeResult:
 		return nilIf(e.Result)
+	case TypeAwaitingReply:
+		return nilIf(e.AwaitingReply)
+	case TypeMessage:
+		return nilIf(e.Message)
 	}
 	return nil
 }
@@ -300,6 +356,9 @@ func (e *Event) Redact(redact func(string) string) {
 	if a := e.ApprovalRequest; a != nil {
 		a.Args = redactMap(a.Args, redact)
 		a.Message = redact(a.Message)
+	}
+	if a := e.AwaitingReply; a != nil {
+		a.Question = redact(a.Question)
 	}
 	if r := e.Result; r != nil {
 		r.FinalText = redact(r.FinalText)
