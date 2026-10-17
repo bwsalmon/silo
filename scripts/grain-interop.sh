@@ -388,15 +388,12 @@ round_trip() {
 		{ fail accept "grain accepted hub task $a as task $na, which grain does not have: $(grainapi GET "/api/tasks/$na")"; return 1; }
 	if [ "$claims" = signed ]; then
 		# The signed spec_digest covers the body, so grain files the
-		# prompt byte for byte, with no footer naming the hub task.
+		# prompt byte for byte, with no "Placed here by the Silo hub"
+		# footer: a note grain adds says so in a comment instead.
 		local ta
 		ta="$(grainapi GET "/api/tasks/$na")"
-		echo "$ta" | jq -e --arg p "$PROMPT" '[.. | strings] | index($p) != null' >/dev/null ||
-			{ fail accept "grain task $na, hub task $a under signed claims, has no body that is the prompt byte for byte: $ta"; return 1; }
-		if echo "$ta" | jq -e '[.. | strings | select(contains("Placed here by the Silo hub"))] | length > 0' >/dev/null; then
-			fail accept "grain task $na, hub task $a under signed claims, carries the hub's footer: $ta"
-			return 1
-		fi
+		echo "$ta" | jq -e --arg p "$PROMPT" '(.description // .body) == $p' >/dev/null ||
+			{ fail accept "grain task $na, hub task $a under signed claims, has a body that is not the prompt byte for byte (a footer?): $ta"; return 1; }
 		say "hub task $a's signed claims verified: grain task $na's body is the prompt, with no footer"
 	fi
 	say "hub task $a accepted as grain task $na ($(task_field "$a" state))"
