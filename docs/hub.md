@@ -635,7 +635,13 @@ hub → node  {"type":"welcome","owner":"alice@example.com","heartbeat_seconds":
             or {"type":"error","error":"registry: node belongs to another owner: ws-1"}, then close
 node → hub  {"type":"heartbeat","free":1}       every heartbeat_seconds
 hub → node  {"type":"goodbye","error":"the hub is shutting down"}, then close
+node → hub  {"type":"file_task","request_id":"r-1","task":{"repo":"bwsalmon/web","prompt":"...","origin_task":"t-...","node_task":"42"}}
+hub → node  {"type":"filed","request_id":"r-1","task":{...}}   or {"type":"filed","request_id":"r-1","error":"..."}
 ```
+
+`file_task` is a Grain filing a task at the hub (§6.6), answered by a
+`filed` of the same `request_id`; the hub decides it in the background,
+so heartbeats are not held up behind it.
 
 `goodbye` is `Server.Shutdown`: the hub is going away, and the node
 should reconnect (to its replacement) as after any drop. While it shuts
@@ -903,6 +909,15 @@ in. The web UI uses only these routes and §6.1's, as any client can.
 - Optional **constraints**: node labels (`{"labels":{"zone":"eu"}}`,
   each of which the node must carry with that value), or a node ID
   (`{"node":"ws-1"}`).
+- Optional **depends_on**: up to 16 hub task IDs, each one the caller
+  may see. The task is not placed until each of them is `done`, and is
+  cancelled if one of them ends any other way (§6.2, §6.6). A task's
+  dependencies are fixed when it is filed, and can only name tasks
+  that exist already, so they never form a cycle.
+
+A Grain files a task the same way on its control stream (§4.3), with
+the Grain recorded as its filer and its submitter the human its agent
+works for; who that is, and when it is proposed, is §6.6.
 
 Every task also records its **team**: the team it targets, or the team
 that owned its repository when it was submitted. Dispatch is ordered
@@ -966,7 +981,7 @@ The intake API (`tasks.API`) uses the directory's sign-on and
 visibility (§5.3):
 
 ```
-POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints"}
+POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}
 GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
 GET  /v1/tasks/{id}
 POST /v1/tasks/{id}/cancel {"reason"}                        its submitter, a team admin or a hub admin
@@ -1037,6 +1052,17 @@ each task:
    the node was away), or `refuse` (the node does not have it, so
    nobody is running it, and the task is requeued for any node).
 
+A queued task with `depends_on` is placed only once each of its
+dependencies is `done`; until then each pass leaves it queued, and it
+holds back no other task. If a dependency ends `failed`, `cancelled` or
+`rejected` (or does not exist), the pass cancels the task, with the
+reason `dependency <id> is <state>`, so a task waiting on it in turn
+is cancelled at the next pass. A dependency that is `lost` has not
+ended. A proposed task's dependencies are looked at only once it is
+approved. Every task the dispatcher sees end wakes it, so a dependent
+is placed, and a Grain waiting on the task is told (§6.6), at once
+rather than at the next `Retry`.
+
 A team-targeted task goes to any node that serves one of the team's
 repositories. That node's grain chooses the repository, as it does for
 a task without one.
@@ -1073,10 +1099,13 @@ hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}
             {"type":"cancel","task":{"id":...}}
             {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"...","reason":"..."}
             {"type":"message","task":{"id":...},"message":{"id":"...","text":"...","attachments":[...],"sender":"...","sent_at":"..."}}
+            {"type":"dependency_done","task":{"id":...},"state":"done"|"failed"|"cancelled"|"rejected","reason":"...","node_task":"<local id>"}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
 ```
+
+`dependency_done` is the only message of a stream of its own (§6.6).
 
 When the dispatcher starts, it has no streams. A task that was
 `offered` is requeued, and a task that was `running` is `lost` until
@@ -1312,6 +1341,87 @@ A proposal's submitter outside the team may post once the proposal is
 approved, but does not see the session's events (§7, §6.1). A
 message's `sender` is the hub's claim, as `approved_by` is, which the
 Grain takes on trust (§1.2).
+
+### 6.6 Tasks filed by Grains, and dependencies across Grains (built: `hub/tasks`; grain's side to come)
+
+Phase 1 runs a repository's tasks on its owning team's Grain, and a
+Grain has one backlog. A Grain's agent may still propose work for a
+repository another team owns, and a task on one Grain may have to wait
+for a task on another. Both go through the hub: the Grain files the
+task upward, and the hub's task IDs are what tasks on different Grains
+depend on. The wire is in [hub-interface.md](hub-interface.md); this
+is what the hub does with it.
+
+**Filing.** A Grain sends `file_task` on its control stream (§4.3):
+the target, title and prompt, optionally the hub task its agent is
+running (`origin_task`), the hub tasks the new one depends on, and the
+Grain's own task that waits on it (`node_task`). `tasks.Filer`,
+`rendezvous.Server.FileTask`, decides it:
+
+1. **Rate.** Each node may file 10 at once and one more each minute
+   (`Filer.Burst`, `Filer.Every`, set from the hub's config), counted
+   by the pod holding its connection; refusals count. At most 4
+   filings per node are decided at once.
+2. **Submitter.** An agent-filed task's submitter is the human it works
+   for: `origin_task`'s submitter, where `origin_task` must be a task
+   this node runs now, for the owner it was offered to (anything else
+   is refused as if it did not exist). With no `origin_task`, it is
+   the node's owner. The node and its owner are recorded as
+   `filed_by` and `filed_by_owner`, and `origin_task` with them; none
+   comes from the filing's own say-so.
+3. **Placement and approval**, as for a human (§6.1): the repository's
+   owning team is the task's team. The task is queued only if the
+   submitter *and* the node's owner are members of that team, by
+   `user:<email>`; otherwise it is proposed, for a member of the team to
+   approve. A team-targeted filing needs both in the team. The origin
+   task's `approved_by` is never carried over.
+4. **Dependencies** must each be visible to the node's owner.
+5. With `node_task`, a **watcher** is recorded (`tasks.task_watchers`):
+   that node's local task waits on the new hub task.
+
+So an agent cannot launder approval through a Grain. Running on a
+team member's Grain does not make an outsider's request the member's:
+the outsider remains the submitter, the task is proposed, and, as its
+submitter, they cannot approve it. A member of the team approves it,
+or nobody does. Membership is checked by `user:<email>` because the
+hub does not know the groups of a human who is not signed in, so
+someone in the team only through a group sees their agent's filings
+proposed. This is the safe side to err on.
+
+**Dependencies.** The dispatcher holds a task until its dependencies
+are done, and cancels it when one ends otherwise (§6.2). This works
+the same whichever Grains the tasks run on, because the hub, not a
+Grain, places both.
+
+**Telling a Grain.** When a hub task with watchers ends, whichever
+way, the dispatcher writes each watcher's node a `dependency_done`
+with the task's ID, end state and reason and the node's `node_task`,
+as the only message of a stream it opens for it (`Server.Open`, so
+from whichever pod holds the lease, §2.2.3). It does so only to a node
+online and registered by the owner that filed, as a pending cancel is
+(§6.2), and when it is next online if it is away. The watcher is
+marked delivered once written; a dispatcher that restarts between the
+write and the mark writes it again, so a Grain takes each one once.
+The Grain unblocks its local task on `done`. On any other end the hub
+task will never be done, and what becomes of the local task is the
+Grain's local policy; failing it, as the hub cancels a hub task whose
+dependency failed, is the expected one.
+
+**Failure and cancel semantics**, in one place:
+
+| What happens | The hub task that depends on it | The Grain's waiting local task |
+| --- | --- | --- |
+| The dependency is `done` | Placed, once approved if it was proposed | `dependency_done` `done`: unblocked |
+| The dependency `failed`, or was `cancelled` or `rejected` | Cancelled: `dependency <id> is <state>`, which cascades to its own dependents | `dependency_done` with that state: not run as if done |
+| The dependency is `lost` | Waits: a lost task has not ended (§6.3) | Waits |
+| The dependent is cancelled | Its dependencies are untouched | n/a |
+| The origin task ends, whichever way | The filed task is its own task and lives on | n/a |
+| The Grain cancels its local task | The hub task lives on; a Grain cannot cancel a hub task, but its submitter, a team admin or a hub admin can | Ignores the later `dependency_done` |
+| The filing Grain is away, or re-registered by another owner | n/a | Told when it is next online under its owner |
+
+What is not built: a Grain cannot cancel a task it filed, or watch a
+hub task it did not file. Either would be another control message,
+with the same owner binding.
 
 ## 7. Live events and privacy (built: `hub/live`)
 
