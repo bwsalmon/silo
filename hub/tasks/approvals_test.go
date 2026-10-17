@@ -236,7 +236,7 @@ func TestAPIAnswer(t *testing.T) {
 	allow := map[string]string{"decision": "allow"}
 	for _, c := range []struct {
 		user, id string
-		body any
+		body     any
 		want     int
 	}{
 		{"", "r-1", allow, http.StatusUnauthorized},
