@@ -33,10 +33,20 @@
       "type": "object",
       "properties": {"labels": {"type": "object", "additionalProperties": {"type": "string"}}, "node": {"type": "string"}}
     },
-    "capabilities": {
-      "description": "Names of capabilities requested; never secret material (§11.6)",
+    "capability_approvals": {
+      "description": "Approvals of the capabilities this task requests that need one (§5.7), each by a principal the capability's approval names, set after the task is approved. Not part of the frozen spec: it is the approval, as approved_by is",
       "type": "array",
-      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:/._-]*$"}
+      "items": {
+        "type": "object",
+        "properties": {
+          "ref": {"$ref": "common.schema.json#/$defs/refString"},
+          "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The resolved chain it approves: any change to a link is a new approval"},
+          "by": {"$ref": "common.schema.json#/$defs/principal"},
+          "at": {"$ref": "common.schema.json#/$defs/time"}
+        },
+        "required": ["ref", "digest", "by", "at"],
+        "additionalProperties": false
+      }
     },
     "auto_merge": {"type": "boolean"},
     "template": {
@@ -63,6 +73,7 @@
     },
     "repo": false,
     "base": false,
+    "capabilities": false,
     "reads": false,
     "writes": false,
     "id": false,

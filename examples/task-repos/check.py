@@ -32,6 +32,13 @@ This is a reviewer's aid, not the implementation. It:
   each kind: asset sidecar's asset, sha256 and bytes;
 - derives each task's status from its runs, and prints each lane's
   effective order, and each Grain's next picks across its lanes;
+- resolves capability objects (§5.7): each chain of bases to a base type,
+  with cycle detection and a depth limit; applies the built-in reducers to
+  the Grain's published base declaration; checks the chain against an
+  illustrative local policy (sanctioned bases and definition sources,
+  implied egress and repos); reports Anselm reducers as not evaluable,
+  which refuses the request until Anselm is adopted; and checks that a
+  requested capability is in the Grain's namespace;
 - recomputes requirement hashes;
 - renders each template fixture with Python Jinja2 under StrictUndefined.
 
@@ -59,6 +66,7 @@ HOSTED = {
     "https://git.example.com/hub/widgets.git": "widgets-code",
     "https://silo.example.com/git/hub/placements.git": "hub-placements",
     "https://silo.example.com/git/org/templates.git": "org-templates",
+    "https://silo.example.com/git/org/capabilities.git": "org-capabilities",
     "https://silo.example.com/git/demo/namespaces.git": "ns-demo",
 }
 EXTERNAL = ("https://github.com/",)  # real repos: referenced, not fetched here
@@ -71,6 +79,22 @@ CONFIG = ("include", "exclude")
 ASSET = "(asset)"
 CONTEXT_LIMITS = {"entries": 64, "depth": 3, "reached_files": 256, "reached_bytes": 64 << 20, "file_bytes": 32 << 20}
 LIMITS = {"depth": 8, "includes_per_space": 64, "spaces": 256, "repos": 32, "objects": 50000}
+CAPABILITY_DEPTH = 8
+# Grain eu's local policy for capabilities, as §5.7 sketches it. A real
+# policy is the Grain's own configuration, not a task-repo file.
+POLICY = {
+    "eu": {
+        "bases": ["git@v1", "gcp-service-account@v1"],
+        "sources": [
+            {"source": "https://silo.example.com/git/grains/eu.git//", "bases": "*"},
+            {"source": "https://silo.example.com/git/org/capabilities.git//", "bases": ["gcp-service-account@v1"]},
+            {"source": "https://silo.example.com/git/hub/shared.git//capabilities/", "bases": ["gcp-service-account@v1"]},
+        ],
+        "egress": ["oauth2.googleapis.com", "sts.googleapis.com", "*.googleapis.com"],
+        "repos": ["https://github.com/bwsalmon/*", "https://silo.example.com/git/hub/*", "https://git.example.com/hub/*"],
+        "anselm": None,  # no Anselm evaluator yet
+    },
+}
 errors = []
 
 
@@ -220,7 +244,7 @@ def edges(fm):
     for e in (fm.get("context") or []) if kind in ("task", "template", "schedule") else []:
         e = entry(e)
         if e.get("ref"):
-            add("context", e["ref"])
+            add("context", e["ref"], "capability" if e["mode"] == "use" else None)
     if kind == "task":
         add("template", fm.get("template"), "template")
         add("schedule", fm.get("schedule"), "schedule")
@@ -255,6 +279,8 @@ def edges(fm):
         add("template", fm.get("template"), "template")
     elif kind == "include":
         add("target", fm.get("target"))
+    elif kind == "capability":
+        add("base.capability", (fm.get("base") or {}).get("capability"), "capability")
     elif kind == "exclude":
         for r in fm.get("names") or []:
             add("names", r, pinned=True)  # may name what is not there (yet)
@@ -344,7 +370,7 @@ def materialise(objs, repo, path, fm):
     plans them (the PEP is the examples' own: everything readable here)."""
     plan, skipped, queue, budget = [], [], [], {"files": 0, "bytes": 0}
     for e in map(entry, fm.get("context") or []):
-        if target_type(e["ref"]) != "file":
+        if target_type(e["ref"]) != "file" or e["mode"] == "use":
             continue
         ident, t, _ = resolve(objs, repo, path, e["ref"])
         if ident is None:
@@ -419,6 +445,12 @@ def check_context(objs, repo, path, fm, report):
             write_base[url] = at
         if e.get("depth") and what != "file":
             err(f"{repo}/{path}: context entry {n}: depth is for files only")
+        if e.get("reducers") and e["mode"] != "use":
+            err(f"{repo}/{path}: context entry {n}: reducers are for use entries only")
+        if e["mode"] == "use":
+            if what != "file" or e.get("depth") or e.get("path"):
+                err(f"{repo}/{path}: context entry {n}: use names one capability object, with no depth or path")
+            continue  # a request: nothing of the file lands (§5.7)
         resolved.append((e, what, url, ipath, at))
     if kind != "task":
         return
@@ -444,6 +476,114 @@ def check_context(objs, repo, path, fm, report):
     for link, via, why in skipped:
         report.append(f"  skipped {link} (via {short(via)}): {why}")
     return reached
+
+
+def seconds(v):
+    """A limit's max: a number of seconds, or a duration such as 30m or 1h."""
+    if isinstance(v, int):
+        return v
+    m = re.match(r"^(\d+)([smhd])$", v)
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def narrow_set(current, allow):
+    """subset: keep what both the current set and allow admit (globs either side)."""
+    import fnmatch
+    out = [v for v in current if any(fnmatch.fnmatchcase(v, a) for a in allow)]
+    out += [a for a in allow if a not in out and any(fnmatch.fnmatchcase(a, c) for c in current)]
+    return out
+
+
+def bases_of(objs, grain):
+    """The base declarations a Grain publishes in its root (§5.7)."""
+    return {fm["type"]: ((r, p), fm) for (r, p), (fm, _) in objs.items()
+            if fm["kind"] == "capability-base" and fm["grain"] == grain}
+
+
+def source_ok(ident, base_type, policy):
+    url = next(u for u, d in HOSTED.items() if d == ident[0])
+    for s in policy["sources"]:
+        sep = s["source"].find("//", s["source"].index("://") + 3)
+        surl, spath = s["source"][:sep], s["source"][sep + 2:]
+        if url == surl and ident[1].startswith(spath) and (s["bases"] == "*" or base_type in s["bases"]):
+            return True
+    return False
+
+
+def chain_of(objs, repo, src, ref):
+    """Follow a capability's base references to its base type (§5.7): the
+    chain base-most first, or (None, reason)."""
+    chain, seen = [], []
+    while True:
+        ident, fm, _ = resolve(objs, repo, src, ref)
+        if ident is None:
+            return None, f"{ref}: {fm}"
+        if fm is None or fm.get("kind") != "capability":
+            return None, f"{ref}: not a capability"
+        if ident in seen:
+            return None, "capability cycle: " + " -> ".join(short(i) for i in seen + [ident])
+        seen.append(ident)
+        chain.insert(0, (ident, fm))
+        if len(chain) > CAPABILITY_DEPTH:
+            return None, f"a chain longer than {CAPABILITY_DEPTH}"
+        if "type" in fm["base"]:
+            return chain, fm["base"]["type"]
+        repo, src, ref = ident[0], ident[1], fm["base"]["capability"]
+
+
+def effective(objs, grain, chain, base_type, extra):
+    """Apply every reducer, base-most first, to the Grain's declared maximum.
+    Returns (dimensions, implies, pending, refusal)."""
+    policy = POLICY[grain]
+    if base_type not in policy["bases"]:
+        return None, None, [], f"base {base_type} is not in {grain}'s policy"
+    decl = bases_of(objs, grain).get(base_type)
+    if not decl:
+        return None, None, [], f"{grain} does not implement {base_type}"
+    for ident, fm in chain:
+        if not source_ok(ident, base_type, policy):
+            return None, None, [], f"{short(ident)}: not a sanctioned source for {base_type}"
+    dims = {k: (list(v["maximum"]) if v["kind"] == "set" else v["maximum"]) for k, v in decl[1]["dimensions"].items()}
+    pending = []
+    steps = [(short(i), n, r) for i, fm in chain for n, r in enumerate(fm.get("reducers") or [], 1)]
+    steps += [("the task's entry", n, r) for n, r in enumerate(extra, 1)]
+    for where, n, r in steps:
+        if r["language"] == "anselm":
+            if policy["anselm"] is None:
+                pending.append(f"{where} reducer {n} ({r.get('id', 'anselm')}, on {r['on']})")
+            continue
+        if r["type"] in ("subset", "limit"):
+            d = decl[1]["dimensions"].get(r["dimension"])
+            if d is None:
+                return None, None, [], f"{where} reducer {n}: {base_type} has no dimension {r['dimension']}"
+            if r.get("on") and r["on"] not in d["narrow"]:
+                return None, None, [], f"{where} reducer {n}: {r['dimension']} cannot be narrowed on {r['on']}"
+            if r["type"] == "subset":
+                dims[r["dimension"]] = narrow_set(dims[r["dimension"]], r["allow"])
+                if not dims[r["dimension"]] and d.get("required"):
+                    return None, None, [], f"{where} reducer {n}: {r['dimension']} is empty"
+            else:
+                dims[r["dimension"]] = min(dims[r["dimension"]], seconds(r["max"]))
+        elif r["type"] == "not_after":
+            dims["not_after"] = min(dims.get("not_after", r["at"]), r["at"])
+    if "accounts" in dims and "projects" in dims:
+        # Provider logic, not a reducer: the GCP base mints only for an
+        # account in a remaining project (its declaration's note).
+        dims["accounts"] = [a for a in dims["accounts"]
+                            if any(a.endswith(f"@{p}.iam.gserviceaccount.com") for p in dims["projects"])]
+        if not dims["accounts"]:
+            return None, None, [], "no account qualifies"
+    implies = {}
+    for k, v in decl[1]["implies"].items():
+        implies[k] = dims.get(v["from"], []) + v.get("plus", []) if isinstance(v, dict) else v
+    import fnmatch
+    for host in implies.get("egress", []):
+        if not any(fnmatch.fnmatchcase(host, a) for a in policy["egress"]):
+            return None, None, [], f"implies egress to {host}, not in {grain}'s network policy"
+    for r in implies.get("repos", []):
+        if not any(fnmatch.fnmatchcase(r, a) for a in policy["repos"]):
+            return None, None, [], f"implies repo {r}, not in {grain}'s repos policy"
+    return dims, implies, pending, None
 
 
 def section_hashes(text):
@@ -850,6 +990,8 @@ def main():
         ("us", "hub-shared", "schedules/granule-pull.md", False),        # the root's exclude
         ("us", "grain-us", "schedules/granule-pull-weekly.md", True),
         ("us", "hub-shared", "templates/granule-pull.md", False),        # referenced, never included
+        ("eu", "hub-shared", "capabilities/widgets-deployer.md", True),  # available to request
+        ("eu", "org-capabilities", "gcp/acme-widgets.md", False),        # a base in its chain, not offered
     ]
     for grain, repo, path, want in expect:
         if has(grain, repo, path) != want:
@@ -872,6 +1014,55 @@ def main():
         at = fm["target"].rsplit("@", 1)[-1] if "@" in fm["target"] else ""
         if fm.get("ref_mode") == "track" and re.match(r"^[0-9a-f]{40}$", at):
             err(f"{repo}/{path}: track names a branch, not a commit")
+
+    # Capabilities (§5.7): every chain resolves to a base type, and each
+    # request is checked against the Grain's base declaration and policy.
+    for (repo, path), (fm, body) in objs.items():
+        if fm["kind"] == "capability":
+            chain, why = chain_of(objs, repo, path, "/" + path)
+            if chain is None:
+                err(f"{repo}/{path}: {why}")
+        if fm["kind"] == "capability-base":
+            for k, v in (fm.get("implies") or {}).items():
+                if isinstance(v, dict) and v["from"] not in fm["dimensions"]:
+                    err(f"{repo}/{path}: implies {k} from {v['from']}, which is not a dimension")
+    loop = dict(objs)
+    for a, b in (("a", "b"), ("b", "a")):
+        loop[("hub-shared", f"capabilities/{a}.md")] = ({"kind": "capability", "base": {"capability": f"{b}.md"}}, "")
+    if "capability cycle" not in (chain_of(loop, "hub-shared", "x.md", "capabilities/a.md")[1] or ""):
+        err("a capability cycle was not detected")
+    got_caps = {}
+    for (repo, path), (fm, body) in sorted(objs.items()):
+        if fm["kind"] != "task":
+            continue
+        for n, e in enumerate(map(entry, fm.get("context") or []), 1):
+            if e["mode"] != "use":
+                continue
+            chain, base_type = chain_of(objs, repo, path, e["ref"])
+            if chain is None:
+                err(f"{repo}/{path}: context entry {n}: {base_type}")
+                continue
+            for grain in sorted(POLICY):
+                listed = chain[-1][0] in spaces[grain][3]
+                dims, implies, pending, refusal = effective(objs, grain, chain, base_type, e.get("reducers") or [])
+                head = f"capability {repo}/{path} entry {n} on {grain}: "
+                report.append(head + " -> ".join(short(i) for i, _ in chain) + f" over {base_type}")
+                if not listed:
+                    refusal = refusal or f"{short(chain[-1][0])} is not in {grain}'s namespace"
+                if refusal:
+                    report.append(f"  refused: {refusal}")
+                    got_caps[(repo, path, n, grain)] = ("refused", refusal)
+                    continue
+                report.append("  effective: " + ", ".join(f"{k}={v}" for k, v in dims.items()))
+                report.append("  implies: " + ", ".join(f"{k}={v}" for k, v in implies.items()))
+                for p in pending:
+                    report.append(f"  not evaluable here: {p}; {grain} refuses the request until it can evaluate Anselm")
+                got_caps[(repo, path, n, grain)] = (dims, pending)
+    want = got_caps.get(("hub-intake", "tasks/2026-10-17-widgets-preview-deploy/task.md", 2, "eu"))
+    if not want or want[0] == "refused" or want[0]["projects"] != ["acme-widgets"] \
+            or want[0]["roles"] != ["roles/run.developer", "roles/iam.serviceAccountUser"] \
+            or want[0]["token_lifetime"] != 1800 or len(want[1]) != 1:
+        err(f"widgets-preview-deploy's capability on eu: {want}, expected acme-widgets, two roles, 1800s and one Anselm reducer pending")
 
     report.append("tasks:")
     for ident, (fm, body) in sorted(objs.items()):

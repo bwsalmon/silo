@@ -111,6 +111,7 @@
       "type": "string"
     },
     "capabilities": {
+      "description": "Legacy capability names of a .grain/ declaration, kept verbatim (§12.1). Filing turns each into a use entry of the task's context:, naming the legacy capability object for that name (§13.2). New templates list use entries in context: instead",
       "type": "array",
       "items": {
         "type": "string"

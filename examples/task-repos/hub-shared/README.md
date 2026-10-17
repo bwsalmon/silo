@@ -17,17 +17,18 @@ aliases:
   grain-code: https://github.com/bwsalmon/grain.git
   silo-code: https://github.com/bwsalmon/silo.git
   org: https://silo.example.com/git/org/templates.git
+  org-caps: https://silo.example.com/git/org/capabilities.git
 writers:
   - who: ["team:hub#maintainer"]
     may: [create, update, move]
-    kinds: [template, schedule, design, include, exclude]
+    kinds: [template, schedule, design, include, exclude, capability]
     fields: "*"
     note: >-
       Definitions are never deleted: a rename or reorganisation leaves a
       kind: moved tombstone at the old path (docs/task-repos.md §2.1).
   - who: ["team:hub#member"]
     may: [create, update]
-    kinds: [template, schedule, design, include, exclude]
+    kinds: [template, schedule, design, include, exclude, capability]
     fields: "*"
     refs: ["review/*"]
     note: >-
@@ -36,7 +37,7 @@ writers:
       branch's author (docs/task-repos.md §8.11).
   - who: ["team:hub#approver"]
     may: update
-    kinds: [template, schedule, design, include, exclude]
+    kinds: [template, schedule, design, include, exclude, capability]
     fields: "*"
     merge_of: "review/*"
   - who: [silo]
@@ -68,3 +69,9 @@ referring repo's README.
   folders in `hub/placements` (§6.2).
 - `designs/` holds design docs with `{#HS-n}` requirement anchors. Silo
   plans them on every merge to `main`.
+- `capabilities/` holds the team's capability objects (`kind:
+  capability`). `widgets-deployer.md` narrows the org's
+  `org-caps:gcp/acme-widgets.md`, pinned at `v1`, by role and token
+  lifetime, and with a per-use Anselm reducer. A Grain that includes this
+  folder can offer them to tasks; it honours them only if its local
+  policy sanctions this folder as a source (§5.7).
