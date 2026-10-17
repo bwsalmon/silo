@@ -1128,19 +1128,11 @@ capability objects and their bases, a trigger's or task's template,
 template partials, `depends_on`, `implements`, `derived_from`.
 
 ```
-resolve(ref, from, reader_credential, expected_kinds):
-    loc = expand(ref, aliases of from's repo .grainconfig)     # §4
-    for hop in 1..LIMITS.redirects:                            # 8
-        if exists(loc):                                        # sparse: this path's trees (§3.10)
-            check suffix(loc) in expected_kinds, else WRONG_KIND   # a template where a task
-            return parse(fetch_one(loc))                       # was expected is an error
-        if exists(loc + ".moved.md"):                          # the tombstone beside it (§2.1)
-            loc = resolve_relative(parse(fetch_one(loc + ".moved.md")).to); continue
-        if exists(archive_mapping(loc)):                       # §3.8: one more lookup
-            return parse(fetch_one(archive_mapping(loc)))      # read-only, never active
-        if repo's .grainconfig has moved_to: loc = same path in moved_to; continue
-        return DANGLING                                        # reported, never widened
-    return TOO_MANY_HOPS
+resolve_reference(ref, from, expected_kinds):
+    T = resolve(ref, from, reader's credential, ALLOW)   # §5.6: the one resolver
+    if T is dangling: report; return DANGLING            # never widened
+    check kind(T) in expected_kinds, else WRONG_KIND     # from the suffix: no blob read
+    return T                                             # parsed only when the caller needs fields
 ```
 
 Resolving is a **read** with the reader's own credential (§11.18). It
@@ -1357,7 +1349,7 @@ Examples:
   `git clone` argument. The `//` separator is the one Terraform uses, and
   it is the first `//` after the URL's `scheme://authority`.
 - `shared:designs/hub-intake.md#HS-3`: an **alias**, declared in the
-  referring repo's README. It resolves to exactly the URL form. An alias
+  referring repo's `.grainconfig` (§3.4). It resolves to exactly the URL form. An alias
   that is not declared is an error, never a guess.
 
 **A reference in front matter is a string** in this grammar. Where an
@@ -1372,10 +1364,9 @@ Those are for humans and carry no meaning.
 
 1. **Canonicalise.** Expand the alias, and resolve a relative path
    against the referring file, to get the canonical global identity
-   (§2.1). The aliases are those of the README that governs the
-   referring file, found by nearest-README discovery (§3.1): an object in
-   a code repo's `.grain/` uses `.grain/README.md`'s aliases, not the
-   code's README. A `/`-rooted path is rooted at the repo.
+   (§2.1). The aliases are those of the referring repo's `.grainconfig`
+   (§3.4), one file at the repo root; nothing is discovered by walking
+   folders. A `/`-rooted path is rooted at the repo.
 2. **Unpinned references** resolve to the tip of the target repo's
    `default_ref` at the moment they are read. Anything recorded for
    traceability records the commit sha that was actually used: a task's
@@ -1385,9 +1376,11 @@ Those are for humans and carry no meaning.
    pinned.
 3. **Pinned references** (`@v3`, `@<sha>`) resolve to exactly that ref.
    A branch pin follows the branch's tip.
-4. **Redirects.** If the target repo's README has `moved_to`, retry at
-   that URL with the same path. If the file is `kind: moved`, follow its
-   `to:`, resolved relative to the tombstone. Each is one hop:
+4. **Redirects.** If the target repo's `.grainconfig` has `moved_to`,
+   retry at that URL with the same path. If the path is missing and a
+   tombstone, `<path>.moved.md`, sits beside it, follow its `to:`,
+   resolved relative to the tombstone. If neither, try the archive
+   mapping (§3.8), which is not a hop. Each redirect is one hop:
    - a reader follows **at most 8 hops** in total;
    - it keeps the set of canonical identities it has visited. Arriving at
      one twice is a **redirect loop**;
@@ -1445,12 +1438,11 @@ sidecars, and `aka` → path.
 | trigger → workflow | `fires: {workflow: <path>}` | a plain path to a workflow file in the trigger's own repo (§12.2) |
 | trigger → watched designs | `on.design-change.designs: [<ref>]` | read on each event; adds no name (§7.4) |
 | gate → its review templates | `requires.security_review.template`, `requires.second_review.template` | optional; grain's built-in otherwise (§6.3) |
-| comment → what it discusses | `run: <ref>` or `task: <ref>` | usually `../run.md` or `../task.md` (§5.4) |
+| comment → what it discusses | `run: <ref>` or `task: <ref>` | usually `../<utc>.run.md` or `../../<name>.task.md` (§5.4) |
 | tombstone → new address | `to: <ref>` | the moved object lists the old address in `moved_from` |
-| include → what it includes | `target: <ref>@<gitref>` + `ref_mode`, `kinds` | **the only edge that adds names to a namespace** (§3.3) |
-| exclude → what it cuts | `names: [<ref>]`, `patterns` | subtracts from its own space only; may name what is not there |
+| Grain config → its active roots | `backlog.lanes[].path`, `triggers[].path`, `memory[].path`, each with `ref_mode` and `ignore` | **the only edges that make anything active** (§3.3) |
 | trigger → the trigger it was customised from | `derived_from: <ref>` | provenance only: inherits nothing (§6.2) |
-| repo → its new URL | README `moved_to` | a repo-level redirect |
+| repo → its new URL | `.grainconfig` `moved_to` | a repo-level redirect |
 | task → what its sandbox holds | `context: [{ref, mode, path, depth}]` | **the only edge that materialises anything** (§5.6); a relative entry reads the task's own commit |
 | comment → its attachments | `attachments: [<ref>]` | assets beside the comment (§2.2) |
 | capability → its base | `base: {capability: <ref>}`, or `{type: <base type>}` | narrows that object further; a chain is resolved with cycle detection and a depth limit, and every link must be a sanctioned source (§5.7) |
@@ -1552,16 +1544,16 @@ database projection.
 
 ### 5.2 Backlogs: folders of ranked references
 
-A repo's own backlog is the `kind: ref` files in its backlog folders
-(`backlog/` by default, §3). A Grain's queue is every reference in its
-namespace, from its own lane and from the lanes it includes (below).
-Each reference is small:
+A repo's backlog is a folder of `*.ref.md` files (`backlog/` by
+convention). A Grain's queue is every reference its `backlog:` lanes
+activate (§3.3): its own lane, Silo's folder for it, and any other lane
+its owner names. Each reference is small:
 
 ```yaml
 ---
 kind: ref
 schema: grain/ref@v1
-to: "intake:tasks/2026-10-16-approval-flow/task.md"
+to: "intake:tasks/2026-10-16-approval-flow.task.md"
 spec_rev: 0c4e9a7b5d3f1e2a6b8c9d0e1f2a3b4c5d6e7f80   # the task commit placement read
 rank: "t"                   # LexoRank-style key, compared bytewise
 priority: high              # optional: urgent | high | normal (default) | low
@@ -1588,15 +1580,14 @@ file. Two people reordering different references never conflict. Two
 reordering the same one conflict on one field, and the second push
 rebases and re-applies its move.
 
-**Lanes.** A Grain's queue is every `kind: ref` in its namespace (§3.3).
-They come from several sources, each with its own writer: the root's own
-`backlog/`, Silo's placements for this Grain, perhaps a second team's
-placements or a colleague's shared queue. **Each source is a lane**: the
-folder that holds a reference is its lane, so a reference's lane does not
-depend on the route that brought it. **Ranks are compared only within a
-lane.** Two writers' ranks are not comparable (Silo's `t` and the
-owner's `t` mean nothing to each other), so merging them would let
-whichever writer picked more extreme keys win.
+**Lanes.** A Grain's queue comes from several sources, each with its own
+writer: the root's own `backlog/`, Silo's folder for this Grain, perhaps a
+second team's placements or a colleague's shared queue. **Each backlog
+entry in `grain.config.md` is a lane** (§3.3): a reference belongs to the
+most specific entry that lists it, so its lane is fixed by its folder.
+**Ranks are compared only within a lane.** Two writers' ranks are not
+comparable (Silo's `t` and the owner's `t` mean nothing to each other), so
+merging them would let whichever writer picked more extreme keys win.
 
 **Effective order within a lane:**
 
@@ -1607,16 +1598,16 @@ whichever writer picked more extreme keys win.
 4. then `rank`;
 5. then the task's `created_at`, and finally the reference's path.
 
-**Between lanes, the root decides**, with `lanes` in its README:
+**Between lanes, the root decides**, with `backlog:` in its
+`grain.config.md`:
 
 ```yaml
-lanes:
+backlog:
   mode: weighted            # strict (the default) | weighted | round_robin
-  order:                    # first is highest; each entry matches its lane and the folders under it
-    - {lane: "placements:grains/eu/backlog/", weight: 3}
-    - {lane: backlog/, weight: 1}
-  unlisted: last            # lanes not named: after the listed ones, by name (default), or ignore
   expedite: lane            # Silo's expedite reorders within its lane (default), or global
+  lanes:                    # first is highest
+    - {name: silo, path: "placements:grains/eu/backlog/@main", ref_mode: track, weight: 3}
+    - {name: own, path: backlog/, weight: 1}
 ```
 
 - **`strict`**: take the first runnable reference of the first listed
@@ -1624,33 +1615,21 @@ lanes:
   hold up the next lane.
 - **`weighted`**: smooth weighted round-robin over the lanes that have a
   runnable reference. Each pick, every such lane gains its weight in
-  credit; the lane with the most credit (ties in `order`) gives its next
-  reference, and pays the total. With weights 3 and 1, Silo's lane gets
-  three picks in four. The credits are runtime state, in the Grain's
-  database, not in git.
+  credit; the lane with the most credit (ties in list order) gives its
+  next reference, and pays the total. With weights 3 and 1, Silo's lane
+  gets three picks in four. The credits are runtime state, in the
+  Grain's database, not in git.
 - **`round_robin`**: `weighted` with every weight 1.
 
 A Grain skips references whose task is `cancelled`, or which it already
 has an open or closed run of, and picks a task referenced from two lanes
 once, at whichever comes first.
 
-**Why lane priority is declared in the root README, not on the include
-objects:**
-
-- **It is one decision about the set of lanes**, not a property of any
-  one of them. Spread over include objects as numbers, it would be a
-  merged rank again, across files with different writers.
-- **The root's owner owns it.** An include object deep in a branch, which
-  someone else wrote (Silo's folder could hold one), must not be able to
-  promote its own lane. Kinds narrowing bounds *what* a branch brings,
-  not how urgent it says it is.
-- **A lane can arrive with no include object in the root at all**:
-  through a transitive include, or as the root's own `backlog/`.
-- **It is metadata, and it changes rarely**, so a README field neither
-  holds objects nor becomes a contended file. The includes stay
-  standalone objects, so linking and unlinking (§8.12) still touch only
-  their own files, and an unlisted lane falls in after the listed ones
-  until the owner places it.
+**Why lane priority is declared in `grain.config.md`:** it is one
+decision about the set of lanes, not a property of any one of them, and
+the root's owner owns it. A lane's writer (Silo, for its folder) cannot
+promote its own lane, because nothing it writes is read for priority.
+Every lane is an entry in the same file, so there are no unlisted lanes.
 
 In the examples, Grain `eu` weights Silo's lane 3 to 1 against its own,
 and `check.py` prints the order it would take its runnable references:
@@ -1666,8 +1645,8 @@ the expedited `2026-10-16-reject-dangling-refs` and the `high`
   of a redirect chain. Whoever reorders a Grain's placements, the Grain's
   owner included, does it through Silo's UI or API (`grain backlog move`
   calls it for a placement), and Silo commits with `ranked_by` set to
-  them. The owner's last word over their Grain is the lane order and
-  their own excludes, not Silo's ranks.
+  them. The owner's last word over their Grain is the lane order, and
+  whether Silo's folder is a lane at all, not Silo's ranks.
 - **The root's own lane** (`backlog/`): the Grain and its owner, for
   everything: the references, their ranks, adding and removing them.
 - **In an intake's backlog**, the team's members own `rank` and
@@ -1678,15 +1657,15 @@ the expedited `2026-10-16-reject-dangling-refs` and the `high`
 **Lanes for triggered and gated work.** A trigger's firing on a Grain
 (§6.2) writes its reference in the root, in `backlog/fired/`, and the
 review tasks a gate files on a Grain's merge queue (§6.3) in
-`backlog/gated/`. Each folder is a lane of its own, written by the Grain.
-An `order` entry for `backlog/` matches both, so by default they sort
-with the owner's own work; an owner who wants standing work weighed
-against ad-hoc work, or held merges cleared first, lists them
-separately (`{lane: backlog/gated/, weight: 4}`). A firing in Silo is
-placed like any task: its reference is a placement, in Silo's lane, or
-waits in the intake's backlog for a Grain (§6.2). A gate review that
-Silo files sits in the intake's backlog, ahead of the team's unplaced
-work, because a merge is waiting on it.
+`backlog/gated/`. Both are under the own lane's folder, so by default
+they sort with the owner's own work. An owner who wants standing work
+weighed against ad-hoc work, or held merges cleared first, adds an entry
+for the subfolder (`{name: gated, path: backlog/gated/, weight: 4}`),
+which, being more specific, takes those references out of `backlog/`'s
+lane (§3.3). A firing in Silo is placed like any task: its reference is
+a placement, in Silo's lane, or waits in the intake's backlog for a Grain
+(§6.2). A gate review that Silo files sits in the intake's backlog, ahead
+of the team's unplaced work, because a merge is waiting on it.
 
 **One task, many views.** The intake's references are the team's
 ordering of its unplaced work. The same task can be referenced from the
@@ -1730,8 +1709,8 @@ runtime state (§1.2).
 ---
 kind: run
 schema: grain/run@v1
-task: {ref: "intake:tasks/4310-carry-approver/task.md", rev: <intake commit>}
-from: {ref: "placements:grains/eu/backlog/4310-carry-approver.md", rev: <placements commit where it was read>}
+task: {ref: "intake:tasks/4310-carry-approver.task.md", rev: <intake commit>}
+from: {ref: "placements:grains/eu/backlog/4310-carry-approver.ref.md", rev: <placements commit where it was read>}
 grain: eu
 state: done                 # accepted | running | waiting | done | failed | refused | cancelled | superseded
 accepted_at: "2026-10-16T13:58:30Z"
@@ -1742,12 +1721,15 @@ closed:
   summary: …
   change: {url: …, branch: grain/eu/task-4310, merge_commit: 5623aa25…}
   design_revs: [{item: …#HS-2, rev: …, hash: …}]
-  follow_ups: ["intake:tasks/2026-10-16-approval-flow/task.md"]
+  follow_ups: ["intake:tasks/2026-10-16-approval-flow.task.md"]
 ---
 <optional: the closing report, in prose>
 ```
 
-This file is `eu:runs/4310-carry-approver/run.md`.
+This file is `eu:runs/4310-carry-approver/20261016T135830Z.run.md`. Once closed
+for the Grain's retention period, the Grain archives the folder to
+`runs/archive/4310-carry-approver/`, and references to it still resolve
+through the archive mapping (§3.8).
 
 ```
 accepted → running ⇄ waiting → done | failed | cancelled
@@ -1813,22 +1795,22 @@ the team's intake; where it lives once it is approved is **an option**,
 | Mode | Where an approved task's file lives | For |
 | --- | --- | --- |
 | **`intake`** (the default) | the team's intake, where it was proposed. Code repos hold only the definitions someone deliberately committed there | most work: nothing is written to a code repo but the work itself |
-| **`code-repo`** | the target code repo's grain folder (`.grain/tasks/<name>/task.md`), committed on approval through that repo's own review and merge. The intake path becomes a tombstone | teams that want every task reviewed and versioned with the code |
+| **`code-repo`** | the target code repo's grain folder (`.grain/tasks/<name>.task.md`), committed on approval through that repo's own review and merge. The intake path becomes a tombstone | teams that want every task reviewed and versioned with the code |
 | **`promote`** | the intake, until an explicit **promote** moves it into the code repo, leaving a tombstone | long-lived or design-linked work, chosen task by task |
 
-**Configuring it.** The team's setting is in its intake's README; a
-code repo's is in its `.grain/README.md`:
+**Configuring it.** The team's setting is in its intake's `.grainconfig`;
+a code repo's is in its own `.grainconfig` (§3.4):
 
 ```yaml
-# hub-intake/README.md: the team
+# hub-intake/.grainconfig: the team
 task_home:
   mode: intake                          # the team's default
   allow: [intake, promote, code-repo]   # what a code repo may choose for itself (default: all three)
   repos:                                # per-repo overrides
     https://git.example.com/hub/widgets.git: promote
 
-# widgets/.grain/README.md: the code repo
-task_home: {mode: promote, path: tasks/}  # path: where tasks are committed, under this README
+# widgets/.grainconfig: the code repo
+task_home: {mode: promote, path: .grain/tasks/}  # path: where tasks are committed, repo-relative
 ```
 
 A bare mode (`task_home: promote`) is short for `{mode: promote}`. The
@@ -1836,7 +1818,7 @@ A bare mode (`task_home: promote`) is short for `{mode: promote}`. The
 set, for the code repo that is the task's primary repo, its first
 `write` entry (§5.6):
 
-1. that code repo's `.grain/README.md` `task_home.mode`, if the team's
+1. that code repo's `.grainconfig` `task_home.mode`, if the team's
    `allow` lists it;
 2. the team's `task_home.repos` entry for that repo;
 3. the team's `task_home.mode`;
@@ -1876,11 +1858,11 @@ read that repo, which may be more people than can read the intake.
   home is the intake's file with `moved_from` added. The only other
   change allowed is to how its references are written: an alias or a
   relative path that meant something in the intake is re-expressed for
-  the new home's README, and must name the same canonical identity
+  the new home's `.grainconfig`, and must name the same canonical identity
   (§2.1). The spec digest is computed over canonical references, so it
   does not change. The example task's `implements:` was
-  `widgets:docs/design/widgets.md#WG-2` in the intake, and is
-  `/docs/design/widgets.md#WG-2` in the widgets repo.
+  `widgets:docs/design/widgets.design.md#WG-2` in the intake, and is
+  `/docs/design/widgets.design.md#WG-2` in the widgets repo.
 
 - **A move follows the identity rules of §2.1:** the new home first, then
   the tombstone in the intake, then Silo rewrites the references it owns
@@ -2019,11 +2001,12 @@ given. Other names were weighed:
 
 - **A relative or `/`-rooted entry** (`attachments/x.png`,
   `/designs/a.md`) reads **the task's own commit**, the `spec_rev` it was
-  placed at, as a relative include reads its includer's (§3.3). So a
+  placed at, as a relative root entry reads its `grain.config.md`'s
+  (§3.3). So a
   task's attachments are exactly the ones that were approved.
 - **An entry in another repo** reads its `@ref`. With no `@`, it reads the
   target repo's `default_ref`, or the remote's `HEAD` for a repo with no
-  task-repo README, at the moment the run is materialised. Either way the
+  `.grainconfig`, at the moment the run is materialised. Either way the
   execution record notes the commit it used (below), as every unpinned
   reference is recorded pinned (§4).
 - **A `write` entry must name a branch** (`@main`, `@candidate`). It is
@@ -2251,43 +2234,49 @@ context:
   there today (§12.1). An adopting team that wants another repo
   supplies it from its own trigger.
 
-#### One resolver, two consumers
+#### One resolver, three consumers
 
-Includes (§3.3) and `context:` use the **same reference resolution**:
-canonicalisation, aliases from the governing README, refs and pins,
-redirects with the hop limit, cycle detection, and dangling handling
-(§4). They differ in what they build:
+Root entries (§3.3), references (§3.7) and `context:` use the **same
+reference resolution**: canonicalisation, aliases from the repo's
+`.grainconfig`, refs and pins, redirects (tombstones beside the old path,
+repo `moved_to`) with the hop limit, the archive mapping, cycle
+detection, and dangling handling (§4). They differ in what they build:
 
-| | Includes | `context:` |
-| --- | --- | --- |
-| builds | a **Grain's namespace**: the names it acts on | a **sandbox's view**: what one run sees and may write |
-| accepts | objects, narrowed by `kinds` | repos, folders, objects and assets, with a mode |
-| transitive | always, with excludes and a depth limit of 8 | off, unless an entry sets `depth` (at most 3), over body links only |
-| on a bad target | skip the branch; the namespace only shrinks | a listed entry refuses the run; a reached file is skipped |
-| gate | the reader's credential (§11.18) | the reader's credential **and** the Grain's policy, before each fetch |
-| written by | the root's writers | the task's author, frozen on approval |
+| | Root entries | References | `context:` |
+| --- | --- | --- | --- |
+| builds | a **Grain's active set**: what it runs, fires and gives its runs | one object, read when an operation needs it | a **sandbox's view**: what one run sees and may write |
+| accepts | a folder (or one file), listed by its type's kind suffix | one object of the kinds the field expects | repos, folders, objects and assets, with a mode |
+| transitive | never; each entry is one folder's subtree less `ignore:` and `archive/` | never: each reference is resolved by whatever needs it | off, unless an entry sets `depth` (at most 3), over body links only |
+| on a bad target | the entry is unknown: nothing new starts from it | dangling: reported, never widened | a listed entry refuses the run; a reached file is skipped |
+| gate | the reader's credential (§11.18) | the reader's credential | the reader's credential **and** the Grain's policy, before each fetch |
+| written by | the Grain's owner, in `grain.config.md` | the referring object's writers | the task's author, frozen on approval |
 
 So one package, `taskrepo`, has one `resolve` with a gate supplied by its
-caller, and two consumers:
+caller:
 
 ```
-resolve(ref, from, cred, gate):                 # §4; shared by namespaces and sandboxes
-    id   = canonicalise(ref, from)              # alias, relative path, /-rooted; keeps @ref
+resolve(ref, from, cred, gate):                 # §4; shared by every consumer
+    id   = canonicalise(ref, from)              # alias from from's .grainconfig, relative, /-rooted; keeps @ref
     seen = []
     loop at most LIMITS.hops times:
         if id in seen: return dangling("redirect loop")
         seen += id
         if not gate(id): return refused(id, gate.rule)   # before any read of id's repo
-        if id.repo's README has moved_to: id = id at moved_to; continue
-        t = stat(id, at id.ref or id.repo's default_ref, cred)
-        if t is missing or unreadable: return dangling(t.reason)
-        if t is a kind: moved object: id = canonicalise(t.to, from = id); continue
+        if id.repo's .grainconfig has moved_to: id = id at moved_to; continue
+        t = stat(id, at id.ref or id.repo's default_ref, cred)      # trees only (§3.10)
+        if t is missing:
+            if stat(id + ".moved.md") exists:  id = canonicalise(its to, from = id); continue
+            if stat(archive_mapping(id)) exists: t = that                       # §3.8, not a hop
+            else: return dangling(t.reason)
+        if t is unreadable: return dangling(t.reason)
         return Target(id, commit = t.commit,
-                      what = repo | folder | object(t.kind) | asset)
+                      what = repo | folder | object(kind from the suffix) | asset)
     return dangling("more than 8 redirects")
 
-# Includes (§3.3): gate = always true; the credential is the gate.
-# contribution(...) calls resolve(i.target, i, reader's credential, ALLOW).
+# Root entries (§3.7): gate = always true; the credential is the gate.
+# list_entry(...) calls resolve(e.path, grain.config.md, reader's credential, ALLOW)
+# for the folder, then lists its trees.
+# References (§3.7): the same, then a kind check against what the field expects.
 
 materialise(task, grain):
     L     = min(CONTEXT_LIMITS, grain.policy.context_limits)
@@ -2661,14 +2650,13 @@ effective_capability(entry, task, grain):           # entry: a context: entry wi
         seen += C.id; chain = [C] + chain              # base-most first
         if |chain| > CAPABILITY_LIMITS.chain: return refuse(entry, "chain longer than 8")
         if C.base.type: break
-        ref, from = C.base.capability, C               # a relative base reads C's commit, as includes do
+        ref, from = C.base.capability, C               # a relative base reads C's commit
     B = grain.providers[chain[0].base.type]            # the Grain's code, never a published file
     if B is missing:                     return refuse(entry, "base not implemented")
     if B.type not in grain.policy.capabilities.bases:  return refuse(entry, "base not allowed")
     for C in chain:
         if not grain.policy.sanctions(C.source, B.type):       return refuse(entry, link = C, "unsanctioned source")
         if C.secrets names one the source may not bind:        return refuse(entry, link = C, "secret not allowed")
-    if chain[-1].id not in grain.namespace:            return refuse(entry, "not offered here")  # catalog
     cap = B.maximum
     for r in reducers of chain (base-most first) + entry.reducers:
         if r.language is not evaluable here:           return refuse(entry, reducer = r, "cannot evaluate")
@@ -2690,8 +2678,8 @@ effective_capability(entry, task, grain):           # entry: a context: entry wi
   alias, a URL and a tombstone is still one loop. A cycle, or a chain
   over the limit, refuses the request. It is never truncated, because a
   truncated chain has lost reducers.
-- **Pins.** Each link reads the commit its own reference names, as an
-  include does (§3.3). A team should pin the org object it builds on
+- **Pins.** Each link reads the commit its own reference names, as any
+  reference does (§4). A team should pin the org object it builds on
   (`@v1`). Tracking it is safe, because each link still narrows, but
   every upstream change changes the digest.
 - **Monotonic within one resolution, not over time.** The org can edit
@@ -2703,14 +2691,15 @@ effective_capability(entry, task, grain):           # entry: a context: entry wi
 
 #### Catalog and grant
 
-**Including a capability object makes it available to request, and
-never grants it.** A Grain's include of `shared:capabilities/` with
-`kinds: [capability]`
-([`grain-eu/capabilities/hub.md`](../examples/task-repos/grain-eu/capabilities/hub.md))
-puts those objects in its namespace (§3.3). That is the **catalog**:
-Silo shows it, a task's author picks from it, and the Grain offers what
-it holds. The bases of their chains need not be in the namespace. They
-are read when a chain is resolved, and are not offered on their own.
+**A capability definition is reached only by reference, and referencing
+one never grants it.** There is no capability root: a definition
+changes what a run *may* be given, never whether anything runs, so by the
+test of §3.1 it is a reference. A task names it in `context:` with
+`mode: use`, and the Grain resolves the chain then. Silo's **catalog**,
+the list it shows a task's author, is a view of the capability objects
+in the repos the team's `.grainconfig` aliases and the sources Grains'
+policies sanction; it is a convenience for authors, and nothing a Grain
+reads.
 
 **A task requests a capability in `context:`**, alongside its repos and
 files (§5.6), with `mode: use`:
@@ -2719,7 +2708,7 @@ files (§5.6), with `mode: use`:
 context:
   - ref: "https://git.example.com/hub/widgets.git@main"
     mode: write
-  - ref: "shared:capabilities/widgets-deployer.md"
+  - ref: "shared:capabilities/widgets-deployer.capability.md"
     mode: use                                     # request it; nothing of the file lands
     reducers:                                     # optional: the task's own, only narrowing
       - {language: builtin, type: limit, dimension: token_lifetime, max: 30m}
@@ -2746,8 +2735,10 @@ context:
 
 **The Grain's local policy grants.** It allowlists **base types** and
 **definition sources**: which repos and folders may define capability
-objects it will honour, and for which bases. So an included Silo or team
-folder cannot introduce authority the owner did not sanction:
+objects it will honour, and for which bases. **This allowlist is the
+whole control**: a capability object from anywhere else is refused,
+whoever references it, so no Silo or team folder can introduce authority
+the owner did not sanction:
 
 ```yaml
 # Grain eu's local policy: its own configuration, not a task-repo file
@@ -2806,7 +2797,8 @@ A capability can require a human's approval before it is used:
    **`capability_approvals`**: `{ref, digest, by, at}`. The intake's
    rules let only such a principal append it, with `by` bound to the
    pusher and never equal to the submitter, after the task is `approved`
-   ([`hub-intake/README.md`](../examples/task-repos/hub-intake/README.md)).
+   ([`hub-intake/GRAINOWNERS`](../examples/task-repos/hub-intake/GRAINOWNERS), and
+   the hook's fixed rule that `by` is the pusher, §3.5).
    It is the approval, like `approved_by`, and not part of the frozen
    spec. Until it is there, Silo shows the task as "waiting: capability
    approval of `<ref>` by `<by>`", and does not place it.
@@ -2863,8 +2855,8 @@ Grain CI jobs declare capabilities in workflow files today
 YAML (§12.2), and the key keeps its shape. Each item is resolved by the
 Grain into a capability object and checked as a `use` entry would be:
 
-- **a reference to a capability object** (`"caps:gcp/ci-deployer.md"`,
-  resolved from the workflow's governing README), which is new;
+- **a reference to a capability object** (`"caps:gcp/ci-deployer.capability.md"`,
+  with the alias from the repo's `.grainconfig`), which is new;
 - **a legacy name** (`gcp-key`, `self-debug`, `github-sandbox`, …),
   which resolves to that name's legacy capability object (§13.2);
 - **`repo-read:<owner/name>` and `repo-write:<owner/name>` become
@@ -3089,43 +3081,50 @@ The task records `trigger: {ref, on, key, fired_at, event}`: the
 trigger, which source fired, the key, when, and the event fields it
 bound. `submitted_via: trigger`.
 
-- **A `fires_in: grain` trigger in a Grain's namespace fires on that
-  Grain**, locally: the Grain renders the task into its own root, adds a
-  reference to it in its `backlog/fired/` lane (§5.2), and runs it, so
-  it never needs Silo.
-  That covers the Grain's own triggers and any it includes (§3.3). A
-  trigger from another repo fires at
-  `tasks/fired/<repo name>/<trigger>/<key>/task.md` in the root, so two
-  repos' triggers of one name never collide. The Grain watches the
+- **A `fires_in: grain` trigger in one of a Grain's trigger roots fires
+  on that Grain** (§3.3), locally: the Grain renders the task into its own
+  root, adds a reference to it in its `backlog/fired/` folder (§5.2), and
+  runs it, so it never needs Silo. That covers the Grain's own
+  `triggers/` and every other folder its `triggers:` entries name, less
+  each entry's `ignore:` and any `archive/`. A trigger from another repo
+  fires at `tasks/fired/<repo name>/<trigger>/<key>.task.md` in the root,
+  so two repos' triggers of one name never collide. The Grain watches the
   sources itself: its clock, and the repos it fetches for `push:`,
   `merge:` and `design-change:`.
-- **A team trigger is assigned to a Grain by an include in Silo's folder
-  for it** (`placements:grains/us/triggers/hub.md`, including
-  `shared:triggers/`, `kinds: [trigger]`), which the Grain's root
-  includes in turn (`triggers/silo.md`, `kinds: [trigger]`). Silo
-  assigns each `fires_in: grain` trigger to one Grain, and moves the
-  include to re-assign it. Silo never copies the trigger.
-- **A `fires_in: silo` trigger fires in Silo** for the team it names.
-  Silo renders the task into the team's intake, approved if the
-  trigger's approval policy allows it, and places it by adding a
-  placement (§8.12). If no Grain can take it now, Silo adds a reference
-  to the intake's backlog instead, and the task waits there in the team's
-  order. Silo watches the repos it hosts on receive, and code repos by
-  webhook or on its next pass (§8.13). A Grain whose namespace includes
-  such a trigger lists it, and never fires it.
+- **A team trigger is assigned to a Grain through Silo's folder for it.**
+  Silo writes the trigger, or a copy of the team's, into
+  `placements:grains/<grain>/triggers/`, and it fires on that Grain only
+  if the Grain's owner has named that folder as a trigger root (§8.12).
+  Silo assigns each `fires_in: grain` team trigger to one Grain, and
+  moves the file to re-assign it. A Grain that wants every team trigger,
+  unassigned, names the team's `shared:triggers/` folder itself instead
+  (§8.15).
+- **A `fires_in: silo` trigger fires in Silo** for the team it names, if
+  it is in one of **the team's trigger roots**: the intake's own
+  `grain.config.md`, which says `team: hub` where a Grain's says `grain:`,
+  and may hold only `triggers:` entries (the intake's `backlog/` is the
+  team's queue, and Silo has no memory). Silo renders the task into the
+  team's intake, approved if the trigger's approval policy allows it, and
+  places it by adding a placement (§8.12). If no Grain can take it now,
+  Silo adds a reference to the intake's backlog instead, and the task
+  waits there in the team's order. Silo watches the repos it hosts on
+  receive, and code repos by webhook or on its next pass (§8.13). A Grain
+  whose trigger root lists a `fires_in: silo` trigger shows it, and never
+  fires it.
 
 **Approval of a firing.** A firing in a Grain's root is the Grain's own
 task. It is filed `approved` (with `approved_by: grain:<id>`) only if the
-trigger says `auto_approve_proposals` **and** the trigger is the root's
-own, or reached through includes that are all pinned (`ref_mode: pin`),
-so that what fires is exactly what the owner reviewed. Through a
-tracking include it is filed `proposed`, and the Grain's owner approves
-it, or the Grain's local policy does. Silo files `approved_by:
-silo:trigger` under the same rule. Whatever the trigger says, a firing
-**caused by someone** is approved no further than they could approve: a
-`push:` or `merge:` firing whose pusher or merger is not an approver of
-the firing's team, and a `manual:` firing requested by one who is not,
-are filed `proposed`. `design-change:` firings keep §7.4's rule.
+trigger says `auto_approve_proposals` **and** the trigger is in the
+root's own repo, or reached through an entry that is pinned
+(`ref_mode: pin`), so that what fires is exactly what the owner reviewed.
+Through a tracking entry it is filed `proposed`, and the Grain's owner
+approves it, or the Grain's local policy does. Silo files `approved_by:
+silo:trigger` under the same rule, for the team's trigger roots. Whatever
+the trigger says, a firing **caused by someone** is approved no further
+than they could approve: a `push:` or `merge:` firing whose pusher or
+merger is not an approver of the firing's team, and a `manual:` firing
+requested by one who is not, are filed `proposed`. `design-change:`
+firings keep §7.4's rule.
 
 **Runtime state is not committed.** The last and next fire times, the
 debounce windows, the catch-up cursor, whether a trigger is **paused**
@@ -3137,38 +3136,40 @@ own reviewed switch, and stays in git. The task each firing produces
 records `trigger.fired_at`, so the history of what fired is in git
 anyway, as tasks.
 
-**Customising an included trigger** is an exclude plus a new object.
-Includes and excludes work on triggers exactly as on everything else
-(§3.3). Grain `us` is assigned the team's daily
-`shared:triggers/granule-pull.md` and wants it weekly. It does not edit
-or override it: it excludes it (`triggers/no-granule-pull.md`) and adds
-its own `triggers/granule-pull-weekly.md`, a whole, self-contained
-trigger that references the same template, whose `derived_from` names
-the original. `derived_from` is a reference: it adds no name and
-inherits nothing, and Silo's views use it to show the two diverging when
-the team changes the original (§8.15).
+**Customising a team's trigger** is an `ignore:` plus a new object.
+Grain `us` names the team's `shared:triggers/` as a trigger root, and
+wants the daily `granule-pull.trigger.md` weekly. It does not edit or
+override it: its entry says `ignore: [granule-pull.trigger.md]`, and it
+adds its own `triggers/granule-pull-weekly.trigger.md`, a whole,
+self-contained trigger that references the same template, whose
+`derived_from` names the original. `derived_from` is a reference: it
+activates nothing and inherits nothing, and Silo's views use it to show
+the two diverging when the team changes the original (§8.15).
+
+**Retiring a trigger** is the producer's move: the team moves it to
+`triggers/archive/`, and it stops firing everywhere that names
+`triggers/`, without any Grain changing its config (§3.8, §8.15).
 
 **Triggers in code repos.** A trigger's *definition* may live in a code
 repo's grain folder, beside the code it is about
-(`widgets:.grain/triggers/weekly-release-notes.md`). Its *instances*
+(`widgets:.grain/triggers/weekly-release-notes.trigger.md`). Its *instances*
 never do:
 
 - **In Silo**, a trigger that Silo does not host fires for a team only
-  if that team **adopts** it, with a `kind: include` of it in its intake
-  (`hub-intake/triggers/widgets.md`, `kinds: [trigger]`, written by the
-  team's admins). A code repo cannot make a team's intake receive firings
+  if that team **adopts** it, with an entry for it in its intake's
+  `grain.config.md` `triggers:` (written by the team's admins). A code repo cannot make a team's intake receive firings
   by naming the team. The instances go into the adopting team's intake,
-  at `tasks/fired/<repo name>/<trigger>/<key>/task.md`, where
+  at `tasks/fired/<repo name>/<trigger>/<key>.task.md`, where
   `<repo name>` is the last element of the code repo's URL without
   `.git`. So two code repos' triggers of the same name never collide.
   A firing is filed `approved` only if the trigger says
-  `auto_approve_proposals` **and** the adopting include is **pinned** to
+  `auto_approve_proposals` **and** the adopting entry is **pinned** to
   a commit the admins reviewed, at which the template it names also
   resolves (a relative template reference reads that same commit).
   Otherwise it is filed `proposed` (§11.13). A pin replaces 4450's
   `auto_approve: {digest}`: it fixes the same bytes, and taking a change
   is re-pinning, one line.
-- **On a Grain** whose namespace includes a code repo's trigger, a
+- **On a Grain** whose trigger root names a code repo's trigger, a
   firing goes into the Grain's own root as above, or is an **inline
   firing**: a backlog reference whose `to:` is the trigger, with
   `fired_at` (and the key), and then the execution record. No task file
@@ -3223,19 +3224,20 @@ sensitive: true
 ---
 ```
 
-This is [`widgets-code/.grain/gates/grain-declarations.md`](../examples/task-repos/widgets-code/.grain/gates/grain-declarations.md)
+This is [`widgets-code/.grain/gates/grain-declarations.gate.md`](../examples/task-repos/widgets-code/.grain/gates/grain-declarations.gate.md)
 (without `branches` and `second_review`), converted from bwsalmon/silo's own
 `.grain/triggers/grain-declarations.yml`.
 
 - **`match`** says which changes it holds: `paths` and `paths_ignore`,
-  repo-relative, and `branches`, the target branches. A gate in a repo
-  governs that repo. A gate in a shared gate set, reached through an
-  include (below), also names the repos it governs in `match.repos`.
+  repo-relative, and `branches`, the target branches. **A gate belongs to
+  the repo being merged into**, and governs only that repo. A gate in a
+  mandatory gate source (below) also names the repos it governs in
+  `match.repos`.
 - **`requires`** lists what must be done, and each key only adds:
   - `human`: a Submit from a human approver. `when: always` is grain's
     `human: required`; `when: on-findings` is grain's `human:
     on-findings`, a human only if a required review found something.
-    `from` names the approvers, by principal (§3), and defaults to the
+    `from` names the approvers, by principal (§3.5), and defaults to the
     repo's own (its forge's reviewers, or the owning team's approvers in
     Silo); `count` defaults to 1. The change's author, its task's
     submitter, and the agent and Grain that made it never count;
@@ -3260,7 +3262,7 @@ match it, and a repo's `.grain/**` gate matches its own gates.
 **The review tasks a gate files** are the gate's only work. Each is
 filed once per revision of the change (its head commit), gate and
 requirement, at
-`tasks/gated/<repo name>/<change id>-<head, 12 hex>-<gate name>-<requirement>/task.md`
+`tasks/gated/<repo name>/<change id>-<head, 12 hex>-<gate name>-<requirement>.task.md`
 in whichever root or intake runs the merge queue (below). Re-queuing the
 same revision files nothing new; a new revision is reviewed again, and a
 human's Submit counts only for the revision it was given on. Like a
@@ -3270,10 +3272,11 @@ trigger's firings, these tasks are never committed to the code repo
 **How gates apply in each task home** (§5.5):
 
 - **In a code repo**, through grain's merge queue. For a change into
-  repo R at branch B, the queue gathers R's own gates (the `kind: gate`
-  objects in R's grain folder, at B's tip) and any gate in the landing
-  Grain's namespace, or from its mandatory gate sources (below), whose
-  `match.repos` covers R. It matches each against the change's paths,
+  repo R at branch B, the queue lists R's own gates (the `*.gate.md`
+  files under R's grain folder, `.grain/` unless R's `.grainconfig` says
+  otherwise, at B's tip, by the same tree-only listing as a root entry,
+  §3.7) and any gate from the landing Grain's mandatory gate sources
+  (below) whose `match.repos` covers R. It matches each against the change's paths,
   files the review tasks each requires (into the Grain's own root, as the
   Grain's work), withdraws auto-merge if any is sensitive, and holds the
   change until every requirement is met. The forge's own branch
@@ -3292,38 +3295,39 @@ trigger's firings, these tasks are never committed to the code repo
   outcomes and each human's Submit, which the hook checks against the
   gate at the ref's current tip. Silo files the required review tasks
   into the owning team's intake, `approved`, as Silo's own
-  (`submitted_via: gate`). The gates that apply are the repo's own, plus
-  those its own includes with `kinds: [gate]` bring, resolved by the same
-  resolver (§3.3).
+  (`submitted_via: gate`). The gates that apply are the repo's own, in
+  its grain folder (`.grain/gates/` by convention in a Silo repo too),
+  plus Silo's mandatory sources (below).
 - **In an intake, Silo's field rules come first.** A proposal, an
-  approval or a cancel is checked by the intake's `writers` rules (§3)
-  and is not a gated change unless a gate matches its path. An intake
-  that wants, say, every change to `README.md` reviewed says so with a
-  gate.
+  approval or a cancel is checked against the intake's `GRAINOWNERS` and
+  the hook's fixed rules (§3.5), and is not a gated change unless a gate
+  matches its path. An intake that wants, say, every change to
+  `GRAINOWNERS` reviewed says so with a gate.
 
-**Gates and namespaces.** A gate reaches a Grain's namespace only
-through an include whose `kinds` accept `gate`. `kinds: [trigger]`,
-"accept triggers only", lets no gate through, so a team's triggers
-folder can never hold the Grain's merges. Included gates are policy the
-included folders cannot weaken: an exclude inside an included folder
-subtracts only from that folder's own contribution (§3.3), and no gate
-relaxes another. **The root can exclude an included gate**, as it can
-exclude anything: what an include brings is the root's owner's choice.
-But that only stops this Grain's merge queue applying it. It never
-removes a gate a repo holds itself, which is the repo's own policy, not
-any namespace's.
+**Gates are not Grain roots.** There is no `gates:` entry in
+`grain.config.md`, and a Grain never activates a gate by naming a
+folder. A gate is policy of the repo being merged into, so the merge
+queue finds it there, at the target branch's tip, when that repo's
+change is queued. Three things follow:
 
-**Recommendation: gates from sanctioned sources are non-excludable.** A
-Grain's local policy may name **mandatory gate sources**
+- **A team's `triggers/` can never hold a Grain's merges.** A trigger root
+  lists `*.trigger.md` only; a `*.gate.md` beside them is not listed.
+- **No Grain can switch off a repo's gate.** Its `ignore:` patterns apply
+  to its own root entries, and gates are in none of them.
+- **A Grain cannot add a gate to someone else's repo** by naming a
+  folder. It adds one by proposing it to that repo, through that repo's
+  review, or through a mandatory source (below) for the repos its own
+  merge queue lands.
+
+**Mandatory gate sources, for rules enforced across repos.** A Grain's
+local policy may name **mandatory gate sources**
 (`gates.mandatory: ["org-gates:gates/@main"]`), as it names sanctioned
 capability sources (§5.7). The merge queue reads those itself, with the
-Grain's credential, whether or not the namespace includes them. So no
-exclude, no disabled include and no `kinds:` narrowing removes them, and
-a mandatory source the queue cannot read holds every change it might
-cover (unknown is not empty, §3.3). Silo's own policy may name mandatory
-gate sources for every repo it hosts in the same way. An org that wants
-a rule enforced everywhere uses a mandatory source; an include is for
-gates a Grain chooses to adopt.
+Grain's credential, and applies each gate whose `match.repos` covers the
+repo being merged into. Nothing in any task repo removes them, and a
+mandatory source the queue cannot read holds every change it might cover
+(unknown is not empty, §3.7). Silo's own policy may name mandatory gate
+sources for every repo it hosts in the same way.
 
 ## 7. Design docs (`kind: design`)
 
