@@ -2,7 +2,10 @@ package rendezvous
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -56,6 +59,64 @@ type Conn struct {
 
 	mu      sync.Mutex
 	goodbye string
+	filings map[string]chan Message // file_tasks awaiting their filed, by request ID
+}
+
+// ErrFileRefused is the hub refusing to file a task (Conn.FileTask);
+// the message says why.
+var ErrFileRefused = errors.New("rendezvous: hub refused the filing")
+
+// FileTask asks the hub to file a task, on the control stream
+// (TypeFileTask), and waits for its answer: the task the hub filed, as
+// JSON (tasks.Task), or its refusal, wrapping ErrFileRefused. filing is
+// marshalled as the file_task's task: a tasks.Filing.
+func (c *Conn) FileTask(ctx context.Context, filing any) (json.RawMessage, error) {
+	raw, err := json.Marshal(filing)
+	if err != nil {
+		return nil, err
+	}
+	b := make([]byte, 8)
+	rand.Read(b)
+	id := hex.EncodeToString(b)
+	ch := make(chan Message, 1)
+	c.mu.Lock()
+	if c.filings == nil {
+		c.filings = map[string]chan Message{}
+	}
+	c.filings[id] = ch
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.filings, id)
+		c.mu.Unlock()
+	}()
+	if err := c.ctl.write(Message{Type: TypeFileTask, RequestID: id, Task: raw}); err != nil {
+		return nil, err
+	}
+	select {
+	case m := <-ch:
+		if m.Error != "" || len(m.Task) == 0 {
+			return nil, fmt.Errorf("%w: %s", ErrFileRefused, m.Error)
+		}
+		return m.Task, nil
+	case <-c.Done():
+		return nil, errors.New("rendezvous: the connection ended before the hub answered")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// filed hands the hub's answer to the FileTask waiting for it.
+func (c *Conn) filed(m Message) {
+	c.mu.Lock()
+	ch := c.filings[m.RequestID]
+	c.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- m:
+		default:
+		}
+	}
 }
 
 // Goodbye is the reason the hub gave for ending the connection, when
@@ -131,13 +192,18 @@ func (cl *Client) Connect(ctx context.Context) (*Conn, error) {
 	}
 	go cl.heartbeat(c, hb)
 	go func() {
-		// The hub sends nothing more on the control stream but a
-		// goodbye; a read ending is the stream or the connection ending.
+		// The hub sends nothing more on the control stream but the
+		// answers to the node's filings and a goodbye; a read ending is
+		// the stream or the connection ending.
 		for {
 			msg, err := l.read()
 			if err != nil {
 				c.Close()
 				return
+			}
+			if msg.Type == TypeFiled {
+				c.filed(msg)
+				continue
 			}
 			if msg.Type == TypeGoodbye {
 				c.mu.Lock()

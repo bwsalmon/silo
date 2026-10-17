@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -52,6 +53,12 @@ type Server struct {
 	// control stream, for the event streams of docs/hub.md §7. Nil
 	// resets them.
 	NodeStream func(nodeID string, c net.Conn)
+	// FileTask, when set, files the task a node asks the hub to file on
+	// its control stream (TypeFileTask): nodeID and owner are the node
+	// as its credential proved and registered it, never as the filing
+	// says, and the answer is the task filed, as JSON, or why none was:
+	// tasks.Filer.File. Nil refuses every filing.
+	FileTask func(ctx context.Context, nodeID, owner string, filing json.RawMessage) (json.RawMessage, error)
 	// Heartbeat is the interval the hub asks nodes to heartbeat at;
 	// DefaultHeartbeat when zero. Set Registry.StaleAfter to a few of
 	// them.
@@ -288,6 +295,7 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	s.observe(EventConnected)
 	defer s.observe(EventDisconnected)
 
+	var filing atomic.Int32
 	go s.acceptNodeStreams(node.ID, m)
 	go func() {
 		select {
@@ -312,10 +320,57 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 			if !lease.Heartbeat(free) {
 				return
 			}
+		case TypeFileTask:
+			s.fileTask(ctx, node.ID, owner, l, msg, &filing)
 		default:
 			s.logf("rendezvous: node %q sent an unknown %s message", node.ID, logsafe.Quote(msg.Type))
 		}
 	}
+}
+
+// Bounds on a node's filings (TypeFileTask). How often a node may file
+// is the FileTask hook's to limit; these keep one node from holding
+// more than a few of the hub's goroutines, and database connections,
+// at once.
+const (
+	maxFilingsInFlight = 4
+	maxRequestID       = 128
+	fileTimeout        = 30 * time.Second
+)
+
+// fileTask files the task a node's file_task asks for, in the
+// background, and answers it on the control stream with filed.
+func (s *Server) fileTask(ctx context.Context, nodeID, owner string, l *lines, msg Message, inFlight *atomic.Int32) {
+	reply := func(task json.RawMessage, err error) {
+		m := Message{Type: TypeFiled, RequestID: msg.RequestID, Task: task}
+		if err != nil {
+			m.Task, m.Error = nil, err.Error()
+		}
+		l.write(m)
+	}
+	switch {
+	case msg.RequestID == "" || len(msg.RequestID) > maxRequestID:
+		reply(nil, fmt.Errorf("rendezvous: a file_task needs a request_id of 1-%d bytes", maxRequestID))
+		return
+	case s.FileTask == nil:
+		reply(nil, errors.New("rendezvous: this hub files no tasks from nodes"))
+		return
+	}
+	if inFlight.Add(1) > maxFilingsInFlight {
+		inFlight.Add(-1)
+		reply(nil, fmt.Errorf("rendezvous: over %d filings in flight; wait for their answers", maxFilingsInFlight))
+		return
+	}
+	go func() {
+		defer inFlight.Add(-1)
+		fctx, cancel := context.WithTimeout(ctx, fileTimeout)
+		defer cancel()
+		task, err := s.FileTask(fctx, nodeID, owner, msg.Task)
+		if err != nil {
+			s.logf("rendezvous: node %q of %s: filing refused: %s", nodeID, owner, logsafe.Quote(err.Error()))
+		}
+		reply(task, err)
+	}()
 }
 
 func (s *Server) acceptNodeStreams(nodeID string, m *mux.Mux) {

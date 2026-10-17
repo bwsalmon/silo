@@ -193,12 +193,14 @@ node. For example:
   test, and add a sentinel served by the fake node's UI handler to the
   at-rest test, since the proxy must pass bytes through as the
   view-through does.
-- *Agent filing upward (4233, not landed).* When a node can file a
-  task, add: its route to the matrix, with the node-token columns
-  holding the outcomes; a rate-limit test in `nodetoken_test.go` that
-  files past the limit and expects a refusal; and a case in
-  `TestApprovedBy` that files from an approved task into another team
-  and expects `approved_by` to be empty and the task `proposed`.
+- *Agent filing upward (4233).* A node files on its control stream
+  (`file_task`), not an HTTP route, so the matrix has no row for it.
+  `TestNodeFilingRateLimited` (`nodetoken_test.go`) files past the
+  limit and expects a refusal that leaves the connection up, and
+  `TestAgentFilingLaunders` (`claims_test.go`) files from an approved
+  outsider's task into the Grain owner's own team and into another,
+  expecting both `proposed` with `approved_by` empty and the outsider
+  as submitter, and `dependency_done` for the rejected one.
 
 **A new listener**: add it to `server.Hub.Routes`, with a `Listener`
 constant, and route the matrix's requests to it in `TestRouteMatrix`.

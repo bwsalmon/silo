@@ -7,8 +7,15 @@ different code altogether, as long as it speaks them as written here.
 
 Everything below is built: the connection and control stream in
 `hub/rendezvous` (`rendezvous.go`), the task stream in `hub/tasks`
-(`stream.go`), and the event and view streams in `hub/live`. The
+(`stream.go`), filing a task and its dependencies in `hub/tasks`
+(`filing.go`, `depends.go`), and the event and view streams in
+`hub/live`. The
 sections of [hub.md](hub.md) cited give the full semantics.
+
+Whether a Grain speaks it is checked by the conformance kit,
+`silo conformance` ([conformance.md](conformance.md)), which drives a
+Grain through the [conformance workloads](#conformance-workloads)
+below. The reference Grain in `hub/conformance/refgrain` passes it.
 
 ## Connection
 
@@ -30,14 +37,69 @@ hub → node  {"type":"goodbye","error":"<why>"}  the hub is shutting down, then
 ```
 
 `features` lists the optional parts of this interface the Grain
-supports; today the only one is `interactive` (below). A Grain that
-lists none is never offered a task that needs one. `hello` must come
+supports. The hub reads only `interactive` (below). A Grain that
+lists none is never offered a task that needs one. The hub keeps, but does not read,
+`approvals`, which says the Grain sends `approval_request` and takes
+`approve` (below), and `filing`, upward filing; the conformance kit
+reads both, to skip what a Grain does not claim. `hello` must come
 within 30s of the handshake. `free` is the Grain's
 own count of free slots, counting every task it has accepted. After
 `goodbye`, or any drop, the Grain reconnects with backoff: the hub's
 replacement is usually a few seconds away (a rolled pod). A Grain that
 does not know `goodbye` loses nothing by ignoring it, since the
 connection then ends anyway.
+
+## File a task at the hub (the control stream, optional)
+
+A Grain whose agent proposes work for a repository or team the Grain
+does not serve, typically one another team owns, hands it to the hub on
+the control stream (hub.md §6.6):
+
+```
+node → hub  {"type":"file_task","request_id":"<the node's name for it>","task":{
+              "repo":"owner/name" | "team":"<team>",
+              "title":"...","prompt":"...",
+              "origin_task":"<hub id>",            optional: the hub task whose run files this
+              "depends_on":["<hub id>",...],       optional: hub tasks the new one waits for
+              "node_task":"<local id>"}}           optional: the Grain's own task that waits on the new one
+hub → node  {"type":"filed","request_id":"...","task":{...}}       the task filed, a `tasks.Task`
+            or {"type":"filed","request_id":"...","error":"..."}   nothing filed, and why
+```
+
+| Field | Meaning |
+| --- | --- |
+| `request_id` | The Grain's name for the filing, 1-128 bytes; the `filed` answering it carries it back. Answers may come in any order. |
+| `repo`, `team` | The target, exactly one, as in `POST /v1/tasks`. |
+| `title`, `prompt` | What to do; the title defaults to the prompt's first line. |
+| `origin_task` | The hub task the filing comes from, if the agent is running one: it must be a task this Grain runs now (`running`, offered to this node as its owner). Absent for work from a task that came from no hub task. |
+| `depends_on` | Up to 16 hub task IDs the new task waits for: each one the Grain's owner may see. |
+| `node_task` | The Grain's own ID, at most 200 bytes, for a local task that waits on the new hub task: the hub sends `dependency_done` (below) when the new task ends. |
+| `node` | Optional; if present it must be the Grain's own node ID. The hub records the filer from the connection, never from the filing. |
+
+The hub, not the filing, decides who the task is for and whether it
+needs approval:
+
+- Its **submitter** is the submitter of `origin_task`, the human the
+  agent works for; with no `origin_task` it is the Grain's owner. The
+  Grain (`filed_by`, its node ID) and its owner (`filed_by_owner`) are
+  recorded as its **filer**, beside it.
+- It is **queued** only if both the submitter and the Grain's owner are
+  members of the team that owns the repository, by `user:<email>`; it
+  is **proposed** otherwise, for a member of that team to approve, as a
+  human's proposal is. A team-targeted filing is refused unless both
+  are in the team. `approved_by` is never carried over from
+  `origin_task`, and the submitter may not approve the task they are
+  submitter of. An agent cannot launder approval by filing through a
+  Grain: whatever it files outside its submitter's team waits for a
+  member of that team.
+
+A Grain may file at most **10 tasks at once, and one more each minute**
+(the hub's `tasks.Filer` defaults), and have at most 4 filings awaiting
+their `filed` at once. A filing over either limit is answered with
+`error`, and refusals count against the rate. `filed` with `error`
+does not end the connection, unlike `error`. A hub that takes no
+filings answers every one with `error`. A Grain that does not file
+tasks never sends `file_task`.
 
 ## Accept or refuse a task, report its result (the task stream)
 
@@ -52,6 +114,8 @@ hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}    r
              "decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
             {"type":"message","task":{"id":...},"message":{"id":"...",       a human's message to an interactive task
              "text":"...","attachments":[...],"sender":"<email>","sent_at":"<RFC 3339>"}}
+            {"type":"dependency_done","task":{"id":...},"state":"...",      a hub task your own task waits on has ended
+             "reason":"...","node_task":"<local id>"}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
@@ -70,6 +134,9 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 | `submitter` | The requester, from their sign-on to the hub. |
 | `approved_by` | The human who approved the task at the hub: a member of the task's team, never its submitter, who approved it while it was proposed. Absent for a task nobody approved there, which is every task a member of the team filed directly. |
 | `approved_at` | When `approved_by` approved it (RFC 3339); absent with it. |
+| `depends_on` | Hub tasks that were done before the task was offered; absent for none. |
+| `filed_by`, `filed_by_owner` | The Grain that filed the task (above), and the owner it was registered by: the hub's record of its filer. Absent for a task a human filed. |
+| `origin_task` | The hub task whose run filed it; absent with `filed_by`, or for a Grain's filing from no hub task. |
 | `constraints` | The labels or node ID the task was placed by. |
 | `created_at` | When it was submitted. |
 
@@ -118,6 +185,42 @@ has been put back in the queue instead: no `resume` comes, the hub
 refuses the Grain's events for it, and its result is not recorded. A
 Grain may stop such a task when, some minutes after reconnecting, it
 has been sent neither `resume` nor `cancel` for it.
+
+### Dependencies on hub tasks (optional)
+
+A hub task with `depends_on` is offered only once each task it names is
+`done`. If one of them ends any other way (`failed`, `cancelled`,
+`rejected`), the hub cancels it, with the reason `dependency <id> is
+<state>`, so a Grain is never offered a task whose dependencies did
+not all succeed. A dependency that is `lost` has not ended, and the
+task waits.
+
+A Grain that filed a task with `node_task` is told when that task ends,
+whichever way, on a stream of its own, as the only message on it, as a
+cancel for a task the Grain was away for is:
+
+```
+{"type":"dependency_done","task":{"id":"<hub id>"},"state":"done"|"failed"|"cancelled"|"rejected","reason":"...","node_task":"<local id>"}
+```
+
+- It is sent to the node that filed the task, only while that node is
+  registered by the owner it was when it filed, and when it is next
+  online if it is away then. The hub writes it once; it may write it
+  again if it restarted before recording the first, so a Grain takes
+  one (`task.id`, `node_task`) once.
+- `done` is the Grain's cue to unblock its local task. Any other
+  `state` means the hub task will never be done: the Grain must not
+  run its local task as if it were, and what it does instead, such as
+  failing or cancelling the local task as the hub cancels a hub task
+  whose dependency failed, is its own local policy.
+- A Grain ignores a `dependency_done` for a local task it no longer
+  has, or one that no longer waits: cancelling the local task does not
+  cancel the hub task, which is the hub's and its team's to cancel, by
+  its submitter, a team admin or a hub admin. Likewise the hub task
+  outlives `origin_task`: the origin ending, whichever way, does not
+  end it.
+
+A Grain that never sets `node_task` is never sent `dependency_done`.
 
 ### Approvals inside a run (optional)
 
@@ -253,3 +356,40 @@ end.
 
 A Grain serves only the streams above. It serves a view only of an
 artifact it has itself listed, and an http stream only to its own UI.
+
+## Conformance workloads
+
+A task whose prompt's first line is
+
+```
+silo-conformance/v1 <workload>
+```
+
+is a **conformance workload**, filed by the conformance kit
+([conformance.md](conformance.md)) or by anyone checking a Grain. A
+Grain may short-circuit it: run no model and touch no repository, and
+do exactly what the workload says, through the messages above. Its
+title is `silo conformance: <workload>`, and the rest of the prompt is
+prose for a human. Package `hub/conformance/workload` has these as Go
+constants. A Grain that does not recognise the marker runs the task as
+any other, which the kit's checks will not, in general, accept.
+
+| Workload | What the Grain does, once it has accepted the task |
+| --- | --- |
+| `run` | Sends a `status` event, then an `artifact` event `{"kind":"diff","ref":"<its own ref>","size":N}` for the change below, then a `result` event, then `result` `done` on the task stream. It serves the ref on the view stream, with exactly the change's bytes. |
+| `hold` | Sends a `status` event with the message `silo-conformance: started`, then a `status` event every second or so. It never ends on its own: it runs until cancelled, holding its slot. |
+| `approve` | Sends `silo-conformance: started`, then an `approval_request` with `id` `silo-conformance`. On its `approve`, it ends with `result` `done` for `allow`, or `failed` for `deny`. This workload is only filed on a Grain that lists `approvals`. |
+| `interactive` | Filed with `"kind":"interactive"`, only on a Grain that lists `interactive`. It sends `silo-conformance: started` and `awaiting_reply` `waiting`. On the first message it sends a `message` event naming its `id`, then `awaiting_reply` `resumed` with that `message_id`, then `result` `done`. |
+
+Each workload says `silo-conformance: started` once per run of it. A
+Grain that runs the same task twice therefore says it twice, which is
+what the kit's restart scenario looks for.
+
+The fixed change a `run` makes, byte for byte:
+
+```
+--- /dev/null
++++ b/SILO-CONFORMANCE
+@@ -0,0 +1 @@
++This change was made by a Grain running the silo conformance kit.
+```

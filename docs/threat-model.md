@@ -316,7 +316,18 @@ agents, what records `approved_by` decides whether this is closed.
 (O-4): an agent- or node-filed task enters the hub as `proposed` with
 a non-human requester, and only a signed-in human other than the
 requester may approve it (ui.md U3), recorded as `approved_by`.
-INV-17.
+INV-17. *As built for 4233* (hub.md §6.6): a node-filed task's
+requester is the submitter of the hub task it was filed from, or the
+node's owner, with the node recorded as its filer (`filed_by`). It is
+`proposed` unless that requester and the node's owner are both members
+of its team; an origin task's `approved_by` is never carried over; and
+only a team member other than the requester approves it. A filing
+queued for a team both are in carries no `approved_by`, as a member's
+own submission does not, so grain files it for local approval
+(GSA1-11) rather than taking it as approved. Tested by
+`TestAgentFilingLaunders`. The hub's `depends_on` only orders tasks,
+and carries no task's output into another's prompt, so the dependency
+route (4235, a dependency's output fed to the next task) remains.
 
 **T-TB1-8 (D) A user exhausting the hub.** *Mitigation:* bodies are
 bounded (`readJSON`: 64 KiB for the directory, the prompt limit plus
@@ -701,9 +712,15 @@ capability credentials are placed per run. *Residual:* a host-directory
 sandbox runs as the Grain's user and can read them. *Status:* covered
 by O-8.
 
-**T-TB7-3 (E) An agent filing or approving work.** *Mitigation:* no
-hub path exists for it today. *Residual:* tasks 4233 and 4235 add one.
-*Status:* open, design-time (O-4, T-TB1-7).
+**T-TB7-3 (E) An agent filing or approving work.** *Mitigation:* an
+agent files work through its Grain's control stream only
+(`file_task`, hub.md §6.6), rate limited per node, as the human its
+run was for and never with an approval (T-TB1-7); it has no path to
+approve a task or answer an approval request. *Residual:* a Grain
+can still propose work on its submitter's behalf to any team, at its
+rate limit, which the team's members see as proposals. *Status:*
+mitigated for filing (4233); open for 4235's feeding of one task's
+output into another (O-4).
 
 **T-TB7-4 (E) Sandbox escape.** Out of this document's scope: grain's
 sandbox design (grain `docs/design.md`) is its own threat model; this
@@ -770,7 +787,7 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-8 | A node's event stream is accepted only for a task the hub has placed on that same node, registered by the same owner, and carries one task only. | `hub/live` `TestStreamForAnotherNode`, `TestAnotherOwnersNode` |
 | INV-9 | A caller sees a task, its events and its artifacts only as a member of its team or of the team a hub admin gave its repository with its history (or as a hub admin), and a node only as its owner, a member of a team owning one of its repositories, or a hub admin; anything else answers 404 exactly as a missing resource does. | `hub/tasks` `TestAPIVisibility`, `TestRepoSquatting`; `hub/live` `TestAccess`; `hub/directory` `TestAccess`, `TestAPI`, `TestSeesTask`; `hub/rendezvous` `TestVisibleDirectory` |
 | INV-10 | A task's `submitter` is the signed-in caller; a request body naming one is refused. | `hub/tasks` `TestAPISubmit` |
-| INV-11 | The hub opens only `offer`, `resume`, `cancel`, `view` and `http` streams to a node, and a `view` only of a ref the node listed in the task's artifact events; a conforming Grain closes any other stream unread, serves a view only of a ref it listed, and an `http` stream only when its owner turned it on. | `hub/live` `TestViewOnlyListedRefs`, `TestViewListedBeforeRestart` (the hub's side, SA1-M3); grain `pkg/hubnode` tests (offer, resume, cancel); task 4236 (conformance kit: a Grain refuses an unlisted and a `..` ref); gap: view and http on grain's side |
+| INV-11 | The hub opens only `offer`, `resume`, `cancel`, `view` and `http` streams to a node, and a `view` only of a ref the node listed in the task's artifact events; a conforming Grain closes any other stream unread, serves a view only of a ref it listed, and an `http` stream only when its owner turned it on. | `hub/live` `TestViewOnlyListedRefs`, `TestViewListedBeforeRestart` (the hub's side, SA1-M3); grain `pkg/hubnode` tests (offer, resume, cancel); conformance kit scenario `unlisted` (`hub/conformance` `kit.unlisted`, `TestUnlistedViews`: a Grain asked directly refuses an unlisted, traversal or cross-task ref); gap: grain serves no views yet, so `unlisted` fails against it as `view` does, and http on grain's side |
 | INV-12 | A Grain refuses, and never runs, a task its local policy does not allow, whatever claims the task carries; a Grain connected to a hub runs with a local policy. | `scripts/grain-interop.sh` (a task outside grain's policy is refused); grain `pkg/policy` tests; gap: the second clause (O-3) |
 | INV-13 | A node's UI is served only on that node's own host, only to the node's owner (not hub admins), never with the hub's `Authorization` header or session cookies, never setting a cookie with a `Domain`, and accepts WebSocket upgrades only from its own origin. | `hub/nodeui` `TestNode`, `TestAccess`, `TestWebSocket`, `TestViewThrough`; `hub/server` `TestNodeUIHosts`; gap: IAP's own cookies (O-2) |
 | INV-14 | A browser's WebSocket subscription to task events is accepted only from the hub's own origin. | `hub/live` `TestWebSocket` |
