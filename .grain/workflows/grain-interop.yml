@@ -4,7 +4,10 @@
 # commit's hub packages -- and each grain daemon logs in to a hub built
 # from this commit (`grain hub login`), registers, accepts a task filed
 # through POST /v1/tasks, refuses one its local policy does not allow,
-# and carries a cancel down and a result up. Stages grain does not
+# and carries a cancel down and a result up -- then again with the hub
+# signing each offer's claims and grain's policy naming it silo_issuer,
+# and once more against a hub that signs nothing, whose offer grain
+# must refuse. Stages grain does not
 # support yet are skipped and say so. A red job is a mismatch between
 # silo's interface and grain's, and its last lines say which side
 # changed, by both commits' short SHAs. The fake Grains in hub/*'s own
