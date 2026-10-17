@@ -4,7 +4,7 @@
 // as a stock one's; a type the UI does not know is shown by its name.
 import type { ReactNode } from 'react';
 import { Alert, Box, Chip, Stack, Typography } from '@mui/material';
-import type { HubEvent } from '../api';
+import type { Attachment, HubEvent, MessageBody } from '../api';
 import Markdown from './Markdown';
 import { ArtifactView } from './ArtifactView';
 
@@ -26,6 +26,47 @@ export function EventRow({ e, answer }: { e: HubEvent; answer?: Answer }) {
       <Box sx={{ flex: 1, minWidth: 0 }}>
         <EventBody e={e} answer={answer} />
       </Box>
+    </Box>
+  );
+}
+
+// AttachmentLink is a message's attachment: a link for an https URL,
+// else the ref the session resolves, as text.
+function AttachmentLink({ a }: { a: Attachment }) {
+  if (/^https:\/\//i.test(a.ref)) {
+    return (
+      <a href={a.ref} target="_blank" rel="noreferrer noopener">
+        {a.name}
+      </a>
+    );
+  }
+  return (
+    <span>
+      {a.name} ({a.ref})
+    </span>
+  );
+}
+
+// MessageTurn is a human's turn in a session's conversation.
+export function MessageTurn({ m, note }: { m: MessageBody; note?: string }) {
+  return (
+    <Box sx={{ borderLeft: 3, borderColor: 'primary.main', pl: 1.5 }}>
+      <Typography variant="caption" color="text.secondary">
+        {m.sender ?? 'someone'}
+        {note ? ` · ${note}` : ''}
+      </Typography>
+      <Markdown>{m.text ?? ''}</Markdown>
+      {m.attachments?.length ? (
+        <Typography variant="body2" component="div">
+          Attached:{' '}
+          {m.attachments.map((a, i) => (
+            <span key={i}>
+              {i > 0 ? ', ' : ''}
+              <AttachmentLink a={a} />
+            </span>
+          ))}
+        </Typography>
+      ) : null}
     </Box>
   );
 }
@@ -60,6 +101,23 @@ function EventBody({ e, answer }: { e: HubEvent; answer?: Answer }) {
         {a.message ? `: ${a.message}` : ''}
         {answer?.(a.id)}
       </Alert>
+    );
+  }
+  if (e.message) return <MessageTurn m={e.message} />;
+  if (e.awaiting_reply) {
+    const a = e.awaiting_reply;
+    if (a.state === 'waiting') {
+      return (
+        <Alert severity="warning">
+          Waiting for a reply{a.question ? ':' : ''}
+          {a.question && <Markdown>{a.question}</Markdown>}
+        </Alert>
+      );
+    }
+    return (
+      <Typography variant="body2" color="text.secondary">
+        resumed
+      </Typography>
     );
   }
   if (e.usage) {

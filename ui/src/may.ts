@@ -22,3 +22,10 @@ export function memberOf(me: Me | undefined, team: string): boolean {
 export function mayApprove(me: Me | undefined, t: Task): boolean {
   return memberOf(me, t.team) && me!.email.toLowerCase() !== t.submitter.toLowerCase();
 }
+
+// mayMessage is whether the caller may send an interactive task a
+// message: its submitter, or a member of its team in either role. A hub
+// admin outside the team may watch the session but not talk to it.
+export function mayMessage(me: Me | undefined, t: Task): boolean {
+  return t.kind === 'interactive' && !!me && (me.email.toLowerCase() === t.submitter.toLowerCase() || memberOf(me, t.team));
+}
