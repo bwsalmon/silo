@@ -214,6 +214,14 @@ grain_team() {
 	grainapi GET "/api/teams/$id/git-connections" |
 		jq -e 'arrays | .[] | select(.status.configured and (.status.commitError // "") == "")' >/dev/null ||
 		{ fail setup "could not give grain's team $id a git connection: $out"; return 1; }
+	# A daemon that resolved -tenancy=auto to single (every new
+	# installation since grain 0324dfc) looks every team's credential up
+	# on its default team, so that team gets the same connection.
+	if ! grainapi GET /api/teams/default/git-connections |
+		jq -e --arg h "127.0.0.1:$GITHUB_PORT" 'arrays | .[] | select(.host == $h)' >/dev/null 2>&1; then
+		grainapi POST /api/teams/default/git-connections "$(jq -nc --arg h "127.0.0.1:$GITHUB_PORT" \
+			'{host: $h, baseUrl: ("http://" + $h), kind: "github", value: "grain-interop"}')" >/dev/null || true
+	fi
 }
 
 # claims_key FILE writes a P-256 private key for the hub to sign claims
