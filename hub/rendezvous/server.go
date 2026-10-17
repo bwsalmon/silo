@@ -13,6 +13,7 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/bwsalmon/silo/hub/registry"
+	"github.com/bwsalmon/silo/hub/route"
 	"github.com/bwsalmon/silo/internal/logsafe"
 	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
@@ -123,7 +124,7 @@ func (s *Server) logf(format string, args ...any) {
 // directory is served unauthenticated: the caller fronts it with the
 // hub's human sign-on, or serves only ConnectPath.
 func (s *Server) Handler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	m.Handle("GET "+ConnectPath, http.HandlerFunc(s.serveConnect))
 	m.Handle("GET "+DirectoryPath, http.HandlerFunc(s.serveDirectory))
 	return m

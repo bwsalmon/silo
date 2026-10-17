@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+
+	"github.com/bwsalmon/silo/hub/route"
 )
 
 // Paths the OIDC handler serves, besides the callback (RedirectURL's).
@@ -235,7 +237,7 @@ func (o *OIDC) Principal(r *http.Request) (Principal, error) {
 
 // Handler serves LoginPath, LogoutPath and RedirectURL's path.
 func (o *OIDC) Handler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	m.HandleFunc("GET "+LoginPath, o.login)
 	// Signing out is a write too: another origin on the hub's site
 	// must not sign the viewer out.

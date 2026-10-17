@@ -8,6 +8,7 @@ import (
 
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/registry"
+	"github.com/bwsalmon/silo/hub/route"
 )
 
 // Paths the API serves.
@@ -110,7 +111,7 @@ func (a *API) Visible(r *http.Request) (func(registry.Entry) bool, error) {
 // but the hub's own origin, or with a body that is not JSON, is refused
 // before it is signed in (identity.SameOrigin).
 func (a *API) Handler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	h := func(pattern string, f func(http.ResponseWriter, *http.Request, *Access) error) {
 		m.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			acc, err := a.Access(r)
@@ -138,7 +139,7 @@ func (a *API) Handler() http.Handler {
 	h("POST "+NodeTokensPath, a.mintToken)
 	h("DELETE "+NodeTokensPath+"/{id}", a.revokeToken)
 	h("DELETE "+NodeTokensPath+"/nodes/{node}", a.releaseNodeID)
-	return identity.SameOrigin(m)
+	return route.Wrap(m, identity.SameOrigin(m))
 }
 
 // httpError is an error with its status.
