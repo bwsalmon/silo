@@ -17,10 +17,15 @@ export type TaskState = 'proposed' | 'rejected' | 'queued' | 'offered' | 'runnin
 
 export const TASK_STATES: TaskState[] = ['proposed', 'queued', 'offered', 'running', 'done', 'failed', 'cancelled', 'rejected', 'lost'];
 
+export type TaskKind = 'interactive';
+
 export interface Task {
   id: string;
   team: string;
   repo?: string;
+  // kind is "interactive" for a session, absent for a task that runs
+  // to its result.
+  kind?: TaskKind;
   title: string;
   prompt: string;
   submitter: string;
@@ -83,6 +88,26 @@ export interface HubEvent {
     errors?: string[];
   };
   artifact?: { kind: string; ref?: string; size?: number };
+  // An interactive session waiting for a human, and going on again.
+  awaiting_reply?: { state: 'waiting' | 'resumed' | string; question?: string; message_id?: string };
+  // A human's message, as the session took it in and the hub recorded
+  // it: who sent it is the hub's word, not the node's.
+  message?: MessageBody;
+}
+
+export interface Attachment {
+  name: string;
+  ref: string;
+  media_type?: string;
+  size?: number;
+}
+
+export interface MessageBody {
+  id: string;
+  text?: string;
+  attachments?: Attachment[];
+  sender?: string;
+  sent_at?: string;
 }
 
 export class ApiError extends Error {
@@ -149,6 +174,7 @@ export async function listNodes(signal?: AbortSignal): Promise<NodeEntry[]> {
 export interface NewTask {
   repo?: string;
   team?: string;
+  kind?: TaskKind;
   title: string;
   prompt: string;
   constraints?: { labels?: Record<string, string>; node?: string; node_owner?: string };
@@ -327,4 +353,31 @@ export async function fetchArtifact(task: string, ref: string, signal?: AbortSig
   if (r.status === 503) return { kind: 'unavailable', message: text.trim() || 'the node that holds it is offline' };
   if (!r.ok) return { kind: 'error', status: r.status, message: text.trim() || r.statusText };
   return { kind: 'text', text };
+}
+
+// Sessions (docs/hub.md §6.5): the submitter of an interactive task and
+// the members of its team send it messages, which the hub keeps and
+// sends down to its node.
+
+// TaskMessage is a message as the hub keeps it.
+export interface TaskMessage {
+  task: string;
+  id: string;
+  text: string;
+  attachments: Attachment[];
+  sender: string;
+  sent_at: string;
+  delivered: boolean;
+}
+
+export async function listMessages(id: string, signal?: AbortSignal): Promise<TaskMessage[]> {
+  const r = await getJSON<{ messages: TaskMessage[] }>(`/v1/tasks/${encodeURIComponent(id)}/messages`, signal);
+  return r.messages ?? [];
+}
+
+// sendMessage posts text to the session. messageID names the message:
+// the same ID again is the same message retried, which the hub keeps
+// and sends once.
+export function sendMessage(id: string, messageID: string, text: string): Promise<TaskMessage> {
+  return write<TaskMessage>('POST', `/v1/tasks/${encodeURIComponent(id)}/messages`, { id: messageID, text });
 }

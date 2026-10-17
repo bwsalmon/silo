@@ -72,6 +72,14 @@ type Hub struct {
 	// could not keep it.
 	Ingested func(c Class, err error)
 
+	// Messages, when set, finds the hub's own record of the message with
+	// ID id that it sent task's node (tasks.Store.MessageEvent). A
+	// message event a node sends is kept and broadcast with that record
+	// in place of what the node sent; one naming a message the hub never
+	// sent for the task is rejected, as is every message event when
+	// Messages is nil.
+	Messages func(ctx context.Context, task, id string) (events.Message, bool, error)
+
 	// Bus, when set, tells the hub's other pods of each event this pod
 	// stores, as {"event":"<task>","seq":N} (docs/hub.md §2.2.4); hand
 	// its notices to Notice.
@@ -355,6 +363,22 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			h.logf("live: node %q sent task %s's event on task %s's stream", nodeID, logsafe.Quote(e.Task), t.id)
 			return
 		}
+		if e.Message != nil {
+			m, ok, err := h.message(ctx, e.Task, e.Message.ID)
+			if err != nil {
+				// The node replays it after it reconnects.
+				h.logf("live: task %s: reading message %s: %v", t.id, logsafe.Quote(e.Message.ID), err)
+				h.ingested(class, err)
+				return
+			}
+			if !ok {
+				err := rejected("message %s was not sent to task %s", logsafe.Quote(e.Message.ID), t.id)
+				h.logf("live: node %q: %s", nodeID, logsafe.Quote(err.Error()))
+				h.ingested(class, err)
+				continue
+			}
+			e.Message = &m
+		}
 		stamp(&e, h.now())
 		t.mu.Lock()
 		if t.dead {
@@ -375,6 +399,13 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			h.announce(t.id, e.Seq)
 		}
 	}
+}
+
+func (h *Hub) message(ctx context.Context, task, id string) (events.Message, bool, error) {
+	if h.Messages == nil {
+		return events.Message{}, false, nil
+	}
+	return h.Messages(ctx, task, id)
 }
 
 // holds fails unless t's node is registered by the owner it was

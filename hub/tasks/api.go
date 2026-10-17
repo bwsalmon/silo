@@ -21,7 +21,7 @@ const TasksPath = "/v1/tasks"
 // API is the backlog over HTTP, for humans and custom UIs signed in
 // through the team directory's API (docs/hub.md §6.1):
 //
-//	POST /v1/tasks {"repo" | "team", "title", "prompt", "constraints"}   submit a task
+//	POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints"}  submit a task; kind "interactive" for a session
 //	GET  /v1/tasks?state=queued,running&team=infra&limit=100            the tasks the caller sees, newest first
 //	GET  /v1/tasks/{id}
 //	POST /v1/tasks/{id}/cancel {"reason"}                               its submitter, a team admin or a hub admin
@@ -30,6 +30,8 @@ const TasksPath = "/v1/tasks"
 //	POST /v1/tasks/{id}/reject {"reason"}                               the same: a proposed task turned down
 //	GET  /v1/tasks/{id}/approvals                                       the answers to the task's approval requests
 //	POST /v1/tasks/{id}/approvals/{request_id} {"decision", "reason"}   a member of the task's team: allow or deny one
+//	GET  /v1/tasks/{id}/messages                                        the messages humans sent an interactive task
+//	POST /v1/tasks/{id}/messages {"id", "text", "attachments"}          its submitter or a member of its team: send it one
 //
 // The caller submits to a repository one of their teams owns, or to one
 // of their teams, and sees those teams' tasks. Any signed-in caller may
@@ -44,6 +46,11 @@ const TasksPath = "/v1/tasks"
 // in either role (member or admin): not a hub admin who is not in the
 // team, nor a team given only the repository's history. A task's
 // submitter may not approve or reject it, but may withdraw it (cancel).
+//
+// Sending an interactive task a message is for its submitter and the
+// members of its team in either role (posts): not a hub admin outside
+// the team, nor a team given only the repository's history, who may
+// watch the session but not talk to it.
 type API struct {
 	Store      *Store
 	Dispatcher *Dispatcher
@@ -86,6 +93,8 @@ func (a *API) Handler() http.Handler {
 	h("POST "+TasksPath+"/{id}/reject", a.reject)
 	h("GET "+TasksPath+"/{id}/approvals", a.answers)
 	h("POST "+TasksPath+"/{id}/approvals/{request}", a.answer)
+	h("GET "+TasksPath+"/{id}/messages", a.messages)
+	h("POST "+TasksPath+"/{id}/messages", a.post)
 	return identity.SameOrigin(m)
 }
 
@@ -142,6 +151,13 @@ func member(acc *directory.Access, t Task) bool {
 	return acc.Teams[t.Team] != ""
 }
 
+// posts is whether the caller may send t a message: its submitter, or a
+// member of its team in any role (directory.Access.Teams, which counts
+// user:<email> and group membership alike).
+func posts(acc *directory.Access, t Task) bool {
+	return strings.EqualFold(t.Submitter, acc.Email) || member(acc, t)
+}
+
 // manages is whether the caller may cancel or requeue t.
 func manages(acc *directory.Access, t Task) bool {
 	return strings.EqualFold(t.Submitter, acc.Email) || acc.AdminOf(t.Team)
@@ -151,6 +167,7 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 	var req struct {
 		Repo        string      `json:"repo"`
 		Team        string      `json:"team"`
+		Kind        string      `json:"kind"`
 		Title       string      `json:"title"`
 		Prompt      string      `json:"prompt"`
 		Constraints Constraints `json:"constraints"`
@@ -158,7 +175,7 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
-	spec := Spec{Repo: req.Repo, Title: req.Title, Prompt: req.Prompt, Submitter: strings.ToLower(acc.Email), Constraints: req.Constraints}
+	spec := Spec{Repo: req.Repo, Kind: req.Kind, Title: req.Title, Prompt: req.Prompt, Submitter: strings.ToLower(acc.Email), Constraints: req.Constraints}
 	propose := false
 	switch {
 	case (req.Repo == "") == (req.Team == ""):
@@ -423,4 +440,60 @@ func (a *API) answer(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 		a.Dispatcher.Answered(r.Context(), t.ID)
 	}
 	return writeJSON(w, http.StatusOK, ans)
+}
+
+func (a *API) messages(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	t, err := a.task(r, acc)
+	if err != nil {
+		return err
+	}
+	ms, err := a.Store.Messages(r.Context(), t.ID, false)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, struct {
+		Messages []TaskMessage `json:"messages"`
+	}{ms})
+}
+
+// post is the task's submitter or a member of its team sending an
+// interactive task a message, which the hub keeps and sends its node.
+// A message to a task that has not started yet, or whose node is away,
+// is kept and sent when the node next accepts the task; one to a task
+// that is over, or still a proposal, is refused (409), as is one to a
+// task that is not interactive. A post retried with the same id is
+// answered with the message already kept (200), not sent again.
+func (a *API) post(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	t, err := a.task(r, acc)
+	if err != nil {
+		return err
+	}
+	if !posts(acc, t) {
+		return &httpError{http.StatusForbidden, "forbidden: only the task's submitter or a member of team " + t.Team + " may send it a message"}
+	}
+	var req struct {
+		ID          string              `json:"id"`
+		Text        string              `json:"text"`
+		Attachments []events.Attachment `json:"attachments"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return err
+	}
+	switch {
+	case t.Kind != KindInteractive:
+		return &httpError{http.StatusConflict, "task " + t.ID + " is not interactive: it takes no messages"}
+	case t.State.Terminal() || t.State == Proposed:
+		return &httpError{http.StatusConflict, "task " + t.ID + " is " + string(t.State) + ": it takes no messages"}
+	}
+	m, dup, err := a.Store.Post(r.Context(), TaskMessage{Task: t.ID, ID: req.ID, Text: req.Text, Attachments: req.Attachments, Sender: acc.Email})
+	if err != nil {
+		return err
+	}
+	if dup {
+		return writeJSON(w, http.StatusOK, m)
+	}
+	if a.Dispatcher != nil {
+		a.Dispatcher.Posted(r.Context(), t.ID)
+	}
+	return writeJSON(w, http.StatusCreated, m)
 }

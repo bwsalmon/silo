@@ -11,7 +11,29 @@ import type { HubEvent } from './api';
 // The event types the hub relays: package events' types, and "artifact"
 // for the reference it keeps of a node-only event. An EventSource
 // delivers a named event only to a listener for its name.
-export const EVENT_TYPES = ['status', 'transcript', 'tool_call', 'usage', 'approval_request', 'resumable', 'result', 'artifact'];
+export const EVENT_TYPES = [
+  'status',
+  'transcript',
+  'tool_call',
+  'usage',
+  'approval_request',
+  'resumable',
+  'result',
+  'awaiting_reply',
+  'message',
+  'artifact',
+];
+
+// awaiting is the question an interactive session is waiting on a
+// human for ('' when it asked none), or undefined when it is not
+// waiting: its last awaiting_reply event, unless that was its resume.
+export function awaiting(events: HubEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const a = events[i].awaiting_reply;
+    if (a) return a.state === 'waiting' ? (a.question ?? '') : undefined;
+  }
+  return undefined;
+}
 
 export function streamURL(task: string): string {
   return `/v1/tasks/${encodeURIComponent(task)}/events`;

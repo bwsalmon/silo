@@ -2,16 +2,19 @@
 // with the node-only artifacts they name viewed through the hub; for
 // its submitter or a team admin, cancel and requeue; and for a member of
 // its team, approving or rejecting it while it is proposed, and
-// answering its approval requests while it runs.
+// answering its approval requests while it runs. An interactive task's
+// page is its session: a "waiting for you" while its agent waits on a
+// human, and a reply box for its submitter and the members of its team.
 import { useState, type ReactNode } from 'react';
 import { Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Typography } from '@mui/material';
-import { ApiError, cancelTask, getTask, listApprovals, requeueTask, type Me, type Task } from '../api';
+import { ApiError, cancelTask, getTask, listApprovals, listMessages, requeueTask, type Me, type Task } from '../api';
 import { useAction } from '../action';
-import { managesTask, mayApprove, memberOf } from '../may';
+import { managesTask, mayApprove, mayMessage, memberOf } from '../may';
 import { ApprovalPrompt } from '../components/ApprovalPrompt';
 import { ProposalActions } from '../components/ProposalActions';
 import { ConfirmButton } from '../components/ConfirmButton';
-import { useEventStream, type StreamState } from '../events';
+import { awaiting, useEventStream, type StreamState } from '../events';
+import { Session, WaitingForYou } from '../components/Session';
 import { useLoad } from '../load';
 import { Link, routePath } from '../router';
 import { StateChip } from '../components/StateChip';
@@ -56,6 +59,7 @@ function Lifecycle({ t }: { t: Task }) {
         <Link to={routePath({ page: 'backlog', team: t.team })}>{t.team}</Link>
       </Field>
       {t.repo && <Field name="Repository">{t.repo}</Field>}
+      {t.kind === 'interactive' && <Field name="Kind">Interactive session</Field>}
       <Field name="Submitter">{t.submitter}</Field>
       {t.approved_by && (
         <Field name="Approved by">
@@ -112,19 +116,27 @@ function Events({ t, me }: { t: Task; me?: Me }) {
   const approvals = useLoad((signal) => (asks ? listApprovals(id, signal) : Promise.resolve([])), [id, asks], asks ? 10000 : undefined);
   const answers = new Map((approvals.data ?? []).map((a) => [a.request_id, a]));
   const mayAnswer = t.state === 'running' && memberOf(me, t.team);
+  const session = t.kind === 'interactive';
+  const open = !finished.has(t.state);
+  const messages = useLoad((signal) => (session ? listMessages(id, signal) : Promise.resolve([])), [id, session], session && open ? 5000 : undefined);
+  const question = session && open ? awaiting(stream.events) : undefined;
   return (
     <Paper sx={{ p: 2 }}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
-        <Typography variant="h6">Events</Typography>
+        <Typography variant="h6">{session ? 'Session' : 'Events'}</Typography>
         <Chip size="small" variant="outlined" label={streamLabels[stream.state]} color={stream.state === 'live' ? 'primary' : 'default'} />
+        {question !== undefined && <Chip size="small" color="warning" label="waiting for you" />}
       </Stack>
+      {question !== undefined && <WaitingForYou question={question} />}
       {approvals.error && <Alert severity="error">{approvals.error.message}</Alert>}
+      {messages.error && <Alert severity="error">{messages.error.message}</Alert>}
       <Timeline
         events={stream.events}
         answer={(request) => (
           <ApprovalPrompt task={id} request={request} answer={answers.get(request)} mayAnswer={mayAnswer} onDone={approvals.reload} />
         )}
       />
+      {session && <Session t={t} events={stream.events} messages={messages.data ?? []} mayReply={mayMessage(me, t)} onSent={messages.reload} />}
     </Paper>
   );
 }

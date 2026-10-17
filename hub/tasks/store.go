@@ -72,7 +72,7 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	if create {
 		err = s.migrate(ctx)
 	} else {
-		err = dbaccess.Check(ctx, db, "tasks", "tasks", "task_approvals")
+		err = dbaccess.Check(ctx, db, "tasks", "tasks", "task_approvals", "task_messages")
 		if err == nil {
 			err = dbaccess.CheckColumns(ctx, db, "tasks", added...)
 		}
@@ -123,6 +123,16 @@ CREATE TABLE IF NOT EXISTS task_approvals (
 	answered_at BIGINT NOT NULL,
 	delivered INTEGER NOT NULL,
 	PRIMARY KEY (task, request)
+);
+CREATE TABLE IF NOT EXISTS task_messages (
+	task TEXT NOT NULL,
+	id TEXT NOT NULL,
+	text TEXT NOT NULL,
+	attachments TEXT NOT NULL,
+	sender TEXT NOT NULL,
+	sent_at BIGINT NOT NULL,
+	delivered INTEGER NOT NULL,
+	PRIMARY KEY (task, id)
 )
 `
 
@@ -132,10 +142,12 @@ CREATE TABLE IF NOT EXISTS task_approvals (
 // and goes back to the queue after its team's grace.
 // approved_by (INV-17) is empty on a task created before it, as it is
 // on every task nobody approved at the hub, and approved_at (0) with it.
+// kind is empty, an ordinary task, on a task created before it.
 var added = []dbaccess.Column{
 	{Table: "tasks", Name: "node_owner", Add: `ALTER TABLE tasks ADD COLUMN node_owner TEXT NOT NULL DEFAULT ''`},
 	{Table: "tasks", Name: "approved_by", Add: `ALTER TABLE tasks ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`},
 	{Table: "tasks", Name: "approved_at", Add: `ALTER TABLE tasks ADD COLUMN approved_at BIGINT NOT NULL DEFAULT 0`},
+	{Table: "tasks", Name: "kind", Add: `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT ''`},
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -176,7 +188,7 @@ func (s *Store) q(query string) string {
 	return b.String()
 }
 
-const columns = `id, team, repo, title, prompt, submitter, approved_by, approved_at, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
+const columns = `id, team, repo, kind, title, prompt, submitter, approved_by, approved_at, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
 
 type scanner interface{ Scan(...any) error }
 
@@ -189,7 +201,7 @@ func scanTask(r scanner) (Task, error) {
 		approved         int64
 		state            string
 	)
-	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &approved, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
+	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Kind, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &approved, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
 		&t.Reason, &excl, &t.Attempts, &pending, &created, &updated, &t.version); err != nil {
 		return Task{}, err
 	}
@@ -256,8 +268,8 @@ func (s *Store) create(ctx context.Context, spec Spec, state State) (Task, error
 	}
 	t := Task{Spec: spec, State: state, Excluded: []string{}, Updated: now, version: 1}
 	cons, _ := json.Marshal(t.Constraints)
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
 		now.UnixMilli(), now.UnixMilli(), t.version)
 	if err != nil {
 		return Task{}, err

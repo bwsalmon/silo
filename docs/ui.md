@@ -1,9 +1,9 @@
 # The hub's human UI: a new UI in silo, or grain's UI pointed at the hub
 
 Part of the [hub design](hub.md). Status: **option (a) chosen by the
-owner; stages U1, U2 and U3's silo side built** (`hub/ui`, `ui/`; §6,
-§7 for running it, §8 for U2's writes, and §9 for proposals and
-approvals).
+owner; stages U1, U2, U3's silo side and U7's silo side built**
+(`hub/ui`, `ui/`; §6, §7 for running it, §8 for U2's writes, §9 for
+proposals and approvals, and §10 for interactive sessions).
 
 People need a page where they file, approve and watch tasks across
 teams. The hub (hub.md) has the APIs for it: intake (§6), the directory
@@ -176,6 +176,7 @@ Each stage is a candidate task, to be filed once the owner chooses.
 | U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. **Built (silo side):** `proposed` and `rejected` in `hub/tasks`, `approve`, `reject` and `approvals` in its API, the `approve` message on the task stream (hub.md §6.1, §6.2; [hub-interface.md](hub-interface.md)), `ui/src/pages/Proposals.tsx`, `ProposalActions.tsx` and `ApprovalPrompt.tsx`; §9. The node's side of `approve` is bwsalmon/grain's. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
 | U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. | silo |
 | U5 | A Grain's local UI shows the hub task ID and links to the hub page for tasks the hub placed. | bwsalmon/grain |
+| U7 | Interactive sessions: long-lived chat tasks with an agent, like grain's chat and director tasks, viewable and answerable from the hub. **Built (silo side):** the `interactive` task kind, a Grain's `interactive` feature in `hello` and placement by it, `POST`/`GET /v1/tasks/{id}/messages`, the `message` message on the task stream, and the `awaiting_reply` and `message` events (hub.md §6.5, §7.1; [hub-interface.md](hub-interface.md)); in the UI, *Start a session*, the reply box and "waiting for you" (`ui/src/components/Session.tsx`); §10. The node's side is bwsalmon/grain's. | silo (API and UI), then bwsalmon/grain for the node's side |
 | U6 | Future: "Open Grain UI" for team admins, a Grain's own UI proxied by the hub on its own origin, read-only unless the Grain's owner opts in. Designed in [grain-ui-proxy.md](grain-ui-proxy.md), with its own silo (S1–S5) and grain (G1–G4) stages. | silo, then bwsalmon/grain |
 
 ## 7. As built: U1
@@ -386,3 +387,60 @@ expired or finished one 409), and, over the rendezvous to a test node,
 that an `approve` reaches the node on the task's stream, including an
 answer kept before the node accepted. `hub/server`'s `TestWebUIActions`
 sends approve, reject and an answer as the browser does.
+
+## 10. As built: U7 (silo side)
+
+**Starting a session.** The file-task form (`FileTask.tsx`) has *Start
+a session* beside *File task*: the same form, filed with
+`"kind":"interactive"` (hub.md §6.5). The prompt is the session's
+opening message. The task waits in the queue until a Grain that lists
+the `interactive` feature has a free slot.
+
+**The session's page.** An interactive task's page shows *Kind:
+Interactive session*, and its events panel is titled *Session*. Its
+conversation is the event timeline: each `message` event renders as a
+turn with its sender, as the hub recorded them (never as the node
+said), and attachments as links (an `https` ref) or as their ref. A
+message sent but not yet taken in by the session is listed below the
+timeline, from `GET /v1/tasks/{id}/messages` (read every 5s while the
+session is open), as *waiting to be sent to the session* or *sent to
+the session*, until its `message` event arrives.
+
+**Waiting for you.** While the session's last `awaiting_reply` event
+is `waiting` and the task is not over, the panel shows a filled
+*Waiting for you* banner, with the agent's question if it asked one,
+and a *waiting for you* chip by its title. A `resumed` event clears
+both. In the timeline, a wait is a warning row and a resume a quiet
+*resumed*.
+
+**Replying.** The task's submitter and the members of its team, in
+either role (`mayMessage`, `ui/src/may.ts`, mirroring the API), get a
+reply box under the conversation while the task is not over; a hub
+admin outside the team watches but gets none. *Send* (or Ctrl+Enter)
+posts `{"id","text"}` to `POST /v1/tasks/{id}/messages`. Each draft
+has its own message ID, kept until the hub has the message, so sending
+again after an error is the same message retried, which the hub keeps
+and sends once. A refusal (a session that is over: 409) is shown as
+the API says it. The box takes text only: attachments go through the
+API, by reference.
+
+**Ending a session.** *Cancel task* ends it, as for any task; the Grain
+may also close it itself.
+
+**Tests.** `ui/src/sessions.test.tsx` (vitest) checks the calls'
+method, path and body with same-origin credentials, that *Start a
+session* files an interactive task, that "waiting for you" follows the
+`awaiting_reply` events, that messages render as they stream and a
+pending one is replaced by its event, that a failed send is retried
+under the same ID, who is offered the reply box, and the API's 409.
+`hub/tasks`' `messages_test.go` checks the store (a retried ID is the
+same message, another text under it is refused), the API's rules (a
+non-member 404, a hub admin outside the team 403; queued and lost tasks
+take messages, a finished, proposed or ordinary one 409), that the
+dispatcher places an interactive task only on a node with the feature,
+and, over the rendezvous to a test node, that a message reaches the
+node on the task's stream, including one kept before the node
+accepted. `hub/server`'s `TestInteractiveSession` runs a session
+through a whole hub: a fake node is offered it, sends `awaiting_reply`,
+is sent a member's message, echoes it with a forged sender, which the
+subscriber sees replaced by the hub's record, and resumes.

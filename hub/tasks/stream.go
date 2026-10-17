@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
+	"github.com/bwsalmon/silo/events"
 )
 
 // The task stream (docs/hub.md §6.2) is a stream the hub opens to a node
@@ -19,6 +21,8 @@ import (
 //	            {"type":"cancel","task":{"id":...}}        stop it
 //	            {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
 //	                                                       a human's answer to the task's approval_request event of that ID
+//	            {"type":"message","task":{"id":...},"message":{"id":"...","text":"...","attachments":[...],"sender":"<email>","sent_at":"..."}}
+//	                                                       a human's message to an interactive task's session
 //	node → hub  {"type":"accept","node_task":"<local id>"} it is running
 //	            {"type":"refuse","reason":"..."}           not here (to an offer), or not mine (to a resume)
 //	            {"type":"result","state":"done"|"failed","reason":"..."}
@@ -26,7 +30,8 @@ import (
 // A stream that carries an offer or a resume stays open for the task's
 // life: the node writes its result there when the task ends, and the hub
 // writes cancel there if a human cancels it, and approve for each of
-// the task's approval requests a human answers. While the task is the
+// the task's approval requests a human answers, and, for an interactive
+// task, message for each message a human sends it. While the task is the
 // node's, the hub also writes attest there, a newly signed attestation
 // for the same task, before the last one it sent lapses: a node checks
 // the attestation again before each dispatch of the task, which may be
@@ -41,6 +46,8 @@ const (
 	TypeCancel = "cancel"
 	// TypeApprove answers one of a running task's approval requests.
 	TypeApprove = "approve"
+	// TypeMessage carries a human's message to an interactive task.
+	TypeMessage = "message"
 	TypeAccept  = "accept"
 	TypeRefuse  = "refuse"
 	TypeResult  = "result"
@@ -69,6 +76,9 @@ type Message struct {
 	// AnsweredBy is the member of the task's team who answered, in
 	// approve: the hub's claim about who decided.
 	AnsweredBy string `json:"answered_by,omitempty"`
+	// Message is a message's message: its ID, which the node tells
+	// copies apart by, what it says and who sent it, the hub's claim.
+	Message *events.Message `json:"message,omitempty"`
 }
 
 // maxLine bounds one message; an offer carries the prompt.

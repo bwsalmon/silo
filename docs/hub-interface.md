@@ -22,14 +22,17 @@ one JSON line on a mux stream. The hub never dials a Grain.
 The Grain opens the first stream (hub.md §4.3):
 
 ```
-node → hub  {"type":"hello","node":{"id":"...","repos":["owner/name",...],"slots":N,"version":"...","labels":{...}}}
+node → hub  {"type":"hello","node":{"id":"...","repos":["owner/name",...],"slots":N,"version":"...","labels":{...},"features":["interactive"]}}
 hub → node  {"type":"welcome","owner":"<from the credential>","heartbeat_seconds":15}
             or {"type":"error","error":"..."}, then close
 node → hub  {"type":"heartbeat","free":N}      every heartbeat_seconds
 hub → node  {"type":"goodbye","error":"<why>"}  the hub is shutting down, then close
 ```
 
-`hello` must come within 30s of the handshake. `free` is the Grain's
+`features` lists the optional parts of this interface the Grain
+supports; today the only one is `interactive` (below). A Grain that
+lists none is never offered a task that needs one. `hello` must come
+within 30s of the handshake. `free` is the Grain's
 own count of free slots, counting every task it has accepted. After
 `goodbye`, or any drop, the Grain reconnects with backoff: the hub's
 replacement is usually a few seconds away (a rolled pod). A Grain that
@@ -47,6 +50,8 @@ hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}    r
             {"type":"cancel","task":{"id":...}}                              stop it
             {"type":"approve","task":{"id":...},"request_id":"...",          a human's answer to an approval_request
              "decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
+            {"type":"message","task":{"id":...},"message":{"id":"...",       a human's message to an interactive task
+             "text":"...","attachments":[...],"sender":"<email>","sent_at":"<RFC 3339>"}}
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
             {"type":"result","state":"done"|"failed","reason":"..."}
@@ -60,6 +65,7 @@ node → hub  {"type":"accept","node_task":"<local id>"}
 | `id` | The hub's task ID. |
 | `team` | The team the task belongs to. |
 | `repo` | `owner/name`, or empty for a team-targeted task, where the Grain chooses the repository. |
+| `kind` | `interactive` for a session (below); absent for a task that runs to its result. Not among the attested claims. |
 | `title`, `prompt` | What to do. |
 | `submitter` | The requester, from their sign-on to the hub. |
 | `approved_by` | The human who approved the task at the hub: a member of the task's team, never its submitter, who approved it while it was proposed. Absent for a task nobody approved there, which is every task a member of the team filed directly. |
@@ -102,7 +108,7 @@ The Grain takes these claims on trust and holds the task to its own
 local policy, refusing what that policy does not allow (hub.md §1.2).
 No answer to an offer within a minute counts as a refusal. After
 `accept`, the stream stays open for the task's life: the Grain writes
-`result` there, and the hub writes `cancel` and `approve` there. A cancel for a task
+`result` there, and the hub writes `cancel`, `approve` and `message` there. A cancel for a task
 with no open stream arrives as the only message on a stream of its own.
 
 A Grain that was away while it ran a task is normally sent `resume`
@@ -154,6 +160,53 @@ A Grain that does not support answers simply never sends
 `approval_request`; one that sends it must expect `approve` on the
 task stream, and should treat an unknown message type there as
 ignorable.
+
+### Interactive sessions (optional)
+
+An **interactive** task (`"kind":"interactive"`) is a session: it stays
+open across many turns, taking messages from the humans at the hub,
+and ends only when the hub cancels it or the Grain closes it with
+`result`. The hub offers one only to a Grain that listed `interactive`
+in its `hello`'s `features`, and writes `message` only for an
+interactive task, so a Grain without the feature never sees either.
+
+```
+{"type":"message","task":{"id":"<hub id>"},"message":{"id":"m-...","text":"...","attachments":[{"name":"...","ref":"...","media_type":"...","size":N}],"sender":"<email>","sent_at":"<RFC 3339>"}}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Names the message within the task. Delivery is **at least once**: the same message may arrive again (after a resume, say), and the Grain takes one `id` once. |
+| `text` | What the human wrote, Markdown. |
+| `attachments` | References only, never content: the hub keeps no uploaded file. `ref` is an `https` URL or one of the task's own artifact refs; the Grain fetches or resolves it under its own policy, or not at all. |
+| `sender` | The task's submitter or a member of its team, from their sign-on: the hub's claim, which the Grain takes on trust as it does `approved_by`. |
+| `sent_at` | When the hub took the message. |
+
+A message posted while the task is not yet accepted, or while the
+Grain is offline, is **queued** at the hub and written after the
+Grain's next `accept` of the task (its offer or resume). The hub
+refuses (409) a message to a task that is over, so none arrives after
+the task's `result` or `cancel`.
+
+On the task's event stream (below) a Grain running a session sends:
+
+```
+{"type":"awaiting_reply","seq":N,"task":"<hub id>","awaiting_reply":{"state":"waiting","question":"..."}}
+{"type":"awaiting_reply","seq":N,"task":"<hub id>","awaiting_reply":{"state":"resumed","message_id":"m-..."}}
+{"type":"message","seq":N,"task":"<hub id>","message":{"id":"m-..."}}
+```
+
+- `awaiting_reply` `waiting` when the agent stops for a human, with the
+  question it asks if it asks one, and `resumed` when it goes on, with
+  the `id` of the message that woke it if one did. It is a lifecycle
+  event: stored and broadcast, and what the hub's UI shows as "waiting
+  for you".
+- `message` when the session takes a message in, naming its `id`. It
+  is a conversation event: the hub stores and broadcasts its own record
+  of the message in its place, whatever else the event carries, and
+  drops one naming an `id` it never sent for the task. This is how a
+  message appears in the task's conversation, so a Grain that supports
+  sessions sends it once for each message it takes in.
 
 ## Stream events (the event stream)
 

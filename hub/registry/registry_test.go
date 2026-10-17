@@ -27,7 +27,12 @@ func TestValidate(t *testing.T) {
 	if got := n.Repos; len(got) != 2 || got[0] != "bwsalmon/grain" || got[1] != "bwsalmon/silo" {
 		t.Errorf("repos %v, want lower-cased, sorted and deduplicated", got)
 	}
+	n, err = Validate(Node{ID: "ws-1", Features: []string{"interactive", "attest", "interactive"}})
+	if err != nil || len(n.Features) != 2 || n.Features[0] != "attest" || !n.Supports(FeatureInteractive) {
+		t.Errorf("features %v %v, want sorted and deduplicated", n.Features, err)
+	}
 	for _, bad := range []Node{
+		{ID: "ok", Features: []string{"Not A Feature"}},
 		{ID: ""},
 		{ID: "has space"},
 		{ID: "ok", Slots: -1},

@@ -2,10 +2,12 @@
 // repository one of them owns. The teams and their repositories come
 // from the directory (GET /v1/teams), which lists only the teams the
 // caller is in (every team, for a hub admin); the API checks the
-// target again, and its refusal is shown as it says it.
+// target again, and its refusal is shown as it says it. "Start a
+// session" files the same form as an interactive task (kind
+// "interactive"): one that stays open for its team to talk to.
 import { useMemo, useState } from 'react';
 import { Alert, Button, FormControl, InputLabel, LinearProgress, MenuItem, Paper, Select, Stack, TextField, Typography } from '@mui/material';
-import { listTeams, submitTask, type Me, type NewTask } from '../api';
+import { listTeams, submitTask, type Me, type NewTask, type TaskKind } from '../api';
 import { useAction } from '../action';
 import { useLoad } from '../load';
 import { navigate, routePath } from '../router';
@@ -30,8 +32,9 @@ export function FileTask({ me, team: initialTeam }: { me?: Me; team?: string }) 
   }, [teams.data, me]);
   const chosen = options.find((t) => t.id === team);
 
-  const submit = useAction(async () => {
+  const submit = useAction(async (kind?: TaskKind) => {
     const req: NewTask = repo ? { repo, title, prompt } : { team, title, prompt };
+    if (kind) req.kind = kind;
     if (node.trim()) req.constraints = { node: node.trim() };
     const t = await submitTask(req);
     navigate(routePath({ page: 'task', id: t.id }));
@@ -92,6 +95,9 @@ export function FileTask({ me, team: initialTeam }: { me?: Me; team?: string }) 
           <Stack direction="row" spacing={1}>
             <Button type="submit" variant="contained" disabled={!chosen || !prompt.trim() || submit.busy}>
               File task
+            </Button>
+            <Button variant="outlined" disabled={!chosen || !prompt.trim() || submit.busy} onClick={() => void submit.run('interactive')}>
+              Start a session
             </Button>
           </Stack>
         </Stack>

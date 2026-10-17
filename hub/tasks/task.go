@@ -71,6 +71,18 @@ func (s State) valid() bool {
 	return false
 }
 
+// Kinds of task.
+const (
+	// KindTask, the default, is a task that runs to its result.
+	KindTask = ""
+	// KindInteractive is a session: a task that stays open across many
+	// turns, taking its humans' messages (Store.Post) and waiting for
+	// them (an awaiting_reply event), until it is cancelled or its node
+	// closes it. It is placed only on a node that lists
+	// registry.FeatureInteractive.
+	KindInteractive = "interactive"
+)
+
 // Constraints narrow the nodes a task may be placed on.
 type Constraints struct {
 	// Labels a node must carry, each with this value.
@@ -94,7 +106,9 @@ type Spec struct {
 	// Repo is the repository the task targets, "owner/name"; empty for a
 	// task that targets a team, whose node's grain chooses the
 	// repository.
-	Repo      string `json:"repo,omitempty"`
+	Repo string `json:"repo,omitempty"`
+	// Kind is KindTask or KindInteractive.
+	Kind      string `json:"kind,omitempty"`
 	Title     string `json:"title"`
 	Prompt    string `json:"prompt"`
 	Submitter string `json:"submitter"`
@@ -178,6 +192,9 @@ func normalize(s Spec) (Spec, error) {
 	s.Repo = strings.ToLower(strings.TrimSpace(s.Repo))
 	if s.Repo != "" && !repoName.MatchString(s.Repo) {
 		return s, fmt.Errorf("%w repository %q: want owner/name", ErrInvalid, s.Repo)
+	}
+	if s.Kind != KindTask && s.Kind != KindInteractive {
+		return s, fmt.Errorf("%w kind %q: want %q or none", ErrInvalid, s.Kind, KindInteractive)
 	}
 	if !teamID.MatchString(s.Team) {
 		return s, fmt.Errorf("%w team %q", ErrInvalid, s.Team)
