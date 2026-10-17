@@ -8,3 +8,4 @@ aliases:
   shared: https://silo.example.com/git/hub/shared.git
   placements: https://silo.example.com/git/hub/placements.git
   eu: https://silo.example.com/git/grains/eu.git
+  widgets: https://git.example.com/hub/widgets.git

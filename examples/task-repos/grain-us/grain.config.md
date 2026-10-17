@@ -16,6 +16,8 @@ triggers:
   - path: "placements:grains/us/triggers/@main"
     ref_mode: track
     ignore: ["granule-pull.trigger.md"]
+  - path: "widgets:.grain/triggers/nightly-ci.trigger.md@main"
+    ref_mode: track
 memory:
   - path: memory/
     write: true
@@ -24,3 +26,4 @@ memory:
 Grain `us`, the hub team's own Grain. Silo's placements come first.
 Silo assigns `us` the team's daily granule pull; `us` ignores it and
 runs its own weekly copy from `triggers/` (docs/task-repos.md §8.15).
+It also runs the widgets repo's nightly CI, by naming that one trigger.

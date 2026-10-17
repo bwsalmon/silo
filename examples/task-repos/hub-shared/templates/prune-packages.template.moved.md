@@ -1,7 +1,7 @@
 ---
 kind: moved
 schema: grain/moved@v1
-to: ghcr/prune-packages.md
+to: ghcr/prune-packages.template.md
 moved_by: "user:bsalmon@google.com"
 moved_at: "2026-10-16T17:40:00Z"
 reason: Group the GHCR templates under templates/ghcr/.

@@ -344,7 +344,7 @@ designs/<name>.design.md                   kind: design
 capabilities/<name>.capability.md          kind: capability (a team's or org's definitions, §5.7)
 designs/img/<file>                         an asset      (an image the design embeds)
 designs/img/<file>.asset.md                kind: asset   (its optional sidecar, §2.2)
-<an old path, as name.moved.md>            kind: moved   (a tombstone, §2.1)
+<old name>.moved.md                        kind: moved   (a tombstone, §2.1)
 ```
 
 A code repo keeps the same kinds in its grain folder, beside the code
@@ -362,9 +362,9 @@ README.md                                  the code's own README: an asset
 docs/design/<name>.design.md               kind: design  (in place, §12.3)
 ```
 
-**A tombstone's file name** is the old file name plus `.moved.md`:
-moving `templates/prune-packages.template.md` leaves
-`templates/prune-packages.template.moved.md`. A reference still names the
+**A tombstone's file name** is the old path with its final `.md`
+replaced by `.moved.md`: moving `templates/prune-packages.template.md`
+leaves `templates/prune-packages.template.moved.md`. A reference still names the
 old path; a resolver that finds nothing there looks for the tombstone
 beside it, then for the archive mapping (§3.8). Each is one
 deterministic lookup, and no index is needed.
@@ -414,7 +414,7 @@ an execution record in that Grain's root (§5.3).
 
 **A real move leaves a tombstone.** A rename, a reorganisation, or a
 move to another repo leaves a `kind: moved` object beside the old path,
-named for it (`<old file name>.moved.md`, §2). Archiving is not a real
+named for it (the old path with `.md` replaced by `.moved.md`, §2). Archiving is not a real
 move, and leaves none (§3.8):
 
 ```yaml
@@ -714,7 +714,7 @@ folder's objects, and know each one's kind, from a git tree alone (§3.7):
 
 **Code-repo design docs become `*.design.md`.** A design doc in a code
 repo is an object as soon as it is renamed (`docs/design/hub.md` →
-`docs/design/hub.design.md`, leaving `hub.md.moved.md`), and an asset until
+`docs/design/hub.design.md`, leaving `hub.moved.md`), and an asset until
 then. bwsalmon/grain's design-doc planner keys on `docs/design/` today:
 as a `design-change` trigger its `paths` stay `docs/design/**`, which
 matches both forms, so the planner keeps working through the migration
@@ -1220,8 +1220,10 @@ optionally, Silo's hook) reports it.
   triggers' `paths`, `context:` targets, capability objects and their
   bases, `depends_on` targets, and the targets of tombstones;
 - a repo's own `grain.config.md`, `.grainconfig` and `GRAINOWNERS`, its
-  gates under its grain folder (§6.3), and its execution records and
-  comments under a known task or run.
+  gates under its grain folder (§6.3), every task and reference in a
+  team's intake (Silo's own records of proposals and unplaced work), the
+  partials a known template includes, and the comments beside a known
+  task, run or tombstone.
 
 For `grain lint` on a single repo, known means the same with only the
 `grain.config.md` files in that repo and the ones its `--config` flags
@@ -1378,7 +1380,7 @@ Those are for humans and carry no meaning.
    A branch pin follows the branch's tip.
 4. **Redirects.** If the target repo's `.grainconfig` has `moved_to`,
    retry at that URL with the same path. If the path is missing and a
-   tombstone, `<path>.moved.md`, sits beside it, follow its `to:`,
+   tombstone (the path with `.md` replaced by `.moved.md`) sits beside it, follow its `to:`,
    resolved relative to the tombstone. If neither, try the archive
    mapping (§3.8), which is not a hop. Each redirect is one hop:
    - a reader follows **at most 8 hops** in total;
@@ -2265,7 +2267,7 @@ resolve(ref, from, cred, gate):                 # §4; shared by every consumer
         if id.repo's .grainconfig has moved_to: id = id at moved_to; continue
         t = stat(id, at id.ref or id.repo's default_ref, cred)      # trees only (§3.10)
         if t is missing:
-            if stat(id + ".moved.md") exists:  id = canonicalise(its to, from = id); continue
+            if stat(stone(id)) exists:  id = canonicalise(its to, from = id); continue   # .md -> .moved.md
             if stat(archive_mapping(id)) exists: t = that                       # §3.8, not a hop
             else: return dangling(t.reason)
         if t is unreadable: return dangling(t.reason)
@@ -4176,7 +4178,7 @@ confirmed.
 
 A member who promotes directly skips the proposal row. In the examples,
 the tombstone is
-[`hub-intake/tasks/2026-10-16-widget-schema-v2.task.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-widget-schema-v2.task.md),
+[`hub-intake/tasks/2026-10-16-widget-schema-v2.task.moved.md`](../examples/task-repos/hub-intake/tasks/2026-10-16-widget-schema-v2.task.moved.md),
 Silo's comment beside it records the change, and `eu`'s
 [placement](../examples/task-repos/hub-placements/grains/eu/backlog/2026-10-16-widget-schema-v2.ref.md)
 names the code-repo path, while the other placements in that folder
@@ -5428,7 +5430,7 @@ Design docs already in code repos (`docs/design/*.md`, with `{#D-n}` or
 `{#HS-n}` anchors) are referenceable as `kind: design` objects **where
 they are**, renamed in place to the `design` suffix
 (`docs/design/widgets.md` → `docs/design/widgets.design.md`, with a
-tombstone `widgets.md.moved.md`; §3.2). Nothing else moves:
+tombstone `widgets.moved.md`; §2). Nothing else moves:
 
 - The planner's `design-change` trigger watches `docs/design/**`, which
   matches both names, so bwsalmon/grain's planner keeps working while
