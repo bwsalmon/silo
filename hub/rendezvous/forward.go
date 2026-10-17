@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/route"
 	"github.com/bwsalmon/silo/internal/logsafe"
 	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
@@ -79,7 +80,7 @@ func (s *Server) internalAuthorized(r *http.Request) bool {
 // checked its own caller's right to the node; this pod trusts that
 // check.
 func (s *Server) InternalHandler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	m.HandleFunc("GET "+InternalOpenPath, s.serveInternalOpen)
 	return m
 }

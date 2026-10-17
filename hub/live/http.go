@@ -18,6 +18,7 @@ import (
 
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/rendezvous"
+	"github.com/bwsalmon/silo/hub/route"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
 
@@ -51,7 +52,7 @@ const viewTimeout = 30 * time.Second
 // The caller must see the task, as for GET /v1/tasks/{id}, at every
 // subscription and every view: a task they may not see answers 404.
 func (h *Hub) Handler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	m.HandleFunc("GET "+EventsPath, h.serveEvents)
 	m.HandleFunc("GET "+ArtifactsPath, h.serveArtifact)
 	return m

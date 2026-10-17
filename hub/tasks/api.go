@@ -13,6 +13,7 @@ import (
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
+	"github.com/bwsalmon/silo/hub/route"
 )
 
 // TasksPath is the backlog's HTTP API.
@@ -71,7 +72,7 @@ type ApprovalRequests interface {
 // but the hub's own origin, or with a body that is not JSON, is refused
 // (identity.SameOrigin).
 func (a *API) Handler() http.Handler {
-	m := http.NewServeMux()
+	m := route.NewMux()
 	h := func(pattern string, f func(http.ResponseWriter, *http.Request, *directory.Access) error) {
 		m.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			acc, err := a.Directory.Access(r)
@@ -95,7 +96,7 @@ func (a *API) Handler() http.Handler {
 	h("POST "+TasksPath+"/{id}/approvals/{request}", a.answer)
 	h("GET "+TasksPath+"/{id}/messages", a.messages)
 	h("POST "+TasksPath+"/{id}/messages", a.post)
-	return identity.SameOrigin(m)
+	return route.Wrap(m, identity.SameOrigin(m))
 }
 
 type httpError struct {
