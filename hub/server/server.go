@@ -227,6 +227,23 @@ func (c *Config) auth() (identity.Authenticator, http.Handler, []string, error) 
 	}
 }
 
+// CheckDevSignOn refuses a DevUserHeader sign-on where the hub is
+// deployed for real: on Kubernetes (docs/deploy.md), which sets
+// KUBERNETES_SERVICE_HOST in every pod, read through getenv. `silo hub
+// serve` checks it before serving, so that the header the browser
+// suite (ui/e2e) and the fault tests sign in with cannot be turned on
+// in a production pod by a stray flag or environment variable; Config
+// itself still takes one, for tests that build a hub in-process.
+func CheckDevSignOn(header string, getenv func(string) string) error {
+	if header == "" {
+		return nil
+	}
+	if getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return errors.New("server: the development user header is refused on Kubernetes, where anyone who reaches the hub could claim to be anyone; sign on with IAP or OIDC")
+	}
+	return nil
+}
+
 // headerAuth is DevUserHeader's sign-on.
 type headerAuth string
 

@@ -286,6 +286,27 @@ real sign-on.
 boundary's bundle test runs after `npm run build`, and is skipped
 without a bundle unless `SILO_UI_REQUIRE_BUNDLE` is set, as CI sets it.
 
+**The browser suite.** `ui/e2e` is a Playwright suite: Chromium against
+`silo hub serve` with the bundle embedded, over a SQLite file per worker
+(or the database `SILO_E2E_DATABASE` names), and fake Grains
+(`internal/fakegrain`), rendezvous clients that accept what they are
+offered and emit only the events, results and artifacts a spec scripts
+over their control API. Humans sign on with `-dev-user-header`, which
+`silo hub serve` refuses on Kubernetes (`server.CheckDevSignOn`). It
+covers a member's backlog and another team's task as not found; filing,
+placement, live events and the token stream, an artifact through the
+view-through and unavailable once its node is offline, and the end; a
+reload mid-stream without duplicates; cancel and requeue; a proposal
+approved and one rejected; approval requests allowed and denied; a node
+token minted, shown once, and revoked, disconnecting its node; an
+interactive session; axe (WCAG 2.1 A and AA) on every page; and, after
+an artifact is viewed, nothing of it in Web Storage, IndexedDB, Cache
+Storage or a service worker. `npm run build && npx playwright install
+chromium && npm run e2e` runs it; grain CI runs it as `ui e2e`, on every
+push, keeping each failed test's trace and screenshot. It takes under a
+minute after the build, and its fakes act only when told, so it is not
+split into a nightly tier.
+
 ## 8. As built: U2
 
 **Pages and actions.** Each is a call to the public API (`ui/src/api.ts`)
