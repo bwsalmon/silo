@@ -2,9 +2,10 @@
 
 **Status:** draft for review (bsalmon@google.com). Normative.
 
-This document specifies the Grainfile Format: how Grain's work (tasks,
-backlogs, runs, comments, templates, triggers, gates, capabilities,
-designs, memory and lifecycles) is kept as plain files in git, how those
+This document specifies the Grainfile Format: how Grain's work (task
+definitions, task executions and their runs, backlogs, comments,
+templates, triggers, gates, capabilities, designs, memory and
+lifecycles) is kept as plain files in git, how those
 files refer to each other, who may change them, and how a reader
 discovers, resolves and checks them. It is written so that a conforming
 reader, writer, executor, hub, forge check or linter can be built from it
@@ -85,7 +86,7 @@ conformance class MUST treat the condition as §20.2 says.
 **asset**
 : Any file in a grain folder that is not a grainfile: an image, a YAML
   workflow, a `README.md`, a Markdown file with no known kind suffix
-  (§7.15).
+  (§7.14).
 
 **grain folder**
 : A directory that contains a file named `grain.config.md`. That file is
@@ -98,7 +99,7 @@ conformance class MUST treat the condition as §20.2 says.
 
 **template folder**
 : A directory inside a grain folder whose top holds a folder-template
-  manifest (§13.1). Its contents are inert (§13.4).
+  manifest (§13.1). Its contents are inert (§13.2).
 
 **deployment** (grain deployment)
 : One running Grain. Each deployment has exactly one **root grain
@@ -120,6 +121,24 @@ conformance class MUST treat the condition as §20.2 says.
 : The account the forge authenticated for a push or a pull request: the
   only identity this specification uses for authorisation (§16.4).
 
+**definition** (task definition)
+: A `task` grainfile (§7.1): what to do. It holds no state and no runs.
+  It is a file `<name>.task.md`, or a folder `<name>.task/` holding
+  `task.md` and the definition's own `thread/` and `assets/` (§4.3).
+  It may live in any grain folder.
+
+**execution** (task execution)
+: One folder `<name>.exec/` (§7.2) in a lane of the executing
+  deployment's root grain folder: `exec.md` (provenance, lifecycle state,
+  approvals), a snapshot copy of the definition (`task.md`), the
+  execution's own `thread/`, one folder per attempt under `runs/`, and
+  `assets/`. Everything that happens to that piece of work is inside it;
+  nothing about an execution spans repositories.
+
+**container**
+: A definition folder or an execution folder. Its children are found by
+  listing it, never by pointers (§11).
+
 **principal**
 : A forge-independent name for who acts (§6.3), mapped to forge
   identities by the identity map (§16.5).
@@ -133,8 +152,8 @@ are the sentences that name it, plus §3, §4, §5 and §9 for every class.
 | --- | --- | --- |
 | **reader** | Reads grain folders: lists root entries, parses grainfiles, resolves references. | §3–§11, §12.2 (category lookup), §19 |
 | **writer** | Creates or changes grainfiles. | reader; §5.5 (round-trip), §6, §7, §8, §13.3 (if it instantiates), §16.6 |
-| **executor** | A deployment: acts on its root grain folder, dispatches tasks, writes runs and comments. | reader, writer; §10.2, §11, §12, §14, §15, §16.7, §16.8 |
-| **hub** | Silo: the human-facing reader and writer, and the policy decision point for its UI. Keeps derived indexes and a registry. | reader, writer; §11.9, §16.6, §16.8, §17 |
+| **executor** | A deployment: acts on its root grain folder, dispatches executions, writes their runs, comments and state. | reader, writer; §10.2, §11, §12, §14, §15, §16.7, §16.8 |
+| **hub** | Silo: the human-facing reader and writer, and the policy decision point for its UI. Creates executions, keeps derived indexes and a registry. | reader, writer; §11, §16.6, §16.8, §17 |
 | **forge check** | The required status check that gates a protected branch: validates a change and authorises it against `GRAINOWNERS`. | linter; §16 |
 | **linter** | Reports the conditions of §20 for a tree, or for a change between two trees. | reader; §20 |
 
@@ -217,6 +236,9 @@ segment        = 1*( LOWER / DIGIT / "-" / "_" / UPPER-ASSET )
 UPPER-ASSET    = %x41-5A                           ; see 4.2
 kind           = LOWER *( LOWER / DIGIT / "-" )    ; registered in §22.1
 tombstone-name = stem "." kind ".moved.md"
+container-name = stem ( %s".task" / %s".exec" )     ; a directory, §4.3
+fixed-name     = %s"task.md" / %s"exec.md" / %s"run.md" ; §4.1.3
+run-name       = compact-utc [ "-" 1*( LOWER / DIGIT / "-" ) ]
 config-name    = %s"grain.config.md"
 owners-name    = %s"GRAINOWNERS"
 settings-name  = %s".grainconfig"
@@ -230,6 +252,20 @@ sidecar (kind `asset`); `report.png.asset.md` is the sidecar of
 
 4.1.2. The **name** of a grainfile is its stem. `4310-carry-approver` is
 the name of `4310-carry-approver.task.md`.
+
+4.1.3. **Fixed names.** Inside a container the kind is given by a fixed
+file name instead of a suffix, and the name is the container's stem:
+
+| Path | Kind | Name |
+| --- | --- | --- |
+| `<name>.task/task.md` | `task` (a definition) | `<name>` |
+| `<name>.exec/exec.md` | `exec` | `<name>` |
+| `<name>.exec/task.md` | `task` (the execution's snapshot, §7.2) | `<name>` |
+| `<name>.exec/runs/<run>/run.md` | `run` | `<run>`, a `run-name` |
+
+A fixed name anywhere else, a file with suffix `.exec.md` or `.run.md`,
+and a container nested in a container are errors (GF007). An execution
+is always a folder and a run always `runs/<run>/run.md`.
 
 ### 4.2 Characters, case and length
 
@@ -255,16 +291,31 @@ the name of `4310-carry-approver.task.md`.
 | `.grainconfig` | the repo settings file (§10.5) | Only at a repository's root. |
 | `archive/` | archived grainfiles (§10.6) | A directory of this name anywhere; never listed by a root entry. |
 | `.grain/` | the default grain folder of a code repo (§18) | A convention, not a rule: it is a grain folder only if it holds `grain.config.md`. |
-| `<name>.thread/` | a task's thread folder (§11.2) | Holds only `*.comment.md` and comment attachments. |
-| `<name>.runs/` | a backlog reference's runs folder (§11.3) | Holds only `*.run.md`, `*.comment.md` and their attachments. |
-| `<name>.placements/` | a task's placements folder (§11.4) | Holds only `*.placement.md`. |
-| `<name>.attachments/` | a task's or comment's attachments (§11.6) | Holds only assets. |
+| `<name>.task/` | a definition folder (§7.1, §11.2) | Holds `task.md`, `thread/`, `assets/` and `GRAINOWNERS`, nothing else. |
+| `<name>.exec/` | an execution folder (§7.2, §11.3) | Holds `exec.md`, `task.md`, `thread/`, `runs/`, `assets/` and `GRAINOWNERS`, nothing else. MUST be in a lane of a deployment's root grain folder (GF047). |
+| `thread/` in a container | the container's thread (§11.2) | Holds only `*.comment.md`, and each comment's attachments in `<comment name>.attachments/`. |
+| `runs/<run>/` in an execution | one attempt (§11.3) | Holds `run.md`, that attempt's `*.comment.md`, and assets. |
+| `assets/` in a container | the container's attachments | Holds only assets and their sidecars. |
 | `*.moved.md` | a tombstone (§8.3) | Never changed, never deleted. |
 
-A reserved folder suffix (`.thread`, `.runs`, `.placements`,
-`.attachments`) MUST NOT be used for any other directory, and a file
-whose kind is not allowed in a reserved folder MUST NOT be placed there
-(GF007).
+`thread/`, `runs/` and `assets/` are reserved only directly inside a
+container. A file whose kind is not allowed where it is placed MUST NOT
+be there (GF007); in particular a comment outside every `thread/` and
+run folder is an error, and readers MUST NOT attach it to anything.
+A container's required files missing (`exec.md`, the snapshot
+`task.md`, a run folder's `run.md`, a definition folder's `task.md`), or
+a definition present both as `<name>.task.md` and `<name>.task/`, is
+GF045.
+
+**Decision:** a definition with no discussion and no assets MAY stay a
+single file `<name>.task.md`. When its first comment or asset arrives,
+the writer **folds** it: in one commit it moves `<name>.task.md` to
+`<name>.task/task.md` byte for byte and adds the comment. A fold is not a
+move: it leaves no tombstone, the definition's identity is unchanged
+(§9.3 step 5 resolves either form), and the forge check authorises it
+under the rule that lets the actor create the comment (§16.2.6). Writers
+SHOULD reference a definition as `<name>.task.md` in either form, so a
+fold changes no reference. A folder is never unfolded.
 
 ### 4.4 Kinds and assets
 
@@ -287,7 +338,7 @@ A reader MUST support at least, and MAY refuse beyond (GF006):
 | What | Limit |
 | --- | --- |
 | a grainfile | 1 MiB; front matter 64 KiB |
-| an asset in git | 10 MiB (larger: an external sidecar, §7.15) |
+| an asset in git | 10 MiB (larger: an external sidecar, §7.14) |
 | grainfiles listed by one root entry | 2,000 (`limits.objects_per_entry`) |
 | grainfiles listed by one deployment | 20,000 (`limits.objects`) |
 | redirect hops | 8 (§9.4) |
@@ -368,7 +419,7 @@ OPTIONAL.
 | `schema` | schema-id (§3.1) | Req. | The kind's schema and major version. |
 | `aka` | list of strings | Opt. | Identities from before migration (`grain:eu/task/4310`, `repo:template:o:r:n`). Indexed for search, never resolved (§8.5). |
 | `moved_from` | list of references | Opt. | Earlier addresses of this grainfile, oldest first (§8.3). |
-| `instantiated_from` | string, `<ref>@<sha>` | Opt. | Set on every grainfile an instantiation materialised (§13.3). |
+| `instantiated_from` | string, `<ref>@<sha>` | Opt. | Set on every execution an instantiation created (§13.3). |
 | `x_*` | any | Opt. | Extension fields (§3.3). |
 
 There is **no `id` field**: a grainfile is identified by its path (§8). A
@@ -385,7 +436,7 @@ file that sets `id` is an error (GF020).
 | *time* | §1.4 |
 | *principal* | §6.3 |
 | *rank* | `[0-9a-z]*[1-9a-z]`, compared bytewise (§7.2) |
-| *state* | a state name of the task's lifecycle (§12) |
+| *state* | a state name of the execution's lifecycle (§12) |
 
 6.3. **Principals.**
 
@@ -412,151 +463,207 @@ example. The JSON Schema `schemas/grainfiles/<kind>.schema.json` is the
 machine form; where it and this text disagree, this text wins and the
 schema is a bug.
 
-### 7.1 `task`
+### 7.1 `task` (definition)
 
-A unit of work, written once where it was proposed; its body is the
-prompt.
+What to do, written once where it was proposed; its body is the prompt.
+A definition **holds no state and no runs**: its lifecycle state,
+approvals and runs are its executions' (§7.2). It is `<name>.task.md`,
+or `<name>.task/task.md` when it has a thread or assets (§4.3). It MAY
+live in any grain folder: an intake, a code repository's `.grain/`, a
+shared library, a deployment's own folder. A folder template's members
+are definitions (§13).
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `title` | string | Req. | | One line. |
-| `state` | *state* | Req. | the lifecycle's `initial` | The task's lifecycle state (§12). |
-| `lifecycle` | *ref* to a `lifecycle` | Opt. | the lane's, else `grain/default` (§12.5) | |
-| `team` | string | Opt. | | Owning team. |
 | `submitter` | *principal* | Req. | | Who proposed it. |
 | `created_at` | *time* | Req. | | |
 | `submitted_via` | enum `git` `api` `ui` `cli` `trigger` `gate` `agent` `template` | Opt. | `git` | |
-| `approved_by`, `approved_at` | *principal*, *time* | Opt. | | Set by the transition out of the initial `proposed`-category state into a `ready`-category state. MUST differ from `submitter` unless the folder's lifecycle sets `self_approval: true`. |
-| `context` | list of context entries (§14) | Opt. | `[]` | What its sandbox holds. |
-| `template` | *edge* `{ref, rev, inputs}` | Opt. | | The single-task template it was rendered from. |
-| `depends_on` | list of *ref* to tasks | Opt. | `[]` | §12.3. |
+| `lifecycle` | *ref* to a `lifecycle` | Opt. | | The lifecycle its executions use, unless the execution's lane names one (§12.5). |
+| `team` | string | Opt. | | Owning team. |
+| `context` | list of context entries (§14) | Opt. | `[]` | What a run's sandbox holds. |
+| `template` | *edge* `{ref, rev, inputs}` | Opt. | | The single-task template it was rendered from, when a person proposed it from one. |
+| `depends_on` | list of *ref* to definitions | Opt. | `[]` | Mapped to executions when executions are created (§11.4, §13.3). |
 | `implements` | list of *edge* `{ref, rev, hash}` | Opt. | `[]` | Design requirements (§7.10). |
-| `constraints` | mapping `{labels, deployment}` | Opt. | | Where it may run. |
-| `thread` | folder *ref* | Opt. | `<name>.thread/` | §11.2. |
-| `placements` | folder *ref* | Opt. | `<name>.placements/` | §11.4. |
-| `cancel` | `{by, at, reason}` | Opt. | | REQUIRED when `state`'s category is `cancelled` and the state is not `rejected`. |
-| `rejection` | `{by, at, reason}` | Opt. | | |
-| `capability_approvals` | list of `{ref, digest, by, at}` | Opt. | | §15.4. |
-| `trigger` | *edge* `{ref, on, key, fired_at, event}` | Opt. | | The firing that filed it (§7.7). |
+| `constraints` | mapping `{labels, deployment}` | Opt. | | Where its executions may be created. |
 | `filed_by` | `{deployment, run, principal}` | Opt. | | An agent's upward filing. |
-| `supersedes` | *ref* to a task | Opt. | | |
+| `supersedes` | *ref* to a definition | Opt. | | The definition this one replaces. |
 | `origin` | string | Opt. | | An external origin (`owner/repo#N`). |
 | `labels` | list of strings | Opt. | | |
 | `auto_merge` | boolean | Opt. | | |
 
-**Frozen spec.** Once a task has left its lifecycle's initial state for
-a `ready`-category state, `title`, the body, `context`, `template`,
-`depends_on`, `implements`, `constraints` and the files of its
-attachments folder MUST NOT change (GF052 in the forge check). A changed
-request is a new task with `supersedes:`. `state`, `cancel`, `thread`,
-`placements`, `capability_approvals` and `labels` are not spec.
+**Definitions do not change once executed.** A definition SHOULD NOT be
+changed after an execution has been created from it: the execution runs
+from its snapshot (§7.2), so the edit would change nothing that runs and
+would make the definition disagree with what ran. A linter warns on a
+definition whose bytes differ from the `definition_sha256` an execution
+recorded (GF046). The forge check MAY refuse such a change unless the
+change carries an explicit override (**Decision:** a
+`Grain-Definition-Edit: <reason>` trailer on one of its commits). A
+changed request is normally a new definition with `supersedes:`. The
+definition's `thread/` and `assets/` are not part of the definition and
+change freely.
 
 **Refused fields** (GF020): `id`, `repo`, `base`, `reads`, `writes`,
-`capabilities`, `closed`, `placement`.
+`capabilities`, `closed`, `placement`, and the fields that are an
+execution's (`state`, `approved_by`, `approved_at`, `cancel`,
+`rejection`) or a pointer to children (`thread`, `runs`, `placements`).
 
 ```yaml
 ---
 kind: task
 schema: grain/task@v1
 title: Carry a hub task's approver on its offer
-state: proposed
 submitter: user:bsalmon@google.com
 created_at: "2026-10-16T09:00:00Z"
 context:
   - {ref: "https://github.com/bwsalmon/silo.git@main", mode: write}
 ---
-Carry `approved_by` from the task onto its offer and its attestation.
+Carry `approved_by` from the execution onto its offer and its attestation.
 ```
 
-### 7.2 `ref` (backlog reference)
+### 7.2 `exec` (execution)
 
-A pointer that puts a task in a lane at a rank.
+`<name>.exec/exec.md`: the front matter of one execution of one
+definition on one deployment. The folder is the execution (§4.3, §11.3):
 
-| Field | Type | Req. | Default | Meaning |
-| --- | --- | --- | --- | --- |
-| `to` | *ref* to a task (or, with `fired_at`, a trigger) | Req. | | |
-| `rank` | *rank* | Req. | | Order within the lane. |
-| `added_by`, `added_at` | *principal*, *time* | Req. | | |
-| `runs` | folder *ref* | Opt. | `<name>.runs/` | Where the executor records runs (§11.3). MUST be inside the executing deployment's root grain folder. |
-| `spec_rev` | *sha* | Opt. | | The task commit the placement read. |
-| `priority` | enum `urgent` `high` `normal` `low` | Opt. | `normal` | |
-| `expedite` | boolean | Opt. | `false` | Sorts ahead of every priority in its lane. |
-| `ranked_by`, `ranked_at` | *principal*, *time* | Opt. | | |
-| `previous` | *ref* to a run | Opt. | | On re-placement (§11.7). |
-| `superseded` | `{at, by, by_ref}` | Opt. | | Set on the old reference's runs folder marker (§11.7). |
-| `attestation` | JWS compact string | Opt. | | The hub's signed claims. |
-| `fired_at` | *time* | Opt. | | An inline firing: `to` names a trigger. |
+```
+<name>.exec/
+  exec.md        # this kind
+  task.md        # the snapshot: a copy of the definition when the execution was created
+  thread/        # *.comment.md: discussion of this execution
+  runs/          # one folder per attempt: <run>/run.md and that attempt's comments
+  assets/        # attachments
+```
 
-**Effective order within a lane** is: references whose task's
-dependencies are satisfied (§12.3) first; then `expedite: true`; then
-`priority`; then `rank` bytewise; then the path. A reference whose `to`
-does not resolve to a task in a `ready`-category state is skipped and
+| Field | Type | Req. | Meaning |
+| --- | --- | --- | --- |
+| `definition` | *ref* `@` *sha* | Req. | The definition (or single-task template, or folder-template member) the snapshot was copied from, pinned to the commit read. |
+| `definition_sha256` | `sha256:` + 64 hex | Req. | The SHA-256 of the definition file's bytes at that commit. |
+| `inputs` | mapping | Opt. | Input values substituted into the snapshot at creation (§13.5). |
+| `instantiated_from` | *ref* `@` *sha* | Opt. | The folder-template manifest, when created by instantiation (§13.3). |
+| `state` | *state* | Req. | The lifecycle state of this execution (§12). |
+| `lifecycle` | *ref* to a `lifecycle` | Opt. | §12.5. A writer copies the definition's lifecycle here, pinned, when it has one. |
+| `created_by`, `created_at` | *principal*, *time* | Req. | Who created the execution (placed the work). |
+| `created_via` | enum `git` `api` `ui` `cli` `trigger` `template` `agent` | Opt. | |
+| `rank` | *rank* | Req. | Order within the lane. |
+| `priority` | enum `urgent` `high` `normal` `low` | Opt. (`normal`) | |
+| `expedite` | boolean | Opt. (`false`) | Sorts ahead of every priority in its lane. |
+| `ranked_by`, `ranked_at` | *principal*, *time* | Opt. | |
+| `depends_on` | list of *ref* to executions | Opt. | What dispatch waits on (§12.3). |
+| `approved_by`, `approved_at` | *principal*, *time* | Opt. | Set by the transition out of the initial `proposed`-category state into a `ready`-category state. MUST differ from the definition's `submitter` unless the lifecycle sets `self_approval: true`. |
+| `capability_approvals` | list of `{ref, digest, by, at}` | Opt. | §15.4. |
+| `cancel`, `rejection` | `{by, at, reason}` | Opt. | `cancel` REQUIRED when `state`'s category is `cancelled` and the state is not `rejected`. |
+| `previous` | *ref* to an execution | Opt. | The execution this one re-places (§11.5). |
+| `superseded` | `{at, by, reason}` | Opt. | Set by this execution's own deployment when it is re-placed; `by` names the new execution. |
+| `trigger` | *edge* `{ref, on, key, fired_at, event}` | Opt. | The firing that created it (§7.6). |
+| `attestation` | JWS compact string | Opt. | The hub's signed claims. |
+| `labels` | list of strings | Opt. | |
+
+**The snapshot.** Creating an execution copies the definition into
+`task.md`. For a definition that is a `task`, the copy is byte for byte,
+so `task.md` hashes to `definition_sha256` (GF045 otherwise). For a
+template or a folder-template member, the copy is the rendered task:
+inputs substituted into body and title (§13.5), with the template's
+`context`, `lifecycle` and copied fields. The execution runs from its
+snapshot, **never from the live definition**. Relative references in a
+snapshot are read as they were in the definition, relative to the
+definition's path at `definition`'s commit, never relative to the copy.
+The definition's thread is not copied: the execution reaches it through
+`definition` (§11.2).
+
+**Fixed at creation** (GF052 in the forge check): `task.md`,
+`definition`, `definition_sha256`, `inputs`, `instantiated_from`,
+`previous`, `created_by`, `created_at`.
+
+**References out of an execution** SHOULD be `/`-rooted or carry a
+locator or alias, so that moving the folder between lanes (§11.3)
+changes none of them; references between executions created together
+(an instance, §13.3) are relative and move together.
+
+**Effective order within a lane** is: executions whose dependencies are
+satisfied (§12.3) first; then `expedite: true`; then `priority`; then
+`rank` bytewise; then the path. An execution not in a `ready`-category
+state, or whose snapshot is missing or unreadable, is skipped and
 reported, not dispatched.
 
 ```yaml
 ---
-kind: ref
-schema: grain/ref@v1
-to: "intake:tasks/2026-10-16-approval-flow.task.md"
+kind: exec
+schema: grain/exec@v1
+definition: "hub:intake/tasks/2026-10-16-approval-flow.task.md@0c4e9a7b5d3f1e2a6b8c9d0e1f2a3b4c5d6e7f80"
+definition_sha256: "sha256:a83c…"
+lifecycle: "hub:intake/lifecycles/security.lifecycle.md@0c4e9a7b5d3f1e2a6b8c9d0e1f2a3b4c5d6e7f80"
+state: sec-approved
+created_by: user:dev@example.com
+created_at: "2026-10-16T11:50:00Z"
 rank: "t"
-added_by: hub
-added_at: "2026-10-16T17:12:00Z"
+approved_by: user:sec@example.com
+approved_at: "2026-10-16T12:00:00Z"
 ---
 ```
 
-### 7.3 `run` (execution record)
+### 7.3 `run` (attempt record)
 
-What one deployment did with one reference: a final-state snapshot,
-updated at coarse status changes.
+`<name>.exec/runs/<run>/run.md`: what one attempt of the execution did,
+a final-state snapshot updated at coarse status changes. `<run>` is the
+compact UTC time the attempt was accepted, with an optional `-<suffix>`
+(GF001). Only the execution's deployment writes it (§16.7).
 
 | Field | Type | Req. | Meaning |
 | --- | --- | --- | --- |
-| `task` | *edge* `{ref, rev}` | Req. | Back-pointer, checked (§11.1). |
-| `from` | *edge* `{ref, rev}` | Req. | The reference it ran from; back-pointer, checked. |
-| `deployment` | dep-id | Req. | The executor. |
+| `deployment` | dep-id | Req. | The executor; MUST be the deployment whose folder holds the execution. |
 | `status` | enum (below) | Req. | Run status. |
 | `accepted_at` | *time* | Req. | |
 | `started_at` | *time* | Opt. | |
-| `previous` | *ref* to a run | Opt. | The superseded attempt on another deployment. |
 | `waiting` | `{on, entry, reason}` | Opt. | REQUIRED when `status` is `awaiting_reply` or `held`. |
 | `refusal` | `{reason, at, entry, capability, reducer, secret}` | Opt. | REQUIRED when `status` is `refused`. |
 | `context` | `{materialised, skipped}` | Opt. | §14.6. |
 | `capabilities` | list | Opt. | §15.6. |
-| `superseded` | `{at, by, withdrawn_at, reason}` | Opt. | REQUIRED when `status` is `superseded`. |
+| `superseded` | `{at, by, reason}` | Opt. | REQUIRED when `status` is `superseded`. |
 | `closed` | `{outcome, at, summary, change, design_revs, follow_ups}` | Opt. | REQUIRED when the status is terminal. |
-| `proposed_transition` | `{to, applied, at}` | Opt. | The task transition its outcome proposed (§12.6). |
+| `proposed_transition` | `{to, applied, at}` | Opt. | The execution transition its outcome proposed (§12.6). |
 
 **Run status** (open: §3.2) is `accepted`, `running`, `awaiting_reply`,
 `held`, `done`, `failed`, `interrupted`, `refused`, `cancelled`,
 `superseded`. The terminal ones are `done`, `failed`, `interrupted`,
 `refused`, `cancelled`, `superseded`; a terminal record MUST NOT change
 (GF052). `closed.outcome` is one of `done`, `failed`, `nothing_needed`,
-`cancelled`, `interrupted`. Run status is never a lifecycle state (§12.1).
+`cancelled`, `interrupted`. Run status is never a lifecycle state
+(§12.1). At most one run of an execution is open (`accepted`, `running`,
+`awaiting_reply`, `held`) at a time (GF053).
+
+Refused (GF020): `task` and `from`, the back-pointers of the earlier
+model; the run's folder says which execution it belongs to.
 
 ```yaml
 ---
 kind: run
 schema: grain/run@v1
-task: {ref: "intake:tasks/4310-carry-approver.task.md", rev: 0c4e9a7b5d3f1e2a6b8c9d0e1f2a3b4c5d6e7f80}
-from: {ref: "../4310-carry-approver.ref.md", rev: 1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e}
 deployment: eu
 status: running
-accepted_at: "2026-10-16T13:58:30Z"
+accepted_at: "2026-10-16T15:00:00Z"
 ---
 ```
 
 ### 7.4 `comment`
 
+A comment is in exactly one of three places, and its place is its
+parent (§11.2): a definition's `thread/`, an execution's `thread/`, or a
+run folder `runs/<run>/`.
+
 | Field | Type | Req. | Meaning |
 | --- | --- | --- | --- |
-| `task` or `run` | *ref* | Req., exactly one | Back-pointer to the grainfile that declares the folder the comment is in (§11.1). |
 | `author` | *principal* (`user:`, `deployment:`, `agent:`, `hub`) | Req. | |
 | `at` | *time* | Req. | |
 | `via` | enum `git` `hub` `api` `forge` | Opt. | How it was written. |
-| `in_reply_to` | *ref* to a comment | Opt. | |
+| `in_reply_to` | *ref* to a comment | Opt. | May name a comment in another of the three places (an execution comment answering one on its definition). |
 | `supersedes` | *ref* to a comment | Opt. | An edit; comments are append-only. |
-| `attachments` | list of *ref* to assets | Opt. | |
-| `question` | boolean | Opt. | An agent's question that holds its run (`awaiting_reply`). |
+| `attachments` | list of *ref* to assets | Opt. | Normally in `<comment name>.attachments/` beside it. |
+| `question` | boolean | Opt. | An agent's question that holds its run (`awaiting_reply`); only in a run folder. |
+
+Refused (GF020): `task` and `run`, the back-pointers of the earlier
+model.
 
 A comment's name MUST be `<compact UTC time>-<author slug>`, where the
 author slug is the principal with every character outside `[a-z0-9]`
@@ -564,11 +671,12 @@ replaced by `-` (GF001). A comment MUST NOT change once written (GF052).
 
 ### 7.5 `template`
 
-Two forms, distinguished by `form:` (§13.1):
+A template is a definition with inputs. Three forms, distinguished by
+`form:` (§13.1):
 
 - **`form: task`** (the default): a **single-task template**, a
-  shorthand for a folder template holding one task. Its body is the
-  task's prompt.
+  shorthand for a folder template holding one definition. Its body is
+  the prompt. Instantiating it creates one execution (§13.4).
 - **`form: folder`**: the **manifest** of a folder template. It MUST be
   named `<dir>.template.md` and sit at the top of directory `<dir>/`
   (GF068).
@@ -579,12 +687,12 @@ Two forms, distinguished by `form:` (§13.1):
 | `form` | enum `task` `folder` `partial` | Opt. | `task` | |
 | `title` | string (templated) | Req. for `task` | | The rendered task's title. |
 | `inputs` | list of input declarations (§13.5) | Opt. | `[]` | |
-| `context` | list of context entries | Opt. | | Copied into the rendered task, with `input:` entries bound. |
-| `lifecycle` | *ref* | Opt. | | Copied into the rendered task(s). |
+| `context` | list of context entries | Opt. | | Copied into the snapshot, with `input:` entries bound. |
+| `lifecycle` | *ref* | Opt. | | Copied, pinned, into each execution's `exec.md`. |
 | `team` | string | Opt. | | |
-| `model`, `network`, `nothing_needed`, `auto_merge`, `base` | as grain's `.grain/templates` | Opt. | | Copied into the rendered task (§13.8). |
+| `model`, `network`, `nothing_needed`, `auto_merge`, `base` | as grain's `.grain/templates` | Opt. | | Copied into the snapshot (§13.8). |
 | `run` | run policy (below) | Opt., `folder` only | | What grain's suites carried. |
-| `target` | enum `lane` `path` | Opt., `folder` only | `lane` | Where instances go (§13.3). |
+| `target` | enum `lane` `path` | Opt., `folder` only | `lane` | Which lane instances go to: the one the request names, or a trigger's `fires.into` (§13.3). |
 
 **Run policy** (`run:`), the fields of grain's `.grain/suites/*.yml`:
 
@@ -613,7 +721,7 @@ Refused in every form (GF020): `reads`, `writes`, `grants`,
 | --- | --- | --- | --- |
 | `title` | string | Opt. | |
 | `on` | mapping of source → options | Req. | Sources: `schedule`, `push`, `merge`, `pull_request`, `design-change`, `task-state` (§12.4), `manual`; `task-closed` is reserved and refused. Unknown sources: §3.4. |
-| `fires` | mapping | Req. | Exactly one of `template` (a *ref* to a template of any form) or `workflow` (a path to a workflow in the trigger's own repo). With `template`: `inputs`, `bind`, `context`, `per` (`event` `requirement` `folder` `change`), `into` (target path, §13.3). With `workflow`: `branch`, `review: {template, inputs}`. |
+| `fires` | mapping | Req. | Exactly one of `template` (a *ref* to a template of any form) or `workflow` (a path to a workflow in the trigger's own repo). With `template`: `inputs`, `bind`, `context`, `per` (`event` `requirement` `folder` `change`), `into` (the lane, in the firing deployment's root grain folder, its executions are created in, §13.3). With `workflow`: `branch`, `review: {template, inputs}`. |
 | `fires_in` | enum `hub` `deployment` | Opt. (default `deployment`) | Who fires it. `workflow` requires `deployment`. |
 | `enabled` | boolean | Opt. (default `true`) | |
 | `team`, `auto_merge`, `auto_approve_proposals` | | Opt. | |
@@ -633,10 +741,16 @@ Merge-gate keys (`gate`, `human`, `sensitive`, `requires`) are refused
 (GF020): those are a gate's. Runtime state (`last_fire_at`,
 `next_fire_at`, `paused`) is refused: it lives in the firer's database.
 
-A firing that files a task writes it at
-`<into>/fired/<trigger name>/<event key>.task.md`, or materialises a
-folder template there (§13.3). The event key is deterministic, so a
-retried firing lands on the same path and is a no-op.
+A firing creates executions, never definitions: a single-task template
+fires one execution at `<into>/fired/<trigger name>/<event key>.exec/`,
+and a folder template one instance at
+`<into>/fired/<trigger name>/<event key>/` (§13.3); each records
+`trigger:`. `into` is a lane: for `fires_in: deployment`, a lane path in
+the firing deployment's own root grain folder (default: its first lane);
+for `fires_in: hub`, a deployment's lane by folder locator, written by
+the hub as `hub:trigger` under that folder's `GRAINOWNERS`. The event key
+is deterministic, so a retried firing lands on the same path and is a
+no-op.
 
 ### 7.7 Trigger sources are closed
 
@@ -711,31 +825,26 @@ then the path.
 (Req.), `transitions` (Req.), `aliases` (Opt.), `on_outcome` (Opt.),
 `self_approval` (Opt., default `false`), `stalled_after` (Opt.).
 
-### 7.14 `placement`
-
-A pointer from a task to one of its placements (§11.4).
-
-| Field | Type | Req. | Meaning |
-| --- | --- | --- | --- |
-| `task` | *ref* | Req. | Back-pointer to the task declaring the folder. |
-| `deployment` | dep-id | Req. | |
-| `ref` | *ref* | Req. | The backlog reference in that deployment's lane. |
-| `runs` | folder *ref* | Req. | That reference's runs folder. |
-| `placed_by`, `placed_at` | *principal*, *time* | Req. | |
-| `withdrawn` | `{at, by, reason, replaced_by}` | Opt. | Set on re-placement or unplacement. |
-
-Its name MUST be `<compact UTC time>-<deployment>`.
-
-### 7.15 `asset` (sidecar)
+### 7.14 `asset` (sidecar)
 
 | Field | Type | Req. | Meaning |
 | --- | --- | --- | --- |
 | `asset` or `external` | *ref* to an asset, or `{url, sha256, bytes, media_type}` | Req., exactly one | `external.url` is `https://` (or `gs://`, `s3://` where a capability allows); `sha256` REQUIRED. |
 | `title`, `description`, `alt`, `media_type`, `license`, `provenance`, `sha256`, `bytes` | | Opt. | `sha256` and `bytes`, when present, MUST match the blob (GF030). |
 
-### 7.16 `config`
+### 7.15 `config`
 
 `grain.config.md`; §10.
+
+### 7.16 Removed: `ref` and `placement`
+
+The backlog reference (`kind: ref`, `*.ref.md`) and the placement
+pointer (`kind: placement`, `<name>.placements/`) of the format's first
+draft are not part of this format, and neither are the `<name>.thread/`
+and `<name>.runs/` sibling folders: an execution folder replaces all four
+(§11). A file with suffix `.ref.md` or `.placement.md` is an asset to a
+reader and a warning to a linter (GF005); `ref` and `placement` are
+retired kind names (§22.1).
 
 ### 7.17 Removed: `suite`
 
@@ -770,12 +879,23 @@ MUST list the old canonical reference in `moved_from` (GF044). A
 tombstone MUST NOT be changed or deleted (GF052), so a tombstoned path is
 never reused. A move within one repository MUST be one commit.
 
+A container moves as a unit, with everything inside it; its tombstone is
+`<name>.task.moved.md` (the same path a single-file definition's would
+have) or `<name>.exec.moved.md`. **Decision:** moving an execution from
+one lane to another of the same deployment (a `git mv` of its folder)
+leaves **no** tombstone: an execution's name is unique within its
+deployment's root grain folder (GF048), and a reference to it that finds
+nothing at its path finds it by name in the deployment's lanes (§9.3
+step 5). An execution never moves to another repository; re-placement
+creates a new one (§11.5). Folding a definition (§4.3) is not a move.
+
 8.4. **History.** A grainfile's history is its git history at its path
 (and, through `moved_from`, its earlier paths). Nothing in the format
-records history beyond that. Only `ref` grainfiles MAY be deleted; every
-other grainfile leaves its path only by becoming a tombstone or by
-archival (§10.6). Assets MAY be deleted, except a task's attachments
-after its spec is frozen.
+records history beyond that. No grainfile is deleted: a grainfile
+leaves its path only by becoming a tombstone, by a lane move or fold
+(above), or by archival (§10.6). Assets MAY be deleted, except an
+execution's snapshot-time attachments and a definition's `assets/`
+after an execution has been created from it.
 
 8.5. **`aka`** values MUST NOT be used to resolve anything.
 
@@ -850,7 +970,14 @@ Resolution is one function, `resolve(reference, referrer, gate)`.
 4. **Gate.** Call `gate(target)`; the reader's credential is always part
    of it, and for `context:` the executor's policy is too (§14.5). A
    refusal is an error (GF030, "not readable").
-5. **Look up the path.** If it exists, go to 7.
+5. **Look up the path.** A folder reference to a container names its
+   fixed file: `<name>.task/` is `<name>.task/task.md`, `<name>.exec/`
+   is `<name>.exec/exec.md`. If the path exists, go to 7. Then, none
+   counting as a hop: a missing `<name>.task.md` is looked up as
+   `<name>.task/task.md` (a folded definition, §4.3); a missing
+   `<name>.exec/` inside a deployment's root grain folder is looked up by
+   name in each of that deployment's lanes (a lane move, §8.3), one
+   listing per lane. If one of these exists, go to 7.
 6. **Redirect.** In order, each counting as one hop except the last:
    1. the target repository's `.grainconfig` `moved_to`: retry at that
       URL with the same path;
@@ -866,7 +993,7 @@ Resolution is one function, `resolve(reference, referrer, gate)`.
 
 The result is the target's canonical reference, the commit it was read
 at, and its contents. A writer that records an edge for traceability
-(`template.rev`, `implements[].rev`, `spec_rev`, `task.rev`, `from.rev`)
+(`template.rev`, `implements[].rev`, `definition`, `instantiated_from`)
 MUST record the commit actually used.
 
 ### 9.4 Redirect limits and cycles
@@ -893,17 +1020,17 @@ mirror.
 
 | Field | Expected kind |
 | --- | --- |
-| `ref.to` | `task` (or `trigger` with `fired_at`) |
-| `task.depends_on[]`, `task.supersedes`, `comment.task`, `placement.task` | `task` |
-| `task.template.ref`, `trigger.fires.template` | `template` |
-| `task.lifecycle`, lane `lifecycle` | `lifecycle` |
+| `exec.definition` | `task` or `template` (a single-task template, or a member of a folder template) |
+| `task.depends_on[]`, `task.supersedes` | `task` |
+| `exec.depends_on[]`, `exec.previous`, `exec.superseded.by` | `exec` (a folder reference to `<name>.exec/`) |
+| `task.template.ref`, `trigger.fires.template`, `exec.instantiated_from` | `template` |
+| `task.lifecycle`, `exec.lifecycle`, lane `lifecycle` | `lifecycle` |
 | `task.implements[].ref` | `design` (with `#anchor`) |
-| `run.task.ref` | `task`; `run.from.ref`: `ref`; `run.previous`: `run` |
-| `comment.run` | `run`; `comment.in_reply_to`, `comment.supersedes`: `comment` |
+| `comment.in_reply_to`, `comment.supersedes` | `comment` |
 | `capability.base.capability` | `capability` |
 | `moved.to` | the same kind as the tombstone's |
 | `asset.asset` | an asset (not a grainfile) |
-| `task.thread`, `task.placements`, `ref.runs`, root entry `path` | a folder |
+| root entry `path` | a folder |
 
 ### 9.7 Errors
 
@@ -911,10 +1038,10 @@ mirror.
 | --- | --- | --- |
 | malformed reference | GF035 | the field is invalid |
 | undeclared alias | GF033 | unresolvable |
-| missing, unreadable or redirect chain broken | GF030 | dangling: a dependency stays blocked; a template makes the task unrenderable; a backlog reference is skipped and reported; an `implements` is shown unresolved |
+| missing, unreadable or redirect chain broken | GF030 | dangling: a dependency stays blocked; a template makes the execution uncreatable; an unresolvable `definition` is shown unresolved (the execution still runs from its snapshot); an `implements` is shown unresolved |
 | redirect loop or over 8 hops | GF031 | dangling |
 | wrong kind | GF032 | as dangling |
-| `depends_on` cycle | GF034 | every task on the cycle is blocked |
+| `depends_on` cycle | GF034 | every execution on the cycle is blocked |
 
 ## 10. `grain.config.md` and the repo settings file
 
@@ -936,10 +1063,9 @@ A library folder activates nothing.
 | `role` | enum `deployment` `registry` `library` | Req. | |
 | `title` | string | Opt. | |
 | `owner` | `{user}` / `{team}` | Req. | Who owns the folder; the only principal who may change `role` and `owner`. |
-| `lifecycle` | *ref* | Opt. | The default lifecycle for tasks created in this folder (§12.5). |
+| `lifecycle` | *ref* | Opt. | The default lifecycle: for definitions in this folder, copied onto their executions; in a deployment's folder, for its executions (§12.5). |
 | `ignore` | list of gitignore patterns | Opt. | Paths in the folder that no reader lists (they are still assets). |
 | `limits` | `{objects_per_entry, objects}` | Opt. | Lower §4.5. |
-| `task_home` | `{mode, allow, repos}` | Opt. | §18.2. |
 
 ### 10.2 Deployment form
 
@@ -954,8 +1080,7 @@ backlog:
   mode: weighted                 # strict (default) | weighted | round_robin
   lanes:                         # highest priority first
     - name: hub
-      path: "placements:grains/eu/backlog/@main"
-      ref_mode: track
+      path: hub/                 # where the hub creates executions
       weight: 3
     - name: own
       path: backlog/
@@ -976,13 +1101,18 @@ the hub it links to.
 folder *ref* ending `/`, or one file), `ref_mode` (`track` or `pin`;
 REQUIRED when `path` has a locator or alias), and `ignore` (gitignore
 patterns, relative to the entry's folder). A lane also has `name` (Req.,
-unique), `weight` (weighted mode) and `lifecycle` (a *ref*). A memory
+unique), `weight` (weighted mode) and `lifecycle` (a *ref*).
+**Decision:** a lane's `path` MUST be a folder of the deployment's own
+root grain folder, never a locator or alias (GF047): executions are
+written only in the executing deployment's repository, so a backlog move
+never touches another repository. A memory
 entry MAY have `write: true`; at most one entry, inside the root folder,
 may.
 
 10.2.3. **What an entry activates** is exactly: the files in its folder's
-subtree whose kind suffix is the root type's kind (`ref`, `trigger`,
-`memory`), minus the paths its `ignore` matches, minus anything under a
+subtree of the root type's kind (for a lane, every `<name>.exec/`
+folder; for the others, files with suffix `.trigger.md`, `.memory.md`),
+minus the paths its `ignore` matches, minus anything under a
 directory named `archive/`, minus anything inside a template folder
 (GF064 if one would otherwise be listed), minus anything inside a
 reserved folder (§4.3). Nothing is inherited; nothing is transitive.
@@ -996,10 +1126,13 @@ if it is activated by a root entry of its root grain folder's
 `grain.config.md`, or is reached from such a grainfile by resolving a
 reference (§9). A reference never activates anything; only root entries
 do. A grainfile in the deployment's grain folder that is neither is an
-**orphan** (GF040, warning), unless it is in a declared child folder
-(§11), a template folder, `archive/`, or is a kind that is reached only
-by reference (`template`, `lifecycle`, `design`, `capability`,
-`capability-base`, `gate`, `asset`, `moved`).
+**orphan** (GF040, warning), unless it is inside a container (§11), a
+template folder or `archive/`, or is a kind that is reached only by
+reference (`task`, `template`, `lifecycle`, `design`, `capability`,
+`capability-base`, `gate`, `asset`, `moved`). **Decision:** definitions
+are inert, like templates: a definition in a deployment's folder that no
+execution names yet is not an orphan. An execution outside every lane
+is not an orphan but an error (GF047).
 
 10.2.6. **The root setting.** An executor's only local setting about
 grain folders is its root grain folder's folder locator (§9.2) and
@@ -1020,10 +1153,9 @@ folders:
   - {name: hub-intake, at: "https://github.com/acme/hub.git//intake/@main", team: hub, role: library}
   - {name: eu, at: "https://github.com/acme/grain-eu.git//@main", role: deployment}
   - {name: widgets, at: "https://github.com/acme/widgets.git//.grain/@main", team: hub, role: library}
-lanes:
-  - {name: hub-unplaced, folders: [hub-intake], path: backlog/}
 views:
-  - {name: hub-open, folders: [hub-intake, widgets], kinds: [task], categories: [proposed, ready, active, waiting]}
+  - {name: hub-definitions, folders: [hub-intake, widgets], kinds: [task]}
+  - {name: hub-open, folders: [eu], kinds: [exec], categories: [proposed, ready, active, waiting]}
 ---
 ```
 
@@ -1032,10 +1164,10 @@ views:
 | `registry.hub` | URL | Req. | The hub that serves this registry. |
 | `registry.poll_interval` | duration | Opt. (default `5m`) | §17.3. |
 | `folders` | list of `{name, at, team, role}` | Req. | `at` is a folder locator with `@branch`. `name` unique. `role` MUST equal the target's `grain.config.md` `role` (GF032). |
-| `lanes` | list of `{name, folders, path}` | Opt. | Cross-folder lanes the hub ranks (§17.2). |
-| `views` | list of `{name, folders, kinds, categories, states}` | Opt. | Saved cross-folder views. |
+| `views` | list of `{name, folders, kinds, categories, states}` | Opt. | Saved cross-folder views (§17.2). `categories` and `states` filter executions. |
 
-Registering a folder is a commit to the registry (§17.1).
+Registering a folder is a commit to the registry (§17.1). A registry has
+no lanes (`lanes:` is refused, GF020): every lane is a deployment's.
 
 ### 10.4 Library form
 
@@ -1070,187 +1202,245 @@ its folder-relative path, MAY be moved to `<top>/archive/<rest>` with no
 tombstone. Its identity is unchanged. A reference that finds nothing at
 `<top>/<rest>` tries `<top>/archive/<rest>`, then the same path in
 `archive_repo`. A new grainfile MUST NOT be created at a path whose
-archive path exists (GF052). Child folders (§11) move with their parent.
+archive path exists (GF052). A container is archived whole: its folder
+moves to the archive path with everything in it.
 
 ## 11. One-to-many relations
 
-### 11.1 The principle
+### 11.1 The principle: containment
 
-**Every one-to-many relation is navigable from the parent, by listing a
-folder the parent declares.** A reader MUST find a parent's children by
-listing that folder (§19.1), and MUST NOT find them by searching for
-grainfiles whose back-pointer names the parent.
+**A parent contains its children.** Every one-to-many relation that
+decides anything is a directory: a reader finds a parent's children by
+listing the parent's own folder (§19.1). No grainfile points down to its
+children, and no child points back up to its parent: there are no
+`thread:`, `runs:` or `placements:` fields and no back-pointers, and so
+no check that a pointer and a location agree.
 
-Children still carry **back-pointers** (`comment.task`, `comment.run`,
-`run.task`, `run.from`, `placement.task`), so that a child means
-something on its own. Back-pointers are **consistency checks only**:
-
-- A child in a declared folder whose back-pointer does not name the
-  grainfile that declares the folder is **misplaced** (GF041). Readers
-  report it and MUST still treat the folder as authoritative for
-  membership; the forge check fails the change that introduced it.
-- A child of a kind that belongs in a declared folder (`comment`, `run`,
-  `placement`) found outside every declared folder is **stray** (GF042).
-  Readers MUST NOT attach it to any parent.
-
-### 11.2 Task → comments: `thread:`
-
-- `task.thread` is a folder reference. Default: the sibling
-  `<name>.thread/` of `<name>.task.md`.
-- It MAY point into another repository (a task homed in a code repo
-  whose discussion stays in its team's intake, §18.2).
-- It holds one `*.comment.md` per comment, each with `task:` naming the
-  task, and each comment's attachments in `<comment name>.attachments/`.
-- Discussion of the task itself goes here; discussion of one run goes in
-  that run's runs folder (§11.3).
-- `thread` is not part of the frozen spec.
-
-### 11.3 Reference → runs: `runs:`
-
-- Every `*.ref.md` that a deployment executes declares `runs:`, a folder
-  **inside that deployment's own root grain folder**. Default: the
-  sibling `<name>.runs/` of `<name>.ref.md`. An executor MUST refuse a
-  reference whose `runs` is outside its root grain folder.
-- For a placement in a hub-managed lane (another repository), the hub
-  MUST write `runs:` explicitly, as the deployment's folder locator plus
-  `runs/<deployment>/<ref name>.runs/`. **Decision:** placements name a
-  folder under the deployment root's `runs/`, because the default sibling
-  would be in the hub's repository, which the deployment does not write.
-- The folder holds the `*.run.md` records of the work, and the comments
-  of those runs (the agent's thread, and replies relayed to it), each
-  `*.comment.md` with `run:` naming its record. Only the executing
-  deployment writes it (§16.7).
-- The folder outlives the reference: removing a closed reference leaves
-  its runs folder.
-- **Superseded folders.** On re-placement (§11.7) the old runs folder
-  stays where it is: the old deployment writes `superseded: {at, by,
-  withdrawn_at, reason}` on each open record in it (status
-  `superseded`), and the hub
-  records the withdrawal on the placement (§11.4). The new reference has
-  its own runs folder. A runs folder is superseded when every record in
-  it is terminal and its placement is withdrawn.
-
-### 11.4 Task → placements: `placements:`
-
-- `task.placements` is a folder reference. Default: the sibling
-  `<name>.placements/`.
-- It holds one `placement` grainfile (§7.14) per placement, named
-  `<compact UTC time>-<deployment>.placement.md`, each naming the
-  backlog reference and its runs folder.
-- The hub writes them, through the forge API, with the delegated
-  credential of the person whose action placed the task (for automatic
-  dispatch, the approver who made it `ready`; §16.6). **Decision:** the
-  approver's delegation covers automatic dispatch, because approval is
-  the act that authorises placement.
-- **Why git rather than the hub's database.** A placement is a decision
-  about the task that a reader without the hub must be able to see: it
-  is the only way down from a task to its runs. A database-only record
-  would make the task's history depend on one service's availability,
-  would be invisible to a linter and to the forge check, and could not
-  be reviewed. The cost, one small commit per placement in the task's
-  repository, is the cost of every other decision in this format.
-
-### 11.5 Design → implementing tasks, task → dependents
-
-These two are the **exception** to §11.1: they are served by **derived
-indexes** only, and have no declared folder.
-
-- **Why.** Both are many-to-many and usually cross ownership: a design's
-  owners do not write every task that implements it, and a task's author
-  does not own the tasks that depend on it. A declared folder would
-  force a write into a folder the writer does not own for every new
-  edge, and would turn each edge into a two-repository transaction.
-- **What may use them.** Nothing that decides what runs. Dependency
-  satisfaction is evaluated **forwards**, from the dependent's
-  `depends_on` (§12.3); traceability is computed forwards from each
-  task's `implements`. The indexes serve views and wake-ups ("a
-  dependency of yours is done; re-check").
-
-### 11.6 Other relations
-
-| Parent | Navigation | Children |
+| Parent | Children | Found by listing |
 | --- | --- | --- |
-| a deployment | its `grain.config.md` root entries | lanes, trigger folders, memory folders |
-| a registry | its `folders` list | registered grain folders |
-| a lane (root entry) | listing the folder for `*.ref.md` | its references |
-| a task | `<name>.attachments/` (fixed, not declarable) | its attachments |
-| a comment | its `attachments` list (forward); files in `<name>.attachments/` | its attachments |
-| a run | its runs folder (the record's own folder) | its comments |
-| a design | its `requirements` list and body headings | requirements |
-| a trigger | the deterministic path `<into>/fired/<trigger name>/` | its firings (tasks or instances) |
-| a folder template | its directory | its member grainfiles |
-| a template → its instances | **derived index** (`instantiated_from`) | instances; informative only (§13.7) |
-| a lifecycle → tasks using it | **derived index** | tasks; used by migration tools only |
-| an asset → its sidecars | the sidecar beside it (`<asset>.asset.md`); others by derived index | sidecars |
+| a definition `<name>.task/` | its comments | `thread/` |
+| an execution `<name>.exec/` | its comments | `thread/` |
+| an execution | its runs | `runs/` (each `runs/<run>/`) |
+| a run | its comments (the agent's thread, and replies relayed to it) | `runs/<run>/` |
+| a definition or an execution | its attachments | `assets/` |
+| a comment | its attachments | `thread/<comment name>.attachments/`, and its `attachments` list |
 
-### 11.7 Derived indexes
+A child is placed by being written in its parent's folder; it moves when
+the parent moves; and a child outside every parent of its kind is an
+error (GF007), never attached to anything by guesswork. A single-file
+definition `<name>.task.md` has no children until it is folded (§4.3).
+
+### 11.2 Two threads, two scopes
+
+- **The definition's thread**, `<name>.task/thread/`, is about the
+  definition itself: "this spec is wrong", design questions, the
+  background of the request. Anyone `GRAINOWNERS` lets comment writes it,
+  in the definition's repository.
+- **The execution's thread**, `<name>.exec/thread/`, is about that one
+  execution: approval discussion, "re-run this on candidate", what one
+  deployment should do differently. It is written in the deployment's
+  repository.
+- **A run's comments**, in `runs/<run>/`, are the agent's conversation
+  for that attempt: its reports, its questions (`question: true`), and
+  people's replies to them, which the deployment relays and commits there
+  (§16.7).
+
+The definition's thread is never copied into an execution. A reader
+showing an execution (Silo, grain, a CLI) MUST show both threads:
+
+1. Read `exec.md` and list `thread/` and each `runs/<run>/`.
+2. Resolve `definition` **without** its `@rev`, at the tip of the
+   definition's repository (discussion is live; the prompt is the
+   snapshot's), and list its `thread/` if it is a folder.
+3. Label every comment with its **scope**: `definition`, `execution`, or
+   `run <run>`; and show the definition scope as belonging to the
+   definition, with a link to it, since other executions share it.
+4. Either list the scopes as separate sections in that order, or merge
+   them into one timeline ordered by `at`, then by scope in that order,
+   then by name, keeping each comment's label. `in_reply_to` MAY cross
+   scopes; a reader shows the replied-to comment's scope.
+5. A definition thread the reader cannot read is reported as not
+   readable (GF030), and the execution is still shown.
+
+A definition's own page shows its thread, and lists its executions from
+the derived index (§11.6), each a link, never their threads inline.
+
+### 11.3 Executions, placement and moves
+
+- **Placement is creating an execution folder** in a lane of the target
+  deployment's root grain folder: one commit, in one repository, that
+  writes `<lane>/<name>.exec/exec.md` and the snapshot `task.md` (§7.2).
+  The hub does it through the forge API as the person placing the work
+  (§16.6); a deployment does it for its own definitions and firings.
+- `<name>` is the definition's name unless that name is already an
+  execution of this deployment, in which case the writer appends `-2`,
+  `-3`, … (GF048).
+- **Reordering** within a lane changes `rank` (and `priority`,
+  `expedite`) in `exec.md`: one file, in the one repository.
+- **Changing lanes** is a `git mv` of the folder within the one
+  repository, leaving no tombstone (§8.3), authorised by the `move` verb
+  (§16.2.5).
+- **Runs** are written only by the executing deployment, in
+  `runs/<run>/`, one folder per attempt. Lifecycle state lives on
+  `exec.md` (§12); run status lives on each `run.md` (§7.3).
+- An execution never leaves its deployment's repository except by
+  archival. Nothing about an execution is written in any other
+  repository.
+
+### 11.4 Dependencies
+
+`depends_on` in `exec.md` names executions, and is what dispatch reads
+(§12.3). A definition's `depends_on` names definitions, and is mapped
+when executions are created:
+
+- Executions created together from a folder template (§13.3) map each
+  member's relative `depends_on` to the sibling execution created from
+  that member.
+- Otherwise the creator chooses, for each definition dependency, an
+  execution of it (the hub offers the dependency's executions from the
+  definition → executions index, §11.6) and writes it, as a locator
+  reference when it is in another deployment. **Decision:** a creator
+  MUST map every definition dependency or refuse to create the
+  execution; it is never left implicit, because only `exec.md`
+  `depends_on` decides anything.
+
+### 11.5 Re-placement
+
+To move work to another deployment:
+
+1. The hub creates a **new execution** in the new deployment's lane,
+   with the same `definition` (normally at the same `@rev`, so the
+   snapshot is identical) and `previous:` naming the old execution by
+   locator. **Decision:** the new execution carries the old one's
+   `approved_by` and `approved_at` when the snapshot is identical, since
+   the approval was of that content; otherwise it starts in its
+   lifecycle's `initial` state.
+2. The hub asks the old deployment, over its task interface, to
+   withdraw. **Only the old execution's own deployment writes it**: it
+   sets `superseded: {at, by, reason}` (`by` naming the new execution),
+   moves the old execution to a `cancelled`-category state with
+   `cancel`, and marks any open run `superseded`. A deployment that is
+   gone is withdrawn by its root folder's owner, the only other writer
+   `GRAINOWNERS` gives that folder.
+3. **The fence.** The new execution's deployment MUST NOT dispatch it
+   until the `previous` execution, read by reference, is superseded or
+   in a `done`- or `cancelled`-category state with no open run. So two
+   deployments never run the same work at once, and nothing is written
+   in the new deployment's repository by the old or vice versa.
+
+### 11.6 Derived indexes
+
+These relations are **not** containment and are served by **derived
+indexes** only:
+
+- **definition → its executions** (from each `exec.md`'s `definition`);
+- **design → implementing definitions** (from `implements`);
+- **execution → dependents** and **definition → dependents** (from
+  `depends_on`);
+- template → instances (from `instantiated_from`); lifecycle →
+  executions using it; asset → sidecars; `aka` → path.
+
+**Why.** Each is many-to-many, or crosses repositories and ownership: a
+definition's owners do not write in the deployments that execute it, a
+design's owners do not write every task that implements it, and a
+task's author does not own its dependents. Making any of them a folder
+would force a write into a repository the writer does not own for every
+new edge.
 
 A **derived index** is a cache. It MUST be rebuildable from the grain
 folders alone; it MUST be keyed by the git tree or blob hashes it was
 computed from, so that a stale entry is detectable; and nothing that
 decides what runs, what is authorised or what is cancelled may depend on
-it. Losing one costs a rebuild, never a wrong answer.
+it. Dependency satisfaction is evaluated forwards, from the dependent's
+`depends_on` (§12.3); traceability forwards from `implements`. The
+indexes serve views ("this definition's executions"), lint warnings
+(GF046 needs only the execution itself) and wake-ups ("a dependency of
+yours is done; re-check"). Losing one costs a rebuild, never a wrong
+answer. The hub keeps them over the registry's grain folders (§17.2); an
+executor MAY keep the same kinds of cache for its root.
 
-The hub keeps: task → dependents; requirement → implementing tasks;
-template → instances; lifecycle → tasks; asset → sidecars; `aka` →
-path; and, for speed only, task → placements and task → runs (both also
-navigable). An executor MAY keep the same kinds of cache for its root.
+### 11.7 Other relations
+
+| Parent | Navigation | Children |
+| --- | --- | --- |
+| a deployment | its `grain.config.md` root entries | lanes, trigger folders, memory folders |
+| a registry | its `folders` list | registered grain folders |
+| a lane (root entry) | listing the folder for `<name>.exec/` | its executions |
+| a design | its `requirements` list and body headings | requirements |
+| a trigger | the deterministic path `<into>/fired/<trigger name>/` | its firings (executions or instances) |
+| a folder template | its directory | its member definitions |
+| an asset → its sidecars | the sidecar beside it (`<asset>.asset.md`); others by derived index | sidecars |
 
 ### 11.8 Worked flows
 
-**A person comments.** Through the hub, the person writes
-`<task>.thread/<utc>-user-<slug>.comment.md` with `task: ../<task>.task.md`,
-`author: user:…`, `via: hub`. The hub commits it through the forge API
-with that person's delegated token (§16.6); the forge check verifies that
-the author field matches the forge identity (§16.4) and that
-`GRAINOWNERS` grants the thread to them.
+**A person comments on a definition.** Through the hub, the person
+writes `<name>.task/thread/<utc>-user-<slug>.comment.md` with
+`author: user:…`, `via: hub`, in the definition's repository, with their
+delegated token (§16.6). If the definition was a single file, the same
+commit folds it (§4.3). The forge check verifies that the author matches
+the forge identity (§16.4) and that `GRAINOWNERS` lets them create in
+`thread/`.
+
+**A person comments on an execution.** The same, at
+`<name>.exec/thread/` in the deployment's repository.
 
 **An agent comments during a run.** The deployment writes
-`<runs folder>/<utc>-agent-<dep>-<run>.comment.md` with `run:` naming
-the record and `author: agent:<dep>/<run path>`, in its own root, under
-its own identity. A question also sets `question: true` and moves the
-run to `awaiting_reply`. A person's reply through the hub is relayed to
-the deployment, which commits it in the same folder with the person as
-`author` and `via: hub`.
+`runs/<run>/<utc>-agent-<dep>.comment.md` with
+`author: agent:<dep>/<execution path>/runs/<run>`, in its own root,
+under its own identity. A question also sets `question: true` and moves
+the run to `awaiting_reply`. A person's reply through the hub is relayed
+to the deployment, which commits it in the same run folder with the
+person as `author` and `via: hub`.
 
-**Viewing a task by listing only.** Read the task. List `thread`
-(comments, sorted by name). List `placements`; for each placement, list
-its `runs` folder (records and run comments). Merge the comment lists
-by `at`. Every step is one tree listing of a declared folder; no
-repository is searched.
+**Viewing an execution by listing only.** Read `exec.md` and `task.md`;
+list `thread/`, `runs/` and each run folder; resolve `definition` and
+list its `thread/`; label and merge (§11.2). Every step is a tree listing
+of a known folder, in at most two repositories; no repository is
+searched.
 
-**Re-placement.** The hub (1) writes `withdrawn: {at, by, reason,
-replaced_by}` on the old placement and removes the old reference from
-the old deployment's lane; (2) writes a new reference in the new
-deployment's lane with its own `runs` folder and `previous:` naming the
-old open run; (3) writes a new placement. The old deployment, seeing its
-reference gone, marks its open record `superseded`. A record whose
-reference is readably gone is fenced: readers treat it as superseded,
-and the forge check refuses any change to it except that one.
+**Moving within a backlog.** Reorder: one commit changing `rank` in one
+`exec.md`. Change lanes: one commit, a `git mv` of one folder. Both in
+the deployment's repository only.
 
-**A misplaced comment caught by lint.** A comment in
-`a.thread/` whose `task:` names `b.task.md` is GF041; the forge check
-fails the pull request that adds it, naming both paths. A comment in
-`notes/` (no declared folder) is GF042.
+**Re-placement.** §11.5: one commit creating the new execution in the
+new deployment's repository; one commit by the old deployment in its
+own. No third repository is written.
+
+**A misplaced comment caught by lint.** A `*.comment.md` in `notes/`, or
+directly in `<name>.exec/`, is GF007; the forge check fails the change
+that adds it.
 
 ### 11.9 Alternatives rejected
 
+- **Pointers to child folders** (`thread:`, `runs:`, `placements:`) and
+  back-pointers on children, the format's first draft: a backlog move
+  touched several repositories, the hub had to write placement records
+  into task repositories, and every pointer needed a lint (the retired
+  GF041/GF042) to catch it disagreeing with where the child was.
+- **Backlog references** (`*.ref.md`) in lanes pointing at tasks
+  elsewhere, with hub-managed lanes in other repositories: re-placement
+  was a three-step withdraw / new reference / new placement transaction
+  across three repositories.
 - **Back-reference scans.** Finding children by their back-pointers
   costs O(repository), or O(every repository a reader can see), and its
   answer depends on which repositories were searched.
 - **A global comments folder.** One folder per repository for every
-  comment needs a scan or an index to answer "this task's comments", and
-  mixes owners in one directory.
-- **A database-only placement record.** §11.4.
+  comment needs a scan or an index to answer "this execution's
+  comments", and mixes owners in one directory.
+- **Executions that read the live definition.** An edit would change
+  what a queued execution runs, after approval and without review in the
+  deployment's repository; the snapshot makes what runs reviewable where
+  it runs.
 
 ## 12. Lifecycles
 
 ### 12.1 Model
 
-A `lifecycle` grainfile declares a task state machine. **Task state** is
-the decision about the work (proposed, approved, done, …) and lives on
-the task in `state:`. **Run status** (§7.3) is what one attempt is doing
-and lives on run records only. A lifecycle MUST NOT declare run statuses.
+A `lifecycle` grainfile declares an execution's state machine.
+**Lifecycle state** is the decision about one execution of the work
+(proposed, approved, done, …) and lives on the execution, in `exec.md`'s
+`state:`; a definition has none (§7.1). **Run status** (§7.3) is what
+one attempt is doing and lives on run records only. A lifecycle MUST NOT declare run statuses.
 
 ```yaml
 ---
@@ -1288,7 +1478,7 @@ stalled_after: 72h
 | `transitions` | list of `{from, to}` | Req. | `from` is a state name or `*`; `to` a list of state names. |
 | `aliases` | map old name → state name | Opt. | Old names readers accept (§12.8). An alias MUST NOT equal a state name (GF054). |
 | `on_outcome` | map run event → state name | Opt. | Transitions run events propose (§12.6). |
-| `self_approval` | boolean | Opt. (`false`) | Whether a submitter may approve their own task. |
+| `self_approval` | boolean | Opt. (`false`) | Whether a definition's submitter may approve its executions. |
 | `stalled_after` | duration | Opt. (`72h`) | §12.4. |
 
 A lifecycle is invalid (GF050) if a transition or `on_outcome` names an
@@ -1314,22 +1504,24 @@ only by a revision of this specification (§22.3).
 
 ### 12.3 Behaviour keys only off categories
 
-- **Dispatch.** An executor MAY dispatch a reference only when its task's
-  state has category `ready` and all its dependencies are satisfied.
-- **Dependency satisfaction.** A dependency is satisfied when its task's
-  state has category `done`. A dependency in a `cancelled`-category state
+- **Dispatch.** An executor MAY dispatch an execution only when its
+  state has category `ready`, all its dependencies are satisfied, and
+  its `previous` (if any) is fenced off (§11.5).
+- **Dependency satisfaction.** A dependency is satisfied when the
+  execution it names is in a `done`-category state. A dependency in a `cancelled`-category state
   is **failed**: the dependent is not dispatched, is reported "blocked:
   dependency cancelled" (warning GF055), and stays
-  blocked until a human removes the edge (a new task, since `depends_on`
-  is frozen) or reopens the dependency. **Decision:** cancelled never
+  blocked until a human removes the edge (a reviewed edit of the
+  dependent's `exec.md` by its lane's owners) or reopens the
+  dependency. **Decision:** cancelled never
   satisfies, because silently running work whose prerequisite was
   dropped is the worse failure.
 - **Merge queue.** A change produced by a run is eligible for the merge
-  queue while its task is `active` or `waiting`; a task that becomes
-  `cancelled` withdraws its change from the queue.
-- **Stalled detection.** A task `active` longer than `stalled_after`
-  with no run record change, or `ready` with no placement for that long,
-  is reported stalled (informational).
+  queue while its execution is `active` or `waiting`; an execution that
+  becomes `cancelled` withdraws its change from the queue.
+- **Stalled detection.** An execution `active` longer than
+  `stalled_after` with no run record change, or `ready` with no run for
+  that long, is reported stalled (informational).
 - **Exact names** are never consulted by these behaviours.
 
 ### 12.4 Exact names
@@ -1337,35 +1529,39 @@ only by a revision of this specification (§22.3).
 Exact state names MAY be matched by:
 
 - **triggers**: the source `on.task-state: {to: [<selector>], from:
-  [<selector>], folders: [<folder ref>]}` fires when a task in a listed
-  folder makes a matching transition;
+  [<selector>], folders: [<folder ref>]}` fires when an execution in a
+  listed deployment folder makes a matching transition;
 - **gates**: `requires.state: {in: [sec-approved, "category:done"]}`
-  holds a change until the task that produced it is in one of those
-  states;
+  holds a change until the execution that produced it is in one of
+  those states;
 - **`GRAINOWNERS` transition rules** (§16.2.4).
 
 A *state selector* is a state name, `*`, or `category:<category>`.
 
 ### 12.5 Selection
 
-A task's lifecycle is, in order: its `lifecycle:` field; else the
-`lifecycle` of the lane its reference is in (a deployment's lane entry);
-else the `lifecycle` of its grain folder's `grain.config.md`; else the
-built-in `grain/default` (§12.9). **Decision:** the folder default sits
-between the lane and the built-in, so that an intake can choose one for
-every task proposed there. A task whose lifecycle cannot be resolved is
-not dispatched (GF030).
+An execution's lifecycle is, in order: `exec.md`'s `lifecycle:`; else
+the `lifecycle` of the lane it is in; else the `lifecycle` of the
+deployment folder's `grain.config.md`; else the built-in `grain/default`
+(§12.9). When it creates an execution, a writer copies the definition's
+lifecycle into `exec.md`, pinned: the definition's own `lifecycle:`,
+else the `lifecycle` of the definition folder's `grain.config.md`.
+**Decision:** a definition folder's default is copied at creation rather
+than consulted at dispatch, so that an intake can choose a lifecycle for
+everything proposed there while every input to dispatch is in the
+deployment's repository. An execution whose lifecycle cannot be resolved
+is not dispatched (GF030).
 
 ### 12.6 Outcomes propose transitions
 
 The executor applies `on_outcome` (defaults in §12.9): when a run event
 occurs (`accepted`, `done`, `failed`, `nothing_needed`, `cancelled`,
 `interrupted`, `failure_streak`), the mapped state is a **proposed
-transition**. The executor writes it on the task, under its own identity,
+transition**. The executor writes it on `exec.md`, under its own identity,
 only if the transition is allowed by the lifecycle **and**
 `GRAINOWNERS` grants that transition to the deployment (§16.2.4);
 otherwise it records `proposed_transition: {to, applied: false}` on the
-run and a person decides. Run status never changes task state except
+run and a person decides. Run status never changes lifecycle state except
 through this mechanism.
 
 ### 12.7 Transitions and who makes them
@@ -1377,32 +1573,36 @@ a `cancelled`-category state other than by rejection sets `cancel`.
 
 ### 12.8 Changing a lifecycle in use
 
-A lifecycle MAY be edited. A task whose `state` is not a state (nor an
-alias) of its lifecycle is an error (GF051) until it is migrated; readers
-MUST NOT dispatch it. An alias maps a renamed state: readers treat the
-alias as the state, and a writer SHOULD rewrite the task's `state` to
-the new name on its next change. Changing a task's `lifecycle:` is a
-spec change only before approval.
+A lifecycle MAY be edited. An execution whose `state` is not a state
+(nor an alias) of its lifecycle is an error (GF051) until it is
+migrated; readers MUST NOT dispatch it. An alias maps a renamed state:
+readers treat the alias as the state, and a writer SHOULD rewrite the
+execution's `state` to the new name on its next change. Changing an
+execution's `lifecycle:` is allowed only while it is in its initial
+state.
 
 ### 12.9 The built-in default lifecycle, `grain/default`
 
 It reproduces grain's task states (bwsalmon/grain `pkg/model/state.go`,
-`StateOf`). In grain, state is derived; here the task-level states are
-written, and the run-level ones move to run status.
+`StateOf`). A grain task is one definition plus one execution: it
+carries its prompt, its state, one comment thread (`Comment.TaskID`) and
+its runs (`Run.TaskID`) together. In grain, state is derived; here the
+task-level states are written on the execution, and the run-level ones
+move to run status.
 
 | grain state | Here | Category |
 | --- | --- | --- |
-| `proposed` | task state `proposed` (initial) | proposed |
-| `queued` | task state `queued` | ready |
-| `deferred` | task state `deferred` | waiting |
-| `running` | task state `active`; run status `running` | active |
-| `awaiting_reply` | task state `active`; run status `awaiting_reply` | active |
-| `failed` (5 consecutive failing runs, `MaxConsecutiveFailures`) | task state `failed` | waiting |
-| `awaiting_submit` | task state `awaiting_submit` | waiting |
-| `awaiting_ack` | task state `awaiting_ack` | waiting |
-| `completed` | task state `completed` | done |
-| `closed` (without completing) | task state `closed` | cancelled |
-| — (rejected proposal) | task state `rejected` | cancelled |
+| `proposed` | state `proposed` (initial) | proposed |
+| `queued` | state `queued` | ready |
+| `deferred` | state `deferred` | waiting |
+| `running` | state `active`; run status `running` | active |
+| `awaiting_reply` | state `active`; run status `awaiting_reply` | active |
+| `failed` (5 consecutive failing runs, `MaxConsecutiveFailures`) | state `failed` | waiting |
+| `awaiting_submit` | state `awaiting_submit` | waiting |
+| `awaiting_ack` | state `awaiting_ack` | waiting |
+| `completed` | state `completed` | done |
+| `closed` (without completing) | state `closed` | cancelled |
+| — (rejected proposal) | state `rejected` | cancelled |
 
 Run outcomes `paused`, `capacity` and `interrupted`, which grain skips
 when counting failures, are run statuses (`interrupted`) and propose no
@@ -1416,8 +1616,8 @@ completed | active | closed`; `awaiting_ack → completed | active |
 closed`; `completed → queued` (reopen); `closed → queued` (reopen).
 
 `on_outcome`: `accepted → active`; `done → completed` (or
-`awaiting_submit` when the task does not auto-merge, `awaiting_ack` when
-it asks for acknowledgement); `nothing_needed → completed`; `failed →
+`awaiting_submit` when the work does not auto-merge, `awaiting_ack`
+when it asks for acknowledgement); `nothing_needed → completed`; `failed →
 queued`; `failure_streak → failed`; `interrupted → queued`;
 `cancelled → closed`.
 
@@ -1431,7 +1631,7 @@ Jira's status categories (To Do, In Progress, Done) and Linear's state
 types (backlog, unstarted, started, completed, canceled) make the same
 split: teams name states freely, tools act on a small fixed set of
 types. Fully opaque states were rejected because Grain could not tell
-whether a task is done or dispatchable.
+whether an execution is done or dispatchable.
 
 ## 13. Folder templates and instantiation
 
@@ -1439,14 +1639,15 @@ whether a task is done or dispatchable.
 
 A **folder template** is a directory `<dir>/` inside a grain folder
 whose top holds the manifest `<dir>.template.md` with `form: folder`.
-Everything else under `<dir>/` is the template's **members**: grainfiles
-(tasks, and optionally refs, designs, comments, lifecycles, …) and
-assets.
+Everything else under `<dir>/` is the template's **members**: definitions
+(`<name>.task.md` or `<name>.task/`), and optionally designs,
+lifecycles and assets they use. Instantiating a folder template creates
+**one execution per member definition**.
 
 A **single-task template** is a `*.template.md` with `form: task`
 anywhere in a grain folder (outside template folders). It is, by
 definition, equivalent to a folder template whose only member is one
-task rendered from it. **Decision:** the single-file shorthand is kept,
+definition rendered from it. **Decision:** the single-file shorthand is kept,
 because nearly every template today is one task, and a directory per
 template would double the files without saying anything more. A
 trigger's `fires.template` and a task's `template.ref` may name either
@@ -1466,54 +1667,59 @@ form.
    another `form: folder` manifest (GF066). A member MAY reference a
    single-task template or a partial outside the folder; it is resolved
    at instantiation like any escaping reference (§13.3).
-6. Members' `state` fields are ignored; each materialised task gets its
+6. Members hold no state (§7.1); each execution created gets its
    lifecycle's `initial` state, or the state `run.require_approval`
    implies (§13.8).
+7. A template folder MUST NOT contain an execution (GF047).
 
 ### 13.3 Instantiation
 
-Instantiation takes a template, input values and a **target path**, and
-writes **one commit** that materialises every member at the target.
+Instantiation takes a folder template, input values and a **lane** of a
+deployment, and writes **one commit**, in that deployment's repository,
+that creates one execution per member definition.
 
-1. **Target.** The target is a directory in a grain folder: by default
-   (`target: lane`) the directory of the lane named by the request
-   (`backlog/` for refs; tasks go to `tasks/`, see below); or the path a
-   trigger's `fires.into` names. **Decision:** for `target: lane` tasks
-   and other non-ref members go to `<folder>/tasks/<instance>/` and refs
-   to `<lane>/<instance>/`, so that the lane lists only refs.
-2. **Instance name.** `<instance>` is `<template name>-<yyyy-mm-dd>`,
-   with `-2`, `-3`, … appended on collision; a trigger firing uses
+1. **Lane.** By default (`target: lane`) the lane the request names; or
+   the lane a trigger's `fires.into` names (§7.6).
+2. **Instance name.** The executions go in `<lane>/<instance>/`, where
+   `<instance>` is `<template name>-<yyyy-mm-dd>`, with `-2`, `-3`, …
+   appended on collision; a trigger firing uses
    `<template name>-<event key>` instead, so a retry lands on the same
    path and is a no-op. Collisions are detected against the target
    commit; a racing writer's conflict is an ordinary git conflict, and it
    retries with the next suffix.
-3. **Copy.** Each member at `<dir>/<p>` is written at
-   `<target>/<instance>/<p>`, the manifest excepted.
-4. **Substitute** inputs (§13.5) into each member.
-5. **Internal references** (relative, resolving inside the template
-   folder) are written **unchanged**: they resolve to the new copies.
-6. **Escaping references** (resolving outside the template folder) are
-   resolved against the template's location at the instantiated
-   revision and rewritten to their pinned canonical form
-   `<url>//<path>@<sha>`.
-7. **Provenance.** Every materialised grainfile gets
-   `instantiated_from: "<template canonical ref>@<sha>"`.
-8. **Refs.** If the template has no `ref` members, one `*.ref.md` per
-   task is written in the lane, `rank`ed after the lane's last
-   reference in member path order.
-9. The commit is made by the instantiating principal (§16.6), and
-   `GRAINOWNERS` is evaluated for the target paths (§16.2): instantiating
-   requires write authority for every file written.
+3. **One execution per member.** A member definition at `<dir>/<p>.task.md`
+   (or `<dir>/<p>.task/`) becomes `<lane>/<instance>/<p>.exec/`, with
+   `definition: <member's canonical ref>@<sha>` and its
+   `definition_sha256`.
+4. **Snapshot.** Each `task.md` is the member with inputs substituted
+   (§13.5) into body and title, recorded in `exec.md` `inputs`.
+5. **Dependencies.** A member's relative `depends_on` on another member
+   becomes `depends_on: [../<q>.exec/]` on its execution, naming the
+   sibling execution created from that member (§11.4). Escaping
+   references in the snapshot are read relative to the member (§7.2), so
+   none is rewritten.
+6. **Provenance.** Every `exec.md` gets `instantiated_from:
+   "<manifest canonical ref>@<sha>"`, `created_via: template`, and the
+   template's (or the member's) lifecycle, pinned.
+7. **Rank.** The executions are `rank`ed after the lane's last
+   execution, in member path order.
+8. The commit is made by the instantiating principal (§16.6), and
+   `GRAINOWNERS` is evaluated for the paths written (§16.2):
+   instantiating requires write authority for every file written.
 
-A dry run (`grainlint --instantiate`) performs steps 1–8 in memory and
-lints the result as if committed.
+An instance MUST hold exactly the executions steps 3 and 5 make, with
+those definitions and those `depends_on` (GF069); an execution in an
+instance folder without `instantiated_from` is GF067. A dry run
+(`grainlint --instantiate TREE MANIFEST [name=value …]`) performs steps
+2–5 in memory and prints the executions it would create.
 
 ### 13.4 Single-task instantiation
 
-A `form: task` template renders one `*.task.md` at
-`<target>/<template name>-<date>.task.md` (or the trigger path of §7.6),
-with `template: {ref, rev, inputs}` recorded in place of
-`instantiated_from`.
+A `form: task` template creates one execution,
+`<lane>/<template name>-<date>.exec/` (or the trigger path of §7.6),
+with `definition` naming the template at its commit and the rendered
+task as the snapshot. A person proposing a definition from a template
+instead writes a definition with `template: {ref, rev, inputs}`.
 
 ### 13.5 Inputs and substitution
 
@@ -1533,7 +1739,7 @@ Refused: `extends`, `block`, method calls, `namespace`, `cycler`, `self`,
 `range` over 1000, autoescape. Undefined names are errors (GF065).
 
 **Where substitution happens.** Only in a member's (or single-task
-template's) Markdown body and its `title`. **No other front-matter field
+template's) Markdown body and its `title`, when the snapshot is written. **No other front-matter field
 and no path is substituted.** `ref`-typed inputs are never rendered as
 text: they are bound only into `context:` entries that say `input:
 <name>`, after being resolved and checked as references. **Decision:**
@@ -1555,8 +1761,10 @@ instantiated.
 
 ### 13.7 Updates
 
-An instance is an **independent copy**. Changing a template never
-changes an existing instance; there is no live inheritance. The
+An instance is an **independent copy**: each execution runs from its
+snapshot. Changing a template never changes an existing instance; there
+is no live inheritance, and a template edited after an instance was
+created is GF046 on the member, as for any definition. The
 `instantiated_from` revision lets a later tool diff an instance against
 the template's newer revision and propose an upgrade as an ordinary
 change.
@@ -1570,11 +1778,11 @@ become one folder template:
 | --- | --- |
 | `.grain/suites/<name>.yml` | `.grain/templates/<name>/<name>.template.md`, `form: folder` |
 | `name:` | `title:` |
-| `templates: [a, b]` | member tasks `a.task.md`, `b.task.md`, each from `.grain/templates/a.yml` (its `body` becomes the Markdown body, `title` stays) |
+| `templates: [a, b]` | member definitions `a.task.md`, `b.task.md`, each from `.grain/templates/a.yml` (its `body` becomes the Markdown body, `title` stays) |
 | `mode`, `count`, `max-passes` | `run.mode`, `run.count`, `run.max_passes` |
-| `require-approval` | `run.require_approval`: `false` materialises tasks in the lifecycle's first `ready`-category state reachable from `initial`, with `approved_by` the instantiating principal; `true` leaves them in `initial` |
+| `require-approval` | `run.require_approval`: `false` creates the executions in the lifecycle's first `ready`-category state reachable from `initial`, with `approved_by` the instantiating principal; `true` leaves them in `initial` |
 | `auto-merge`, `auto-approve-proposals`, `team` | `run.auto_merge`, `run.auto_approve_proposals`, `run.team` |
-| a template's `base`, `auto-merge`, `model`, … | the member task's own fields |
+| a template's `base`, `auto-merge`, `model`, … | the member definition's own fields |
 | a schedule's `suite: <name>` | a trigger whose `fires.template` names the folder template |
 
 A single `.grain/templates/<name>.yml` not used by a suite becomes
@@ -1583,9 +1791,10 @@ release qualification converted.
 
 ## 14. `context:` materialisation
 
-14.1. A task's `context:` is the **only** thing that places files in a
-run's sandbox. Nothing else a task or template references is
-materialised.
+14.1. The `context:` of an execution's snapshot (`task.md`) is the
+**only** thing that places files in a run's sandbox. Nothing else a
+definition, execution or template references is materialised, and the
+live definition is never read.
 
 14.2. **Entry.** `{ref, mode, path, depth, input, rev, reducers}`:
 
@@ -1597,7 +1806,7 @@ materialised.
 | `path` | sandbox-relative path | §14.3 | Where it appears. |
 | `depth` | 0–3 | 0 | For a Markdown file: follow relative body links this many levels. |
 
-14.3. **Layout.** The first `write` entry is the task's primary
+14.3. **Layout.** The first `write` entry is the execution's primary
 repository, at `work/`. Other repositories and folders appear at
 `work/<repo name>/`; files at `context/<repo name>/<path>`. Two entries
 MUST NOT map to overlapping sandbox paths (GF020).
@@ -1648,11 +1857,11 @@ semantics of Anselm are not specified here** and are out of scope for
 this format; a reader that cannot evaluate a reducer MUST refuse the
 request (fail closed).
 
-15.4. **Requests and approval.** A task requests a capability with a
-`context:` entry `{ref, mode: use, reducers}`. A request is never a
-grant: the executor's local policy decides. A capability whose
+15.4. **Requests and approval.** A definition requests a capability
+with a `context:` entry `{ref, mode: use, reducers}`. A request is never
+a grant: the executor's local policy decides. A capability whose
 `approval` names approvers needs a matching `capability_approvals`
-entry, whose `digest` is `sha256:` of the canonical JSON of the
+entry on the execution's `exec.md`, whose `digest` is `sha256:` of the canonical JSON of the
 resolved chain.
 
 15.5. Secrets never appear in grainfiles: `secrets:` binds slot names to
@@ -1726,24 +1935,68 @@ transition rule whose selectors both match; if none matches, the owners
 of a plain `state` field rule; if none, the whole-file owners. Example:
 
 ```
-/tasks/**/*.task.md:state(*->sec-approved)   @team:security#approver
-/tasks/**/*.task.md:state(category:ready->category:active),state(category:active->category:done)  @deployment:eu
+/hub/**/*.exec/exec.md:state(*->sec-approved)   @team:security#approver
+/hub/**/*.exec/exec.md:state(category:ready->category:active),state(category:active->*)  @deployment:eu
+```
+
+16.2.4a. **Per-subfolder authority.** Because each container holds
+everything about one definition or one execution, `GRAINOWNERS` grants
+authority per subfolder. The intended split, which the worked example
+uses:
+
+| Path | Owners |
+| --- | --- |
+| a definition's `task.md` (or `<name>.task.md`) | the definition's owners (its folder's team) |
+| `**/thread/` of either kind of container | commenters, normally `@authenticated(create)` |
+| an execution's `runs/` | the executing deployment, `@deployment:<id>` |
+| an execution's `exec.md`: `state(...)` transitions out of `ready` and on from `active`, `superseded` | the executing deployment |
+| an execution's `exec.md`: `approved_by`, `approved_at`, the approving `state(...)` transition, `capability_approvals` | the approvers |
+| an execution's `exec.md`: `rank`, `priority`, `expedite`, `ranked_by`, `ranked_at` | the lane's members |
+| creating (and moving) an execution folder in a lane | whoever may place work there, with `(create,move)` |
+
+For example, a deployment's root:
+
+```
+*                                     @user:bsalmon@google.com
+/hub/**/*.exec/                       @team:hub#member(create,move) @user:bsalmon@google.com
+/hub/**/*.exec/exec.md:rank,priority,expedite,ranked_by,ranked_at  @team:hub#member
+/hub/**/*.exec/exec.md:approved_by,approved_at,state(*->sec-approved)  @team:security#approver
+/**/*.exec/exec.md:state(category:ready->category:active),state(category:active->*),superseded  @deployment:eu
+/**/*.exec/runs/                      @deployment:eu
+/**/*.exec/thread/                    @authenticated(create)
+```
+
+and an intake:
+
+```
+*                          @team:hub#admin
+/tasks/                    @authenticated(create) @team:hub#member
+/tasks/**/thread/          @authenticated(create)
 ```
 
 16.2.5. **Verbs.** An owner with no verbs may create, update, move and
 archive; `delete` MUST be granted explicitly and is allowed only on
-`*.ref.md` (GF073 otherwise). `(create)` allows only adding the file.
+assets (GF073 otherwise; no grainfile is deleted, §8.4). `(create)`
+allows only adding the file. A rule on a directory pattern (ending `/`)
+governs every file under it; a lane move of an execution folder is
+authorised by `move` on its `exec.md`.
 
 16.2.6. **Fixed rules** hold whatever `GRAINOWNERS` says:
 
-- a new task's `state` is its lifecycle's `initial`, and its `submitter`
-  is the actor (§16.4);
-- `approved_by` is the actor and differs from `submitter` (unless the
-  lifecycle allows self-approval);
-- `ranked_by`, `added_by`, `author`, `placed_by`, `moved_by` and
-  `cancel.by` are the actor, or the principal the actor is delegated by;
+- a new definition's `submitter` is the actor (§16.4);
+- a new execution's `state` is its lifecycle's `initial`, or a
+  `ready`-category state reachable from it when `approved_by` is the
+  actor and the actor holds that transition; its `created_by` is the
+  actor;
+- `approved_by` is the actor and differs from the definition's
+  `submitter` (unless the lifecycle allows self-approval);
+- `ranked_by`, `created_by`, `author`, `moved_by` and `cancel.by` are
+  the actor, or the principal the actor is delegated by;
 - terminal run records, comments and tombstones never change;
-- the frozen spec of §7.1;
+- an execution's snapshot and the fields of §7.2 fixed at creation never
+  change (GF052);
+- a fold (§4.3) is authorised by permission to create the comment it
+  carries, or to move the definition;
 - `grain.config.md`'s `role` and `owner` change only by its `owner`;
 - `GRAINOWNERS` itself changes only by the owners its own nearest rule
   names, and a file may not grant a path to anyone its parent's rule
@@ -1784,7 +2037,10 @@ a rule's owners are satisfied by "approved by" (§16.8).
 **Algorithm:**
 
 1. Lint the head tree for every grain folder touched (§20); any error
-   fails the check. `orphans: refuse` makes GF040 an error.
+   fails the check. `orphans: refuse` makes GF040 an error. A change to
+   a definition that an execution has snapshotted (GF046, found through
+   the hub's definition → executions index where the check has one) MAY
+   fail the check unless it carries the override of §7.1.
 2. Map the actor to principals with the identity map (§16.5): the
    user principal, and every team role the map gives it. A deployment's
    forge identity maps to `deployment:<id>`.
@@ -1795,7 +2051,7 @@ a rule's owners are satisfied by "approved by" (§16.8).
 4. Authorise each (path, operation, field, transition) against
    `GRAINOWNERS` (§16.2) and the fixed rules; an unauthorised change is
    GF073 (path or field) or GF074 (transition), naming the rule.
-5. Author fields (`submitter`, `author`, `approved_by`, …) are checked
+5. Author fields (`submitter`, `created_by`, `author`, `approved_by`, …) are checked
    against the actor's principals, never against git author or
    committer fields.
 
@@ -1817,8 +2073,12 @@ mapping matches no actor.
 The hub writes through the forge API (a pull request, or a commit where
 the user may push), **as the user** it acts for, with that user's
 delegated token. It MUST NOT write with a credential that has more
-authority than that user. Automatic dispatch writes with the delegation
-of the approver (§11.4). A hub MAY hold a service identity for reading.
+authority than that user. It creates executions (§11.3), comments on
+definitions and executions, approvals and ranks this way; a trigger it
+fires writes as `hub:trigger` under the target folder's `GRAINOWNERS`.
+**Decision:** the hub never writes into a definition's repository on
+behalf of placement: placing work is one commit in the deployment's
+repository. A hub MAY hold a service identity for reading.
 
 ### 16.7 Readers and the deployment as writer
 
@@ -1830,13 +2090,13 @@ of the approver (§11.4). A hub MAY hold a service identity for reading.
   the forge records it, and **refuses** (does not act on) any change it
   cannot authorise, reporting GF073/GF074. It is REQUIRED when
   `enforcement.mode` is not `required-check` and OPTIONAL otherwise.
-- **A deployment writes** its runs folders, the comments in them, and
-  outcome-driven transitions (§12.6) under its own forge identity.
-  `GRAINOWNERS` in the folders it writes MUST grant exactly those:
-  create and update of `*.run.md` and `*.comment.md` in its runs
-  folders, and the `state(...)` transitions its lifecycle's `on_outcome`
-  needs. A deployment's own root grain folder is written by it and its
-  owner.
+- **A deployment writes** its executions' `runs/` (records and the
+  comments in them), outcome-driven transitions on `exec.md` (§12.6) and
+  `superseded` on re-placement (§11.5), under its own forge identity.
+  `GRAINOWNERS` in its root MUST grant exactly those: create and update
+  under `*.exec/runs/`, and the `state(...)` transitions its
+  lifecycles' `on_outcome` needs. A deployment writes only its own root
+  grain folder; it never writes a definition's repository.
 
 ### 16.8 Compiling to CODEOWNERS and rulesets
 
@@ -1854,7 +2114,7 @@ limits:
 
 So `codeowners` mode is weaker than `required-check`, and readers MUST
 verify (§16.7). Rulesets (path-restricted push rules) MAY additionally
-enforce `@none` and the deployment-only folders.
+enforce `@none` and the deployment-only `runs/` folders.
 
 ### 16.9 A grain folder inside a code repository
 
@@ -1872,17 +2132,19 @@ repository root, that folder's `GRAINOWNERS`.
 `GRAINOWNERS`. Unregistering removes the entry. A hub MUST NOT read a
 folder as part of a team's views unless it is registered.
 
-17.2. **Cross-folder lanes and views** in the registry are derived
-indexes (§11.7) over the registered folders. A hub ranks a cross-folder
-lane by writing `*.ref.md` files in the registry's own folder at the
-lane's `path`; those are ordinary references.
+17.2. **Cross-folder views** in the registry are derived indexes
+(§11.6) over the registered folders: Silo's lists of definitions, of
+executions across deployments, and of a definition's executions are
+caches over the registry's grain folders, rebuilt from them. A registry
+has no lanes; ranking is always an edit of an execution in its
+deployment's lane.
 
 17.3. **Freshness.** A hub refreshes a registered folder on a forge
 webhook for its branch, and otherwise polls it at `poll_interval`
 (default 5 minutes). A view MUST show the commit each folder was last
-read at. A hub MUST NOT make a decision (placement, cancel) from an
-index older than the folder's tip it last saw; it re-reads the parent
-first.
+read at. A hub MUST NOT make a decision (placement, re-placement,
+cancel) from an index older than the folder's tip it last saw; it
+re-reads the execution (or the definition) first.
 
 17.4. **The hub is the PDP for its UI**: it decides what a user may
 attempt, using the same `GRAINOWNERS` evaluation as the forge check, so
@@ -1890,11 +2152,15 @@ the UI does not offer what the check would refuse. The forge check
 remains the enforcement point for the repository, and each executor the
 enforcement point for what it runs.
 
-17.5. **Placement.** To place a task on a deployment, the hub writes a
-reference in a lane that deployment's `grain.config.md` names (§11.3),
-then a placement in the task's `placements` folder (§11.4). Nothing the
-hub writes activates anything unless a deployment's owner pointed a
-root entry at it.
+17.5. **Placement.** To place a definition on a deployment, the hub
+creates an execution in a lane that deployment's `grain.config.md` names
+(§11.3): one commit in the deployment's repository, as the placing user.
+Nothing the hub writes activates anything unless it is in a lane a
+deployment's owner declared. Re-placement is §11.5.
+
+17.6. **Showing an execution** follows §11.2: the execution's thread and
+runs, plus the definition's thread read through `definition`, each
+comment labelled with its scope.
 
 ## 18. Grain folders in code repos, and task homes
 
@@ -1905,16 +2171,22 @@ existing `.grain/` declarations without `grain.config.md` are read by
 grain's own loader as today; they become grainfiles once the folder has
 a `grain.config.md` (§13.8 and the design's migration).
 
-18.2. **Task homes.** `task_home: {mode, allow, repos}` in a folder's
-`grain.config.md` says where approved tasks live: `intake` (they stay
-where proposed), `promote` (moved once, with a tombstone, into the code
-repository's grain folder on approval), `code-repo` (proposed there).
-When a task moves, its `thread` and `placements` are re-expressed as
-locator references so they stay where they were written.
+18.2. **Where definitions and executions live.** Definitions, with
+their threads, MAY live in any grain folder, including a code
+repository's `.grain/`; executions live only in a deployment's root
+grain folder (§11.3). **Decision:** the `task_home` setting and its
+`intake`, `promote` and `code-repo` modes are removed (`task_home` is
+refused, GF020). They existed to decide where an approved task, with
+its state and its pointers, should live; a definition now holds no
+state, its discussion is inside it, and approval is on the execution,
+so nothing has to move when work is approved. A team that wants a
+definition next to its code writes it there, or moves it there once with
+a tombstone (§8.3), its thread moving with it.
 
 18.3. In a code repository's grain folder, `context:` names only that
 repository (§14.8), and templates carry no `reads`, `writes`, `grants`
-or `target`.
+or `target`. A code repository's grain folder holds no executions
+(GF047).
 
 18.4. Workflows (`.grain/workflows/*.yml`) stay YAML assets; a
 trigger's `fires.workflow` names one by path in the same repository.
@@ -1924,8 +2196,8 @@ trigger's `fires.workflow` names one by path in the same repository.
 19.1. **Tree-only discovery.** A reader lists a folder from the git tree
 alone and knows each entry's kind from its name (§4.1). It MUST NOT open
 a blob to decide what a file is. Nothing scans a repository for
-grainfiles: a reader lists only root entries' folders, declared child
-folders and the folders a reference names.
+grainfiles: a reader lists only root entries' folders, containers and
+the folders a reference names.
 
 19.2. **Lazy parsing.** A reader parses a grainfile's front matter only
 when it needs a field, and the body only when it needs the body.
@@ -1948,13 +2220,13 @@ it says. A *warning* fails nothing.
 
 | Code | Severity | Condition |
 | --- | --- | --- |
-| GF001 | error | A grainfile name violates §4.1–§4.2, or a comment, placement or run is not named as §7 requires. |
+| GF001 | error | A grainfile name violates §4.1–§4.2, or a comment or run folder is not named as §7 requires. |
 | GF002 | error | `kind:` differs from the file's kind suffix. |
 | GF003 | error | Malformed: no front matter, unclosed delimiter, not UTF-8, NUL, LFS pointer, YAML that does not parse. |
 | GF004 | error | Front matter outside the YAML subset (§5.3): duplicate keys, anchors, tags, non-string keys, top level not a mapping. |
 | GF005 | warning | A Markdown file with an unregistered kind suffix. |
 | GF006 | error | A limit of §4.5 exceeded, or two paths differ only in case. |
-| GF007 | error | A reserved name misused: a reserved folder suffix on another directory, a wrong kind in a reserved folder, `grain.config.md` not at a folder top, `.grainconfig` not at a repository root. |
+| GF007 | error | A reserved name misused: a file a container does not allow (§4.3), a container nested in a container, a fixed name (`task.md`, `exec.md`, `run.md`) outside its place, a `*.exec.md` or `*.run.md` file, a comment outside every `thread/` and run folder, `grain.config.md` not at a folder top, `.grainconfig` not at a repository root. |
 | GF010 | error | Nested grain folder. |
 | GF011 | error | `grain.config.md` inside a template folder. |
 | GF020 | error | Schema validation failure (a field's type, a required field, a refused field, an unknown trigger source or gate requirement, a mutually exclusive pair). |
@@ -1969,13 +2241,15 @@ it says. A *warning* fails nothing.
 | GF035 | error | Malformed reference. |
 | GF036 | error | Reference climbs above its repository root. |
 | GF040 | warning | Orphan (§10.2.5). |
-| GF041 | error | Misplaced child: a child's back-pointer disagrees with the declaring parent. |
-| GF042 | error | Stray child: a comment, run or placement in no declared folder. |
 | GF044 | warning | A tombstone's target does not list it in `moved_from`, or a `moved_from` entry has no tombstone. |
+| GF045 | error | A container lacks a required file (an execution's `exec.md` or snapshot `task.md`, a run folder's `run.md`, a definition folder's `task.md`), a definition exists both as `<name>.task.md` and `<name>.task/`, or a snapshot of a plain definition does not hash to `definition_sha256`. |
+| GF046 | warning | A definition was edited after an execution snapshotted it: its bytes differ from that execution's `definition_sha256`. |
+| GF047 | error | An execution outside every lane of a deployment's root grain folder (in a library folder, a code repository, a template folder, or a non-lane directory), or a lane whose `path` is outside the root grain folder. |
+| GF048 | error | Two executions with the same name in one deployment's root grain folder. |
 | GF050 | error | Invalid lifecycle (§12.1). |
-| GF051 | error | A task's `state` is not a state or alias of its lifecycle. |
-| GF052 | error | A forbidden change: a transition the lifecycle does not allow, a frozen field changed, a terminal record, comment or tombstone changed, a path reused. |
-| GF053 | error | Two open runs of one task in one deployment. |
+| GF051 | error | An execution's `state` is not a state or alias of its lifecycle. |
+| GF052 | error | A forbidden change: a transition the lifecycle does not allow, an execution's snapshot or a field fixed at creation changed, a terminal record, comment or tombstone changed, a path reused. |
+| GF053 | error | Two open runs in one execution. |
 | GF054 | error | A lifecycle alias equals a state name, or aliases form a chain. |
 | GF055 | warning | A dependency is in a `cancelled`-category state. |
 | GF061 | error | A template member's internal reference does not resolve inside the template folder. |
@@ -1984,8 +2258,9 @@ it says. A *warning* fails nothing.
 | GF064 | error | A template member, gate or other inert grainfile is listed by a root entry. |
 | GF065 | error | A template uses a construct outside the subset, an undefined name, or fails to render. |
 | GF066 | error | A template folder contains another folder-template manifest. |
-| GF067 | warning | A grainfile inside an instance folder lacks `instantiated_from`. |
+| GF067 | warning | An execution inside an instance folder lacks `instantiated_from`. |
 | GF068 | error | A `form: folder` manifest is not `<dir>/<dir>.template.md`, or a `form: task` template sits at a template folder's top. |
+| GF069 | error | An instance does not match its folder template's dry run: an execution missing or extra, a `definition` that is not its member, or `depends_on` that does not map the members' (§13.3). |
 | GF070 | error | `GRAINOWNERS` syntax error. |
 | GF071 | error | `GRAINOWNERS` names an unknown principal form. |
 | GF072 | warning | A grainfile has no governing `GRAINOWNERS` rule. |
@@ -2035,10 +2310,10 @@ a reference cannot cause a reader to send one forge's token to another.
 
 ## 22. Registries of identifiers
 
-22.1. **Kinds:** `config`, `task`, `ref`, `run`, `comment`, `template`,
+22.1. **Kinds:** `config`, `task`, `exec`, `run`, `comment`, `template`,
 `trigger`, `gate`, `capability`, `capability-base`, `design`, `memory`,
-`moved`, `lifecycle`, `placement`, `asset`. (`suite` is retired and
-MUST NOT be reused.)
+`moved`, `lifecycle`, `asset`. (`suite`, `ref` and `placement` are
+retired and MUST NOT be reused.)
 
 22.2. **Root types:** `backlog`, `triggers`, `memory`.
 
@@ -2057,44 +2332,70 @@ which updates this section, the JSON Schemas and the linter together.
 Experimental kinds use names beginning `x-` and are assets to readers
 that do not know them.
 
+22.7. **Retired lint codes:** `GF041` (misplaced child) and `GF042`
+(stray child) were the pointer model's checks that a back-pointer agreed
+with its declaring parent; containment (§11.1) leaves nothing to
+disagree, and a child outside its parent is GF007. They MUST NOT be
+reused.
+
 ## Appendix A. A complete worked example
 
 The files are in [`examples/grainfiles/`](../examples/grainfiles/README.md),
 and `python3 tools/grainfiles/grainlint.py examples/grainfiles` checks
 them all.
 
-A.1. **A grain repo** — `examples/grainfiles/grain-eu/`: deployment `eu`,
-`grain.config.md` (`role: deployment`) with a hub lane and its own lane,
-its own task with a thread, a backlog reference with its runs folder (a
-run and an agent comment), a trigger and memory.
+A.1. **An intake with a custom lifecycle, and a definition with its
+thread** — `examples/grainfiles/hub-intake/`: a `role: library` folder
+whose `grain.config.md` names `lifecycles/security.lifecycle.md`; the
+definition `tasks/2026-10-16-approval-flow.task/` with `task.md` and a
+`thread/` of two comments, one replying to the other; the tombstone of a
+definition that moved to a code repository; and `GRAINOWNERS` giving
+definitions to the team and their threads to any commenter.
 
 A.2. **A grain folder in a code repo** — `examples/grainfiles/widgets/`:
 a code repository whose `.grain/` is a `role: library` grain folder with
-a gate, a single-task template and a task homed there; the code outside
-`.grain/` is not governed by its `GRAINOWNERS`.
+a gate, a single-task template and a definition homed there with its
+thread; the code outside `.grain/` is not governed by its `GRAINOWNERS`.
 
-A.3. **A registry** — `examples/grainfiles/registry/`: `role: registry`,
-listing the intake, `eu` and the widgets `.grain/` folder, with a
-cross-folder view.
+A.3. **A deployment with executions** — `examples/grainfiles/grain-eu/`:
+deployment `eu`, `grain.config.md` (`role: deployment`) with a `hub`
+lane and an `own` lane, a trigger and memory, and `GRAINOWNERS`
+granting per subfolder as in §16.2.4a.
+`hub/2026-10-16-approval-flow.exec/` is an execution of the intake's
+definition: `exec.md` in `in-progress` of the security lifecycle,
+approved by the security team; its snapshot; its own `thread/` with a
+comment replying to one on the definition's thread; and two runs, the
+first `failed`, the second `running` with an agent comment.
+`backlog/2026-10-16-tidy-run-notes.exec/` executes a single-file
+definition of eu's own, with a run awaiting a reply.
 
-A.4. **An intake with a custom lifecycle** —
-`examples/grainfiles/hub-intake/`: `lifecycles/security.lifecycle.md`,
-named by the folder's `grain.config.md`; a task in `sec-approved` with
-its thread and placements; `GRAINOWNERS` giving `*->sec-approved` to the
-security team and the outcome transitions to `deployment:eu`.
+A.4. **A registry** — `examples/grainfiles/registry/`: `role: registry`,
+listing the intake, the widgets `.grain/` folder and both deployments,
+with a definitions view and an executions view.
 
 A.5. **A folder template and an instance** —
-`examples/grainfiles/hub-intake/templates/release-qualification/`:
-grain's release-qualification suite converted (four member tasks, a
-`qualification-report` task that `depends_on` all four, and `run:` from
-the suite file), and its instance under
-`tasks/release-qualification-2026-10-17/`, with internal references
-unchanged, the escaping lifecycle reference pinned, and
-`instantiated_from` on every file. **Note:** grain's suite runs its four
-templates independently; the report task is added to show a DAG.
+`examples/grainfiles/hub-intake/intake/templates/release-qualification/`:
+grain's release-qualification suite converted (four member definitions,
+a `qualification-report` definition that `depends_on` all four, and
+`run:` from the suite file), and its instance in eu's hub lane,
+`grain-eu/hub/release-qualification-2026-10-17/`: one execution per
+member, each with `instantiated_from`, `inputs` and its rendered
+snapshot, the report's `depends_on` mapped to its four sibling
+executions. **Note:** grain's suite runs its four templates
+independently; the report is added to show a DAG.
 
-A.6. **Broken fixtures** — `tools/grainfiles/testdata/bad/`: one tree per
-lint code, each with `expect.txt` listing the codes it must produce.
+A.6. **A re-placement** — the widgets definition's execution
+`grain-eu/hub/2026-10-16-widget-schema-v2.exec/` is `superseded` (state
+`closed`, its run `superseded`), written by eu; its replacement
+`examples/grainfiles/grain-us/hub/2026-10-16-widget-schema-v2.exec/`, in
+deployment `us`'s repository, has `previous:` naming it and an identical
+snapshot.
+
+A.7. **Fixtures** — `tools/grainfiles/testdata/bad/`: one tree per
+lint code, each with `expect.txt` listing the codes it must produce;
+`tools/grainfiles/testdata/good/`: changes the forge check authorises,
+including a commenter folding a definition and a member moving an
+execution between lanes.
 
 ## Appendix B. Decisions made by this specification
 
@@ -2104,16 +2405,16 @@ lint code, each with `expect.txt` listing the codes it must produce.
 4. A `/`-rooted reference is rooted at the referring file's grain folder (§9.1).
 5. `grain.config.md` has a third form, `role: library` (§10).
 6. `.grainconfig` loses `host`, `ref_policy` and `grain_folder`, and gains `enforcement` and `identity_map` (§10.5).
-7. Hub placements name runs folders under the deployment root's `runs/<deployment>/` (§11.3).
-8. Placements are git pointer grainfiles of a new kind, `placement`, written with the approver's delegation for automatic dispatch (§11.4).
-9. Task → dependents and design → implementing tasks are derived indexes, the only exceptions to §11.1 (§11.5).
+7. A definition with no thread or assets may stay a single file `<name>.task.md`; its first comment folds it into `<name>.task/task.md`, byte for byte, in one commit, with no tombstone (§4.3).
+8. Definition → executions, design → implementing definitions and execution/definition → dependents are derived indexes, the only relations not served by containment (§11.6).
+9. A definition edited after a snapshot is a warning (GF046); the forge check's override is a `Grain-Definition-Edit:` commit trailer (§7.1).
 10. The category set is the six given, unrefined (§12.2).
 11. A `cancelled` dependency never satisfies; its dependents stay blocked (§12.3).
-12. Lifecycle selection adds the folder default between lane and built-in (§12.5).
+12. Lifecycle selection is execution, lane, deployment folder, built-in; a definition folder's default lifecycle is copied, pinned, onto each execution at creation (§12.5).
 13. A `task-state` trigger source and a gate `requires.state` match exact states (§12.4).
-14. grain's `failed`, `deferred`, `awaiting_submit` and `awaiting_ack` are `waiting`-category task states; `running` and `awaiting_reply` are run statuses under task state `active` (§12.9).
+14. grain's `failed`, `deferred`, `awaiting_submit` and `awaiting_ack` are `waiting`-category execution states; `running` and `awaiting_reply` are run statuses under state `active` (§12.9).
 15. The single-task template file is kept as a shorthand, with `form:` distinguishing it from a manifest and a partial (§13.1).
-16. Instances are named `<template>-<date>[-N]`, or `<template>-<event key>` for a trigger; tasks go under `tasks/<instance>/`, refs under `<lane>/<instance>/` (§13.3).
+16. Instances are named `<template>-<date>[-N]`, or `<template>-<event key>` for a trigger, and are a folder `<lane>/<instance>/` of executions (§13.3).
 17. Substitution only in bodies and titles; never in other fields or paths (§13.5).
 18. Nested folder-template inclusion is deferred (§13.2).
 19. `GRAINOWNERS` transition rules are written `state(<from>-><to>)` field rules with state, `*` and `category:` selectors (§16.2.4).
@@ -2121,3 +2422,17 @@ lint code, each with `expect.txt` listing the codes it must produce.
 21. The forge check evaluates rules from the base tree (§16.4).
 22. A hub's registry is polled every 5 minutes absent webhooks (§17.3).
 23. `.grain/` without `grain.config.md` stays grain's legacy declaration folder (§18.1).
+24. Executions are folders `<name>.exec/` holding `exec.md`, a snapshot `task.md`, `thread/`, `runs/<run>/run.md` and `assets/`; definitions with discussion are `<name>.task/` holding `task.md`, `thread/` and `assets/` (§4.3, §7.2).
+25. The snapshot records `definition_sha256` beside `definition: <ref>@<rev>`, so a reader without history can check the copy and tell whether the definition changed (§7.2).
+26. A snapshot's relative references are read relative to its definition, never to the copy; references out of an execution should be `/`-rooted (§7.2).
+27. Moving an execution between lanes leaves no tombstone; an execution is found by name across its deployment's lanes, and names are unique per deployment (§8.3, §9.3).
+28. A lane's `path` must be inside the deployment's own root grain folder; registries have no lanes (§10.2.2, §10.3).
+29. Definitions are inert in a deployment folder and are never orphans (§10.2.5).
+30. A creator maps every definition dependency to an execution, or refuses to create the execution (§11.4).
+31. A re-placement carries the old approval when the snapshot is identical, and the new execution is fenced until the old one is superseded or finished (§11.5).
+32. A deployment that is gone is withdrawn by its root folder's owner (§11.5).
+33. Readers show an execution's thread, its runs' comments and its definition's thread (read at the tip), each labelled with its scope, as sections or one timeline ordered by `at` (§11.2).
+34. The hub never writes into a definition's repository to place work (§16.6).
+35. `task_home` and its modes are removed: definitions live anywhere, executions only in deployment folders (§18.2).
+36. GF041 and GF042 are retired; a stray child is GF007, and GF045–GF048 and GF069 are new (§20, §22.7).
+37. Triggers create executions, never definitions; `fires.into` names a lane (§7.6).

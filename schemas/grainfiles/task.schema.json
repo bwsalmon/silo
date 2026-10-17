@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/task.schema.json",
-  "title": "grain/task@v1: a unit of work (spec \u00a77.1)",
+  "title": "grain/task@v1: a task definition, what to do; holds no state and no runs (spec \u00a77.1)",
   "type": "object",
   "properties": {
     "kind": {
@@ -29,9 +29,6 @@
     "title": {
       "type": "string"
     },
-    "state": {
-      "$ref": "common.schema.json#/$defs/stateName"
-    },
     "lifecycle": {
       "$ref": "common.schema.json#/$defs/refString"
     },
@@ -55,12 +52,6 @@
         "agent",
         "template"
       ]
-    },
-    "approved_by": {
-      "$ref": "common.schema.json#/$defs/principal"
-    },
-    "approved_at": {
-      "$ref": "common.schema.json#/$defs/time"
     },
     "context": {
       "$ref": "common.schema.json#/$defs/context"
@@ -129,75 +120,6 @@
       },
       "additionalProperties": false
     },
-    "thread": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "placements": {
-      "$ref": "common.schema.json#/$defs/refString"
-    },
-    "cancel": {
-      "$ref": "common.schema.json#/$defs/by"
-    },
-    "rejection": {
-      "$ref": "common.schema.json#/$defs/by"
-    },
-    "capability_approvals": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "ref": {
-            "$ref": "common.schema.json#/$defs/refString"
-          },
-          "digest": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
-          },
-          "by": {
-            "$ref": "common.schema.json#/$defs/principal"
-          },
-          "at": {
-            "$ref": "common.schema.json#/$defs/time"
-          }
-        },
-        "required": [
-          "ref",
-          "digest",
-          "by",
-          "at"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "trigger": {
-      "allOf": [
-        {
-          "$ref": "common.schema.json#/$defs/edge"
-        }
-      ],
-      "properties": {
-        "ref": {
-          "$ref": "common.schema.json#/$defs/refString"
-        },
-        "on": {
-          "type": "string"
-        },
-        "key": {
-          "type": "string"
-        },
-        "fired_at": {
-          "$ref": "common.schema.json#/$defs/time"
-        },
-        "event": {
-          "type": "object"
-        }
-      },
-      "required": [
-        "on",
-        "fired_at"
-      ],
-      "additionalProperties": false
-    },
     "filed_by": {
       "type": "object",
       "properties": {
@@ -235,7 +157,15 @@
     "capabilities": false,
     "closed": false,
     "placement": false,
-    "id": false
+    "id": false,
+    "state": false,
+    "thread": false,
+    "runs": false,
+    "placements": false,
+    "approved_by": false,
+    "approved_at": false,
+    "cancel": false,
+    "rejection": false
   },
   "patternProperties": {
     "^x_": {}
@@ -245,7 +175,6 @@
     "kind",
     "schema",
     "title",
-    "state",
     "submitter",
     "created_at"
   ]

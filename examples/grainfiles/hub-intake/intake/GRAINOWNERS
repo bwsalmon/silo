@@ -1,8 +1,5 @@
-*                                                  @team:hub#admin
-/tasks/                                            @authenticated(create) @team:hub#member
-/tasks/**/*.task.md:state                          @team:hub#approver
-/tasks/**/*.task.md:state(*->sec-approved)         @team:security#approver
-/tasks/**/*.task.md:state(category:ready->category:active),state(category:active->category:done)  @deployment:eu
-/tasks/**/*.thread/                                @authenticated(create)
-/tasks/**/*.placements/                            @team:hub#approver
-/lifecycles/                                       @team:hub#admin
+*                          @team:hub#admin
+/tasks/                    @authenticated(create) @team:hub#member
+/tasks/**/thread/          @authenticated(create)
+/templates/                @team:hub#member
+/lifecycles/               @team:hub#admin

@@ -2,7 +2,6 @@
 kind: task
 schema: grain/task@v1
 title: Report on release qualification
-state: proposed
 submitter: hub
 created_at: "2026-10-16T09:00:00Z"
 lifecycle: ../../lifecycles/security.lifecycle.md

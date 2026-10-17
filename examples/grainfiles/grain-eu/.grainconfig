@@ -2,4 +2,6 @@ schema: grain/repo-config@v1
 default_ref: main
 enforcement: {mode: required-check, check: grainfiles/authorize, branch: main}
 aliases:
-  intake: https://github.com/acme/hub.git
+  hub: https://github.com/acme/hub.git
+  widgets: https://github.com/acme/widgets.git
+  us: https://github.com/acme/grain-us.git

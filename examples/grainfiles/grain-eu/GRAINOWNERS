@@ -1,3 +1,8 @@
-*                     @user:bsalmon@google.com @deployment:eu
-/grain.config.md      @user:bsalmon@google.com
-/backlog/**/*.runs/   @deployment:eu
+*                                     @user:bsalmon@google.com
+/grain.config.md                      @user:bsalmon@google.com
+/hub/**/*.exec/                       @team:hub#member(create,move) @user:bsalmon@google.com
+/hub/**/*.exec/exec.md:rank,priority,expedite,ranked_by,ranked_at  @team:hub#member
+/hub/**/*.exec/exec.md:approved_by,approved_at,state(*->sec-approved)  @team:security#approver
+/**/*.exec/exec.md:state(category:ready->category:active),state(category:active->*),superseded  @deployment:eu
+/**/*.exec/runs/                      @deployment:eu
+/**/*.exec/thread/                    @authenticated(create)

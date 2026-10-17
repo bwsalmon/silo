@@ -4,6 +4,8 @@
   grainlint.py TREE...                 lint each tree (a directory holding repos, or one repo)
   grainlint.py --authorize BASE HEAD --actor PRINCIPAL [--actor ...]
                                        authorise HEAD against BASE's GRAINOWNERS (§16.4)
+  grainlint.py --instantiate TREE MANIFEST [NAME=VALUE ...]
+                                       dry-run a folder template: the executions it would create (§13.3)
   grainlint.py --self-test             lint the examples (no errors), every fixture under
                                        testdata/bad (exactly the codes in its expect.txt), and
                                        check the spec, schemas and linter agree
@@ -15,35 +17,43 @@ to a child directory; an unmapped URL is treated as external and stubbed.
 
 Needs python3-yaml, python3-jsonschema and python3-jinja2.
 """
-import fnmatch, json, pathlib, posixpath, re, sys
+import fnmatch, hashlib, json, pathlib, posixpath, re, sys
 import jinja2, jsonschema, yaml
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 SCHEMAS = ROOT / "schemas" / "grainfiles"
 SPEC = ROOT / "docs" / "grainfiles-spec.md"
-KINDS = ["config", "task", "ref", "run", "comment", "template", "trigger", "gate", "capability",
-         "capability-base", "design", "memory", "moved", "lifecycle", "placement", "asset"]
+KINDS = ["config", "task", "exec", "run", "comment", "template", "trigger", "gate", "capability",
+         "capability-base", "design", "memory", "moved", "lifecycle", "asset"]
 CATEGORIES = ["proposed", "ready", "active", "waiting", "done", "cancelled"]
 SEVERITY = {"GF005": "warning", "GF022": "warning", "GF040": "warning", "GF044": "warning",
-            "GF055": "warning", "GF067": "warning", "GF072": "warning"}
+            "GF046": "warning", "GF055": "warning", "GF067": "warning", "GF072": "warning"}
 CODES = ["GF001", "GF002", "GF003", "GF004", "GF005", "GF006", "GF007", "GF010", "GF011", "GF020",
          "GF021", "GF022", "GF023", "GF030", "GF031", "GF032", "GF033", "GF034", "GF035", "GF036",
-         "GF040", "GF041", "GF042", "GF044", "GF050", "GF051", "GF052", "GF053", "GF054", "GF055",
-         "GF061", "GF062", "GF063", "GF064", "GF065", "GF066", "GF067", "GF068", "GF070", "GF071",
-         "GF072", "GF073", "GF074", "GF080", "GF090"]
+         "GF040", "GF044", "GF045", "GF046", "GF047", "GF048", "GF050", "GF051", "GF052", "GF053",
+         "GF054", "GF055", "GF061", "GF062", "GF063", "GF064", "GF065", "GF066", "GF067", "GF068",
+         "GF069", "GF070", "GF071", "GF072", "GF073", "GF074", "GF080", "GF090"]
+RETIRED = ["GF041", "GF042"]  # misplaced and stray children of the pointer model (spec §22.7)
 STEM = re.compile(r"^(\d{8}T\d{6}Z|[a-z0-9])[a-z0-9._-]*$")
-RESERVED_DIRS = {".thread": {"comment"}, ".runs": {"run", "comment"}, ".placements": {"placement"}, ".attachments": set()}
+RUN_NAME = re.compile(r"^\d{8}T\d{6}Z(-[a-z0-9-]+)?$")
+CONTAINERS = (".task", ".exec")  # §4.3: a definition folder and an execution folder
+FIXED = {"task.md": "task", "exec.md": "exec", "run.md": "run"}  # §4.1.3
+OPEN_RUN = ("accepted", "running", "awaiting_reply", "held")
 EXPECTS = {  # field -> expected kind (§9.6)
-    ("ref", "to"): "task", ("task", "depends_on"): "task", ("task", "supersedes"): "task",
-    ("comment", "task"): "task", ("placement", "task"): "task", ("task", "template"): "template",
-    ("trigger", "fires.template"): "template", ("task", "lifecycle"): "lifecycle",
-    ("config", "lifecycle"): "lifecycle", ("template", "lifecycle"): "lifecycle", ("run", "task"): "task",
-    ("run", "from"): "ref", ("comment", "run"): "run", ("comment", "in_reply_to"): "comment",
-    ("capability", "base.capability"): "capability", ("placement", "ref"): "ref", ("ref", "previous"): "run",
+    ("task", "depends_on"): "task", ("task", "supersedes"): "task", ("task", "template"): "template",
+    ("trigger", "fires.template"): "template", ("task", "lifecycle"): "lifecycle", ("exec", "lifecycle"): "lifecycle",
+    ("config", "lifecycle"): "lifecycle", ("template", "lifecycle"): "lifecycle",
+    ("exec", "depends_on"): "exec", ("exec", "previous"): "exec", ("exec", "superseded.by"): "exec",
+    ("exec", "instantiated_from"): "template", ("comment", "in_reply_to"): "comment",
+    ("comment", "supersedes"): "comment", ("capability", "base.capability"): "capability",
 }
 DEFAULT_LIFECYCLE = "grain/default"
 PRINCIPAL = re.compile(r"^(user:[^@\s]+@[^@\s]+|team:[a-z0-9-]+#(member|approver|admin|maintainer)|(deployment|grain):[a-z][a-z0-9-]*|hub(:trigger)?|silo(:trigger)?|authenticated|none)$")
+
+
+def sha256(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
 
 class Finding:
@@ -67,6 +77,28 @@ def kind_of(name):
         if base.endswith("." + k) and len(base) > len(k) + 1:
             return k
     return None
+
+
+def container_of(rel):
+    """§4.3: (container directory index, container type, the path inside it) for a folder-relative
+    path, or (None, None, None) when it is in no definition or execution folder."""
+    parts = pathlib.PurePosixPath(rel).parts
+    for i, d in enumerate(parts[:-1]):
+        for c in CONTAINERS:
+            if d.endswith(c) and len(d) > len(c):
+                return i, c[1:], parts[i + 1:]
+    return None, None, None
+
+
+def kind_at(rel):
+    """The kind of a folder-relative path: a fixed name in its container (§4.1.3), else by suffix."""
+    rel = pathlib.PurePosixPath(rel)
+    _, ctype, inner = container_of(rel)
+    if ctype and len(inner) == 1 and rel.name in ("task.md", "exec.md"):
+        return "task" if rel.name == "task.md" else ("exec" if ctype == "exec" else None)
+    if ctype == "exec" and len(inner) == 3 and inner[0] == "runs" and rel.name == "run.md":
+        return "run"
+    return kind_of(rel.name)
 
 
 def stem_of(name, kind):
@@ -214,7 +246,7 @@ class Linter:
         for repo in self.repos:
             self.lint_repo(repo)
         self.check_references()
-        self.check_relations()
+        self.check_containers()
         self.check_lifecycles()
         self.check_templates()
         self.check_roots()
@@ -247,14 +279,11 @@ class Linter:
 
     def lint_file(self, repo, folder, p):
         name = p.name
-        k = kind_of(name)
-        for d in p.relative_to(folder).parent.parts:
-            for suf, allowed in RESERVED_DIRS.items():
-                if d.endswith(suf):
-                    if suf == ".attachments" and k is None:
-                        continue
-                    if k not in allowed and not (k is None and suf != ".placements"):
-                        self.add("GF007", p, "a %s file in a reserved %s/ folder" % (k or "asset", suf))
+        rel = p.relative_to(folder)
+        k = kind_at(rel)
+        fixed = name in FIXED and k == FIXED[name]
+        if not self.placed_ok(p, rel, k, fixed):
+            return
         if name.endswith(".suite.md"):
             self.add("GF090", p, "kind: suite is removed; convert it to a folder template (spec §13.8)")
             return
@@ -264,7 +293,13 @@ class Linter:
             return
         if k == "config" and name == "grain.config.md" and p.parent != folder:
             self.add("GF010", p, "nested grain.config.md")
-        stem = stem_of(name, k) if name != "grain.config.md" else "grain"
+        if name == "grain.config.md":
+            stem = "grain"
+        elif fixed:
+            ci, ctype, inner = container_of(rel)
+            stem = rel.parts[ci][:-len(ctype) - 1] if k != "run" else rel.parts[-2]
+        else:
+            stem = stem_of(name, k)
         if k != "asset" and not STEM.match(stem):
             self.add("GF001", p, "name %r is not lower-case [a-z0-9._-]" % stem)
         if len(name.encode()) > 255:
@@ -290,9 +325,41 @@ class Linter:
             self.add(code, p, msg)
         if k == "comment" and not re.match(r"^\d{8}T\d{6}Z-[a-z0-9-]+$", stem):
             self.add("GF001", p, "a comment is named <compact UTC>-<author slug>")
-        if k == "placement" and not re.match(r"^\d{8}T\d{6}Z-[a-z0-9-]+$", stem):
-            self.add("GF001", p, "a placement is named <compact UTC>-<deployment>")
+        if k == "run" and not RUN_NAME.match(stem):
+            self.add("GF001", p, "a run folder is named <compact UTC>[-<suffix>]")
         self.files[p] = {"kind": k, "data": data, "body": body, "repo": repo, "folder": folder, "stem": stem}
+
+    def placed_ok(self, p, rel, k, fixed):
+        """§4.3, §11: containment. Returns False when the file is not a grainfile to read further."""
+        ci, ctype, inner = container_of(rel)
+        name = p.name
+        if not fixed and k in ("exec", "run"):
+            self.add("GF007", p, "an execution is a folder <name>.exec/ with exec.md, and a run is runs/<run>/run.md (spec §4.3)")
+            return False
+        if ctype is None:
+            if name in FIXED:
+                self.add("GF007", p, "%s is a reserved name outside its folder (spec §4.3)" % name)
+                return False
+            if k == "comment":
+                self.add("GF007", p, "a comment outside every thread/ and run folder (spec §11.2)")
+                return False
+            return True
+        if any(d.endswith(CONTAINERS) for d in inner[:-1]):
+            self.add("GF007", p, "a definition or execution folder nested in another")
+            return False
+        top = inner[0] if len(inner) > 1 else None
+        ok = False
+        if top is None:
+            ok = fixed or name == "GRAINOWNERS"
+        elif top == "thread":
+            ok = (len(inner) == 2 and k == "comment") or (len(inner) > 2 and inner[1].endswith(".attachments") and k is None)
+        elif top == "runs" and ctype == "exec":
+            ok = len(inner) >= 3 and (k is None or (len(inner) == 3 and k in ("run", "comment", "asset")))
+        elif top == "assets":
+            ok = k in (None, "asset")
+        if not ok:
+            self.add("GF007", p, "a %s may not be at %s inside a .%s/ folder (spec §4.3)" % (k or "asset", "/".join(inner), ctype))
+        return ok and k is not None
 
     # ---- references ------------------------------------------------------
     def repo_of_url(self, url):
@@ -359,12 +426,10 @@ class Linter:
         if target is False:
             return False
         if expect == "folder":
-            if not target.is_dir():
-                return target  # an absent declared child folder is simply empty
             return target
         if expect and target.is_file():
-            tk = kind_of(target.name)
-            if tk != expect:
+            tk = self.files[target]["kind"] if target in self.files else kind_of(target.name)
+            if tk != expect and not (expect == "definition" and tk in ("task", "template")):
                 self.add("GF032", src, "%s: %r is a %s, expected a %s" % (field, ref, tk or "asset", expect))
                 return False
         if anchor and target.is_file() and target in self.files:
@@ -380,13 +445,24 @@ class Linter:
         seen = set()
         hops = 0
         while True:
+            if path.is_dir() and path.name.endswith(CONTAINERS):
+                path = path / ("task.md" if path.name.endswith(".task") else "exec.md")
             if path.exists():
                 return path
+            # §9.3 step 5: a definition is the same at x.task.md and x.task/task.md (no hop)
+            if path.name.endswith(".task.md") and (path.with_name(path.name[:-3]) / "task.md").exists():
+                return path.with_name(path.name[:-3]) / "task.md"
+            if path.name == "exec.md" and path.parent.name.endswith(".exec"):
+                found = self.find_exec(path.parent)
+                if found:
+                    return found
             if path in seen or hops >= 8:
                 self.add("GF031", src, "%s: redirect loop or more than 8 hops from %r" % (field, ref))
                 return False
             seen.add(path)
-            tomb = path.with_name(path.name[:-3] + ".moved.md") if path.name.endswith(".md") else None
+            node = path.parent if path.name in FIXED and path.parent.name.endswith(CONTAINERS) else path
+            tomb = node.with_name(node.name + ".moved.md") if node is not path else (
+                path.with_name(path.name[:-3] + ".moved.md") if path.name.endswith(".md") else None)
             if tomb and tomb.exists() and tomb in self.files:
                 to = str(self.files[tomb]["data"].get("to"))
                 if re.match(r"^[a-z]+://|^[a-z][a-z0-9-]*:", to):
@@ -410,6 +486,25 @@ class Linter:
             self.add("GF030", src, "%s: %r does not resolve" % (field, ref))
             return False
 
+    def lanes(self, folder):
+        """The lane directories of a deployment root grain folder (§10.2), folder-relative paths."""
+        cfg = self.files.get(folder / "grain.config.md")
+        if not cfg or cfg["data"].get("role") != "deployment":
+            return []
+        return [e for e in (cfg["data"].get("backlog") or {}).get("lanes") or [] if isinstance(e, dict)]
+
+    def find_exec(self, d):
+        """§9.3 step 5: an execution is found by name in any lane of its deployment (a lane move is a git mv)."""
+        folder = next((f for r in self.repos for f in r.folders if f in d.parents), None)
+        if folder is None:
+            return None
+        for e in self.lanes(folder):
+            base = folder / str(e.get("path", "")).lstrip("/")
+            for q in sorted(base.rglob(d.name)) if base.is_dir() else []:
+                if q.is_dir() and (q / "exec.md").exists():
+                    return q / "exec.md"
+        return None
+
     def refs_of(self, k, d):
         """Yield (field, value, expected kind) for every reference a grainfile holds."""
         def one(f, v, exp=None):
@@ -425,19 +520,18 @@ class Linter:
             for i in d.get("implements") or []:
                 if isinstance(i, dict):
                     yield from one("implements", i.get("ref"), "design")
-        elif k == "ref":
-            yield from one("to", d.get("to"), "trigger" if d.get("fired_at") else "task")
+        elif k == "exec":
+            yield from one("definition", d.get("definition"), "definition")
+            yield from one("instantiated_from", d.get("instantiated_from"))
+            yield from one("lifecycle", d.get("lifecycle"))
+            for v in d.get("depends_on") or []:
+                yield from one("depends_on", v)
             yield from one("previous", d.get("previous"))
-        elif k == "run":
-            for f in ("task", "from"):
-                if isinstance(d.get(f), dict):
-                    yield from one(f, d[f].get("ref"))
+            if isinstance(d.get("superseded"), dict):
+                yield from one("superseded.by", d["superseded"].get("by"))
         elif k == "comment":
-            for f in ("task", "run", "in_reply_to"):
+            for f in ("in_reply_to", "supersedes"):
                 yield from one(f, d.get(f))
-        elif k == "placement":
-            yield from one("task", d.get("task"))
-            yield from one("ref", d.get("ref"))
         elif k == "trigger":
             if isinstance(d.get("fires"), dict):
                 yield from one("fires.template", d["fires"].get("template"))
@@ -463,8 +557,15 @@ class Linter:
 
     def check_references(self):
         self.edges = {}
-        for p, info in list(self.files.items()):
+        snapshot = lambda p: p.name == "task.md" and p.parent.name.endswith(".exec")
+        for p, info in sorted(self.files.items(), key=lambda pi: snapshot(pi[0])):
             tdir = self.in_template(p)
+            src = p
+            if snapshot(p):
+                # §7.2: a snapshot's references read as its definition's did, never relative to the copy
+                src = dict(self.edges.get(p.parent / "exec.md", [])).get("definition")
+                if src is None or src not in self.files:
+                    continue
             for field, v, exp in self.refs_of(info["kind"], info["data"]):
                 if v == DEFAULT_LIFECYCLE:
                     continue
@@ -473,7 +574,9 @@ class Linter:
                     if field == "depends_on" and tdir not in tgt.parents:
                         self.add("GF061", p, "depends_on %r leaves the template folder" % v)
                         continue
-                t = self.resolve(v, p, exp or None, field)
+                t = self.resolve(v, src, exp or None, field)
+                if t is False and src != p:
+                    self.findings[-1].path = str(p.relative_to(self.top))
                 if tdir and field == "depends_on" and t is False:
                     self.findings[-1].code = "GF061"
                 if t:
@@ -494,61 +597,61 @@ class Linter:
                     if not any(pathlib.Path(posixpath.normpath(str(t.parent / m))) == old or str(m).endswith(str(old.relative_to(info["folder"]))) for m in mf):
                         self.add("GF044", p, "the moved grainfile does not list this tombstone in moved_from")
 
-    # ---- one-to-many (§11) -----------------------------------------------
-    def declared(self, p, field, default_suffix):
-        d = self.files[p]["data"]
-        v = d.get(field)
-        if v is None:
-            return (p.parent / (self.files[p]["stem"] + default_suffix)).resolve()
-        t = self.resolve(v.rstrip("/") + "/" if not v.endswith("/") else v, p, "folder", field)
-        return t.resolve() if t else None
+    # ---- containment (§11) -----------------------------------------------
+    def check_containers(self):
+        """§11: a definition or execution folder holds everything about it; nothing points at children."""
+        dirs = set()
+        for repo in self.repos:
+            for folder in repo.folders:
+                for d in sorted(folder.rglob("*")):
+                    if d.is_dir() and d.name.endswith(CONTAINERS) and container_of(d.relative_to(folder) / "x")[0] is not None:
+                        dirs.add((folder, d))
+        names = {}
+        for folder, d in sorted(dirs):
+            if d.name.endswith(".task"):
+                if not (d / "task.md").exists():
+                    self.add("GF045", d, "a definition folder holds task.md (spec §4.3)")
+                if d.with_name(d.name + ".md").exists():
+                    self.add("GF045", d, "a definition is either %s.md or %s/, not both" % (d.name, d.name))
+                continue
+            exec_md, snap = d / "exec.md", d / "task.md"
+            for f, what in ((exec_md, "exec.md"), (snap, "its snapshot task.md")):
+                if not f.exists():
+                    self.add("GF045", d, "an execution folder holds %s (spec §7.2)" % what)
+            rel = d.relative_to(folder)
+            lanes = [str(e.get("path", "")).lstrip("/") for e in self.lanes(folder)]
+            if not any(rel.as_posix().startswith(l.rstrip("/") + "/") for l in lanes if l and not re.match(r"^[a-z]+:", l)) or self.in_template(d):
+                self.add("GF047", d, "an execution lives only in a lane of a deployment's root grain folder (spec §11.3)")
+            if d.name in names.get(folder, {}):
+                self.add("GF048", d, "a second execution named %s in this deployment (also %s)" % (d.name, names[folder][d.name].relative_to(folder)))
+            names.setdefault(folder, {})[d.name] = d
+            runs = d / "runs"
+            open_runs = []
+            for r in sorted(runs.iterdir()) if runs.is_dir() else []:
+                if not r.is_dir():
+                    continue
+                rm = r / "run.md"
+                if not rm.exists():
+                    self.add("GF045", r, "a run folder holds run.md")
+                elif rm in self.files and self.files[rm]["data"].get("status") in OPEN_RUN:
+                    open_runs.append(rm)
+            if len(open_runs) > 1:
+                self.add("GF053", open_runs[-1], "a second open run of one execution (%s)" % open_runs[0].parent.name)
+            if exec_md in self.files and snap in self.files:
+                self.check_snapshot(exec_md, snap)
 
-    def check_relations(self):
-        parents = {}  # folder -> (parent path, back-pointer field)
-        for p, info in self.files.items():
-            if self.in_template(p) and info["kind"] not in ("task", "ref"):
-                pass
-            if info["kind"] == "task":
-                for field, suf in (("thread", ".thread"), ("placements", ".placements")):
-                    f = self.declared(p, field, suf)
-                    if f:
-                        parents[(f, field)] = p
-            elif info["kind"] == "ref":
-                f = self.declared(p, "runs", ".runs")
-                if f:
-                    parents[(f, "runs")] = p
-        open_runs = {}
-        for p, info in self.files.items():
-            k, d = info["kind"], info["data"]
-            if k not in ("comment", "run", "placement"):
-                continue
-            folder = p.parent.resolve()
-            owner = None
-            if k == "comment":
-                owner = parents.get((folder, "thread")) or parents.get((folder, "runs"))
-            elif k == "run":
-                owner = parents.get((folder, "runs"))
-            else:
-                owner = parents.get((folder, "placements"))
-            if owner is None:
-                self.add("GF042", p, "a %s in no declared folder: no parent lists %s/" % (k, p.parent.name))
-                continue
-            back = {"comment": d.get("task") or d.get("run"), "run": (d.get("from") or {}).get("ref") if isinstance(d.get("from"), dict) else None,
-                    "placement": d.get("task")}[k]
-            target = dict(self.edges.get(p, [])).get({"comment": "task" if d.get("task") else "run", "run": "from", "placement": "task"}[k])
-            okind = self.files[owner]["kind"]
-            if k == "comment" and d.get("run"):
-                # a run comment's parent is the run record, inside the ref's runs folder
-                if target is None or target.parent.resolve() != folder:
-                    self.add("GF041", p, "run: %r is not a record in this runs folder" % back)
-                continue
-            if target is not None and target.resolve() != owner.resolve():
-                self.add("GF041", p, "back-pointer %r names %s, but the folder is declared by %s" % (back, target.name, owner.name))
-            if k == "run" and d.get("status") in ("accepted", "running", "awaiting_reply", "held"):
-                key = (str((d.get("task") or {}).get("ref")), d.get("deployment"))
-                if key in open_runs:
-                    self.add("GF053", p, "a second open run of one task on one deployment (%s)" % open_runs[key].name)
-                open_runs[key] = p
+    def check_snapshot(self, exec_md, snap):
+        """§7.2: the snapshot is the definition as it was; a later edit of the definition is GF046."""
+        d = self.files[exec_md]["data"]
+        want = str(d.get("definition_sha256", ""))
+        target = dict(self.edges.get(exec_md, [])).get("definition")
+        plain = target is not None and target in self.files and self.files[target]["kind"] == "task" \
+            and not self.in_template(target) and not d.get("inputs")
+        if plain and "sha256:" + sha256(snap) != want:
+            self.add("GF045", snap, "the snapshot is not a copy of the definition at %s" % d.get("definition"))
+        if target is not None and target in self.files and "sha256:" + sha256(target) != want:
+            self.add("GF046", target, "definition edited after %s snapshotted it; put changes in a new definition"
+                     % exec_md.parent.relative_to(self.files[exec_md]["folder"]))
 
     # ---- lifecycles (§12) ------------------------------------------------
     def lifecycle_ok(self, p, d):
@@ -589,16 +692,25 @@ class Linter:
         return ok
 
     def lifecycle_for(self, p):
-        d = self.files[p]["data"]
-        cand = d.get("lifecycle")
-        src = p
+        """§12.5: an execution's lifecycle: its own, else its lane's, else its folder's, else grain/default."""
+        info = self.files[p]
+        folder = info["folder"]
+        cfgp = folder / "grain.config.md"
+        cand, src = info["data"].get("lifecycle"), p
         if not cand:
-            cfg = self.files.get(self.files[p]["folder"] / "grain.config.md")
-            if cfg and cfg["data"].get("lifecycle"):
-                cand, src = cfg["data"]["lifecycle"], self.files[p]["folder"] / "grain.config.md"
+            rel = p.relative_to(folder).as_posix()
+            for e in sorted(self.lanes(folder), key=lambda e: -len(str(e.get("path", "")))):
+                if e.get("lifecycle") and rel.startswith(str(e.get("path", "")).lstrip("/").rstrip("/") + "/"):
+                    cand, src = e["lifecycle"], cfgp
+                    break
+        if not cand and cfgp in self.files and self.files[cfgp]["data"].get("lifecycle"):
+            cand, src = self.files[cfgp]["data"]["lifecycle"], cfgp
         if not cand or cand == DEFAULT_LIFECYCLE:
             return self.default_lifecycle
-        t = dict(self.edges.get(src, [])).get("lifecycle")
+        memo = self.__dict__.setdefault("_lc_memo", {})
+        if (src, cand) not in memo:
+            memo[(src, cand)] = self.resolve(cand, src, "lifecycle", "lifecycle")
+        t = memo[(src, cand)]
         if t and t in self.files:
             return self.files[t]["data"]
         return None
@@ -609,7 +721,7 @@ class Linter:
             if info["kind"] == "lifecycle":
                 self.lifecycle_ok(p, info["data"])
         for p, info in self.files.items():
-            if info["kind"] != "task" or self.in_template(p):
+            if info["kind"] != "exec":
                 continue
             lc = self.lifecycle_for(p)
             if lc is None:
@@ -620,11 +732,11 @@ class Linter:
                 self.add("GF051", p, "state %r is not a state of its lifecycle %r" % (st, lc.get("title")))
                 continue
             for f, t in self.edges.get(p, []):
-                if f == "depends_on" and t in self.files:
+                if f == "depends_on" and t in self.files and self.files[t]["kind"] == "exec":
                     dl = self.lifecycle_for(t)
                     ds = self.files[t]["data"].get("state")
                     if dl and ((dl.get("states") or {}).get(ds) or {}).get("category") == "cancelled":
-                        self.add("GF055", p, "dependency %s is cancelled; this task stays blocked" % t.name)
+                        self.add("GF055", p, "dependency %s is cancelled; this execution stays blocked" % t.parent.name)
 
     # ---- templates (§13) -------------------------------------------------
     def check_templates(self):
@@ -647,12 +759,80 @@ class Linter:
                 if p.name == p.parent.name + ".template.md" and form == "task":
                     self.add("GF068", p, "a template at a folder's top named for it must be form: folder")
                 self.render_check(p, info, self.default_inputs(info["data"], p))
-        # an instance folder: a sibling was materialised, so every grainfile here was (§13.3)
-        for p, info in self.files.items():
-            if info["data"].get("instantiated_from"):
+        # an instance folder: a sibling execution was instantiated, so every execution here was (§13.3)
+        execs = {p: i for p, i in self.files.items() if i["kind"] == "exec"}
+        for p, info in execs.items():
+            if not info["data"].get("instantiated_from") and any(
+                    q.parent.parent == p.parent.parent and i["data"].get("instantiated_from") for q, i in execs.items()):
+                self.add("GF067", p, "an execution in an instance folder without instantiated_from")
+        self.check_instances(execs)
+
+    def members(self, tdir):
+        """A folder template's member definitions: x.task.md, or x.task/task.md (§13.1)."""
+        out = []
+        for q, i in sorted(self.files.items()):
+            if i["kind"] != "task" or tdir not in q.parents:
                 continue
-            if any(q.parent == p.parent and i["data"].get("instantiated_from") for q, i in self.files.items()):
-                self.add("GF067", p, "a grainfile in an instance folder without instantiated_from")
+            ci, ctype, inner = container_of(q.relative_to(tdir))
+            if ci is None or (ctype == "task" and len(inner) == 1):
+                out.append(q)
+        return out
+
+    def plan(self, manifest, vals=None):
+        """§13.3 in memory: one execution per member definition, keyed by its path in the instance,
+        with the definition it snapshots, its depends_on mapped to sibling executions, and its title."""
+        tdir = manifest.parent
+        vals = self.default_inputs(self.files[manifest]["data"], manifest) if vals is None else vals
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
+        where = {}
+        for m in self.members(tdir):
+            r = m.relative_to(tdir)
+            r = r.parent if m.name == "task.md" else r.with_name(r.name[:-len(".md")])
+            where[m] = r.with_name(r.name[:-len(".task")] + ".exec")
+        out = {}
+        for m, e in where.items():
+            deps = []
+            for f, t in self.edges.get(m, []):
+                if f == "depends_on" and t in where:
+                    deps.append(posixpath.relpath(where[t].as_posix(), e.as_posix()) + "/")
+            try:
+                title = env.from_string(str(self.files[m]["data"].get("title", ""))).render(**vals)
+            except jinja2.TemplateError:
+                title = self.files[m]["data"].get("title")
+            out[e.as_posix()] = {"definition": m, "depends_on": sorted(deps), "title": title}
+        return out
+
+    def check_instances(self, execs):
+        """GF069: an instance holds exactly the executions its folder template's plan makes (§13.3)."""
+        groups = {}
+        for p, info in execs.items():
+            man = dict(self.edges.get(p, [])).get("instantiated_from")
+            if not man or man not in self.files or self.files[man]["data"].get("form") != "folder":
+                continue
+            d = dict(self.edges.get(p, [])).get("definition")
+            depth = 1
+            if d and manifest_dir_has(man.parent, d):
+                depth = len(d.relative_to(man.parent).parts) - (1 if d.name == "task.md" else 0)
+            inst = p.parent
+            for _ in range(depth):
+                inst = inst.parent
+            groups.setdefault((man, inst), []).append(p)
+        for (man, inst), ps in sorted(groups.items()):
+            want = self.plan(man)
+            have = {p.parent.relative_to(inst).as_posix(): p for p in ps}
+            for e in sorted(set(want) - set(have)):
+                self.add("GF069", inst, "instance of %s lacks the execution %s/" % (man.name, e))
+            for e in sorted(set(have) - set(want)):
+                self.add("GF069", have[e], "no member of %s makes the execution %s/" % (man.name, e))
+            for e in sorted(set(want) & set(have)):
+                p = have[e]
+                d = dict(self.edges.get(p, [])).get("definition")
+                if d != want[e]["definition"]:
+                    self.add("GF069", p, "definition should be the member %s" % want[e]["definition"].relative_to(man.parent))
+                deps = sorted(posixpath.relpath(t.parent.relative_to(inst).as_posix(), e) + "/"
+                              for f, t in self.edges.get(p, []) if f == "depends_on")
+                if deps != want[e]["depends_on"]:
+                    self.add("GF069", p, "depends_on %s, but the members' depends_on map to %s" % (deps, want[e]["depends_on"]))
 
     def default_inputs(self, d, p):
         vals = {}
@@ -703,12 +883,15 @@ class Linter:
             if info["kind"] != "config" or info["data"].get("role") != "deployment":
                 continue
             d = info["data"]
-            entries = [("ref", e) for e in (d.get("backlog") or {}).get("lanes", [])]
+            entries = [("exec", e) for e in (d.get("backlog") or {}).get("lanes", [])]
             entries += [("trigger", e) for e in d.get("triggers") or []]
             entries += [("memory", e) for e in d.get("memory") or []]
             for k, e in entries:
                 path = e.get("path", "")
                 if re.match(r"^[a-z]+://|^[a-z][a-z0-9-]*:", path):
+                    if k == "exec":
+                        self.add("GF047", p, "lane %r is outside the deployment's root grain folder (spec §10.2.2)" % e.get("name"))
+                        continue
                     t = self.resolve(path.rsplit("@", 1)[0] if "@" in path.split("//")[-1] else path, p, "folder", "root entry")
                     if not t:
                         continue
@@ -717,11 +900,13 @@ class Linter:
                     base = (info["folder"] / path).resolve()
                 if not base.exists():
                     continue
-                for q in sorted(base.rglob("*." + k + ".md")):
+                listed = [q for q in base.rglob("exec.md") if q.parent.name.endswith(".exec")] if k == "exec" \
+                    else base.rglob("*." + k + ".md")
+                for q in sorted(listed):
                     rel = q.relative_to(base)
                     if "archive" in rel.parts or any(fnmatch.fnmatch(str(rel), g.rstrip("/") + "*") for g in e.get("ignore") or []):
                         continue
-                    if any(part.endswith(tuple(RESERVED_DIRS)) for part in rel.parts[:-1]):
+                    if k != "exec" and container_of(rel)[0] is not None:
                         continue
                     if self.in_template(q):
                         self.add("GF064", q, "template content listed by root entry %r" % path)
@@ -729,21 +914,24 @@ class Linter:
                     reached.add(q.resolve())
                     for f, t in self.edges.get(q, []):
                         reached.add(t.resolve())
-                if k == "trigger":
-                    for g in base.rglob("*.gate.md"):
-                        pass
         # orphans: deployment folders only (§10.2.5)
         for p, info in self.files.items():
             cfg = self.files.get(info["folder"] / "grain.config.md")
             if not cfg or cfg["data"].get("role") != "deployment":
                 continue
-            if info["kind"] in ("config", "template", "lifecycle", "design", "capability", "capability-base",
-                                "gate", "asset", "moved", "comment", "run", "placement"):
+            # definitions are inert, like templates: reached only by reference (§10.2.5)
+            if info["kind"] in ("config", "task", "template", "lifecycle", "design", "capability", "capability-base",
+                                "gate", "asset", "moved", "comment", "run"):
                 continue
-            if self.in_template(p) or "archive" in p.relative_to(info["folder"]).parts:
+            rel = p.relative_to(info["folder"])
+            if self.in_template(p) or "archive" in rel.parts or (container_of(rel)[0] is not None and info["kind"] != "exec"):
                 continue
             if p.resolve() not in reached and not any(p.resolve() == t.resolve() for es in self.edges.values() for _, t in es):
                 self.add("GF040", p, "orphan: no root entry activates it and nothing reached references it")
+
+
+def manifest_dir_has(tdir, p):
+    return tdir in p.parents
 
 
 def cycles(graph, nodes):
@@ -810,7 +998,9 @@ def gitmatch(pat, rel):
     p = pat.lstrip("/")
     if p in ("*", "**"):
         return True
-    if p.endswith("/"):
+    if p.endswith("/") and "*" in p:
+        p += "**"
+    elif p.endswith("/"):
         return rel.startswith(p) if anchored else ("/" + rel).find("/" + p) >= 0
     rx = re.escape(p).replace(r"\*\*/", "(.*/)?").replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
     if anchored or "/" in p:
@@ -867,6 +1057,9 @@ def owners_for(folder, rel, field, trans, lc):
         d = d.parent
 
 
+IMMUTABLE_EXEC = ("definition", "definition_sha256", "inputs", "instantiated_from", "previous", "created_by", "created_at")
+
+
 def authorize(base, head, actors):
     """§16.4, steps 3-5, for two trees of one repository (BASE and HEAD directories)."""
     base, head = pathlib.Path(base).resolve(), pathlib.Path(head).resolve()
@@ -887,12 +1080,43 @@ def authorize(base, head, actors):
                     return True
         return False
     folders = [f for r in bl.repos for f in r.folders] or [base]
+    folder_of = lambda bp: next((f for f in folders if f == bp.parent or f in bp.parents), None)
+    # §11.2: folding x.task.md into x.task/task.md, byte for byte, when its first comment arrives
+    folds = {}
+    for bp in sorted(base.rglob("*.task.md")):
+        hp = head / bp.relative_to(base)
+        np = hp.with_name(hp.name[:-3]) / "task.md"
+        if not hp.exists() and np.exists() and np.read_bytes() == bp.read_bytes():
+            folds[np] = bp
+    for np, bp in folds.items():
+        folder = folder_of(bp)
+        thread = np.parent / "thread"
+        news = [q for q in sorted(thread.glob("*.comment.md")) if not (base / q.relative_to(head)).exists()] if thread.is_dir() else []
+        ow_move, _ = owners_for(folder, bp.relative_to(folder), None, None, {})
+        ok = allowed(ow_move, "move") or any(
+            allowed(owners_for(folder, (base / q.relative_to(head)).relative_to(folder), None, None, {})[0], "create") for q in news)
+        if not ok:
+            findings.append(Finding("GF073", np.relative_to(head), "%s may not fold this definition into a folder" % sorted(principals)))
+    # §11.3: moving an execution between lanes is a git mv of its folder inside the one repository
+    moved = {}
+    head_execs = {d.name: d for d in head.rglob("*.exec") if d.is_dir() and ".git" not in d.parts}
+    for bd_ in sorted(base.rglob("*.exec")):
+        hd_ = head_execs.get(bd_.name)
+        if not bd_.is_dir() or (head / bd_.relative_to(base)).exists() or hd_ is None:
+            continue
+        folder = folder_of(bd_ / "exec.md")
+        ow, _ = owners_for(folder, (bd_ / "exec.md").relative_to(folder), None, None, {})
+        if not allowed(ow, "move"):
+            findings.append(Finding("GF073", bd_.relative_to(base), "%s may not move this execution" % sorted(principals)))
+        for q in hd_.rglob("*"):
+            if q.is_file():
+                moved[q] = bd_ / q.relative_to(hd_)
     for hp in sorted(head.rglob("*")):
-        if hp.is_dir() or ".git" in hp.parts:
+        if hp.is_dir() or ".git" in hp.parts or hp in folds:
             continue
         rel = hp.relative_to(head)
-        bp = base / rel
-        folder = next((f for f in folders if f == bp.parent or f in bp.parents), None)
+        bp = moved.get(hp, base / rel)
+        folder = folder_of(bp)
         if folder is None:
             continue
         frel = bp.relative_to(folder)
@@ -903,17 +1127,30 @@ def authorize(base, head, actors):
             continue
         if bp.read_bytes() == hp.read_bytes():
             continue
-        if kind_of(hp.name) is None:
+        if kind_of(hp.name) is None and hp.name not in FIXED:
             ow, _ = owners_for(folder, frel, None, None, {})
             if not allowed(ow, "update"):
                 findings.append(Finding("GF073", rel, "%s may not change this file" % sorted(principals)))
             continue
+        k = kind_at(frel)
+        if k == "task" and hp.name == "task.md" and hp.parent.name.endswith(".exec"):
+            findings.append(Finding("GF052", rel, "an execution's snapshot never changes (spec §7.2)"))
+            continue
+        if k in ("comment", "moved"):
+            findings.append(Finding("GF052", rel, "a %s never changes" % k))
+            continue
         bd, bb = parse(bp)
         hd, hb = parse(hp)
-        changed = [k for k in set(bd) | set(hd) if bd.get(k) != hd.get(k)] + (["body"] if bb != hb else [])
+        changed = [k2 for k2 in set(bd) | set(hd) if bd.get(k2) != hd.get(k2)] + (["body"] if bb != hb else [])
         lc = {}
-        if hp in hl.files:
-            lc = hl.lifecycle_for(hp) or {} if hl.files[hp]["kind"] == "task" else {}
+        if hp in hl.files and hl.files[hp]["kind"] == "exec":
+            lc = hl.lifecycle_for(hp) or {}
+            for f in sorted(set(changed) & set(IMMUTABLE_EXEC)):
+                findings.append(Finding("GF052", rel, "%r is fixed when the execution is created" % f))
+            changed = [f for f in changed if f not in IMMUTABLE_EXEC]
+        if k == "run" and bd.get("status") in ("done", "failed", "interrupted", "refused", "cancelled", "superseded"):
+            findings.append(Finding("GF052", rel, "a terminal run record never changes"))
+            continue
         for f in sorted(changed):
             if f == "state":
                 trans = (bd.get("state"), hd.get("state"))
@@ -922,20 +1159,40 @@ def authorize(base, head, actors):
                     findings.append(Finding("GF052", rel, "transition %s -> %s is not in the lifecycle" % trans))
                 ow, g = owners_for(folder, frel, "state", trans, lc)
                 if not allowed(ow, "update"):
-                    findings.append(Finding("GF074", rel, "%s may not move this task %s -> %s" % (sorted(principals), trans[0], trans[1])))
+                    findings.append(Finding("GF074", rel, "%s may not move this execution %s -> %s" % (sorted(principals), trans[0], trans[1])))
                 continue
             ow, g = owners_for(folder, frel, f, None, lc)
             if not allowed(ow, "update"):
                 findings.append(Finding("GF073", rel, "%s may not change field %r" % (sorted(principals), f)))
     for bp in sorted(base.rglob("*")):
         if bp.is_file() and ".git" not in bp.parts and not (head / bp.relative_to(base)).exists():
-            folder = next((f for f in folders if f in bp.parents), None)
-            if folder is None:
+            folder = folder_of(bp)
+            if folder is None or bp in folds.values() or bp in moved.values():
                 continue
-            ow, _ = owners_for(folder, bp.relative_to(folder), None, None, {})
-            if not bp.name.endswith(".ref.md") or not allowed(ow, "delete"):
-                findings.append(Finding("GF073", bp.relative_to(base), "%s may not delete this file" % sorted(principals)))
+            frel = bp.relative_to(folder)
+            ow, _ = owners_for(folder, frel, None, None, {})
+            if kind_at(frel) is not None or not allowed(ow, "delete"):
+                findings.append(Finding("GF073", bp.relative_to(base), "%s may not delete this file; only assets are deleted (spec §8.4)" % sorted(principals)))
     return findings
+
+
+def instantiate(tree, manifest, vals):
+    """§13.3 dry run: print the executions instantiating MANIFEST would create, one per member definition."""
+    l = Linter(tree)
+    l.run()
+    man = pathlib.Path(manifest).resolve()
+    if man not in l.files or l.files[man]["data"].get("form") != "folder":
+        print("%s is not a folder-template manifest" % manifest)
+        return 1
+    inputs = l.default_inputs(l.files[man]["data"], man)
+    inputs.update(vals)
+    for e, plan in sorted(l.plan(man, inputs).items()):
+        print("%s/  definition: %s  depends_on: %s  title: %r" % (
+            e, plan["definition"].relative_to(l.top), plan["depends_on"], plan["title"]))
+    errors = [f for f in l.findings if SEVERITY.get(f.code, "error") == "error" and str(man.parent.relative_to(l.top)) in f.path]
+    for f in errors:
+        print(f)
+    return 1 if errors else 0
 
 
 def lint(top):
@@ -1001,6 +1258,9 @@ def self_test():
         fail("spec §22.3 categories disagree with the linter")
     if json.loads((SCHEMAS / "common.schema.json").read_text())["$defs"]["category"]["enum"] != CATEGORIES:
         fail("common.schema.json categories disagree")
+    m = re.search(r"22\.7\. \*\*Retired lint codes:\*\*(.*?)\n\n", spec, re.S)
+    if not m or sorted(re.findall(r"`(GF\d{3})`", m.group(1))) != sorted(RETIRED) or set(RETIRED) & set(CODES):
+        fail("spec §22.7 retired codes disagree with the linter")
     uncovered = set(CODES) - seen - {"GF006", "GF021", "GF053", "GF080", "GF072"}
     if uncovered:
         fail("codes with no broken fixture: %s" % sorted(uncovered))
@@ -1011,6 +1271,8 @@ def self_test():
 def main(argv):
     if argv[:1] == ["--self-test"]:
         return self_test()
+    if argv[:1] == ["--instantiate"]:
+        return instantiate(argv[1], argv[2], dict(a.split("=", 1) for a in argv[3:]))
     if argv[:1] == ["--authorize"]:
         actors = [argv[i + 1] for i, a in enumerate(argv) if a == "--actor"]
         fs = authorize(argv[1], argv[2], actors)

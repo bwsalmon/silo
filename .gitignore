@@ -8,3 +8,4 @@
 /sdk/ts/node_modules/
 /sdk/ts/dist/
 /sdk/ts/.bin/
+__pycache__/

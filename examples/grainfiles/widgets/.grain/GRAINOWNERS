@@ -1,2 +1,3 @@
-*            @team:hub#maintainer
-/tasks/      @team:hub#member
+*                    @team:hub#maintainer
+/tasks/              @team:hub#member
+/tasks/**/thread/    @authenticated(create)
