@@ -21,14 +21,14 @@ aliases:
 writers:
   - who: ["team:hub#maintainer"]
     may: [create, update, move]
-    kinds: [template, schedule, design, include, exclude, capability]
+    kinds: [template, trigger, gate, design, include, exclude, capability]
     fields: "*"
     note: >-
       Definitions are never deleted: a rename or reorganisation leaves a
       kind: moved tombstone at the old path (docs/task-repos.md §2.1).
   - who: ["team:hub#member"]
     may: [create, update]
-    kinds: [template, schedule, design, include, exclude, capability]
+    kinds: [template, trigger, gate, design, include, exclude, capability]
     fields: "*"
     refs: ["review/*"]
     note: >-
@@ -37,7 +37,7 @@ writers:
       branch's author (docs/task-repos.md §8.11).
   - who: ["team:hub#approver"]
     may: update
-    kinds: [template, schedule, design, include, exclude, capability]
+    kinds: [template, trigger, gate, design, include, exclude, capability]
     fields: "*"
     merge_of: "review/*"
   - who: [silo]
@@ -53,7 +53,7 @@ writers:
 
 # Hub team shared definitions
 
-This repo holds templates, schedules and design docs for the hub team.
+This repo holds templates, triggers and design docs for the hub team.
 Tasks reference them across repos by URL, or by an alias declared in the
 referring repo's README.
 
@@ -63,12 +63,14 @@ referring repo's README.
   tombstone the move to `ghcr/` left. `templates/org.md` includes the
   org-wide templates at `v3`, and `templates/no-legacy-triage.md`
   excludes one of them from what this folder contributes (§3.3).
-- `schedules/` holds the team's cadences. A `fires_in: silo` schedule
-  fires in Silo and lands in the hub intake. A `fires_in: grain` one fires
-  on the Grains Silo assigns it to, by including this folder from their
-  folders in `hub/placements` (§6.2).
-- `designs/` holds design docs with `{#HS-n}` requirement anchors. Silo
-  plans them on every merge to `main`.
+- `triggers/` holds the team's triggers (`kind: trigger`, §6.2): two
+  scheduled ones, and `plan-designs.md`, the planner as a
+  `design-change` trigger. A `fires_in: silo` trigger fires in Silo and
+  lands in the hub intake. A `fires_in: grain` one fires on the Grains
+  Silo assigns it to, by including this folder from their folders in
+  `hub/placements`, narrowed to `kinds: [trigger]`.
+- `designs/` holds design docs with `{#HS-n}` requirement anchors.
+  `triggers/plan-designs.md` plans them on every merge to `main`.
 - `capabilities/` holds the team's capability objects (`kind:
   capability`). `widgets-deployer.md` narrows the org's
   `org-caps:gcp/acme-widgets.md`, pinned at `v1`, by role and token

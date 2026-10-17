@@ -69,8 +69,9 @@ writers:
     note: >-
       Proposals made through the API and UI (submitted_via api|ui|cli),
       agents' upward filings (submitted_via agent, with filed_by naming an
-      open run in the asking Grain's repo), planning proposals, and
-      firings of approved schedules. Silo never sets approved_by to a
+      open run in the asking Grain's repo), and
+      firings of the team's triggers (submitted_via trigger), planning
+      among them. Silo never sets approved_by to a
       human who did not push it.
   - who: [silo]
     may: update
@@ -112,11 +113,12 @@ writers:
   - who: ["team:hub#admin"]
     may: [create, update, delete]
     kinds: [include, exclude]
-    paths: ["schedules/**"]
+    paths: ["triggers/**"]
     fields: "*"
     note: >-
-      The team adopts a schedule Silo does not host with a kind: include
-      of it here. A tracking include files its firings proposed; only a
+      The team adopts a trigger Silo does not host with a kind: include
+      of it here, narrowed to kinds: [trigger]. Nobody else may add one,
+      so no repo can make this intake receive firings by naming the team. A tracking include files its firings proposed; only a
       pinned one may file them approved (docs/task-repos.md §6.2, §11.13).
   - who: ["team:hub#admin"]
     may: update
@@ -150,8 +152,8 @@ records (docs/task-repos.md §5.1).
 
 **Task home.** Tasks stay here by default (`task_home: intake`). The
 widgets repo is set to `promote`, which its own `.grain/README.md` also
-says. The team adopts the widgets repo's weekly release-notes schedule
-with `schedules/widgets.md`, a `kind: include` of it, so its firings are
+says. The team adopts the widgets repo's weekly release-notes trigger
+with `triggers/widgets.md`, a `kind: include` of it, so its firings are
 filed here, never into the widgets repo (docs/task-repos.md §5.5, §6.2).
 
 The rules above are enforced by Silo's pre-receive hook

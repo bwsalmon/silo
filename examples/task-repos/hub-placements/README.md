@@ -31,12 +31,12 @@ It holds one folder per Grain that serves the hub team:
   the attestation. Placement adds one, and close, cancel and
   re-placement remove it. Re-placement is one commit here: the reference
   leaves one Grain's folder and arrives in another's (§8.8).
-- `grains/<grain>/schedules/` holds the team schedules assigned to that
-  Grain, as `kind: include` objects naming them where they live. Silo
-  never copies a schedule.
+- `grains/<grain>/triggers/` holds the team triggers assigned to that
+  Grain, as `kind: include` objects naming them where they live, with
+  `kinds: [trigger]`. Silo never copies a trigger.
 
 A Grain sees its folder only because its own root includes it
-(`backlog/silo.md` and `schedules/silo.md` in the Grain's repo). Linking
+(`backlog/silo.md` and `triggers/silo.md` in the Grain's repo). Linking
 a Grain to Silo is adding those includes, and unlinking is deleting them
 (§8.12). People who reorder a Grain's placements do it through Silo's UI
 or API, and Silo commits with `ranked_by` set to them.

@@ -19,7 +19,7 @@ aliases:
 writers:
   - who: [authenticated]
     may: [create, update]
-    kinds: [template, schedule, trigger, suite, design]
+    kinds: [template, trigger, gate, suite, design]
     fields: "*"
     note: >-
       Definitions land through this repo's own review and merge, like the
@@ -50,9 +50,11 @@ writers:
 This folder holds the widgets repo's own grain objects, beside the code
 they are about:
 
-- `templates/` and `schedules/`: the standing work on this repo, in the
-  same Markdown format as any task repo's;
-- `triggers/`: the repo's path triggers;
+- `templates/` and `triggers/`: the standing work on this repo, in the
+  same Markdown format as any task repo's. A trigger files work when
+  something happens: a time, a push, a design change, a request;
+- `gates/`: the repo's merge gates, which hold a change for review and
+  file nothing else;
 - `workflows/`: CI, which stays GitHub-Actions YAML;
 - `tasks/`: long-lived and design-linked tasks, promoted here from the
   hub intake. Each one's old intake path is a tombstone pointing here.
@@ -61,8 +63,8 @@ they are about:
 `kind: design` objects in place.
 
 **Task home.** `task_home: promote`: approved tasks stay in the hub
-intake unless someone promotes them. Scheduled firings never come here:
-the weekly release-notes schedule files its tasks into the intake
+intake unless someone promotes them. A trigger's firings never come
+here: the weekly release-notes trigger files its tasks into the intake
 (docs/task-repos.md §5.5, §6.2).
 
 **Write authority** is this repo's review and merge process, not Silo's

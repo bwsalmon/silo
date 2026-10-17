@@ -1,23 +1,171 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/task-repos/trigger.schema.json",
-  "title": "grain/trigger@v1: a .grain/triggers declaration as Markdown; its keys are pkg/declschema's, verbatim, and the body is its notes (docs/task-repos.md §12.1)",
+  "title": "grain/trigger@v1: when an event happens, file work (docs/task-repos.md §6.2). on: names one or more event sources, each with its own options; fires: names what to file. A trigger never holds a merge: that is kind: gate (§6.3). Last and next fire, pause and run history are runtime only",
   "type": "object",
   "properties": {
     "kind": {"const": "trigger"},
     "schema": {"const": "grain/trigger@v1"},
     "aka": {"$ref": "common.schema.json#/$defs/aka"},
     "moved_from": {"$ref": "common.schema.json#/$defs/movedFrom"},
-    "on": {"description": "The event, as the YAML declaration writes it. Quote the key in front matter: a YAML 1.1 reader takes a bare on for true"},
-    "paths": {"type": "array", "items": {"type": "string"}},
-    "gate": {"type": "boolean"},
-    "human": {"type": "string", "description": "required or on-findings, as declschema defines it"},
-    "sensitive": {"type": "boolean"},
-    "template": {"$ref": "common.schema.json#/$defs/refString", "description": "A trigger that files a task names its template by reference"},
+    "title": {"type": "string"},
+    "on": {
+      "description": "The event sources, GitHub Actions' on: shape: each key is a source and its value that source's options. Quote the key in front matter: a YAML 1.1 reader takes a bare on for true. task-closed is reserved for a later minor version and refused until then (§6.2)",
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "schedule": {"$ref": "#/$defs/schedule"},
+        "push": {"$ref": "#/$defs/change"},
+        "merge": {"$ref": "#/$defs/change"},
+        "design-change": {"$ref": "#/$defs/designChange"},
+        "manual": {"$ref": "#/$defs/manual"},
+        "task-closed": false
+      },
+      "additionalProperties": false
+    },
+    "fires": {
+      "description": "Exactly one of: a template plus inputs, which files a task where the firing's task home says (§5.5); or a workflow run followed by a review task, as a workflow's on.schedule behaves in grain today",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "template": {"$ref": "common.schema.json#/$defs/refString", "description": "Unpinned, so a firing renders the template's current revision and records it in the task's template.rev"},
+            "inputs": {"$ref": "common.schema.json#/$defs/inputValues"},
+            "bind": {
+              "description": "Template input name -> event field (event.fired_at, event.to_sha, event.paths, event.group, event.requirement, …). Data, not Jinja: front matter is never rendered",
+              "type": "object",
+              "additionalProperties": {"type": "string", "pattern": "^event\\.[a-z_]+$"}
+            },
+            "context": {"$ref": "common.schema.json#/$defs/context", "description": "Entries added after the template's; no input: entries (§5.6)"},
+            "per": {"enum": ["event", "requirement"], "description": "design-change only: one task per push (event, the default) or one per changed requirement, by the planning table of §7.4"}
+          },
+          "required": ["template"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "workflow": {"$ref": "common.schema.json#/$defs/refString", "description": "A .grain/workflows/*.yml file in the trigger's own repo, by plain path (§12.2). Run at the branch the trigger names"},
+            "branch": {"type": "string", "description": "The branch the workflow runs at; grain's schedule base:. Default: the repo's default_ref"},
+            "review": {
+              "type": "object",
+              "description": "The review task filed once the run finishes, with its result. Default: grain's built-in workflow-review template",
+              "properties": {
+                "template": {"$ref": "common.schema.json#/$defs/refString"},
+                "inputs": {"$ref": "common.schema.json#/$defs/inputValues"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["workflow"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "fires_in": {
+      "enum": ["silo", "grain"],
+      "description": "Who fires it: silo files into the team intake; grain means every Grain whose namespace contains it fires it into its own root. A workflow run needs a Grain: fires.workflow requires grain"
+    },
+    "team": {"type": "string"},
+    "enabled": {"type": "boolean", "description": "The reviewed on/off switch. Pausing and suspending are runtime, in the database"},
+    "auto_approve_proposals": {"type": "boolean"},
+    "auto_merge": {"type": "boolean"},
+    "limits": {
+      "type": "object",
+      "description": "Firings this trigger may make; each can only lower the Grain's or Silo's own caps (§11.36)",
+      "properties": {
+        "per_hour": {"type": "integer", "minimum": 1},
+        "per_day": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "derived_from": {
+      "$ref": "common.schema.json#/$defs/refString",
+      "description": "Provenance only: the trigger this one was customised from, which the same root excludes (§6.2). A reference: it adds no name to any namespace and inherits nothing"
+    },
+    "created_at": {"$ref": "common.schema.json#/$defs/time"},
+    "next_fire_at": false,
+    "last_fire_at": false,
+    "next_run_at": false,
+    "last_run_at": false,
+    "paused": false,
+    "suspended": false,
+    "template": false,
+    "inputs": false,
+    "paths": false,
+    "gate": false,
+    "human": false,
+    "sensitive": false,
+    "requires": false,
     "reads": false,
     "writes": false,
     "grants": false,
-    "target": false
+    "target": false,
+    "repo": false,
+    "base": false
   },
-  "required": ["kind", "schema"]
+  "required": ["kind", "schema", "on", "fires"],
+  "allOf": [
+    {
+      "if": {"properties": {"fires": {"required": ["workflow"]}}, "required": ["fires"]},
+      "then": {"properties": {"fires_in": {"const": "grain"}}}
+    }
+  ],
+  "$defs": {
+    "schedule": {
+      "description": "A cadence (exactly one of grain's cadence keys) plus its options",
+      "allOf": [{"$ref": "common.schema.json#/$defs/cadence"}],
+      "type": "object",
+      "properties": {
+        "hourly": true, "every": true, "daily": true, "weekly": true, "monthly": true, "cron": true,
+        "timezone": {"type": "string", "description": "IANA zone; empty or absent is UTC"},
+        "overlap": {"enum": ["skip", "queue", "cancel-previous"], "description": "While the previous firing is unplaced, queued or running: skip this one; file it to wait on the previous (depends_on); or file it and cancel the previous (§8.7). Default skip"},
+        "catch_up": {
+          "type": "object",
+          "description": "Firings missed while nothing could fire (downtime): none, the latest only, or all, at most max",
+          "properties": {
+            "mode": {"enum": ["none", "latest-only", "all"]},
+            "max": {"type": "integer", "minimum": 1, "maximum": 24},
+            "within": {"type": "string", "pattern": "^[0-9]+[mhd]$", "description": "Ignore missed firings older than this"}
+          },
+          "required": ["mode"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "change": {
+      "description": "push: any update of a matching branch; merge: a reviewed change landing on one (a merge-queue merge, a merged review branch). Filters as Actions writes them",
+      "type": "object",
+      "properties": {
+        "branches": {"type": "array", "items": {"type": "string"}, "description": "Globs; default the repo's protected refs. Only protected refs may be watched (§11.37)"},
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "paths_ignore": {"type": "array", "items": {"type": "string"}},
+        "group_by": {"enum": ["none", "folder", "file"], "description": "Split one event into a firing per changed folder or file (grain's {{group}}); default none"},
+        "debounce": {"type": "string", "pattern": "^[0-9]+[smh]$", "description": "Coalesce events this close together into one firing (from_sha of the first, to_sha of the last)"}
+      },
+      "additionalProperties": false
+    },
+    "designChange": {
+      "description": "A design object's requirements changing on its default_ref: the planner of §7.4 as an event source",
+      "type": "object",
+      "properties": {
+        "designs": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/refString"}, "minItems": 1, "description": "Design files or folders (ending in /) to watch"},
+        "classes": {"type": "array", "items": {"enum": ["new", "changed", "removed"]}, "description": "Which requirement changes fire; default all three"},
+        "debounce": {"type": "string", "pattern": "^[0-9]+[smh]$"},
+        "max_tasks_per_change": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Above this, one plan proposal is filed instead (§7.4); the design's planning.max_tasks_per_change can lower it"}
+      },
+      "required": ["designs"],
+      "additionalProperties": false
+    },
+    "manual": {
+      "description": "An explicit run now, from Silo's UI, the API or the CLI",
+      "type": "object",
+      "properties": {
+        "who": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/principal"}, "description": "Who may request one; default the team's approvers, or the Grain's owner"},
+        "inputs": {"type": "array", "items": {"type": "string"}, "description": "Template inputs the requester may set; every other input comes from fires.inputs"}
+      },
+      "additionalProperties": false
+    }
+  }
 }

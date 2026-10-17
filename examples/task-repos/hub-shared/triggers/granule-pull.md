@@ -1,12 +1,16 @@
 ---
-kind: schedule
-schema: grain/schedule@v1
+kind: trigger
+schema: grain/trigger@v1
 aka: ["sched-1"]
 title: Nightly granule pull
-template: ../templates/granule-pull.md
-inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
-daily: {at: "06:00"}
-overlap: skip
+"on":
+  schedule:
+    daily: {at: "06:00"}
+    overlap: skip
+    catch_up: {mode: none}
+fires:
+  template: ../templates/granule-pull.md
+  inputs: {repo: "https://github.com/bwsalmon/grain.git@candidate"}
 enabled: true
 team: hub
 fires_in: grain
@@ -16,6 +20,8 @@ created_at: "2026-10-02T18:30:00Z"
 
 The settings-owned `sched-1` of grain/config, which fires `template-1`
 (`templates/granule-pull.md`). Its cadence here is illustrative.
+`catch_up: none`: a pull that missed its 06:00 while the Grain was down
+waits for the next morning rather than running late.
 
 It says `fires_in: grain`: Silo does not fire it, and every Grain whose
 namespace contains it does, into its own root. Silo assigns it by

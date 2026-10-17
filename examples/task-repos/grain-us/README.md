@@ -38,10 +38,11 @@ the Grain and its owners write here (docs/task-repos.md §8.1).
   Grain's execution record names the fenced record in `eu` as
   `previous`. The task depends on a task that Grain `eu` completed, which
   this Grain read from `eu`'s execution record (§8.9).
-- `schedules/silo.md` includes the team schedules Silo assigned to this
+- `triggers/silo.md` includes the team triggers Silo assigned to this
   Grain, which Silo's folder in turn includes from `hub/shared`.
-  `schedules/no-granule-pull.md` excludes one of them, and
-  `schedules/granule-pull-weekly.md` is this Grain's own version of it,
-  referencing the original in `derived_from` (§6.2).
+  `triggers/no-granule-pull.md` excludes one of them, and
+  `triggers/granule-pull-weekly.md` is this Grain's own trigger in its
+  place, referencing the same template, and the original in
+  `derived_from` (§6.2).
 - Lanes are strict: Silo's placements first, then the team admins' own
   work in `backlog/`.

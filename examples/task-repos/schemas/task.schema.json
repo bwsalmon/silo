@@ -13,7 +13,7 @@
     "context": {"$ref": "common.schema.json#/$defs/context", "description": "Everything the run's sandbox holds (§5.6). The first write entry is the task's primary repo, and its @branch the base; no write entry is team-targeted or read-only. Concrete: no input: entries"},
     "state": {"enum": ["proposed", "rejected", "approved", "cancelled"], "description": "Only what the author and Silo decide (§5.1); progress is derived from execution records"},
     "submitter": {"$ref": "common.schema.json#/$defs/principal"},
-    "submitted_via": {"enum": ["git", "api", "ui", "cli", "schedule", "planning", "agent"]},
+    "submitted_via": {"enum": ["git", "api", "ui", "cli", "trigger", "gate", "agent"]},
     "approved_by": {"$ref": "common.schema.json#/$defs/principal"},
     "approved_at": {"$ref": "common.schema.json#/$defs/time"},
     "rejection": {"type": "object", "properties": {"by": {"type": "string"}, "at": {"type": "string"}, "reason": {"type": "string"}}},
@@ -53,10 +53,18 @@
       "allOf": [{"$ref": "common.schema.json#/$defs/ref"}],
       "properties": {"rev": {"$ref": "common.schema.json#/$defs/sha"}, "inputs": {"$ref": "common.schema.json#/$defs/inputValues"}}
     },
-    "schedule": {
+    "trigger": {
+      "description": "The trigger that filed this task (§6.2): which of its sources fired, the event's key (the task's path segment) and when. Written by whoever fired it",
       "allOf": [{"$ref": "common.schema.json#/$defs/ref"}],
-      "properties": {"fired_at": {"$ref": "common.schema.json#/$defs/time"}}
+      "properties": {
+        "on": {"enum": ["schedule", "push", "merge", "design-change", "manual"]},
+        "key": {"type": "string"},
+        "fired_at": {"$ref": "common.schema.json#/$defs/time"},
+        "event": {"type": "object", "description": "The event fields the firing bound (to_sha, paths, requirement, requested_by, …)"}
+      },
+      "required": ["on", "fired_at"]
     },
+    "schedule": false,
     "depends_on": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/refString"}},
     "supersedes": {"$ref": "common.schema.json#/$defs/refString"},
     "catalog": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*:([a-z0-9-]+/)?[A-Za-z0-9._-]+$"}, "description": "Optional labels naming software-catalog entities the task touches, in Backstage's own form (component:default/payments). Data only: not references in the sense of §4, so they add no name and grant no read (§3.4)"},

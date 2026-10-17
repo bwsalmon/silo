@@ -10,10 +10,10 @@ is named by its path: there are no ids.
 | Folder | Stands for | Role |
 | --- | --- | --- |
 | [`hub-intake/`](hub-intake/README.md) | `https://silo.example.com/git/hub/intake.git` | the hub team's intake: its tasks, approvals, task discussion, and its ranking of unplaced work |
-| [`hub-shared/`](hub-shared/README.md) | `https://silo.example.com/git/hub/shared.git` | shared templates (one moved, leaving a tombstone), a schedule, and a design doc |
+| [`hub-shared/`](hub-shared/README.md) | `https://silo.example.com/git/hub/shared.git` | shared templates (one moved, leaving a tombstone), triggers (two scheduled, one planning designs), and a design doc |
 | [`grain-eu/`](grain-eu/README.md) | `https://silo.example.com/git/grains/eu.git` | the root of Grain `eu` (owned by bsalmon@google.com): its include of Silo's placements, its own lane, a pinned include of the team's templates, its own task and its execution records. Only the Grain and its owner write it |
-| [`grain-us/`](grain-us/README.md) | `https://silo.example.com/git/grains/us.git` | the root of Grain `us` (a team Grain): its includes of Silo's placements and assigned schedules, one exclude, a customised schedule, and one re-placed task's record |
-| [`hub-placements/`](hub-placements/README.md) | `https://silo.example.com/git/hub/placements.git` | Silo's own repo, written only by Silo: a folder per Grain, holding its placements and the team schedules assigned to it |
+| [`grain-us/`](grain-us/README.md) | `https://silo.example.com/git/grains/us.git` | the root of Grain `us` (a team Grain): its includes of Silo's placements and assigned triggers, one exclude, a customised trigger, and one re-placed task's record |
+| [`hub-placements/`](hub-placements/README.md) | `https://silo.example.com/git/hub/placements.git` | Silo's own repo, written only by Silo: a folder per Grain, holding its placements and the team triggers assigned to it |
 | [`org-templates/`](org-templates/README.md) | `https://silo.example.com/git/org/templates.git` | an org-wide template set, which `hub-shared` includes at `v3` and cuts one template from |
 | [`org-capabilities/`](org-capabilities/README.md) | `https://silo.example.com/git/org/capabilities.git` | org-wide capability objects: the GCP base narrowed to one project, released at `v1`, which the hub team narrows further |
 | [`ns-demo/`](ns-demo/README.md) | `https://silo.example.com/git/demo/namespaces.git` | the X/Y/Z cases of namespace resolution, as a tiny tree |
@@ -27,7 +27,7 @@ copied here.
 
 | Object | File | Real source |
 | --- | --- | --- |
-| schedule | `hub-shared/schedules/prune-packages.md` | grain/config `settings/schedules.yml` `repo:schedule:bwsalmon:grain:prune-packages` |
+| trigger (`on: schedule`) | `hub-shared/triggers/prune-packages.md` | grain/config `settings/schedules.yml` `repo:schedule:bwsalmon:grain:prune-packages` |
 | template | `hub-shared/templates/ghcr/prune-packages.md` | grain/config `settings/templates.yml` `repo:template:bwsalmon:grain:prune-packages` (body verbatim) |
 | template with `reads` | `hub-shared/templates/granule-pull.md` | grain/config `template-1` (body verbatim) |
 | template with inputs, `if`/`for` and an include | `hub-shared/templates/design-plan.md` + `partials/closing-report.md` | bwsalmon/grain `.grain/templates/design-planner.yml`, abridged |
@@ -76,10 +76,10 @@ repos do not exist; code-repo shas are real silo commits. The
   committed by Silo for the agent of run 4310. Its `filed_by.run` names
   that run, which comments on it and lists it in `closed.follow_ups`
   (§8.12).
-- **A schedule firing a templated task:**
-  `hub-intake/tasks/scheduled/prune-packages/20261011T0400Z/`, at a path
-  derived from the schedule and firing time, recording `template.rev` and
-  `schedule.fired_at`; its placement in `hub-placements/grains/eu/backlog/`; and its run,
+- **A trigger firing a templated task on its schedule:**
+  `hub-intake/tasks/fired/prune-packages/20261011T0400Z/`, at a path
+  derived from the trigger and the event's key, recording `template.rev`
+  and `trigger: {ref, on, key, fired_at}`; its placement in `hub-placements/grains/eu/backlog/`; and its run,
   `grain-eu/runs/2026-10-11-prune-ghcr/` (§6.2, §8.12).
 - **Re-placement after a lost Grain:** the task
   `hub-intake/tasks/2026-10-16-refuse-self-approved/` never moved. One
@@ -92,7 +92,7 @@ repos do not exist; code-repo shas are real silo commits. The
   `done`. The `us` run's comment says so (§8.9).
 - **A tombstone from a rename:** `hub-shared/templates/prune-packages.md`
   is `kind: moved`, `to: ghcr/prune-packages.md`, and the template there
-  lists it in `moved_from`. The schedule names the new path. The task
+  lists it in `moved_from`. The trigger names the new path. The task
   fired before the move still names the old one, and resolves through
   the tombstone (§2.1, §4).
 - **Traceability:** tasks 4310, 4248 and `2026-10-16-refuse-self-approved`
@@ -101,8 +101,10 @@ repos do not exist; code-repo shas are real silo commits. The
   record the hash they were done against in `closed.design_revs` (§7.2).
 
 - **A grain folder in a code repo:** `widgets-code/.grain/` holds a
-  template, a schedule, a trigger converted from bwsalmon/silo's own
-  `.grain/triggers/grain-declarations.yml`, and a promoted task. Its CI
+  template; two triggers, one filing the weekly release notes and one
+  running the CI workflow nightly and filing a review of the run; a gate
+  converted from bwsalmon/silo's own
+  `.grain/triggers/grain-declarations.yml`; and a promoted task. Its CI
   stays YAML in `.grain/workflows/`. `.grain/README.md` governs the
   folder and, through its `scope`, `docs/design/widgets.md`, a design doc
   in place (§3.1, §12).
@@ -113,18 +115,27 @@ repos do not exist; code-repo shas are real silo commits. The
 - **Backlog references into both homes:** `eu`'s placements hold
   `2026-10-16-widget-schema-v2.md`, pointing into the code repo, beside
   references pointing into the intake (§5.5).
-- **An adopted schedule:** `hub-intake/README.md` sets the team's
+- **An adopted trigger:** `hub-intake/README.md` sets the team's
   `task_home` (with the widgets repo on `promote`), and
-  `hub-intake/schedules/widgets.md`, a `kind: include`, adopts the widgets
-  repo's weekly schedule, whose firings go to the intake and never into
-  the code repo (§6.2).
-- **Team schedules assigned to a Grain, with one exclude:**
-  `hub-placements/grains/us/schedules/hub.md` is Silo's include of
-  `shared:schedules/`, and `grain-us/schedules/silo.md` includes that
-  folder, so the team's schedules reach `us` transitively, narrowed to
-  `kinds: [schedule]`. `grain-us/schedules/no-granule-pull.md` excludes
-  the daily granule pull, and `granule-pull-weekly.md` replaces it with
-  `derived_from` naming the original (§6.2, §8.15).
+  `hub-intake/triggers/widgets.md`, a `kind: include` with
+  `kinds: [trigger]`, adopts the widgets repo's weekly trigger, whose
+  firings go to the intake and never into the code repo (§6.2).
+- **Team triggers assigned to a Grain, with one exclude:**
+  `hub-placements/grains/us/triggers/hub.md` is Silo's include of
+  `shared:triggers/`, and `grain-us/triggers/silo.md` includes that
+  folder, so the team's triggers reach `us` transitively, narrowed to
+  `kinds: [trigger]`. `grain-us/triggers/no-granule-pull.md` excludes
+  the daily granule pull, and `granule-pull-weekly.md` replaces it: a new
+  trigger referencing the same template, with `derived_from` naming the
+  original (§6.2, §8.15).
+- **The planner as a trigger:** `hub-shared/triggers/plan-designs.md`
+  says `on: design-change` over `designs/`, and fires the design-plan
+  template once per merged change, binding the event's range and paths
+  to the template's inputs (§7.4).
+- **A merge gate:** `widgets-code/.grain/gates/grain-declarations.md`
+  (`kind: gate`) holds every change to `.grain/**` for a security review
+  and then a hub approver. It files no work but those reviews (§6.3,
+  §8.14).
 - **A transitive template set with a cut:** `hub-shared/templates/org.md`
   includes `org-templates/templates/` pinned at `v3`, and
   `hub-shared/templates/no-legacy-triage.md` excludes one of them.
@@ -148,7 +159,7 @@ repos do not exist; code-repo shas are real silo commits. The
 - **A template input choosing the target repo:**
   `hub-shared/templates/ghcr/prune-packages.md` and
   `templates/granule-pull.md` declare an input `repo` of `type: ref`, and
-  take their `write` entry from it. Their schedules set it, and the fired
+  take their `write` entry from it. Their triggers set it, and the fired
   task records the concrete entry and the value in `template.inputs`
   (§5.6, §8.16).
 - **What a run's sandbox held:** `grain-eu/runs/4310-carry-approver/run.md`
@@ -209,9 +220,13 @@ does these things:
 - checks include objects: a target in another repo carries its `@ref`
   and `ref_mode`, and a relative one carries neither;
 - checks code repos' grain folders: a task there came from an intake and
-  is not a scheduled firing, and a template there carries no `reads`,
+  is not a trigger's firing, a template there carries no `reads`,
   `writes`, `grants` or `target`, and no `context:` entry naming another
-  repo;
+  repo, a gate there names no other repos, and a workflow trigger's
+  workflow is a file in the same repo;
+- checks triggers and gates against their schemas, which refuse each
+  other's keys, and that no example Grain's namespace holds a gate,
+  since each includes triggers only;
 - checks `context:` entries: `write` only on a repo or folder at a
   branch, `depth` only on files, `input:` only in templates and only of a
   `ref` input, and no overlapping sandbox paths; prints each task's
