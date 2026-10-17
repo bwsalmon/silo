@@ -4,7 +4,7 @@
 // driven over a small HTTP control API on -control, so that a
 // Playwright spec can say exactly which events the hub sees, and when:
 //
-//	GET  /state                 {"online","refused","connects","tasks":[{"id","node_task","received":[...]}]}
+//	GET  /state                 {"online","refused","connects","failures","last_error","tasks":[{"id","node_task","received":[...]}]}
 //	POST /tasks/{id}/emit       a JSON array of events, without seq or task, which the node numbers and sends up
 //	POST /tasks/{id}/finish     {"state":"done"|"failed","reason":"..."}: the task's result, on its task stream
 //	PUT  /artifacts/{ref}       the body is what the view-through serves for ref, until the node goes offline
@@ -12,8 +12,10 @@
 //
 // "received" is every message the hub wrote down the task's stream
 // after the offer (approve, message, cancel), in order, which is how a
-// spec sees an answer reach the node. A node whose token is refused
-// stops trying and reports refused.
+// spec sees an answer reach the node. A node the hub refuses in its
+// hello stops trying and reports refused; one whose connection is
+// turned away before that (a revoked token is answered 401) keeps
+// trying, and counts its failures.
 package main
 
 import (
@@ -56,6 +58,8 @@ type grain struct {
 	offline   bool
 	refused   bool
 	connects  int
+	failures  int // connection attempts failed since the last success
+	lastError string
 	tasks     map[string]*task
 	order     []string
 	artifacts map[string][]byte
@@ -128,6 +132,10 @@ func (g *grain) run(ctx context.Context) {
 		cancel()
 		if err != nil {
 			log.Printf("fakegrain: connect: %v", err)
+			g.mu.Lock()
+			g.failures++
+			g.lastError = err.Error()
+			g.mu.Unlock()
 			if errors.Is(err, rendezvous.ErrRefused) {
 				g.mu.Lock()
 				g.refused = true
@@ -143,6 +151,7 @@ func (g *grain) run(ctx context.Context) {
 		g.mu.Lock()
 		g.conn = c
 		g.connects++
+		g.failures, g.lastError = 0, ""
 		g.mu.Unlock()
 		stop := context.AfterFunc(ctx, func() { c.Close() })
 		for {
@@ -294,7 +303,8 @@ func (g *grain) routes() http.Handler {
 		for _, id := range g.order {
 			ts = append(ts, g.tasks[id])
 		}
-		writeJSON(w, map[string]any{"online": g.conn != nil, "refused": g.refused, "connects": g.connects, "tasks": ts})
+		writeJSON(w, map[string]any{"online": g.conn != nil, "refused": g.refused, "connects": g.connects,
+			"failures": g.failures, "last_error": g.lastError, "tasks": ts})
 	})
 	mux.HandleFunc("POST /tasks/{id}/emit", func(w http.ResponseWriter, r *http.Request) {
 		var evs []map[string]any

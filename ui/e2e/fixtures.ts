@@ -167,6 +167,8 @@ export interface GrainState {
   online: boolean;
   refused: boolean;
   connects: number;
+  failures: number;
+  last_error: string;
   tasks: GrainTask[];
 }
 
