@@ -1,20 +1,3 @@
----
-kind: repo
-schema: grain/repo@v1
-role: shared
-title: Org-wide capability definitions
-owner:
-  team: platform
-  silo: https://silo.example.com
-host: silo
-default_ref: main
-ref_policy:
-  protected: [main]
-  fast_forward_only: true
-  review_prefix: review/
-writers: ["team:platform#maintainer"]
----
-
 # Org-wide capability definitions
 
 Capability objects (`kind: capability`) the platform team maintains for
@@ -23,9 +6,9 @@ narrowed by reducers, and each reducer only narrows
 (docs/task-repos.md §5.7).
 
 **Nothing here grants anything.** A team narrows these further in its own
-shared repo; a Grain that includes a team's folder can offer what it
-holds; and a Grain honours a definition from here only if its own local
-policy lists this repo as a source, for that base. A task gets a
+shared repo; a task reaches a definition only by reference; and a Grain
+honours a definition from here only if its own local policy lists this
+repo as a source, for that base. A task gets a
 capability only by requesting it in `context:` with `mode: use`.
 
 - [`gcp/acme-widgets.capability.md`](gcp/acme-widgets.capability.md): the GCP service-account

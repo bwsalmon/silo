@@ -26,7 +26,8 @@ result, as a workflow's `on.schedule` behaves in grain today (§6.2,
 happens after the run.
 
 It says `fires_in: grain`, because only a Grain runs CI. The Grain that
-fires it is any whose namespace includes this file. Each run is recorded
+fires it is any whose `grain.config.md` names this folder as a trigger
+root. Each run is recorded
 in that Grain's database; the review task is filed in its root at
 `tasks/fired/widgets/nightly-ci/<fired_at>.task.md`, never in this repo.
 `overlap: cancel-previous`: a run still going at 02:00 the next night is

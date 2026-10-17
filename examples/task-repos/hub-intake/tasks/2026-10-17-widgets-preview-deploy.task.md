@@ -42,7 +42,6 @@ to Cloud Run in `acme-widgets` as the service `preview-schema-v2`, in
    what the capability materialises.
 
 The approver read both entries when approving, and `spec_digest` covers
-them. The capability needs no approval of its own. `eu` offers it,
-because `eu:capabilities/hub.capability.md` includes the team's capabilities, but
-offering is not granting: `eu`'s local policy decides, and §8.17 walks
-the check.
+them. The capability needs no approval of its own. The entry is the only
+thing that reaches the definition, and reaching it is not granting:
+`eu`'s local policy decides, and §8.17 walks the check.

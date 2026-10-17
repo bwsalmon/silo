@@ -10,7 +10,7 @@
     "moved_from": {"$ref": "common.schema.json#/$defs/movedFrom"},
     "title": {"type": "string"},
     "match": {
-      "description": "Which changes it holds. Paths are repo-relative globs, as grain's path triggers write them. A gate applies to the repo that holds it, read at the target branch's tip, never the change's head; a gate reached through an include applies to the repos it names (repos:)",
+      "description": "Which changes it holds. Paths are repo-relative globs, as grain's path triggers write them. A gate applies to the repo that holds it, read at the target branch's tip, never the change's head; a gate in a mandatory gate source applies to the repos it names (repos:)",
       "type": "object",
       "properties": {
         "repos": {"type": "array", "items": {"type": "string"}, "description": "Only on a gate outside the repos it governs: canonical repo URLs or globs over them. Absent means the gate's own repo"},

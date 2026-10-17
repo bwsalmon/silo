@@ -64,7 +64,7 @@
     },
     "fires_in": {
       "enum": ["silo", "grain"],
-      "description": "Who fires it: silo files into the team intake; grain means every Grain whose namespace contains it fires it into its own root. A workflow run needs a Grain: fires.workflow requires grain"
+      "description": "Who fires it: silo files into the team intake; grain means every Grain whose trigger roots list it fires it into its own root. A workflow run needs a Grain: fires.workflow requires grain"
     },
     "team": {"type": "string"},
     "enabled": {"type": "boolean", "description": "The reviewed on/off switch. Pausing and suspending are runtime, in the database"},
@@ -81,7 +81,7 @@
     },
     "derived_from": {
       "$ref": "common.schema.json#/$defs/refString",
-      "description": "Provenance only: the trigger this one was customised from, which the same root excludes (§6.2). A reference: it adds no name to any namespace and inherits nothing"
+      "description": "Provenance only: the trigger this one was customised from, which the same Grain ignores in its trigger entry (§6.2). A reference: it activates nothing and inherits nothing"
     },
     "created_at": {"$ref": "common.schema.json#/$defs/time"},
     "next_fire_at": false,

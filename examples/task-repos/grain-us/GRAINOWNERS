@@ -1,0 +1,5 @@
+*                    @grain:us @team:hub#admin
+/grain.config.md     @team:hub#admin
+/.grainconfig        @team:hub#admin
+/GRAINOWNERS         @team:hub#admin
+/runs/               @grain:us

@@ -15,9 +15,8 @@ requirements:
 
 This design doc lived in `docs/design/` before the repo had a grain
 folder, with its `{#WG-n}` anchors, and it stays where it is. It became a
-`kind: design` object by gaining the front matter above, and nothing
-else: `.grain/README.md` lists `/docs/design/` in its `scope`, so that
-README governs it (docs/task-repos.md §3.1, §12.3).
+`kind: design` object by gaining the front matter above and the
+`.design.md` suffix, and nothing else (docs/task-repos.md §3.2, §12.3).
 
 ## Requirements
 

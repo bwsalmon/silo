@@ -24,7 +24,7 @@ The settings-owned `sched-1` of grain/config, which fires `template-1`
 waits for the next morning rather than running late.
 
 It says `fires_in: grain`: Silo does not fire it, and every Grain whose
-namespace contains it does, into its own root. Silo assigns it by
-including this folder from a Grain's folder in `hub/placements`
-(docs/task-repos.md §6.2). Grain `us` is assigned it, and excludes it in
-favour of a weekly copy of its own.
+trigger roots list it does, into its own root: Grain `eu` names this
+folder directly. Silo assigns it to Grain `us` by writing a copy into
+`us`'s folder in `hub/placements` (docs/task-repos.md §6.2); `us` ignores
+that copy in its entry, in favour of a weekly trigger of its own (§8.15).

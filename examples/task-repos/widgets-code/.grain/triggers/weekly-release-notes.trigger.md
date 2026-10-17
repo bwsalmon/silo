@@ -24,9 +24,9 @@ created_at: "2026-10-16T18:05:00Z"
 The definition lives here, beside the code. Its firings do not: Silo
 files each one into the hub intake, at
 `tasks/fired/widgets/weekly-release-notes/<key>.task.md`, because the hub
-intake adopts this trigger with an include
-(`hub-intake/triggers/widgets.trigger.md`). A trigger that a team has not
-adopted never fires for it (docs/task-repos.md §6.2, §11.13).
+intake adopts this trigger by naming it in its trigger roots
+(`hub-intake/grain.config.md`). A trigger that no root names never fires
+for anyone (docs/task-repos.md §6.2, §11.13).
 
 Two sources. The Friday cadence, in London time, skips a week the last
 notes are still open and does not catch up after downtime: late notes

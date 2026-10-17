@@ -44,5 +44,6 @@ service. Each layer only tightens (docs/task-repos.md §5.7):
    refuses any request for this capability, naming this reducer. It never
    skips it, because skipping a reducer would widen the capability.
 
-Including this folder in a Grain's namespace makes the capability
-available to request there. It grants nothing by itself.
+A task reaches this definition only by reference, from a `context:`
+entry with `mode: use`. Nothing makes it active, and it grants nothing
+by itself (docs/task-repos.md §5.7).

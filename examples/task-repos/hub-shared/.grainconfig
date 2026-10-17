@@ -1,0 +1,12 @@
+schema: grain/repo-config@v1
+owner: {team: hub, silo: https://silo.example.com}
+host: silo
+default_ref: main
+ref_policy: {protected: [main], fast_forward_only: true, review_prefix: review/}
+aliases:
+  intake: https://silo.example.com/git/hub/intake.git
+  grain-code: https://github.com/bwsalmon/grain.git
+  silo-code: https://github.com/bwsalmon/silo.git
+  org: https://silo.example.com/git/org/templates.git
+  org-caps: https://silo.example.com/git/org/capabilities.git
+orphans: warn

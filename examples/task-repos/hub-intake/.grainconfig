@@ -1,0 +1,18 @@
+schema: grain/repo-config@v1
+owner: {team: hub, silo: https://silo.example.com}
+host: silo
+default_ref: main
+ref_policy: {protected: [main], fast_forward_only: true, review_prefix: review/}
+aliases:
+  shared: https://silo.example.com/git/hub/shared.git
+  eu: https://silo.example.com/git/grains/eu.git
+  us: https://silo.example.com/git/grains/us.git
+  silo-code: https://github.com/bwsalmon/silo.git
+  widgets: https://git.example.com/hub/widgets.git
+  placements: https://silo.example.com/git/hub/placements.git
+task_home:
+  mode: intake
+  allow: [intake, promote, code-repo]
+  repos:
+    https://git.example.com/hub/widgets.git: promote
+orphans: warn

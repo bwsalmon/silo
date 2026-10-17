@@ -18,8 +18,9 @@ auto_approve_proposals: false
 created_at: "2026-10-16T17:30:00Z"
 ---
 
-A customised copy of `shared:triggers/granule-pull.trigger.md`, which
-`no-granule-pull.md` excludes from this Grain's namespace. It is a whole,
+A customised copy of `shared:triggers/granule-pull.trigger.md`, whose
+assigned copy in Silo's folder this Grain's trigger entry ignores
+(`grain.config.md`). It is a whole,
 self-contained trigger that references the same template: `derived_from`
 records where it came from, for people and for Silo's views, and
 inherits nothing (docs/task-repos.md §6.2). When the team changes the
