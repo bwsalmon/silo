@@ -72,7 +72,7 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	if create {
 		err = s.migrate(ctx)
 	} else {
-		err = dbaccess.Check(ctx, db, "tasks", "tasks")
+		err = dbaccess.Check(ctx, db, "tasks", "tasks", "task_approvals")
 		if err == nil {
 			err = dbaccess.CheckColumns(ctx, db, "tasks", added...)
 		}
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	prompt TEXT NOT NULL,
 	submitter TEXT NOT NULL,
 	approved_by TEXT NOT NULL DEFAULT '',
+	approved_at BIGINT NOT NULL DEFAULT 0,
 	constraints TEXT NOT NULL,
 	state TEXT NOT NULL,
 	node TEXT NOT NULL,
@@ -112,7 +113,17 @@ CREATE TABLE IF NOT EXISTS tasks (
 	version BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks (state, created_at);
-CREATE INDEX IF NOT EXISTS tasks_team ON tasks (team, created_at)
+CREATE INDEX IF NOT EXISTS tasks_team ON tasks (team, created_at);
+CREATE TABLE IF NOT EXISTS task_approvals (
+	task TEXT NOT NULL,
+	request TEXT NOT NULL,
+	decision TEXT NOT NULL,
+	answered_by TEXT NOT NULL,
+	reason TEXT NOT NULL,
+	answered_at BIGINT NOT NULL,
+	delivered INTEGER NOT NULL,
+	PRIMARY KEY (task, request)
+)
 `
 
 // added are the columns added to tasks since it was first made.
@@ -120,10 +131,11 @@ CREATE INDEX IF NOT EXISTS tasks_team ON tasks (team, created_at)
 // if lost, is never resumed, since its node's owner cannot be checked,
 // and goes back to the queue after its team's grace.
 // approved_by (INV-17) is empty on a task created before it, as it is
-// on every task nobody approved at the hub.
+// on every task nobody approved at the hub, and approved_at (0) with it.
 var added = []dbaccess.Column{
 	{Table: "tasks", Name: "node_owner", Add: `ALTER TABLE tasks ADD COLUMN node_owner TEXT NOT NULL DEFAULT ''`},
 	{Table: "tasks", Name: "approved_by", Add: `ALTER TABLE tasks ADD COLUMN approved_by TEXT NOT NULL DEFAULT ''`},
+	{Table: "tasks", Name: "approved_at", Add: `ALTER TABLE tasks ADD COLUMN approved_at BIGINT NOT NULL DEFAULT 0`},
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -164,7 +176,7 @@ func (s *Store) q(query string) string {
 	return b.String()
 }
 
-const columns = `id, team, repo, title, prompt, submitter, approved_by, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
+const columns = `id, team, repo, title, prompt, submitter, approved_by, approved_at, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
 
 type scanner interface{ Scan(...any) error }
 
@@ -174,9 +186,10 @@ func scanTask(r scanner) (Task, error) {
 		cons, excl       string
 		pending          int
 		created, updated int64
+		approved         int64
 		state            string
 	)
-	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
+	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &approved, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
 		&t.Reason, &excl, &t.Attempts, &pending, &created, &updated, &t.version); err != nil {
 		return Task{}, err
 	}
@@ -184,6 +197,10 @@ func scanTask(r scanner) (Task, error) {
 	t.CancelPending = pending != 0
 	t.Created = time.UnixMilli(created).UTC()
 	t.Updated = time.UnixMilli(updated).UTC()
+	if approved != 0 {
+		at := time.UnixMilli(approved).UTC()
+		t.ApprovedAt = &at
+	}
 	if err := json.Unmarshal([]byte(cons), &t.Constraints); err != nil {
 		return Task{}, fmt.Errorf("tasks: task %s's constraints: %w", t.ID, err)
 	}
@@ -209,16 +226,38 @@ func boolInt(b bool) int {
 // Create adds a task to the backlog, queued. It is given its ID and
 // creation time; the caller has decided its team and submitter.
 func (s *Store) Create(ctx context.Context, spec Spec) (Task, error) {
+	return s.create(ctx, spec, Queued)
+}
+
+// Propose adds a task to the backlog, proposed: filed by someone outside
+// its team, it waits for a member of the team to approve it (Approve)
+// or reject it (Reject), and is not dispatched until it is approved.
+func (s *Store) Propose(ctx context.Context, spec Spec) (Task, error) {
+	spec.ApprovedBy, spec.ApprovedAt = "", nil
+	return s.create(ctx, spec, Proposed)
+}
+
+func (s *Store) create(ctx context.Context, spec Spec, state State) (Task, error) {
 	spec, err := normalize(spec)
 	if err != nil {
 		return Task{}, err
 	}
 	now := s.now().UTC().Truncate(time.Millisecond)
 	spec.ID, spec.Created = newID(), now
-	t := Task{Spec: spec, State: Queued, Excluded: []string{}, Updated: now, version: 1}
+	var approved int64
+	if spec.ApprovedBy == "" {
+		spec.ApprovedAt = nil
+	} else {
+		if spec.ApprovedAt == nil {
+			spec.ApprovedAt = &now
+		}
+		at := spec.ApprovedAt.UTC().Truncate(time.Millisecond)
+		spec.ApprovedAt, approved = &at, at.UnixMilli()
+	}
+	t := Task{Spec: spec, State: state, Excluded: []string{}, Updated: now, version: 1}
 	cons, _ := json.Marshal(t.Constraints)
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Team, t.Repo, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
 		now.UnixMilli(), now.UnixMilli(), t.version)
 	if err != nil {
 		return Task{}, err
@@ -241,6 +280,10 @@ type Filter struct {
 	States []State
 	// Teams, when set, are the teams whose tasks to list.
 	Teams []string
+	// Submitter, when set with Teams, also lists the tasks this
+	// submitter filed in any team: their proposals to teams they are
+	// not in.
+	Submitter string
 	// Limit caps the tasks returned; 0 is no cap.
 	Limit int
 }
@@ -279,10 +322,18 @@ func (s *Store) list(ctx context.Context, f Filter, oldest bool) ([]Task, error)
 		where, args = inList(where, args, "state", states)
 	}
 	if f.Teams != nil {
-		if len(f.Teams) == 0 {
+		switch {
+		case len(f.Teams) == 0 && f.Submitter == "":
 			return []Task{}, nil
+		case len(f.Teams) == 0:
+			where, args = append(where, `submitter = ?`), append(args, f.Submitter)
+		case f.Submitter == "":
+			where, args = inList(where, args, "team", f.Teams)
+		default:
+			var in []string
+			in, args = inList(nil, args, "team", f.Teams)
+			where, args = append(where, `(`+in[0]+` OR submitter = ?)`), append(args, f.Submitter)
 		}
-		where, args = inList(where, args, "team", f.Teams)
 	}
 	q := `SELECT ` + columns + ` FROM tasks`
 	if len(where) > 0 {
@@ -363,9 +414,13 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 		t.Excluded = []string{}
 	}
 	excl, _ := json.Marshal(t.Excluded)
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
+	var approved int64
+	if t.ApprovedAt != nil {
+		approved = t.ApprovedAt.UnixMilli()
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, approved_by = ?, approved_at = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
 		attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
-		string(t.State), t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
+		string(t.State), t.ApprovedBy, approved, t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
 		t.Updated.UnixMilli(), t.version+1, id, t.version)
 	if err != nil {
 		return Task{}, true, err
@@ -375,6 +430,35 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 	}
 	t.version++
 	return t, true, nil
+}
+
+// Approve queues a proposed task, approved by approver: a member of its
+// team (the API's to check), who becomes its approved_by and may not be
+// its submitter. A task is approved once: a second approval, or one of a
+// task that was rejected or withdrawn, fails with ErrState.
+func (s *Store) Approve(ctx context.Context, id, approver string) (Task, error) {
+	approver = strings.ToLower(strings.TrimSpace(approver))
+	if approver == "" {
+		return Task{}, fmt.Errorf("%w: no approver", ErrInvalid)
+	}
+	t, err := s.Get(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	if strings.EqualFold(t.Submitter, approver) {
+		return t, fmt.Errorf("%w: a task's submitter cannot approve it", ErrInvalid)
+	}
+	return s.update(ctx, id, []State{Proposed}, func(t *Task) {
+		at := s.now().UTC().Truncate(time.Millisecond)
+		t.State, t.ApprovedBy, t.ApprovedAt, t.Reason = Queued, approver, &at, ""
+	})
+}
+
+// Reject turns down a proposed task, saying why.
+func (s *Store) Reject(ctx context.Context, id, reason string) (Task, error) {
+	return s.update(ctx, id, []State{Proposed}, func(t *Task) {
+		t.State, t.Reason = Rejected, reason
+	})
 }
 
 // Offer marks a queued task offered to node, which owner registered:
@@ -459,8 +543,8 @@ func (s *Store) RequeueLost(ctx context.Context, id, reason string, lostSince ti
 // by team: the hub's backlog-depth metric. Finished tasks are not
 // counted.
 func (s *Store) Counts(ctx context.Context) (map[string]map[State]int, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, state, COUNT(*) FROM tasks WHERE state IN (?, ?, ?, ?) GROUP BY team, state`),
-		string(Queued), string(Offered), string(Running), string(Lost))
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, state, COUNT(*) FROM tasks WHERE state IN (?, ?, ?, ?, ?) GROUP BY team, state`),
+		string(Proposed), string(Queued), string(Offered), string(Running), string(Lost))
 	if err != nil {
 		return nil, err
 	}
@@ -526,12 +610,12 @@ func (s *Store) Finish(ctx context.Context, id string, state State, reason strin
 	})
 }
 
-// Cancel cancels a task that has not finished. One that a node holds,
-// or may hold, is left CancelPending until the node is told
-// (CancelDelivered).
+// Cancel cancels a task that has not finished: a proposal withdrawn, or
+// a task stopped. One that a node holds, or may hold, is left
+// CancelPending until the node is told (CancelDelivered).
 func (s *Store) Cancel(ctx context.Context, id, reason string) (Task, error) {
-	return s.update(ctx, id, []State{Queued, Offered, Running, Lost}, func(t *Task) {
-		t.CancelPending = t.State != Queued
+	return s.update(ctx, id, []State{Proposed, Queued, Offered, Running, Lost}, func(t *Task) {
+		t.CancelPending = t.State != Queued && t.State != Proposed
 		t.State, t.Reason = Cancelled, reason
 	})
 }

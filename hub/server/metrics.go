@@ -284,7 +284,7 @@ var (
 	descTeamFree = prometheus.NewDesc("silo_hub_team_free_slots",
 		"Unclaimed slots on the online nodes that serve a team's repositories.", []string{"team"}, nil)
 	descBacklog = prometheus.NewDesc("silo_hub_backlog_tasks",
-		"Unfinished tasks in the backlog, by team and state: queued, offered, running, lost.", []string{"team", "state"}, nil)
+		"Unfinished tasks in the backlog, by team and state: proposed, queued, offered, running, lost.", []string{"team", "state"}, nil)
 	descOldestQueued = prometheus.NewDesc("silo_hub_backlog_oldest_queued_seconds",
 		"How long a team's longest-waiting queued task has been queued.", []string{"team"}, nil)
 	descEventRows = prometheus.NewDesc("silo_hub_event_store_events",
@@ -385,7 +385,7 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	if counts, err := h.Backlog.Counts(ctx); !failed(err) {
 		for team, byState := range counts {
-			for _, st := range []tasks.State{tasks.Queued, tasks.Offered, tasks.Running, tasks.Lost} {
+			for _, st := range []tasks.State{tasks.Proposed, tasks.Queued, tasks.Offered, tasks.Running, tasks.Lost} {
 				gauge(ch, descBacklog, float64(byState[st]), team, string(st))
 			}
 		}

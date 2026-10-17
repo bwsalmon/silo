@@ -392,7 +392,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
-	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI}
+	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI, Requests: h.Events}
 
 	m := http.NewServeMux()
 	m.HandleFunc("GET "+HealthzPath, func(w http.ResponseWriter, r *http.Request) {

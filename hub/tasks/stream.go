@@ -16,13 +16,16 @@ import (
 //	hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}   run this task
 //	            {"type":"resume","task":{...},"requester_attestation":"<JWT>"}  a task you ran when the hub lost you: still yours?
 //	            {"type":"cancel","task":{"id":...}}        stop it
+//	            {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
+//	                                                       a human's answer to the task's approval_request event of that ID
 //	node → hub  {"type":"accept","node_task":"<local id>"} it is running
 //	            {"type":"refuse","reason":"..."}           not here (to an offer), or not mine (to a resume)
 //	            {"type":"result","state":"done"|"failed","reason":"..."}
 //
 // A stream that carries an offer or a resume stays open for the task's
 // life: the node writes its result there when the task ends, and the hub
-// writes cancel there if a human cancels it. A cancel for a task with no
+// writes cancel there if a human cancels it, and approve for each of
+// the task's approval requests a human answers. A cancel for a task with no
 // stream (its node was away when it was cancelled) is the first message
 // of a stream of its own, which the hub closes once it has written it.
 // The hub closes a stream after the task's result, or a refusal.
@@ -30,9 +33,11 @@ const (
 	TypeOffer  = "offer"
 	TypeResume = "resume"
 	TypeCancel = "cancel"
-	TypeAccept = "accept"
-	TypeRefuse = "refuse"
-	TypeResult = "result"
+	// TypeApprove answers one of a running task's approval requests.
+	TypeApprove = "approve"
+	TypeAccept  = "accept"
+	TypeRefuse  = "refuse"
+	TypeResult  = "result"
 )
 
 // Message is one line on a task stream.
@@ -48,8 +53,15 @@ type Message struct {
 	NodeTask string `json:"node_task,omitempty"`
 	// State is the task's end, done or failed, in result.
 	State State `json:"state,omitempty"`
-	// Reason says why, in refuse, result and cancel.
+	// Reason says why, in refuse, result, cancel and approve.
 	Reason string `json:"reason,omitempty"`
+	// Request is the approval_request event's ID an approve answers.
+	Request string `json:"request_id,omitempty"`
+	// Decision is an approve's answer: Allow or Deny.
+	Decision string `json:"decision,omitempty"`
+	// AnsweredBy is the member of the task's team who answered, in
+	// approve: the hub's claim about who decided.
+	AnsweredBy string `json:"answered_by,omitempty"`
 }
 
 // maxLine bounds one message; an offer carries the prompt.

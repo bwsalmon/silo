@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/dbaccess"
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
 	_ "modernc.org/sqlite"             // "sqlite"
@@ -228,4 +229,29 @@ func (s *Store) HasRef(ctx context.Context, task, ref string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM task_refs WHERE task = ? AND ref = ?`), task, ref).Scan(&n)
 	return n > 0, err
+}
+
+// ApprovalRequest returns task's approval_request event with ID id, if
+// its node sent one: tasks.API.Requests, which answers only a request
+// the node made.
+func (s *Store) ApprovalRequest(ctx context.Context, task, id string) (events.ApprovalRequest, bool, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND type = ? ORDER BY seq`), task, events.TypeApprovalRequest)
+	if err != nil {
+		return events.ApprovalRequest{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return events.ApprovalRequest{}, false, err
+		}
+		var e Event
+		if err := json.Unmarshal([]byte(body), &e); err != nil {
+			return events.ApprovalRequest{}, false, fmt.Errorf("live: task %s's event: %w", task, err)
+		}
+		if a := e.ApprovalRequest; a != nil && a.ID == id {
+			return *a, true, nil
+		}
+	}
+	return events.ApprovalRequest{}, false, rows.Err()
 }

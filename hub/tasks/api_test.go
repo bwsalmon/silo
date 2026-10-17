@@ -26,6 +26,7 @@ func (headerAuth) Principal(r *http.Request) (identity.Principal, error) {
 }
 
 type apiHub struct {
+	api   *API
 	store *Store
 	dir   *directory.Store
 	url   string
@@ -59,7 +60,7 @@ func newAPIHub(t *testing.T) *apiHub {
 	m.Handle("/", dirAPI.Handler())
 	ts := httptest.NewServer(m)
 	t.Cleanup(ts.Close)
-	return &apiHub{store: store, dir: dir, url: ts.URL}
+	return &apiHub{api: api, store: store, dir: dir, url: ts.URL}
 }
 
 func (h *apiHub) do(t *testing.T, user, method, path string, body any) (int, []byte) {
@@ -126,7 +127,6 @@ func TestAPISubmit(t *testing.T) {
 		want int
 	}{
 		{"", map[string]any{"repo": "bwsalmon/silo", "prompt": "x"}, http.StatusUnauthorized},
-		{"bob@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "x"}, http.StatusNotFound},
 		{"bob@example.com", map[string]any{"team": "infra", "prompt": "x"}, http.StatusNotFound},
 		{"alice@example.com", map[string]any{"repo": "bwsalmon/unowned", "prompt": "x"}, http.StatusNotFound},
 		{"alice@example.com", map[string]any{"repo": "bwsalmon/silo", "team": "infra", "prompt": "x"}, http.StatusBadRequest},
@@ -140,6 +140,10 @@ func TestAPISubmit(t *testing.T) {
 		if code, b := h.do(t, c.user, "POST", TasksPath, c.body); code != c.want {
 			t.Errorf("%s submitting %v: %d %s, want %d", c.user, c.body, code, b, c.want)
 		}
+	}
+	// Outside the repository's team, a submission is a proposal.
+	if p := h.submit(t, "bob@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "x"}); p.State != Proposed || p.Team != "infra" || p.ApprovedBy != "" {
+		t.Errorf("bob's proposal: %+v", p)
 	}
 	// A hub admin may submit anywhere.
 	h.submit(t, "root@example.com", map[string]any{"team": "infra", "prompt": "x"})
