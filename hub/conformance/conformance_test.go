@@ -69,18 +69,14 @@ func statuses(rep *conformance.Report) map[string]conformance.Status {
 	return out
 }
 
-// The reference Grain, with every feature it has, passes every scenario
-// but upward filing, which the kit does not check yet.
+// The reference Grain, with every feature it has, passes every
+// scenario.
 func TestReferenceGrain(t *testing.T) {
-	rep := run(t, []string{refgrain.FeatureInteractive, refgrain.FeatureApprovals})
+	rep := run(t, []string{refgrain.FeatureInteractive, refgrain.FeatureApprovals, refgrain.FeatureFiling})
 	got := statuses(rep)
 	for _, name := range conformance.Scenarios {
-		want := conformance.Pass
-		if name == "filing" {
-			want = conformance.Skip
-		}
-		if got[name] != want {
-			t.Errorf("scenario %s: %s, want %s", name, got[name], want)
+		if got[name] != conformance.Pass {
+			t.Errorf("scenario %s: %s, want %s", name, got[name], conformance.Pass)
 		}
 	}
 	if !rep.Passed {
@@ -91,9 +87,9 @@ func TestReferenceGrain(t *testing.T) {
 // A Grain advertising no optional feature has those scenarios skipped,
 // not failed, and still conforms.
 func TestOptionalFeaturesSkipped(t *testing.T) {
-	rep := run(t, nil, "approve", "interactive")
+	rep := run(t, nil, "approve", "interactive", "filing")
 	got := statuses(rep)
-	want := map[string]conformance.Status{"register": conformance.Pass, "approve": conformance.Skip, "interactive": conformance.Skip}
+	want := map[string]conformance.Status{"register": conformance.Pass, "approve": conformance.Skip, "interactive": conformance.Skip, "filing": conformance.Skip}
 	for name, s := range want {
 		if got[name] != s {
 			t.Errorf("scenario %s: %s, want %s", name, got[name], s)

@@ -45,9 +45,9 @@ const (
 	// takes the approve answers. The hub does not need it said: the
 	// kit does, to tell a Grain without approvals from a broken one.
 	FeatureApprovals = "approvals"
-	// FeatureFiling is upward filing and dependencies
-	// (docs/hub-interface.md): the hub takes them, but the kit does not
-	// check a Grain's yet.
+	// FeatureFiling says the Grain files tasks upward and takes
+	// dependency_done (docs/hub-interface.md, filing a task). The hub
+	// does not read it; the kit does.
 	FeatureFiling = "filing"
 )
 
@@ -313,7 +313,13 @@ func fatal(format string, args ...any) error { return fatalError{fmt.Errorf(form
 
 // submit files workload work, and follows its events from the start.
 func (k *kit) submit(ctx context.Context, repo, kind, work string) (tasks.Task, *watcher, error) {
-	t, err := k.h.submit(ctx, repo, kind, "silo conformance: "+work, workload.Prompt(work))
+	return k.submitAs(ctx, operator, repo, kind, work, workload.Prompt(work))
+}
+
+// submitAs files a conformance task with prompt as user, and follows
+// its events from the start.
+func (k *kit) submitAs(ctx context.Context, user, repo, kind, work, prompt string) (tasks.Task, *watcher, error) {
+	t, err := k.h.submit(ctx, user, repo, kind, "silo conformance: "+work, prompt)
 	if err != nil {
 		return t, nil, err
 	}
@@ -863,10 +869,79 @@ func (k *kit) restart(ctx context.Context) (string, error) {
 	return fmt.Sprintf("reconnected; task %s still running once, as %s, its events going on past seq %d", t.ID, t.NodeTask, before), nil
 }
 
+// filing has the Grain file a task upward from the hub task it runs,
+// in a repository a team outside the submitter's owns, and checks what
+// the hub recorded: the Grain as filer, the origin's submitter as
+// submitter, and the task proposed. A member of that team approves it
+// and the kit, standing in for that team's Grain, ends it done; the
+// Grain is then told (dependency_done) and unblocks its local task.
 func (k *kit) filing(ctx context.Context) (string, error) {
-	listed := "does not list"
-	if slices.Contains(k.entry.Features, FeatureFiling) {
-		listed = "lists"
+	if !slices.Contains(k.entry.Features, FeatureFiling) {
+		return "", skip("the grain does not list the %q feature", FeatureFiling)
 	}
-	return "", skip("the kit does not check upward filing and dependencies yet; the grain %s the %q feature", listed, FeatureFiling)
+	// The reviewer submits the origin, so that its submitter is not the
+	// Grain's owner: the filed task's submitter must be the origin's.
+	o, w, err := k.submitAs(ctx, reviewer, k.cfg.Repo, "", workload.File, workload.FilePrompt(elsewhereRepo))
+	if err != nil {
+		return "", err
+	}
+	defer k.h.cancel(context.WithoutCancel(ctx), o.ID)
+	if o, err = k.await(ctx, o.ID, tasks.Running); err != nil {
+		return "", err
+	}
+	said := func(prefix string) (string, error) {
+		e, ok := w.Await(k.cfg.Timeout, func(e live.Event) bool {
+			return e.Type == events.TypeStatus && e.Status != nil && strings.HasPrefix(e.Status.Message, prefix+" ")
+		})
+		if !ok {
+			if t, err := k.h.task(ctx, o.ID); err == nil && t.State.Terminal() {
+				return "", fmt.Errorf("task %s ended %s (%s) without saying %q", o.ID, t.State, t.Reason, prefix)
+			}
+			return "", fmt.Errorf("task %s never said %q", o.ID, prefix)
+		}
+		return strings.TrimSpace(strings.TrimPrefix(e.Status.Message, prefix)), nil
+	}
+	id, err := said(workload.Filed)
+	if err != nil {
+		return "", err
+	}
+	f, err := k.h.taskAs(ctx, outsider, id)
+	if err != nil {
+		return "", fmt.Errorf("the filed task %q: %w", id, err)
+	}
+	var problems []string
+	for _, c := range []struct{ what, got, want string }{
+		{"filed_by", f.FiledBy, k.cfg.Node},
+		{"filed_by_owner", f.FiledByOwner, k.entry.Owner},
+		{"submitter", f.Submitter, o.Submitter},
+		{"origin_task", f.OriginTask, o.ID},
+		{"repo", f.Repo, elsewhereRepo},
+		{"team", f.Team, elsewhere},
+		{"state", string(f.State), string(tasks.Proposed)},
+		{"approved_by", f.ApprovedBy, ""},
+	} {
+		if c.got != c.want {
+			problems = append(problems, fmt.Sprintf("%s %q, want %q", c.what, c.got, c.want))
+		}
+	}
+	if len(problems) > 0 {
+		return "", fmt.Errorf("the filed task %s: %s", id, strings.Join(problems, "; "))
+	}
+	if err := k.h.call(ctx, "POST", tasks.TasksPath+"/"+id+"/approve", outsider, nil, nil); err != nil {
+		return "", fmt.Errorf("approving the filed task: %w", err)
+	}
+	if err := k.h.complete(ctx, id, outsider); err != nil {
+		return "", fmt.Errorf("ending the filed task: %w", err)
+	}
+	got, err := said(workload.Unblocked)
+	if err != nil {
+		return "", fmt.Errorf("after the filed task %s ended done: %w", id, err)
+	}
+	if got != id {
+		return "", fmt.Errorf("task %s said it was unblocked by %q, but it filed %s", o.ID, got, id)
+	}
+	if _, err := k.await(ctx, o.ID, tasks.Done); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("task %s filed %s, proposed in team %s for %s, filed by %s; ended done, its dependency_done unblocked %s", o.ID, id, f.Team, f.Submitter, f.FiledBy, o.ID), nil
 }

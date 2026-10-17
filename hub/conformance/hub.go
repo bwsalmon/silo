@@ -31,6 +31,15 @@ const (
 	// reviewer, a second member of the team, answers approvals.
 	reviewer = "reviewer@conformance.invalid"
 	team     = "conformance"
+	// elsewhere is a second team, which neither the operator nor the
+	// reviewer is in, owning elsewhereRepo: the filing scenario's Grain
+	// files there. outsider is its one member, who approves the filing.
+	elsewhere     = "conformance-elsewhere"
+	elsewhereRepo = "conformance/elsewhere"
+	outsider      = "outsider@conformance.invalid"
+	// standIn is the node the kit records running a task filed in
+	// elsewhereRepo, which no Grain under test serves.
+	standIn = "conformance-stand-in"
 )
 
 // hub is the kit's own hub, run in this process, which it can stop and
@@ -197,7 +206,8 @@ func (h *hub) call(ctx context.Context, method, path, user string, body, out any
 }
 
 // setup makes the team that owns the kit's repositories, with the
-// operator and the reviewer in it, and mints node's token.
+// operator and the reviewer in it, and the team elsewhere with the
+// outsider in it, and mints node's token.
 func (h *hub) setup(ctx context.Context, node string, repos []string) (string, error) {
 	steps := []func() error{
 		func() error {
@@ -213,6 +223,17 @@ func (h *hub) setup(ctx context.Context, node string, repos []string) (string, e
 	for _, r := range repos {
 		steps = append(steps, func() error { return h.call(ctx, "PUT", "/v1/teams/"+team+"/repos/"+r, admin, nil, nil) })
 	}
+	steps = append(steps,
+		func() error {
+			return h.call(ctx, "POST", "/v1/teams", admin, map[string]string{"id": elsewhere, "name": "Conformance elsewhere"}, nil)
+		},
+		func() error {
+			return h.call(ctx, "PUT", "/v1/teams/"+elsewhere+"/members/user:"+outsider, admin, map[string]string{"role": "member"}, nil)
+		},
+		func() error {
+			return h.call(ctx, "PUT", "/v1/teams/"+elsewhere+"/repos/"+elsewhereRepo, admin, nil, nil)
+		},
+	)
 	for _, s := range steps {
 		if err := s(); err != nil {
 			return "", err
@@ -241,21 +262,40 @@ func (h *hub) node(ctx context.Context, id string) (registry.Entry, bool, error)
 	return registry.Entry{}, false, nil
 }
 
-// submit files a conformance task in repo.
-func (h *hub) submit(ctx context.Context, repo, kind, title, prompt string) (tasks.Task, error) {
+// submit files a conformance task in repo, as user.
+func (h *hub) submit(ctx context.Context, user, repo, kind, title, prompt string) (tasks.Task, error) {
 	var t tasks.Task
 	body := map[string]any{"repo": repo, "title": title, "prompt": prompt}
 	if kind != "" {
 		body["kind"] = kind
 	}
-	err := h.call(ctx, "POST", tasks.TasksPath, operator, body, &t)
+	err := h.call(ctx, "POST", tasks.TasksPath, user, body, &t)
 	return t, err
 }
 
 func (h *hub) task(ctx context.Context, id string) (tasks.Task, error) {
+	return h.taskAs(ctx, operator, id)
+}
+
+// taskAs reads task id as user sees it.
+func (h *hub) taskAs(ctx context.Context, user, id string) (tasks.Task, error) {
 	var t tasks.Task
-	err := h.call(ctx, "GET", tasks.TasksPath+"/"+id, operator, nil, &t)
+	err := h.call(ctx, "GET", tasks.TasksPath+"/"+id, user, nil, &t)
 	return t, err
+}
+
+// complete ends task id done, as a Grain of its team running it would:
+// the kit stands in for that Grain, which it does not run, by writing
+// the backlog itself. The task must be queued.
+func (h *hub) complete(ctx context.Context, id, owner string) error {
+	if h.srv == nil {
+		return errors.New("the hub is not running")
+	}
+	if _, err := h.srv.Backlog.Offer(ctx, id, standIn, owner); err != nil {
+		return err
+	}
+	_, err := h.srv.Backlog.Finish(ctx, id, tasks.Done, "completed by the conformance kit")
+	return err
 }
 
 func (h *hub) cancel(ctx context.Context, id string) error {
