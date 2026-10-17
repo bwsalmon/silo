@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/memory.schema.json",
+  "title": "grain/memory@v1: guidance given to a Grain's runs when a memory root lists it (docs/task-repos.md \u00a73.3)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "memory"
+    },
+    "schema": {
+      "const": "grain/memory@v1"
+    },
+    "title": {
+      "type": "string"
+    },
+    "applies_to": {
+      "type": "object",
+      "properties": {
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "teams": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Which runs it applies to; all runs by default"
+    },
+    "updated_by": {
+      "$ref": "common.schema.json#/$defs/principal"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "kind",
+    "schema",
+    "title"
+  ],
+  "additionalProperties": false
+}

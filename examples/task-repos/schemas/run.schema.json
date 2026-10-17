@@ -8,7 +8,7 @@
     "schema": {"const": "grain/run@v1"},
     "aka": {"$ref": "common.schema.json#/$defs/aka"},
     "task": {"$ref": "common.schema.json#/$defs/pinnedRef", "description": "The task, and the commit of it that was run"},
-    "from": {"$ref": "common.schema.json#/$defs/pinnedRef", "description": "The backlog reference it came from, in the Grain's own lane or an included one such as Silo's placements, and the commit of that reference's repo it was read at"},
+    "from": {"$ref": "common.schema.json#/$defs/pinnedRef", "description": "The backlog reference it came from, in the Grain's own lane or another lane its grain.config.md names, such as Silo's placements, and the commit of that reference's repo it was read at"},
     "previous": {"$ref": "common.schema.json#/$defs/refString", "description": "The superseded run this one replaces, after re-placement (§8.8)"},
     "grain": {"type": "string"},
     "state": {"enum": ["accepted", "running", "waiting", "done", "failed", "refused", "cancelled", "superseded"]},

@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/task-repos/config.schema.json",
+  "title": "grain/config@v1: grain.config.md, a Grain's root configuration of typed active roots; or, with team in place of grain, a team intake's trigger roots (docs/task-repos.md \u00a73.3)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "config"
+    },
+    "schema": {
+      "const": "grain/config@v1"
+    },
+    "grain": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "silo": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "team": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "user": {
+          "type": "string"
+        },
+        "team": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "backlog": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "strict",
+            "weighted",
+            "round_robin"
+          ]
+        },
+        "expedite": {
+          "enum": [
+            "lane",
+            "global"
+          ]
+        },
+        "lanes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "$ref": "common.schema.json#/$defs/refString",
+                "description": "A folder (ending in /) or one file: relative or /-rooted in this repo, read at this file's commit; or an alias or git URL plus @<ref>"
+              },
+              "ref_mode": {
+                "enum": [
+                  "track",
+                  "pin"
+                ],
+                "description": "Required for another repo: track follows a branch's tip, pin names a tag or commit"
+              },
+              "ignore": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "gitignore patterns relative to the entry's folder; they only ever remove (\u00a73.3)"
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "weight": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "lanes"
+      ],
+      "additionalProperties": false
+    },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/refString",
+            "description": "A folder (ending in /) or one file: relative or /-rooted in this repo, read at this file's commit; or an alias or git URL plus @<ref>"
+          },
+          "ref_mode": {
+            "enum": [
+              "track",
+              "pin"
+            ],
+            "description": "Required for another repo: track follows a branch's tip, pin names a tag or commit"
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "gitignore patterns relative to the entry's folder; they only ever remove (\u00a73.3)"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "memory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "$ref": "common.schema.json#/$defs/refString",
+            "description": "A folder (ending in /) or one file: relative or /-rooted in this repo, read at this file's commit; or an alias or git URL plus @<ref>"
+          },
+          "ref_mode": {
+            "enum": [
+              "track",
+              "pin"
+            ],
+            "description": "Required for another repo: track follows a branch's tip, pin names a tag or commit"
+          },
+          "ignore": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "gitignore patterns relative to the entry's folder; they only ever remove (\u00a73.3)"
+          },
+          "write": {
+            "type": "boolean",
+            "description": "At most one entry, in this repo: the one the Grain's memory agent writes"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "objects_per_entry": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "objects": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "entries": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "kind",
+    "schema",
+    "owner"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "grain"
+      ],
+      "not": {
+        "required": [
+          "team"
+        ]
+      }
+    },
+    {
+      "required": [
+        "team",
+        "triggers"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "grain"
+            ]
+          },
+          {
+            "required": [
+              "backlog"
+            ]
+          },
+          {
+            "required": [
+              "memory"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

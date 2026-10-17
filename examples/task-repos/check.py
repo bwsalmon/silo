@@ -3,32 +3,34 @@
 
 This is a reviewer's aid, not the implementation. It:
 
-- finds every object by scanning front matter (never by path), and the
-  README that governs it by nearest-README discovery: a grain folder's
-  .grain/README.md as well as a whole repo's README.md;
-- validates each against its kind's JSON Schema;
+- finds every object by its file name, <name>.<kind>.md (§3.2), never by
+  scanning front matter, and refuses a file whose front matter's kind
+  differs from its suffix, or a kind: file with no suffix; reads each
+  repo's .grainconfig for its aliases and settings (§3.4);
+- validates each object against its kind's JSON Schema, and each
+  .grainconfig against grainconfig.schema.json;
 - resolves every reference -- relative, by alias, and by git URL, mapping
   this folder's illustrative Silo URLs to the sibling directories -- with
-  the path as the identity, following tombstones with a hop limit and
-  cycle detection;
+  the path as the identity, following a tombstone beside the old path
+  (<old>.moved.md) with a hop limit and cycle detection, then the archive
+  mapping (§3.8);
 - checks the path rules: a tombstone's target lists it in moved_from, and
-  the moved object's moved_from entries are tombstones pointing back;
-- resolves each Grain root's namespace bottom-up from its include and
-  exclude objects (§3.3): kinds intersected along the path, a depth limit,
-  cycles cut, excludes scoped to their own folder, an excluded include
-  disabled; and checks the X/Y/Z cases of ns-demo/ and the examples'
-  expected names, in two iteration orders;
+  the moved object's moved_from entries have tombstones pointing back;
+- lists each grain.config.md's typed root entries from the tree alone
+  (§3.3, §3.7): the entry's folder subtree, its kind suffix only, less its
+  ignore: patterns (gitignore syntax) and any archive/ folder, the most
+  specific entry of one type winning an overlap, under limits that fail
+  loudly; and checks what the examples say each Grain's active set holds;
 - checks backlogs: every reference resolves to a task, no lane holds two
   references to one task, and no reference outlives its task's close;
 - checks execution records: at most one open run per task;
-- checks code repos' grain folders: a task there came from an intake
+- checks code repos (host: other): a task there came from an intake
   (moved_from) and is not a trigger's firing, and a template there carries
   no reads, writes, grants or target; a gate there names no other repos,
   and a workflow trigger's workflow exists in the same repo;
-- checks triggers and gates (§6.2, §6.3) by their schemas: a trigger
-  never carries a gate's keys nor a gate a trigger's, and a workflow
-  trigger fires in a Grain; and that the example Grains, which include
-  triggers only, have no gate in their namespaces;
+- checks that no active set holds a gate, template or capability, since
+  gates are read by the merged-into repo's merge queue and the rest are
+  reached by reference only (§3.1, §6.3);
 - checks context: entries (§5.6): write only on a repo or folder at a
   branch, depth only on files, input: only in templates, no overlapping
   sandbox paths, and, in a code repo, only that repo; prints each task's
@@ -42,8 +44,11 @@ This is a reviewer's aid, not the implementation. It:
   the Grain's published base declaration; checks the chain against an
   illustrative local policy (sanctioned bases and definition sources,
   implied egress and repos); reports Anselm reducers as not evaluable,
-  which refuses the request until Anselm is adopted; and checks that a
-  requested capability is in the Grain's namespace;
+  which refuses the request until Anselm is adopted;
+- evaluates GRAINOWNERS (§3.5): every object has an owner, the nearest
+  file and its last matching line win, field lines override for their
+  fields; and replays the design's rejected push;
+- runs the orphan check (§3.9), printing each orphan as a warning;
 - recomputes requirement hashes;
 - renders each template fixture with Python Jinja2 under StrictUndefined.
 
@@ -72,7 +77,6 @@ HOSTED = {
     "https://silo.example.com/git/hub/placements.git": "hub-placements",
     "https://silo.example.com/git/org/templates.git": "org-templates",
     "https://silo.example.com/git/org/capabilities.git": "org-capabilities",
-    "https://silo.example.com/git/demo/namespaces.git": "ns-demo",
 }
 EXTERNAL = ("https://github.com/",)  # real repos: referenced, not fetched here
 REPOS = sorted(set(HOSTED.values()))
@@ -80,10 +84,13 @@ MAX_HOPS = 8
 OPEN_RUN = ("accepted", "running", "waiting")
 CLOSED_RUN = ("done", "failed", "cancelled")
 PRIORITY = ["urgent", "high", "normal", "low"]
-CONFIG = ("include", "exclude")
+# Kind suffixes (§3.2), longest first so capability-base wins over capability.
+KINDS = sorted(["task", "ref", "run", "comment", "template", "trigger", "gate", "suite", "design",
+                "memory", "moved", "asset", "capability", "capability-base"], key=len, reverse=True)
+ROOT_TYPES = {"backlog": "ref", "triggers": "trigger", "memory": "memory"}
 ASSET = "(asset)"
 CONTEXT_LIMITS = {"entries": 64, "depth": 3, "reached_files": 256, "reached_bytes": 64 << 20, "file_bytes": 32 << 20}
-LIMITS = {"depth": 8, "includes_per_space": 64, "spaces": 256, "repos": 32, "objects": 50000}
+LIMITS = {"objects_per_entry": 5000, "objects": 50000, "entries": 64}
 CAPABILITY_DEPTH = 8
 # Grain eu's local policy for capabilities, as §5.7 sketches it. A real
 # policy is the Grain's own configuration, not a task-repo file.
@@ -125,54 +132,51 @@ def load_schemas():
     return store, schemas
 
 
-def readmes(repo):
-    """Every README.md declaring kind: repo, with its scope as repo-rooted
-    folder prefixes ("" is the whole repo)."""
-    out = []
-    for p in sorted((HERE / repo).rglob("README.md")):
-        fm, _ = split(p)
-        if not (isinstance(fm, dict) and fm.get("kind") == "repo"):
-            continue
-        rel = str(p.relative_to(HERE / repo))
-        home = posixpath.dirname(rel)
-        scope = []
-        for s in fm.get("scope") or ["/" + home + "/" if home else "/"]:
-            s = s.lstrip("/") if s.startswith("/") else posixpath.join(home, s)
-            s = posixpath.normpath(s) if s.strip("/") else ""
-            scope.append("" if s in ("", ".") else s + "/")
-        out.append((rel, home, fm, scope))
-    return out
+def grainconfig(repo):
+    """A repo's .grainconfig (§3.4); the defaults when it has none."""
+    p = HERE / repo / ".grainconfig"
+    return yaml.safe_load(p.read_text()) if p.is_file() else {}
 
 
-def governor(repo, path):
-    """The README governing a file: of those whose scope covers it, the one
-    with the longest covering entry (§3.1). Two at one length is an error."""
-    best, length = None, -1
-    for rel, home, fm, scope in readmes(repo):
-        for s in scope:
-            if path.startswith(s) and len(s) >= length:
-                if len(s) == length and best[0] != rel:
-                    err(f"{repo}/{path}: governed by both {best[0]} and {rel}")
-                best, length = (rel, home, fm), len(s)
-    return best
+def kind_of(path):
+    """The kind a file name declares (§3.2), or None for an asset."""
+    name = posixpath.basename(path)
+    if name == "grain.config.md":
+        return "config"
+    for k in KINDS:
+        if name.endswith("." + k + ".md"):
+            return k
+    return None
+
+
+def suffix_problem(path, fm):
+    """Why a file's name and front matter disagree, or None (§3.2)."""
+    k = kind_of(path)
+    fk = fm.get("kind") if isinstance(fm, dict) else None
+    if k and fk != k:
+        return f"the name says kind {k}, the front matter says kind {fk}"
+    if not k and fk:
+        return f"front matter says kind {fk}, but the name has no kind suffix"
+    return None
 
 
 def objects():
     objs = {}
     for repo in REPOS:
         for p in sorted((HERE / repo).rglob("*.md")):
+            path = str(p.relative_to(HERE / repo))
             fm, body = split(p)
-            if isinstance(fm, dict) and "kind" in fm:
-                path = str(p.relative_to(HERE / repo))
-                if governor(repo, path) is None:
-                    err(f"{repo}/{path}: kind {fm['kind']} outside every README's scope")
+            why = suffix_problem(path, fm)
+            if why:
+                err(f"{repo}/{path}: {why}")
+                continue
+            if kind_of(path):
                 objs[(repo, path)] = (fm, body)
     return objs
 
 
 def aliases(repo, src):
-    gov = governor(repo, src)
-    return gov[2].get("aliases", {}) if gov else {}
+    return grainconfig(repo).get("aliases") or {}
 
 
 def short(ident):
@@ -206,6 +210,21 @@ def canonical(repo, src, ref):
     return repo, posixpath.normpath(posixpath.join(posixpath.dirname(src), target))
 
 
+def stone_of(path):
+    """Where a tombstone for path sits (§2.1): its .md replaced by .moved.md."""
+    return path.removesuffix(".md") + ".moved.md"
+
+
+def old_of(stone):
+    return stone.removesuffix(".moved.md") + ".md"
+
+
+def archive_path(path):
+    """The archive mapping (§3.8): <top>/<rest> is stored at <top>/archive/<rest>."""
+    top, _, rest = path.partition("/")
+    return f"{top}/archive/{rest}" if rest else None
+
+
 def resolve(objs, repo, src, ref):
     """Follow a reference, and any tombstones, to an object (§4).
 
@@ -219,20 +238,24 @@ def resolve(objs, repo, src, ref):
             return None, "redirect loop: " + " -> ".join(short(i) for i in seen + [ident]), hops
         seen.append(ident)
         if ident[1] == "" or (HERE / ident[0] / ident[1]).is_dir():
-            return ident, None, hops  # a repo or folder (applies_to)
-        if ident not in objs:
-            if (HERE / ident[0] / ident[1]).is_file():
-                return ident, {"kind": ASSET}, hops  # an asset: any file that is not an object (§2.2)
-            return None, "dangling", hops
-        fm = objs[ident][0]
-        if fm["kind"] != "moved":
-            return ident, fm, hops
-        hops += 1
-        if hops > MAX_HOPS:
-            return None, f"more than {MAX_HOPS} redirects", hops
-        ident = canonical(ident[0], ident[1], fm["to"])
-        if ident[0] is None:
-            return None, ident[1], hops
+            return ident, None, hops  # a repo or folder
+        if ident in objs and objs[ident][0]["kind"] != "moved":
+            return ident, objs[ident][0], hops
+        if ident not in objs and (HERE / ident[0] / ident[1]).is_file():
+            return ident, {"kind": ASSET}, hops  # an asset: any file that is not an object (§2.2)
+        stone = ident if ident in objs else (ident[0], stone_of(ident[1]))
+        if stone in objs:
+            hops += 1
+            if hops > MAX_HOPS:
+                return None, f"more than {MAX_HOPS} redirects", hops
+            ident = canonical(stone[0], stone[1], objs[stone][0]["to"])
+            if ident[0] is None:
+                return None, ident[1], hops
+            continue
+        arch = archive_path(ident[1])
+        if arch and (ident[0], arch) in objs:
+            return (ident[0], arch), objs[(ident[0], arch)][0], hops  # not a hop
+        return None, "dangling", hops
 
 
 def edges(fm):
@@ -292,16 +315,8 @@ def edges(fm):
         req = fm.get("requires") or {}
         for k in ("security_review", "second_review"):
             add(f"requires.{k}.template", (req.get(k) or {}).get("template"), "template")
-    elif kind == "include":
-        add("target", fm.get("target"))
     elif kind == "capability":
         add("base.capability", (fm.get("base") or {}).get("capability"), "capability")
-    elif kind == "exclude":
-        for r in fm.get("names") or []:
-            add("names", r, pinned=True)  # may name what is not there (yet)
-    elif kind == "repo":
-        for lane in (fm.get("lanes") or {}).get("order") or []:
-            add("lanes", lane["lane"])
     elif kind == "design":
         for r in fm.get("applies_to") or []:
             add("applies_to", r)
@@ -430,8 +445,7 @@ def materialise(objs, repo, path, fm):
 def check_context(objs, repo, path, fm, report):
     """A task's, template's or trigger's context: entries (§5.6)."""
     kind = fm["kind"]
-    gov = governor(repo, path)
-    code = bool(gov) and gov[2].get("role") == "code"
+    code = grainconfig(repo).get("host") == "other"
     inputs = {i["name"]: i for i in fm.get("inputs") or []}
     entries = [entry(e) for e in context_of(fm)]
     if len(entries) > CONTEXT_LIMITS["entries"]:
@@ -625,10 +639,13 @@ def section_hashes(text):
 
 
 def glob_re(g):
-    """A name glob: * within one path segment, ** across segments."""
+    """A glob: * and ? within one path segment, ** across segments (a
+    leading or inner **/ also matches no folders at all)."""
     out, i = "", 0
     while i < len(g):
-        if g.startswith("**", i):
+        if g.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif g.startswith("**", i):
             out, i = out + ".*", i + 2
         elif g[i] == "*":
             out, i = out + "[^/]*", i + 1
@@ -639,151 +656,171 @@ def glob_re(g):
     return re.compile("^" + out + "$")
 
 
-def exclude_matcher(ident, fm):
-    """The names an exclude object matches, as (exact names, patterns).
-    Returns None if the exclude cannot be read, which fails its folder
-    closed: an exclude that cannot be applied must never widen."""
-    repo, path = ident
-    names, pats = set(), []
-    for n in fm.get("names") or []:
-        c = canonical(repo, path, n)
-        if c[0] is None:
-            return None
-        names.add(c)
-    for g in fm.get("patterns") or []:
-        c = canonical(repo, path, g)
-        if c[0] is None:
-            return None
-        pats.append((c[0], glob_re(c[1])))
-    return names, pats
-
-
-def matched(name, matchers):
-    return any(name in ns or any(name[0] == r and g.match(name[1]) for r, g in ps) for ns, ps in matchers)
-
-
-def members(objs, space):
-    """The objects a space holds: one file, or every object under a folder.
-    A root holds what its README governs. READMEs are metadata and
-    tombstones redirect, so neither is ever a name in a namespace."""
-    repo, path, kind = space
-    if kind == "file":
-        found = [(repo, path)] if (repo, path) in objs else []
-    else:
-        pre = path + "/" if path else ""
-        found = [i for i in objs if i[0] == repo and i[1].startswith(pre)]
-        if kind == "root":
-            readme = posixpath.join(path, "README.md") if path else "README.md"
-            found = [i for i in found if (governor(repo, i[1]) or ("",))[0] == readme]
-    return [i for i in found if objs[i][0]["kind"] not in ("repo", "moved")]
-
-
-def contribution(objs, space, kinds, depth, stack, disabled, notes, budget, order=1):
-    """contribution(space) = (own objects ∪ ⋃ contribution(each include in
-    it)) − names matched by its excludes (§3.3). kinds is None for every
-    kind; disabled carries the excludes of every space above on this path,
-    which disable any include object they name."""
-    key = (space[0], space[1])
-    if key in stack:
-        notes.append("cycle cut: " + " -> ".join(short(s) for s in stack + [key]))
-        return set()
-    budget["spaces"] += 1
-    budget["repos"].add(space[0])
-    if budget["spaces"] > LIMITS["spaces"] or len(budget["repos"]) > LIMITS["repos"]:
-        budget["failed"] = True
-        return set()
-    held = members(objs, space)[::order]
-    excl = []
-    for i in held:
-        if objs[i][0]["kind"] == "exclude":
-            m = exclude_matcher(i, objs[i][0])
-            if m is None:
-                notes.append(f"{short(i)}: an exclude that cannot be read; {short(key)} contributes nothing")
-                return set()
-            excl.append(m)
-    got = {i for i in held if objs[i][0]["kind"] in CONFIG or kinds is None or objs[i][0]["kind"] in kinds}
-    incs = [i for i in held if objs[i][0]["kind"] == "include"]
-    if len(incs) > LIMITS["includes_per_space"]:
-        notes.append(f"{short(key)}: more than {LIMITS['includes_per_space']} includes; it contributes nothing")
-        return set()
-    above = disabled + excl
-    for inc in incs:
-        fm = objs[inc][0]
-        if matched(inc, above):
-            notes.append(f"disabled: {short(inc)} (its name is excluded)")
-            continue
-        if depth == 0:
-            notes.append(f"depth limit: {short(inc)} not followed")
-            continue
-        ident, target, _ = resolve(objs, inc[0], inc[1], fm["target"])
-        if ident is None:
-            notes.append(f"skipped: {short(inc)} target {fm['target']}: {target}")
-            continue
-        want = None if "*" in fm["kinds"] else set(fm["kinds"])
-        sub_kinds = want if kinds is None else (kinds if want is None else kinds & want)
-        sub_depth = depth - 1 if "max_depth" not in fm else min(depth - 1, fm["max_depth"])
-        sub = (ident[0], ident[1], "folder" if target is None else "file")
-        got |= contribution(objs, sub, sub_kinds, sub_depth, stack + [key], above, notes, budget, order)
-    return {n for n in got if not matched(n, excl)}
-
-
-def namespace(objs, repo, home, order=1):
-    """namespace(root) = contribution(root): the root's excludes apply last."""
-    notes, budget = [], {"spaces": 0, "repos": set(), "failed": False}
-    names = contribution(objs, (repo, home, "root"), None, LIMITS["depth"], [], [], notes, budget, order)
-    if budget["failed"] or len(names) > LIMITS["objects"]:
-        notes.append(f"{repo}/{home}: over the resolver's limits; the Grain keeps its last good namespace")
-    return names, notes
-
-
-def roots(objs):
-    """Every Grain root: a kind: repo README with role: grain-root."""
-    out = []
-    for repo in REPOS:
-        for rel, home, fm, scope in readmes(repo):
-            if fm.get("role") == "grain-root":
-                out.append((repo, home, fm))
+def ignored(rel, patterns):
+    """gitignore semantics for one entry's ignore: (§3.3): the last matching
+    pattern wins, ! negates, a trailing / matches folders, a pattern with no
+    inner / matches at any depth, and a matched folder prunes its subtree.
+    rel is relative to the entry's folder."""
+    parts = rel.split("/")
+    out = False
+    for pat in patterns:
+        neg = pat.startswith("!")
+        pat = pat[1:] if neg else pat
+        dir_only = pat.endswith("/")
+        core = pat.strip("/")
+        anchored = pat.startswith("/") or "/" in core
+        rx = glob_re(core)
+        hit = False
+        # every prefix that is a folder, then the file itself
+        for n in range(1, len(parts) + 1):
+            cand = "/".join(parts[:n]) if anchored else parts[n - 1]
+            is_dir = n < len(parts)
+            if (is_dir or not dir_only) and rx.match(cand):
+                hit = True
+                break
+        if hit:
+            out = not neg
     return out
 
 
-def lane_of(ref):
-    return (ref[0], posixpath.dirname(ref[1]))
+def configs():
+    """Every grain.config.md in the examples: (repo, folder, front matter)."""
+    out = []
+    for repo in REPOS:
+        for p in sorted((HERE / repo).rglob("grain.config.md")):
+            fm, _ = split(p)
+            out.append((repo, posixpath.dirname(str(p.relative_to(HERE / repo))), fm))
+    return out
 
 
-def picks(lanes, entries, conf, repo, src):
-    """The order a Grain takes runnable references across its lanes (§5.2):
-    ranks are compared within a lane only, and the root's lanes setting
-    decides between lanes."""
-    listed = []
-    for item in conf.get("order") or []:
-        c = canonical(repo, src, item["lane"])
-        listed.append((c, item.get("weight", 1)))
-
-    def slot(lane):
-        best = None
-        for n, (c, w) in enumerate(listed):
-            if lane[0] == c[0] and (lane[1] == c[1] or lane[1].startswith(c[1] + "/")):
-                if best is None or len(c[1]) > len(listed[best][0][1]):
-                    best = n
-        return best
-
-    queues, weight, rank = {}, {}, {}
-    for lane in lanes:
-        n = slot(lane)
-        if n is None and conf.get("unlisted") == "ignore":
+def list_entry(objs, repo, cfg_path, e, kind, limit):
+    """The objects one root entry activates (§3.3, §3.7), from the tree alone:
+    files under its folder with the kind's suffix, less its ignore: and any
+    archive/ folder. Returns (identities, None) or (None, why): an entry
+    over its limit is unknown, never truncated."""
+    loc = canonical(repo, cfg_path, e["path"])
+    if loc[0] is None:
+        return None, loc[1]
+    trepo, folder = loc
+    base = HERE / trepo / folder
+    if base.is_file():
+        rel = [folder] if kind_of(folder) == kind else []
+        return [(trepo, r) for r in rel], None
+    if not base.is_dir():
+        return [], None  # a folder not created yet lists empty
+    names = []
+    for f in sorted(base.rglob("*")):
+        if not f.is_file():
             continue
-        queues[lane] = [e for e in entries[lane]]
-        weight[lane] = 1 if conf.get("mode") == "round_robin" or n is None else listed[n][1]
-        rank[lane] = (n if n is not None else len(listed), lane)
-    out, credit = [], {lane: 0 for lane in queues}
+        rel = str(f.relative_to(base))
+        if "archive" in rel.split("/")[:-1]:
+            continue
+        if kind_of(rel) != kind or ignored(rel, e.get("ignore") or []):
+            continue
+        names.append((trepo, posixpath.normpath(posixpath.join(folder, rel))))
+        if len(names) > limit:
+            return None, f"over objects_per_entry ({limit})"
+    return names, None
+
+
+def active_set(objs, repo, home, fm, limits=None):
+    """A grain.config.md's active set: {type: [(entry, identities or None, why)]},
+    each file belonging to the most specific entry of its type."""
+    limits = {**LIMITS, **(fm.get("limits") or {}), **(limits or {})}
+    cfg_path = posixpath.join(home, "grain.config.md") if home else "grain.config.md"
+    out, total = {}, 0
+    for rtype, kind in ROOT_TYPES.items():
+        raw = fm.get(rtype) or []
+        entries = raw.get("lanes", []) if isinstance(raw, dict) else raw
+        listed = [(e, *list_entry(objs, repo, cfg_path, e, kind, limits["objects_per_entry"])) for e in entries]
+        spec = {}
+        for n, (e, ids, why) in enumerate(listed):
+            loc = canonical(repo, cfg_path, e["path"])
+            for i in ids or []:
+                if i not in spec or len(loc[1]) > spec[i][1]:
+                    spec[i] = (n, len(loc[1]))
+        out[rtype] = [(e, None if ids is None else [i for i in ids if spec[i][0] == n], why)
+                      for n, (e, ids, why) in enumerate(listed)]
+        total += sum(len(ids or []) for _, ids, _ in out[rtype])
+    if total > limits["objects"]:
+        return None, f"over objects ({limits['objects']})"
+    return out, None
+
+
+def owners_files(repo):
+    """Every GRAINOWNERS in a repo: {folder: [(regex, fields or None, owners)]}."""
+    out = {}
+    for p in sorted((HERE / repo).rglob("GRAINOWNERS")):
+        home = posixpath.dirname(str(p.relative_to(HERE / repo)))
+        rules = []
+        for line in p.read_text().splitlines():
+            line = re.sub(r"\s+#.*$", "", line).strip()
+            if not line or line.startswith("#"):
+                continue
+            pat, *who = line.split()
+            fields = None
+            if ":" in pat:
+                pat, f = pat.rsplit(":", 1)
+                fields = f.split(",")
+            anchored = pat.startswith("/") or "/" in pat.rstrip("/")
+            core = pat.lstrip("/")
+            if core.endswith("/"):
+                core += "**"
+            rx = glob_re(core if anchored or core == "*" else "**/" + core)
+            if core == "*":
+                rx = re.compile("^.*$")
+            rules.append((rx, fields, who))
+        out[home] = rules
+    return out
+
+
+def owners_of(repo, path, field=None):
+    """Who may write a file, or one field of it (§3.5): the nearest
+    GRAINOWNERS with a matching line; in it, the last matching line,
+    a field line overriding the whole-file owners for its fields."""
+    files = owners_files(repo)
+    d = posixpath.dirname(path)
+    while True:
+        rules = files.get(d)
+        if rules is not None:
+            rel = path[len(d) + 1:] if d else path
+            whole = next((w for rx, f, w in reversed(rules) if f is None and rx.match(rel)), None)
+            if field:
+                fl = next((w for rx, f, w in reversed(rules) if f and field in f and rx.match(rel)), None)
+                if fl is not None:
+                    return fl
+            if whole is not None:
+                return whole
+        if not d:
+            return None
+        d = posixpath.dirname(d)
+
+
+def may(owners, who, verb):
+    for o in owners or []:
+        m = re.match(r"^@?([^()]+)(?:\(([^)]*)\))?$", o)
+        name, verbs = m.group(1), m.group(2)
+        if name == who or (name == "authenticated" and who.startswith("user:")):
+            if verbs is None or verb in verbs.split(","):
+                return True
+    return False
+
+
+def picks(lanes, conf):
+    """The order a Grain takes runnable references across its lanes (§5.2):
+    ranks are compared within a lane only, and grain.config.md's backlog
+    decides between lanes, in list order. lanes is [(weight, [entries])]."""
+    queues = {n: list(es) for n, (w, es) in enumerate(lanes) if es}
+    weight = {n: (1 if conf.get("mode") == "round_robin" else lanes[n][0]) for n in queues}
+    out, credit = [], {n: 0 for n in queues}
     while any(queues.values()):
-        live = sorted((l for l in queues if queues[l]), key=lambda l: rank[l])
+        live = sorted(n for n in queues if queues[n])
         if conf.get("mode", "strict") == "strict":
             lane = live[0]
         else:
             for l in live:
                 credit[l] += weight[l]
-            lane = max(live, key=lambda l: (credit[l], -rank[l][0]))
+            lane = max(live, key=lambda l: (credit[l], -l))
             credit[lane] -= sum(weight[l] for l in live)
         out.append(queues[lane].pop(0))
     return out
@@ -804,6 +841,17 @@ def main():
         v = jsonschema.Draft202012Validator(schemas[kind], resolver=resolver)
         for e in v.iter_errors(json.loads(json.dumps(fm, default=str))):
             err(f"{repo}/{path}: {'/'.join(map(str, e.path))}: {e.message}")
+
+    for repo in REPOS:
+        cfg = HERE / repo / ".grainconfig"
+        if cfg.is_file():
+            v = jsonschema.Draft202012Validator(schemas["grainconfig"])
+            for e in v.iter_errors(yaml.safe_load(cfg.read_text())):
+                err(f"{repo}/.grainconfig: {'/'.join(map(str, e.path))}: {e.message}")
+    bad = suffix_problem("backlog/2026-10-17-fix-dns.task.md", {"kind": "ref"})
+    if not bad or "kind task" not in bad:
+        err("a suffix mismatch was not detected")
+    report.append(f"suffix mismatch (§8.15): backlog/2026-10-17-fix-dns.task.md: {bad}")
 
     # References: the path is the identity; tombstones redirect (§2.1, §4).
     for (repo, path), (fm, body) in objs.items():
@@ -830,7 +878,8 @@ def main():
                     if section_hashes(text).get(anchor) != imp["hash"]:
                         err(f"{repo}/{path}: implements {anchor}: hash differs (changed since implemented)")
 
-    # Tombstones and moved_from agree, both ways (§2.1, §8.1).
+    # Tombstones and moved_from agree, both ways (§2.1, §8.1). A tombstone
+    # is the old file name plus .moved.md, beside the old path.
     for (repo, path), (fm, body) in objs.items():
         if fm["kind"] == "moved":
             ident, target, _ = resolve(objs, repo, path, fm["to"])
@@ -838,28 +887,28 @@ def main():
                 err(f"{repo}/{path}: tombstone to {fm['to']}: {target}")
                 continue
             back = [canonical(ident[0], ident[1], r) for r in target.get("moved_from") or []]
-            if (repo, path) not in back:
-                err(f"{repo}/{path}: tombstone target {short(ident)} does not list it in moved_from")
+            if (repo, old_of(path)) not in back:
+                err(f"{repo}/{path}: tombstone target {short(ident)} does not list its old path in moved_from")
         for r in fm.get("moved_from") or []:
             old = canonical(repo, path, r)
-            if old not in objs or objs[old][0]["kind"] != "moved":
-                err(f"{repo}/{path}: moved_from {r}: not a tombstone")
+            stone = (old[0], stone_of(old[1]))
+            if stone not in objs or objs[stone][0]["kind"] != "moved":
+                err(f"{repo}/{path}: moved_from {r}: no tombstone beside it")
 
     # Code repos' grain folders (§5.5, §6.2, §8.13).
     for (repo, path), (fm, body) in objs.items():
-        gov = governor(repo, path)
-        if not gov or gov[2].get("role") != "code":
+        gfm = grainconfig(repo)
+        if gfm.get("host") != "other":
             continue
-        rel, home, gfm = gov
         if fm["kind"] == "task":
             th = gfm.get("task_home") or "intake"
-            folder = posixpath.join(home, (th.get("path", "tasks/") if isinstance(th, dict) else "tasks/"))
+            folder = th.get("path", ".grain/tasks/") if isinstance(th, dict) else ".grain/tasks/"
             if not path.startswith(folder):
                 err(f"{repo}/{path}: a task outside {folder}, the folder task_home names")
             if fm.get("trigger") or fm.get("schedule"):
                 err(f"{repo}/{path}: a trigger's firing in a code repo; firings live in an intake or a Grain root")
             homes = [canonical(repo, path, r)[0] for r in fm.get("moved_from") or []]
-            if not any(h and split(HERE / h / "README.md")[0].get("role") == "intake" for h in homes):
+            if not any(h and "team" in (split(HERE / h / "grain.config.md")[0] or {}) for h in homes if (HERE / str(h) / "grain.config.md").is_file()):
                 err(f"{repo}/{path}: a task in a code repo with no intake in moved_from; Silo will not place it")
         if fm["kind"] == "template":
             for k in ("reads", "writes", "grants", "target"):
@@ -885,7 +934,7 @@ def main():
                 if "bytes" in fm and len(data) != fm["bytes"]:
                     err(f"{repo}/{path}: bytes does not match {short(ident)}")
     want = {("hub-shared", "designs/img/claims-flow.png")}
-    got = {i for i, via in reached.get(("hub-intake", "tasks/2026-10-16-reject-dangling-refs/task.md")) or []}
+    got = {i for i, via in reached.get(("hub-intake", "tasks/2026-10-16-reject-dangling-refs.task.md")) or []}
     if got != want:
         err(f"depth: 1 reached {sorted(got)}, expected {sorted(want)}")
 
@@ -909,18 +958,20 @@ def main():
     def done(task):
         return any(r[1]["state"] == "done" for r in runs.get(task, []))
 
+    def order_key(e):
+        ref, task, fm, tfm = e
+        ready = all(done(canonical(task[0], task[1], d)) for d in tfm.get("depends_on") or [])
+        return (not ready, not fm.get("expedite", False), PRIORITY.index(fm.get("priority", "normal")),
+                fm["rank"], str(tfm["created_at"]), ref[1])
+
     # Backlogs: folders of ranked references, one lane each (§5.2).
     entries = {}
     for (repo, path), (fm, body) in objs.items():
         if fm["kind"] != "ref":
             continue
-        rel, home, gfm = governor(repo, path) or ("", "", {})
-        folders = [posixpath.join(home, f) for f in gfm.get("backlog", ["backlog/"])]
-        if not any(glob_re(f.rstrip("/") + "/**").match(path) for f in folders):
-            err(f"{repo}/{path}: a ref outside the README's backlog folders {folders}")
         ident, task, _ = resolve(objs, repo, path, fm["to"])
         if ident:
-            entries.setdefault(lane_of((repo, path)), []).append(((repo, path), ident, fm, task))
+            entries.setdefault((repo, posixpath.dirname(path)), []).append(((repo, path), ident, fm, task))
     for lane, es in entries.items():
         seen = {}
         for ref, task, fm, tfm in es:
@@ -932,29 +983,42 @@ def main():
             if any(r[1]["state"] in CLOSED_RUN for r in runs.get(task, [])):
                 err(f"{short(ref)}: references a closed task; its writer removes it")
 
-        def key(e):
-            ref, task, fm, tfm = e
-            ready = all(done(canonical(task[0], task[1], d)) for d in tfm.get("depends_on") or [])
-            return (not ready, not fm.get("expedite", False), PRIORITY.index(fm.get("priority", "normal")),
-                    fm["rank"], str(tfm["created_at"]), ref[1])
-        es.sort(key=key)
+        es.sort(key=order_key)
 
-    # Namespaces: each Grain root's, bottom-up and order-independent (§3.3).
-    spaces = {}
-    for repo, home, fm in roots(objs):
-        grain = fm["grain"]["id"]
-        names, notes = namespace(objs, repo, home)
-        again, _ = namespace(objs, repo, home, order=-1)
-        if again != names:
-            err(f"{repo}/{home}: the namespace depends on iteration order")
-        spaces[grain] = (repo, home, fm, names)
-        report.append(f"namespace {grain} ({repo}/{home}): " + ", ".join(
-            f"{n} {k}" for k, n in sorted(Counter(objs[i][0]["kind"] for i in names).items())))
-        report.extend("  " + n for n in notes)
+    # Active sets: each grain.config.md's typed root entries (§3.3, §3.7).
+    spaces, team_triggers = {}, {}
+    for repo, home, fm in configs():
+        who = (fm.get("grain") or {}).get("id") or "team:" + str(fm.get("team"))
+        act, why = active_set(objs, repo, home, fm)
+        if act is None:
+            err(f"{repo}/{home or '.'}grain.config.md: {why}")
+            continue
+        for rtype, es in act.items():
+            for e, ids, why in es:
+                cross = "://" in e["path"] or re.match(r"^[a-z][a-z0-9-]*:", e["path"])
+                if cross and ("@" not in e["path"] or "ref_mode" not in e):
+                    err(f"{repo}/grain.config.md: {rtype} entry {e['path']}: another repo needs @<ref> and ref_mode")
+                if not cross and ("@" in e["path"] or "ref_mode" in e):
+                    err(f"{repo}/grain.config.md: {rtype} entry {e['path']}: a relative entry reads this commit, and takes no @<ref>")
+                if ids is None:
+                    err(f"{repo}/grain.config.md: {rtype} entry {e['path']}: unknown: {why}")
+        writable = [e for e, _, _ in act["memory"] if e.get("write")]
+        if len(writable) > 1 or any("@" in e["path"] for e in writable):
+            err(f"{repo}/grain.config.md: at most one write: true memory entry, in this repo")
+        spaces[who] = (repo, home, fm, act)
+        names = {i for es in act.values() for _, ids, _ in es for i in ids or []}
+        report.append(f"active set {who} ({repo}/{home or '.'}): " + ", ".join(
+            f"{len([i for _, ids, _ in act[t] for i in ids or []])} {t}" for t in ROOT_TYPES))
+        for i in names:
+            if objs[i][0]["kind"] in ("gate", "template", "capability", "task", "design"):
+                err(f"active set {who}: {short(i)} is a {objs[i][0]['kind']}, which no root lists")
+
+    def active(who, rtype):
+        return [i for _, ids, _ in spaces[who][3][rtype] for i in ids or []]
 
     def queued_on(task):
-        return [g for g, (_, _, _, names) in spaces.items()
-                if any(e[1] == task for lane in entries for e in entries[lane] if e[0] in names)]
+        return [g for g in spaces if any(objs[r][0]["to"] and resolve(objs, r[0], r[1], objs[r][0]["to"])[0] == task
+                                         for r in active(g, "backlog"))]
 
     def status(task):
         """The derived status of §5.1."""
@@ -985,65 +1049,133 @@ def main():
 
     # Each Grain picks across its lanes; a ref is runnable if its task has
     # no open or closed run, and is not cancelled.
-    for grain, (repo, home, fm, names) in sorted(spaces.items()):
-        mine = {lane: [e for e in es if e[0] in names and not runs.get(e[1]) and e[3]["state"] == "approved"]
-                for lane, es in entries.items()}
-        mine = {lane: es for lane, es in mine.items() if es}
-        if not mine:
+    by_ref = {e[0]: e for es in entries.values() for e in es}
+    for who, (repo, home, fm, act) in sorted(spaces.items()):
+        if not act["backlog"]:
             continue
-        src = posixpath.join(home, "README.md") if home else "README.md"
-        order = picks(sorted(mine), mine, fm.get("lanes") or {}, repo, src)
-        report.append(f"next on {grain} ({(fm.get('lanes') or {}).get('mode', 'strict')}): " +
-                      ", ".join(posixpath.basename(e[1][1].removesuffix("/task.md")) for e in order))
+        conf = fm.get("backlog") or {}
+        lanes = []
+        for e, ids, _ in act["backlog"]:
+            es = sorted((by_ref[i] for i in ids or [] if i in by_ref), key=lambda x: order_key(x))
+            lanes.append((e.get("weight", 1), [x for x in es if not runs.get(x[1]) and x[3]["state"] == "approved"]))
+        order = picks(lanes, conf)
+        report.append(f"next on {who} ({conf.get('mode', 'strict')}): " +
+                      ", ".join(posixpath.basename(x[1][1].removesuffix(".task.md")) for x in order))
 
-    # What the examples say each namespace holds.
-    def has(grain, repo, path):
-        return (repo, path) in spaces[grain][3]
+    # What the examples say each active set holds, by root type.
     expect = [
-        ("demo-z", "ns-demo", "y/templates/greeting.md", True),     # (X − Y) ∪ {Y}
-        ("demo-z", "ns-demo", "x/templates/note.md", True),
-        ("demo-z", "ns-demo", "x/exclude-y.md", True),             # configuration is listed
-        ("demo-v", "ns-demo", "x/templates/note.md", True),
-        ("demo-v", "ns-demo", "x/include-y.md", False),            # disabled, and its name cut
-        ("demo-v", "ns-demo", "y/templates/greeting.md", False),
-        ("eu", "org-templates", "templates/security-review.md", True),   # transitive
-        ("eu", "org-templates", "templates/legacy-triage.md", False),    # the team's exclude
-        ("eu", "hub-placements", "grains/eu/backlog/2026-10-16-approval-flow.md", True),
-        ("eu", "hub-placements", "grains/us/backlog/2026-10-16-refuse-self-approved.md", False),
-        ("eu", "hub-shared", "triggers/prune-packages.md", False),       # eu is assigned no triggers
-        ("us", "hub-shared", "triggers/prune-packages.md", True),        # through Silo's folder
-        ("us", "hub-shared", "triggers/plan-designs.md", True),          # listed; only Silo fires it
-        ("us", "hub-shared", "triggers/granule-pull.md", False),         # the root's exclude
-        ("us", "grain-us", "triggers/granule-pull-weekly.md", True),
-        ("us", "hub-shared", "templates/granule-pull.md", False),        # referenced, never included
-        ("eu", "hub-shared", "capabilities/widgets-deployer.md", True),  # available to request
-        ("eu", "org-capabilities", "gcp/acme-widgets.md", False),        # a base in its chain, not offered
+        ("eu", "backlog", "hub-placements", "grains/eu/backlog/2026-10-16-approval-flow.ref.md", True),
+        ("eu", "backlog", "hub-placements", "grains/us/backlog/2026-10-16-refuse-self-approved.ref.md", False),
+        ("eu", "backlog", "grain-eu", "backlog/2026-10-16-tidy-run-notes.ref.md", True),
+        ("eu", "triggers", "hub-shared", "triggers/granule-pull.trigger.md", True),       # a team trigger root
+        ("eu", "triggers", "hub-shared", "triggers/plan-designs.trigger.md", True),       # listed; only Silo fires it
+        ("eu", "triggers", "hub-shared", "triggers/archive/legacy-triage-sweep.trigger.md", False),  # retired
+        ("eu", "triggers", "grain-eu", "triggers/monthly-tidy.trigger.md", True),
+        ("eu", "memory", "grain-eu", "memory/deploy-notes.memory.md", True),
+        ("eu", "memory", "hub-shared", "memory/merge-style.memory.md", True),
+        ("us", "triggers", "hub-placements", "grains/us/triggers/granule-pull.trigger.md", False),  # its entry's ignore:
+        ("us", "triggers", "grain-us", "triggers/granule-pull-weekly.trigger.md", True),
+        ("us", "triggers", "hub-shared", "triggers/granule-pull.trigger.md", False),      # us names no team folder
+        ("us", "triggers", "widgets-code", ".grain/triggers/nightly-ci.trigger.md", True),  # one file named
+        ("us", "backlog", "hub-placements", "grains/us/backlog/2026-10-16-refuse-self-approved.ref.md", True),
+        ("team:hub", "triggers", "widgets-code", ".grain/triggers/weekly-release-notes.trigger.md", True),
+        ("team:hub", "triggers", "widgets-code", ".grain/triggers/nightly-ci.trigger.md", False),
     ]
-    for grain, (_, _, _, names) in spaces.items():
-        for repo, path in names:
-            if objs[(repo, path)][0]["kind"] == "gate":
-                err(f"namespace {grain}: gate {repo}/{path} reached through includes that accept triggers only")
-    for grain, repo, path, want in expect:
-        if has(grain, repo, path) != want:
-            err(f"namespace {grain}: {repo}/{path} {'missing' if want else 'present'}")
-    for space, want in [(("ns-demo", "x", "folder"), {"x/templates/note.md", "x/include-y.md", "x/exclude-y.md"}),
-                        (("ns-demo", "w", "folder"), {"w/include-y.md", "w/exclude-y.md"})]:
-        got = {p for r, p in contribution(objs, space, None, LIMITS["depth"], [], [], [], {"spaces": 0, "repos": set(), "failed": False})}
-        if got != want:
-            err(f"contribution of {short(space[:2])}: {sorted(got)}, expected {sorted(want)}")
+    for who, rtype, repo, path, want in expect:
+        if ((repo, path) in active(who, rtype)) != want:
+            err(f"active set {who} {rtype}: {repo}/{path} {'missing' if want else 'present'}")
+    mem = active("eu", "memory")
+    if mem.index(("grain-eu", "memory/deploy-notes.memory.md")) > mem.index(("hub-shared", "memory/merge-style.memory.md")):
+        err("eu's memory: its own memory must take precedence over the team's")
+    report.append("memory on eu, in precedence order: " + ", ".join(short(i) for i in mem))
+    # ignore: semantics, and limits that fail loudly.
+    for rel, pats, want in [("granule-pull.trigger.md", ["granule-pull.trigger.md"], True),
+                            ("x/granule-pull.trigger.md", ["granule-pull.trigger.md"], True),
+                            ("x/granule-pull.trigger.md", ["/granule-pull.trigger.md"], False),
+                            ("drafts/a.ref.md", ["drafts/"], True),
+                            ("a.trigger.md", ["*.trigger.md", "!a.trigger.md"], False),
+                            ("drafts", ["drafts/"], False)]:
+        if ignored(rel, pats) != want:
+            err(f"ignore {pats} on {rel}: expected {want}")
+    small, why = active_set(objs, "grain-eu", "", spaces["eu"][2], {"objects_per_entry": 1})
+    if any(ids is not None for e, ids, _ in small["triggers"] if "shared:" in e["path"]):
+        err("an entry over objects_per_entry was truncated, not failed")
+    else:
+        report.append("limits: eu's team trigger entry at objects_per_entry 1 is unknown (" +
+                      next(w for e, ids, w in small["triggers"] if "shared:" in e["path"]) + "), never truncated")
 
-    # Include objects: a target in another repo names its ref and its mode.
+    # GRAINOWNERS (§3.5): every object has an owner; and the design's examples.
     for (repo, path), (fm, body) in objs.items():
-        if fm["kind"] != "include":
+        if owners_of(repo, path) is None:
+            err(f"{repo}/{path}: no GRAINOWNERS line owns it")
+    for repo, path, field, who, verb, want in [
+            ("grain-eu", "backlog/urgent-thing.ref.md", None, "user:alex@example.com", "create", False),  # §8.15
+            ("grain-eu", "grain.config.md", None, "silo", "update", False),
+            ("grain-eu", "grain.config.md", None, "grain:eu", "update", False),
+            ("grain-eu", "grain.config.md", None, "user:bsalmon@google.com", "update", True),
+            ("grain-eu", "runs/4310-carry-approver/20261016T135830Z.run.md", None, "grain:eu", "update", True),
+            ("hub-placements", "grains/eu/backlog/x.ref.md", None, "silo", "create", True),
+            ("hub-intake", "tasks/2026-10-16-approval-by-push.task.md", "approved_by", "user:mallory@example.com", "update", False),
+            ("hub-intake", "tasks/2026-10-16-approval-by-push.task.md", "approved_by", "team:hub#approver", "update", True),
+            ("hub-intake", "tasks/2026-10-18-new.task.md", None, "user:alex@example.com", "create", True),
+            ("hub-intake", "tasks/2026-10-16-approval-by-push.task.md", "body", "user:alex@example.com", "update", False),
+            ("hub-intake", "backlog/2026-10-16-approval-flow.ref.md", "rank", "team:hub#member", "update", True)]:
+        got = may(owners_of(repo, path, field), who, verb)
+        if got != want:
+            err(f"GRAINOWNERS {repo}/{path}{':' + field if field else ''}: {who} {verb}: got {got}, expected {want}")
+    report.append("GRAINOWNERS: grain-eu/backlog/urgent-thing.ref.md: user:alex@example.com may not create it; owners "
+                  + " ".join(owners_of("grain-eu", "backlog/urgent-thing.ref.md")))
+
+    # Orphans (§3.9): objects under no known root entry and reached by no
+    # known reference. Warnings, unless a repo's .grainconfig says refuse.
+    known, todo = set(), []
+    for who, (repo, home, fm, act) in spaces.items():
+        todo += [i for es in act.values() for _, ids, _ in es for i in ids or []]
+        todo.append((repo, posixpath.join(home, "grain.config.md") if home else "grain.config.md"))
+        if fm.get("grain"):
+            todo += [i for i in objs if i[0] == repo and i[1].startswith(posixpath.join(home, "runs/") if home else "runs/")]
+    for (repo, path), (fm, body) in objs.items():
+        gf = grainconfig(repo).get("grain_folder", ".grain/")
+        if fm["kind"] == "gate" and path.startswith(gf):
+            todo.append((repo, path))
+        if fm["kind"] in ("ref", "task"):  # an intake's tasks, and its ranking of its unplaced work
+            if (HERE / repo / "grain.config.md").is_file() and "team" in split(HERE / repo / "grain.config.md")[0]:
+                todo.append((repo, path))
+    while todo:
+        i = todo.pop()
+        if i in known or i not in objs:
             continue
-        cross = "://" in fm["target"] or re.match(r"^[a-z][a-z0-9-]*:", fm["target"])
-        if cross and ("@" not in fm["target"] or "ref_mode" not in fm):
-            err(f"{repo}/{path}: an include of another repo needs @<ref> and ref_mode")
-        if not cross and "@" in fm["target"]:
-            err(f"{repo}/{path}: a relative include reads its own commit, and takes no @<ref>")
-        at = fm["target"].rsplit("@", 1)[-1] if "@" in fm["target"] else ""
-        if fm.get("ref_mode") == "track" and re.match(r"^[0-9a-f]{40}$", at):
-            err(f"{repo}/{path}: track names a branch, not a commit")
+        known.add(i)
+        fm = objs[i][0]
+        for field, ref, want, pinned in edges(fm):
+            ident, t, _ = resolve(objs, i[0], i[1], ref)
+            if ident and t is not None:
+                todo.append(ident)
+            stone = canonical(i[0], i[1], ref)
+            if stone[0] and (stone[0], stone_of(stone[1])) in objs:
+                todo.append((stone[0], stone_of(stone[1])))
+        if fm["kind"] == "template":  # its {% include %} and {% import %} partials
+            for r in re.findall(r"\{%-?\s*(?:include|import)\s+\"([^\"]+)\"", objs[i][1]):
+                todo.append(canonical(i[0], i[1], r))
+        if fm["kind"] in ("task", "run", "moved"):  # its thread, beside it
+            folder = (i[1].removesuffix(".task.md") if fm["kind"] == "task" else
+                      old_of(i[1]).removesuffix(".task.md") if fm["kind"] == "moved" else posixpath.dirname(i[1])) + "/"
+            todo += [j for j in objs if j[0] == i[0] and j[1].startswith(folder) and objs[j][0]["kind"] == "comment"]
+        if fm["kind"] == "trigger":
+            for d in (((fm.get("on") or {}).get("design-change") or {}).get("designs") or []):
+                c = canonical(i[0], i[1], d)
+                todo += [j for j in objs if c[0] == j[0] and j[1].startswith(c[1]) and objs[j][0]["kind"] == "design"]
+        if fm["kind"] == "moved" or fm.get("moved_from"):
+            for r in fm.get("moved_from") or []:
+                c = canonical(i[0], i[1], r)
+                todo.append((c[0], stone_of(c[1])))
+    for (repo, path), (fm, body) in sorted(objs.items()):
+        if (repo, path) in known or "archive" in path.split("/") or fm["kind"] in ("capability-base", "asset"):
+            continue
+        if grainconfig(repo).get("orphans") == "refuse":
+            err(f"orphan: {repo}/{path}")
+        else:
+            report.append(f"orphan (warning): {repo}/{path}")
 
     # Capabilities (§5.7): every chain resolves to a base type, and each
     # request is checked against the Grain's base declaration and policy.
@@ -1058,8 +1190,8 @@ def main():
                     err(f"{repo}/{path}: implies {k} from {v['from']}, which is not a dimension")
     loop = dict(objs)
     for a, b in (("a", "b"), ("b", "a")):
-        loop[("hub-shared", f"capabilities/{a}.md")] = ({"kind": "capability", "base": {"capability": f"{b}.md"}}, "")
-    if "capability cycle" not in (chain_of(loop, "hub-shared", "x.md", "capabilities/a.md")[1] or ""):
+        loop[("hub-shared", f"capabilities/{a}.capability.md")] = ({"kind": "capability", "base": {"capability": f"{b}.capability.md"}}, "")
+    if "capability cycle" not in (chain_of(loop, "hub-shared", "x.md", "capabilities/a.capability.md")[1] or ""):
         err("a capability cycle was not detected")
     got_caps = {}
     for (repo, path), (fm, body) in sorted(objs.items()):
@@ -1073,12 +1205,9 @@ def main():
                 err(f"{repo}/{path}: context entry {n}: {base_type}")
                 continue
             for grain in sorted(POLICY):
-                listed = chain[-1][0] in spaces[grain][3]
                 dims, implies, pending, refusal = effective(objs, grain, chain, base_type, e.get("reducers") or [])
                 head = f"capability {repo}/{path} entry {n} on {grain}: "
                 report.append(head + " -> ".join(short(i) for i, _ in chain) + f" over {base_type}")
-                if not listed:
-                    refusal = refusal or f"{short(chain[-1][0])} is not in {grain}'s namespace"
                 if refusal:
                     report.append(f"  refused: {refusal}")
                     got_caps[(repo, path, n, grain)] = ("refused", refusal)
@@ -1088,7 +1217,7 @@ def main():
                 for p in pending:
                     report.append(f"  not evaluable here: {p}; {grain} refuses the request until it can evaluate Anselm")
                 got_caps[(repo, path, n, grain)] = (dims, pending)
-    want = got_caps.get(("hub-intake", "tasks/2026-10-17-widgets-preview-deploy/task.md", 2, "eu"))
+    want = got_caps.get(("hub-intake", "tasks/2026-10-17-widgets-preview-deploy.task.md", 2, "eu"))
     if not want or want[0] == "refused" or want[0]["projects"] != ["acme-widgets"] \
             or want[0]["roles"] != ["roles/run.developer", "roles/iam.serviceAccountUser"] \
             or want[0]["token_lifetime"] != 1800 or len(want[1]) != 1:
@@ -1102,13 +1231,13 @@ def main():
     # Templates render under Python Jinja2, StrictUndefined (§6.1).
     class Loader(jinja2.BaseLoader):
         def get_source(self, env, name):
-            fm, body = split(HERE / "hub-shared" / "templates" / name)
+            fm, body = split(HERE / "hub-shared" / "templates" / name)  # name: <name>.template.md
             return body.lstrip("\n"), name, lambda: True
     env = jinja2.Environment(loader=Loader(), undefined=jinja2.StrictUndefined,
                              keep_trailing_newline=True, autoescape=False)
     for fx in sorted((HERE / "fixtures").glob("*.inputs.json")):
         fname = fx.name.replace(".inputs.json", "")
-        got = env.get_template(fname + ".md").render(**json.loads(fx.read_text()))
+        got = env.get_template(fname + ".template.md").render(**json.loads(fx.read_text()))
         want = (HERE / "fixtures" / (fname + ".out.md")).read_text()
         if got != want:
             err(f"fixtures/{fname}: render differs")
