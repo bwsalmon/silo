@@ -1425,7 +1425,10 @@ anything leaves it.
 The system's threat model, which audits and the security test suites
 cite, is [threat-model.md](threat-model.md): its assets, actors, trust
 boundaries, threats per boundary, numbered invariants (`INV-`) and the
-audit plan. This section is the hub's part of it in brief.
+audit plan. This section is the hub's part of it in brief. The hub's
+security test suite (`hub/security`), which asserts these properties
+route by route and caller by caller, and says how to extend it, is
+[security-tests.md](security-tests.md).
 
 - **Nothing inbound to nodes.** Every connection is node → hub over
   TLS.
