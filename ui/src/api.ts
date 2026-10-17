@@ -31,6 +31,14 @@ export interface Task {
   submitter: string;
   approved_by?: string;
   approved_at?: string;
+  // depends_on are the hub tasks it waits for (docs/hub.md §6.6).
+  depends_on?: string[];
+  // filed_by is the Grain that filed it on behalf of its submitter,
+  // filed_by_owner that Grain's owner, and origin_task the hub task
+  // whose run filed it: all absent for a task a human filed.
+  filed_by?: string;
+  filed_by_owner?: string;
+  origin_task?: string;
   constraints?: { labels?: Record<string, string>; node?: string; node_owner?: string };
   created_at: string;
   state: TaskState;
