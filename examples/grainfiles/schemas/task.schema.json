@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/task.schema.json",
+  "title": "grain/task@v1: one task, where its author wrote it; its body is the prompt, and how it ran is in its execution records (docs/grainfiles.md §6.1)",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "task"},
+    "schema": {"const": "grain/task@v1"},
+    "aka": {"$ref": "common.schema.json#/$defs/aka"},
+    "moved_from": {"$ref": "common.schema.json#/$defs/movedFrom"},
+    "title": {"type": "string", "minLength": 1},
+    "team": {"type": "string"},
+    "context": {"$ref": "common.schema.json#/$defs/context", "description": "Everything the run's sandbox holds (§7). The first write entry is the task's primary repo, and its @branch the base; no write entry is team-targeted or read-only. Concrete: no input: entries"},
+    "state": {"enum": ["proposed", "rejected", "approved", "cancelled"], "description": "Only what the author and Silo decide (§6.1); progress is derived from execution records"},
+    "submitter": {"$ref": "common.schema.json#/$defs/principal"},
+    "submitted_via": {"enum": ["git", "api", "ui", "cli", "trigger", "gate", "agent"]},
+    "approved_by": {"$ref": "common.schema.json#/$defs/principal"},
+    "approved_at": {"$ref": "common.schema.json#/$defs/time"},
+    "rejection": {"type": "object", "properties": {"by": {"type": "string"}, "at": {"type": "string"}, "reason": {"type": "string"}}},
+    "cancel": {"type": "object", "properties": {"by": {"type": "string"}, "at": {"type": "string"}, "reason": {"type": "string"}}, "required": ["by", "at"], "description": "Silo's, honoured by every Grain holding a reference to the task (§10.6)"},
+    "origin": {"type": "string", "description": "What this work comes from: a ref, or an existing Origin: value (task 4193, owner/repo#N)"},
+    "filed_by": {
+      "type": "object",
+      "properties": {
+        "grain": {"type": "string"},
+        "run": {"$ref": "common.schema.json#/$defs/refString"},
+        "principal": {"$ref": "common.schema.json#/$defs/principal"}
+      }
+    },
+    "created_at": {"$ref": "common.schema.json#/$defs/time"},
+    "labels": {"type": "array", "items": {"type": "string"}},
+    "constraints": {
+      "type": "object",
+      "properties": {"labels": {"type": "object", "additionalProperties": {"type": "string"}}, "node": {"type": "string"}}
+    },
+    "capability_approvals": {
+      "description": "Approvals of the capabilities this task requests that need one (§6.8), each by a principal the capability's approval names, set after the task is approved. Not part of the frozen spec: it is the approval, as approved_by is",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ref": {"$ref": "common.schema.json#/$defs/refString"},
+          "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The resolved chain it approves: any change to a link is a new approval"},
+          "by": {"$ref": "common.schema.json#/$defs/principal"},
+          "at": {"$ref": "common.schema.json#/$defs/time"}
+        },
+        "required": ["ref", "digest", "by", "at"],
+        "additionalProperties": false
+      }
+    },
+    "auto_merge": {"type": "boolean"},
+    "template": {
+      "allOf": [{"$ref": "common.schema.json#/$defs/ref"}],
+      "properties": {"rev": {"$ref": "common.schema.json#/$defs/sha"}, "inputs": {"$ref": "common.schema.json#/$defs/inputValues"}}
+    },
+    "trigger": {
+      "description": "The trigger that filed this task (§6.6): which of its sources fired, the event's key (the task's path segment) and when. Written by whoever fired it",
+      "allOf": [{"$ref": "common.schema.json#/$defs/ref"}],
+      "properties": {
+        "on": {"enum": ["schedule", "push", "merge", "design-change", "manual"]},
+        "key": {"type": "string"},
+        "fired_at": {"$ref": "common.schema.json#/$defs/time"},
+        "event": {"type": "object", "description": "The event fields the firing bound (to_sha, paths, requirement, requested_by, …)"}
+      },
+      "required": ["on", "fired_at"]
+    },
+    "schedule": false,
+    "depends_on": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/refString"}},
+    "supersedes": {"$ref": "common.schema.json#/$defs/refString"},
+    "catalog": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*:([a-z0-9-]+/)?[A-Za-z0-9._-]+$"}, "description": "Optional labels naming software-catalog entities the task touches, in Backstage's own form (component:default/payments). Data only: not references in the sense of §3, so they add no name and grant no read (§8.1)"},
+    "implements": {
+      "type": "array",
+      "items": {
+        "allOf": [{"$ref": "common.schema.json#/$defs/ref"}],
+        "properties": {
+          "rev": {"$ref": "common.schema.json#/$defs/sha"},
+          "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        },
+        "required": ["rev", "hash"]
+      }
+    },
+    "repo": false,
+    "base": false,
+    "capabilities": false,
+    "reads": false,
+    "writes": false,
+    "id": false,
+    "placement": false,
+    "moved_to": false,
+    "closed": false
+  },
+  "required": ["kind", "schema", "title", "state", "submitter", "created_at"],
+  "allOf": [
+    {"if": {"properties": {"state": {"const": "approved"}}}, "then": {"required": ["approved_by", "approved_at"]}},
+    {"if": {"properties": {"state": {"const": "cancelled"}}}, "then": {"required": ["cancel"]}}
+  ]
+}

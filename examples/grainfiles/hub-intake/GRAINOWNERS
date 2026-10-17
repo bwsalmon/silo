@@ -1,0 +1,17 @@
+# The hub team's intake: the one repo with several writers, so the one
+# with field-level lines (docs/grainfiles.md §8.2). The hook's fixed rules
+# per kind still apply: a new task is proposed with submitter = pusher;
+# approved_by = pusher, never the submitter; capability_approvals[].by =
+# pusher, never the submitter, and among the capability's approvers;
+# ranked_by = pusher, or the member Silo acted for.
+*                                                        @team:hub#admin
+/tasks/                                                  @authenticated(create) @silo(create,update,move) @team:hub#admin(move)
+/tasks/**/*.task.md:state,approved_by,approved_at,rejection   @team:hub#approver
+/tasks/**/*.task.md:cancel                               @team:hub#approver @silo
+/tasks/**/*.task.md:capability_approvals                 @authenticated
+/tasks/**/*.comment.md                                   @authenticated(create) @silo(create)
+/backlog/                                                @silo
+/backlog/*.ref.md:rank,priority,ranked_by,ranked_at      @team:hub#member @silo
+/grain.config.md                                         @team:hub#admin
+/.grainconfig                                            @team:hub#admin
+/GRAINOWNERS                                             @team:hub#admin
