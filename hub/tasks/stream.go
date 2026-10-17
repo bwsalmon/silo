@@ -15,6 +15,7 @@ import (
 //
 //	hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}   run this task
 //	            {"type":"resume","task":{...},"requester_attestation":"<JWT>"}  a task you ran when the hub lost you: still yours?
+//	            {"type":"attest","task":{"id":...},"requester_attestation":"<JWT>"}  a fresh attestation for a task you accepted
 //	            {"type":"cancel","task":{"id":...}}        stop it
 //	            {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
 //	                                                       a human's answer to the task's approval_request event of that ID
@@ -25,13 +26,18 @@ import (
 // A stream that carries an offer or a resume stays open for the task's
 // life: the node writes its result there when the task ends, and the hub
 // writes cancel there if a human cancels it, and approve for each of
-// the task's approval requests a human answers. A cancel for a task with no
+// the task's approval requests a human answers. While the task is the
+// node's, the hub also writes attest there, a newly signed attestation
+// for the same task, before the last one it sent lapses: a node checks
+// the attestation again before each dispatch of the task, which may be
+// hours after it accepted it. A cancel for a task with no
 // stream (its node was away when it was cancelled) is the first message
 // of a stream of its own, which the hub closes once it has written it.
 // The hub closes a stream after the task's result, or a refusal.
 const (
 	TypeOffer  = "offer"
 	TypeResume = "resume"
+	TypeAttest = "attest"
 	TypeCancel = "cancel"
 	// TypeApprove answers one of a running task's approval requests.
 	TypeApprove = "approve"
@@ -43,11 +49,12 @@ const (
 // Message is one line on a task stream.
 type Message struct {
 	Type string `json:"type"`
-	// Task is the task, in offer and resume; in cancel, only its ID.
+	// Task is the task, in offer and resume; in attest and cancel, only
+	// its ID.
 	Task *Spec `json:"task,omitempty"`
 	// Attestation is the hub's signed claims about Task, for the node it
-	// is written to (hub/claims, docs/hub.md §6.4), in offer and resume;
-	// absent when the hub has no signing key.
+	// is written to (hub/claims, docs/hub.md §6.4), in offer, resume and
+	// attest; absent when the hub has no signing key.
 	Attestation string `json:"requester_attestation,omitempty"`
 	// NodeTask is the node's own ID for the task, in accept.
 	NodeTask string `json:"node_task,omitempty"`

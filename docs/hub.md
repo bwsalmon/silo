@@ -1056,6 +1056,7 @@ The whole stream protocol, one JSON message per line:
 ```
 hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}
             {"type":"resume","task":{...},"requester_attestation":"<JWT>"}
+            {"type":"attest","task":{"id":...},"requester_attestation":"<JWT>"}
             {"type":"cancel","task":{"id":...}}
             {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"...","reason":"..."}
 node → hub  {"type":"accept","node_task":"<local id>"}
@@ -1155,7 +1156,8 @@ offer; one flag without the other is an error at start-up.
 
 **What is signed.** Every offer and resume carries
 `requester_attestation`, a JWT signed for the node it is written to,
-afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
+afresh each time (`tasks.Attest`, `claims.Signer.Sign`), and so does
+each `attest` on an accepted task's stream (below):
 
 | Claim | Value |
 | --- | --- |
@@ -1173,6 +1175,27 @@ afresh each time (`tasks.Attest`, `claims.Signer.Sign`):
 
 The digest binds the claims to the task the node was given: a
 different repository, title or prompt has a different digest.
+
+**Keeping it fresh.** A Grain checks the attestation kept beside a hub
+task again before every dispatch of the task, and refuses one past its
+`exp` (grain's `policy.VerifySiloClaims`), holding the task as
+"waiting: local policy". A task can wait in a Grain's queue, or between
+attempts, for hours after it accepted it, longer than an attestation
+lasts. So while a node has a task, from its `accept` until its result
+or a cancel, the dispatcher writes `{"type":"attest","task":{"id":...},
+"requester_attestation":"<JWT>"}` on the task's stream every
+`Dispatcher.Reattest`, half the attestation's lifetime (half an hour):
+the same claims, signed again with a new `iat` and `exp`. The Grain
+verifies it as it verified the offer (grain's `hubTasks.attest`, the
+path a resume takes) and keeps it in place of the old one. A stream
+lost loses the refresh with it, but then the task is `lost`, and the
+resume that follows when the node is back carries a fresh attestation
+of its own.
+
+The lifetime stays an hour rather than nearer `claims.MaxTTL`: a token
+that leaks is good only for its one node, `hub_task_id` and spec, but
+for as long as its `exp` allows, and refreshing on the stream costs
+one short message per task per half hour.
 
 **What the digest covers, agreed with grain.** grain's
 `ApplySiloClaims` compares `spec_digest` with `policy.SpecDigest` of
@@ -1366,6 +1389,7 @@ audit plan. This section is the hub's part of it in brief.
 | 2.9 | Several replicas, in stages (§2.2): R1, the dispatcher under a database lease (`hub/lease`) and a REGIONAL Cloud SQL option; R2, the shared registry (`hub/registry`'s `Store`); R3, `Server.Open` across pods (`hub/rendezvous`'s internal listener); R4, wake-ups and live events across pods (`hub/notify`); R5, the rolling Deployment. | here, built (not applied to any project) |
 | 2.10 | Signed claims on each offer and resume, and their published keys (`hub/claims`, §6.4). | here, built |
 | — | Grain accepting a hub offer: verifying `requester_attestation` with `policy.ApplySiloClaims` and recording it with `Store.SetSiloAttestation` (§6.4) | bwsalmon/grain |
+| — | Grain taking `attest` on a task's stream: verifying the fresh attestation as a resume's (`hubTasks.attest`) and keeping it in place of the old (§6.4) | bwsalmon/grain |
 | — | Grain embedding `rendezvous.Client`, answering offers, resumes and cancels (§6.2), streaming events | bwsalmon/grain |
 | — | Grain answering the `http` stream from its UI server, when its owner turns it on (§11.3), and retiring `grain-relay` for nodes that use a hub (§11.4) | bwsalmon/grain, after the row above |
 | 2.11 | Future, designed, not filed: a Grain's UI opened from the hub UI by its owner or its owning team's admins, read-only by default at the Grain, with a capability in `hello`, a separate IAP backend and audience for node hosts, and audit ([grain-ui-proxy.md](grain-ui-proxy.md), stages S1–S5 here and G1–G4 in grain). It amends §11.2–§11.3: the IAP assertion and cookies are no longer passed to the node. | silo, then bwsalmon/grain |
