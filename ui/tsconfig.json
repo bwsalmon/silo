@@ -11,6 +11,7 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true,
+    "paths": { "@silo/hub-sdk": ["../sdk/ts/src/index.ts"] },
     "types": ["vitest/globals", "node"]
   },
   "include": ["src", "vite.config.ts"]

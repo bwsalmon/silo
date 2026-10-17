@@ -47,6 +47,36 @@ jobs:
       - name: Embed
         run: go test ./hub/ui ./hub/server -run 'TestBundle|TestHandler|TestPlaceholder|TestWebUI'
 
+  # The TypeScript client SDK the UI is built on (sdk/ts, docs/ui.md
+  # §11): type-checked, built as the package would be, unit-tested with
+  # vitest (its routes among them: each is one docs/hub.md documents),
+  # then run in Node against a real `silo hub serve` and a fake Grain
+  # built from this tree.
+  sdk:
+    name: sdk
+    paths-ignore:
+      - old/**
+      - "*.md"
+    timeout-minutes: 15
+    steps:
+      - name: Check Node and Go
+        infrastructure: true
+        run: |
+          node --version
+          go version
+
+      - name: Install
+        run: cd sdk/ts && npm ci --no-audit --no-fund
+
+      - name: Type-check and build
+        run: cd sdk/ts && npm run typecheck && npm run build
+
+      - name: Test
+        run: cd sdk/ts && npm test
+
+      - name: Integration
+        run: cd sdk/ts && npm run test:integration
+
   # The browser suite (ui/e2e, ui/playwright.config.ts): Chromium driven
   # by Playwright against `silo hub serve` with this bundle embedded,
   # and scripted fake Grains (internal/fakegrain) on the real
