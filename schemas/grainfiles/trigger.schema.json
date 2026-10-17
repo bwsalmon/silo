@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/trigger.schema.json",
+  "title": "grain/trigger@v1: when X happens, file Y (\u00a77.6)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "trigger"
+    },
+    "schema": {
+      "const": "grain/trigger@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "on": {
+      "type": "object",
+      "properties": {
+        "schedule": {
+          "type": "object"
+        },
+        "push": {
+          "type": "object"
+        },
+        "merge": {
+          "type": "object"
+        },
+        "pull_request": {
+          "type": "object"
+        },
+        "design-change": {
+          "type": "object"
+        },
+        "task-state": {
+          "type": "object"
+        },
+        "manual": {}
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "fires": {
+      "type": "object",
+      "properties": {
+        "template": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "workflow": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "object"
+        },
+        "bind": {
+          "type": "object"
+        },
+        "context": {
+          "$ref": "common.schema.json#/$defs/context"
+        },
+        "per": {
+          "enum": [
+            "event",
+            "requirement",
+            "folder",
+            "change"
+          ]
+        },
+        "into": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "review": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "template"
+          ]
+        },
+        {
+          "required": [
+            "workflow"
+          ]
+        }
+      ]
+    },
+    "fires_in": {
+      "enum": [
+        "hub",
+        "deployment",
+        "silo",
+        "grain"
+      ]
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "team": {
+      "type": "string"
+    },
+    "auto_merge": {
+      "type": "boolean"
+    },
+    "auto_approve_proposals": {
+      "type": "boolean"
+    },
+    "limits": {
+      "type": "object"
+    },
+    "derived_from": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "gate": false,
+    "human": false,
+    "sensitive": false,
+    "requires": false,
+    "last_fire_at": false,
+    "next_fire_at": false,
+    "paused": false,
+    "reads": false,
+    "writes": false,
+    "grants": false,
+    "target": false,
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "on",
+    "fires"
+  ]
+}

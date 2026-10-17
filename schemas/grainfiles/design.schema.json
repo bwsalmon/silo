@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/design.schema.json",
+  "title": "grain/design@v1: a design document (\u00a77.10)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "design"
+    },
+    "schema": {
+      "const": "grain/design@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "review",
+        "approved",
+        "superseded"
+      ]
+    },
+    "owners": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/principal"
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "anchor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "applies_to": {},
+    "supersedes": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "superseded_by": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "planning": {
+      "type": "object"
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "title",
+    "status",
+    "owners",
+    "requirements"
+  ]
+}

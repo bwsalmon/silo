@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/gate.schema.json",
+  "title": "grain/gate@v1: a merge gate (\u00a77.8)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "gate"
+    },
+    "schema": {
+      "const": "grain/gate@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "match": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "paths_ignore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "requires": {
+      "type": "object",
+      "properties": {
+        "human": {
+          "type": "object"
+        },
+        "security_review": {
+          "type": "object"
+        },
+        "second_review": {
+          "type": "object"
+        },
+        "state": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "sensitive": {
+      "type": "boolean"
+    },
+    "on": false,
+    "fires": false,
+    "template": false,
+    "reads": false,
+    "writes": false,
+    "grants": false,
+    "target": false,
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "match",
+    "requires"
+  ]
+}

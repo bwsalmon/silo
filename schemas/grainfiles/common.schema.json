@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/common.schema.json",
+  "title": "Definitions shared by every kind (docs/grainfiles-spec.md \u00a76)",
+  "$defs": {
+    "refString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\s\\\\]+$",
+      "not": {
+        "pattern": "^[^/:@]+@[^/:]+:"
+      }
+    },
+    "edge": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/refString"
+        }
+      },
+      "required": [
+        "ref"
+      ]
+    },
+    "principal": {
+      "type": "string",
+      "pattern": "^(user:[^@\\s]+@[^@\\s]+|team:[a-z0-9-]+#(member|approver|admin|maintainer)|(deployment|grain):[a-z][a-z0-9-]*|agent:(grain:)?[a-z][a-z0-9-]*/[A-Za-z0-9./_-]+|hub(:trigger)?|silo(:trigger)?|authenticated)$"
+    },
+    "time": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(\\.\\d+)?Z$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "rank": {
+      "type": "string",
+      "pattern": "^[0-9a-z]*[1-9a-z]$"
+    },
+    "stateName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "category": {
+      "enum": [
+        "proposed",
+        "ready",
+        "active",
+        "waiting",
+        "done",
+        "cancelled"
+      ]
+    },
+    "by": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "at": {
+          "$ref": "#/$defs/time"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "at"
+      ]
+    },
+    "contextEntry": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/refString"
+        },
+        "input": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "read",
+            "write",
+            "use"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "rev": {
+          "$ref": "#/$defs/sha"
+        },
+        "reducers": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "ref"
+          ]
+        },
+        {
+          "required": [
+            "input"
+          ]
+        }
+      ]
+    },
+    "context": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/contextEntry"
+      }
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "text",
+            "int",
+            "bool",
+            "enum",
+            "list",
+            "ref"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "default": {},
+        "options": {
+          "type": "array"
+        },
+        "of": {
+          "type": "string"
+        },
+        "ref_kind": {
+          "enum": [
+            "repo",
+            "folder",
+            "file"
+          ]
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "rootEntry": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/refString"
+        },
+        "ref_mode": {
+          "enum": [
+            "track",
+            "pin"
+          ]
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/refString"
+        },
+        "write": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "objects_per_entry": {
+          "type": "integer"
+        },
+        "objects": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

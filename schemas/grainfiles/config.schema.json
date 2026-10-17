@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/config.schema.json",
+  "title": "grain/config@v1: grain.config.md: a grain folder's root definition (\u00a710)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "config"
+    },
+    "schema": {
+      "const": "grain/config@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "role": {
+      "enum": [
+        "deployment",
+        "registry",
+        "library"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "user": {
+          "type": "string"
+        },
+        "team": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "lifecycle": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "ignore": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limits": {
+      "$ref": "common.schema.json#/$defs/limits"
+    },
+    "task_home": {
+      "type": "object"
+    },
+    "deployment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "hub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "backlog": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "strict",
+            "weighted",
+            "round_robin"
+          ]
+        },
+        "expedite": {
+          "enum": [
+            "lane",
+            "global"
+          ]
+        },
+        "lanes": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "common.schema.json#/$defs/rootEntry"
+              }
+            ],
+            "required": [
+              "name"
+            ]
+          }
+        }
+      },
+      "required": [
+        "lanes"
+      ],
+      "additionalProperties": false
+    },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/rootEntry"
+      }
+    },
+    "memory": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/rootEntry"
+      }
+    },
+    "registry": {
+      "type": "object",
+      "properties": {
+        "hub": {
+          "type": "string"
+        },
+        "poll_interval": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hub"
+      ],
+      "additionalProperties": false
+    },
+    "folders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "team": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "deployment",
+              "registry",
+              "library"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "folders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "folders",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "views": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "folders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "common.schema.json#/$defs/category"
+            }
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "folders"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "role",
+    "owner"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "deployment"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "deployment"
+        ],
+        "properties": {
+          "registry": false,
+          "folders": false,
+          "views": false,
+          "lanes": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "registry"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "registry",
+          "folders"
+        ],
+        "properties": {
+          "deployment": false,
+          "backlog": false,
+          "triggers": false,
+          "memory": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "library"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "deployment": false,
+          "backlog": false,
+          "triggers": false,
+          "memory": false,
+          "registry": false,
+          "folders": false,
+          "views": false,
+          "lanes": false
+        }
+      }
+    }
+  ]
+}

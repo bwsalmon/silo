@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/grainconfig.schema.json",
+  "title": "grain/repo-config@v1: the repo settings file, .grainconfig (\u00a710.5)",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "grain/repo-config@v1"
+    },
+    "default_ref": {
+      "type": "string"
+    },
+    "enforcement": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "required-check",
+            "codeowners",
+            "reader"
+          ]
+        },
+        "check": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "codeowners": {
+          "enum": [
+            "absent",
+            "compiled"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "aliases": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^(https?|ssh|file)://"
+      }
+    },
+    "identity_map": {
+      "type": "string"
+    },
+    "moved_to": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "archive_repo": {
+      "type": "string"
+    },
+    "orphans": {
+      "enum": [
+        "warn",
+        "refuse"
+      ]
+    },
+    "limits": {
+      "type": "object"
+    }
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema"
+  ]
+}

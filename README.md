@@ -51,6 +51,7 @@ The repository root is one Go module, `github.com/bwsalmon/silo`.
 | `docs/hub.md` | The hub's design, and its stages (§9): what is built and what comes next. |
 | `docs/deploy.md` | How to deploy the hub on GKE behind IAP, in `bsalmon-gke-dev`. |
 | `docs/hub-interface.md` | The task interface: the messages a Grain speaks to the hub, and all the hub depends on in a Grain. |
+| [`docs/grainfiles.md`](docs/grainfiles.md), [`docs/grainfiles-spec.md`](docs/grainfiles-spec.md) | Grainfiles: Grain's work as plain git in grain folders on ordinary forges. The design, and **The Grainfile Format**, its normative spec, with the schemas in `schemas/grainfiles/`, the `grainlint` validator in `tools/grainfiles/` (the `grainfiles` CI job) and the worked example in `examples/grainfiles/`. |
 | `docs/ui.md` | The hub's human web UI (hub.md §9, stage 2.6): the options, the chosen one, its stages, and how to run it locally (§7.1). |
 | [`docs/threat-model.md`](docs/threat-model.md) | The threat model of the Grain + Silo system: assets, actors, trust boundaries, threats, the numbered security invariants (`INV-`) that audits and security tests cite, and the audit plan. |
 | `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |

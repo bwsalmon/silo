@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/run.schema.json",
+  "title": "grain/run@v1: one deployment's record of one attempt (\u00a77.3)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "run"
+    },
+    "schema": {
+      "const": "grain/run@v1"
+    },
+    "aka": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "moved_from": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "instantiated_from": {
+      "type": "string",
+      "pattern": "@[0-9a-f]{40}$"
+    },
+    "task": {
+      "allOf": [
+        {
+          "$ref": "common.schema.json#/$defs/edge"
+        }
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "rev": {
+          "$ref": "common.schema.json#/$defs/sha"
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "additionalProperties": false
+    },
+    "from": {
+      "allOf": [
+        {
+          "$ref": "common.schema.json#/$defs/edge"
+        }
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "common.schema.json#/$defs/refString"
+        },
+        "rev": {
+          "$ref": "common.schema.json#/$defs/sha"
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "additionalProperties": false
+    },
+    "deployment": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "status": {
+      "enum": [
+        "accepted",
+        "running",
+        "awaiting_reply",
+        "held",
+        "done",
+        "failed",
+        "interrupted",
+        "refused",
+        "cancelled",
+        "superseded"
+      ]
+    },
+    "accepted_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "started_at": {
+      "$ref": "common.schema.json#/$defs/time"
+    },
+    "previous": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "waiting": {
+      "type": "object",
+      "properties": {
+        "on": {
+          "type": "string"
+        },
+        "entry": {},
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "refusal": {
+      "type": "object"
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "materialised": {
+          "type": "array"
+        },
+        "skipped": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "array"
+    },
+    "superseded": {
+      "type": "object"
+    },
+    "closed": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "enum": [
+            "done",
+            "failed",
+            "nothing_needed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        "at": {
+          "$ref": "common.schema.json#/$defs/time"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "change": {
+          "type": "object"
+        },
+        "design_revs": {
+          "type": "array"
+        },
+        "follow_ups": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/refString"
+          }
+        }
+      },
+      "required": [
+        "outcome",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "proposed_transition": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "type": "string"
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "at": {
+          "$ref": "common.schema.json#/$defs/time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "id": false
+  },
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "schema",
+    "task",
+    "from",
+    "deployment",
+    "status",
+    "accepted_at"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "done",
+              "failed",
+              "interrupted",
+              "refused",
+              "cancelled",
+              "superseded"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "closed"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "awaiting_reply",
+              "held"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "waiting"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "superseded"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "superseded"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "refused"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "refusal"
+        ]
+      }
+    }
+  ]
+}

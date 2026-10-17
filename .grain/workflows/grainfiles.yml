@@ -1,0 +1,31 @@
+# The Grainfile Format's reference linter (docs/grainfiles-spec.md):
+# lints the worked example in examples/grainfiles, checks that every broken
+# fixture under tools/grainfiles/testdata fails with exactly its expected
+# lint codes, and checks that the spec's lint-code table, kinds and state
+# categories agree with schemas/grainfiles and the linter, so the three
+# cannot drift apart.
+name: grainfiles
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  grainfiles:
+    name: grainfiles
+    timeout-minutes: 10
+    steps:
+      - name: Install Python deps
+        infrastructure: true
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-yaml python3-jsonschema python3-jinja2
+
+      - name: Lint the example
+        run: python3 tools/grainfiles/grainlint.py examples/grainfiles
+
+      - name: Self-test
+        run: python3 tools/grainfiles/grainlint.py --self-test
