@@ -4558,10 +4558,10 @@ asks for the widgets repo at `main` to write, and for
 further to 30-minute tokens valid until 2026-10-24 (§5.7). It is placed
 on `eu`.
 
-1. **The catalog.** `eu:capabilities/hub.md` includes
-   `shared:capabilities/@main` with `kinds: [capability]`, so the team's
-   object is in `eu`'s namespace. That made it offerable. It granted
-   nothing.
+1. **By reference only.** Nothing in `eu`'s `grain.config.md` names the
+   team's `capabilities/`: there is no capability root. The task's
+   `context:` entry is the only thing that reaches the definition, and
+   reaching it grants nothing.
 2. **Approval and placement.** The approver approved the task, reading
    its `context:`. The capability asks for no approval of its own. Silo
    resolves the chain as `eu` would, using `eu`'s published base
@@ -4754,7 +4754,7 @@ close.
 | --- | --- |
 | `hello` / `welcome` / `heartbeat` / `goodbye` | unchanged (the registry and slots stay live) |
 | `offer` (task + attestation) | Silo's commit of a placement (with `attestation`) in the Grain's folder of its placements repo + `{"type":"pull"}` |
-| `resume` | gone: the placement is in Silo's repo, the Grain's root includes it, and a returning Grain pulls |
+| `resume` | gone: the placement is in Silo's repo, the Grain's config names its folder as a lane, and a returning Grain pulls |
 | `accept` / `refuse` | the Grain's commit of an execution record in `accepted` / `refused` + `refusal` |
 | `result` | the Grain's commit of the record's `done\|failed` + `closed` |
 | `cancel` | Silo's commit of `cancelled` + `cancel` on the task, + `pull`; the run's `cancelled` commit |
@@ -4766,7 +4766,8 @@ close.
 The contract becomes:
 
 - the repo schema (§3, §10);
-- namespace resolution: include and exclude objects, and lanes (§3.3,
+- `grain.config.md` and its typed roots, the kind suffixes, the
+  resolver's listing rules (`ignore:`, `archive/`) and lanes (§3.3–§3.8,
   §5.2);
 - the layout of Silo's folder for a Grain: `backlog/` and `triggers/`;
 - triggers and their firings, and gates (§6.2, §6.3);
@@ -4784,9 +4785,26 @@ from the commits.
 
 Each kind has a JSON Schema (2020-12) in
 [`examples/task-repos/schemas/`](../examples/task-repos/schemas/):
-`common` (shared definitions), `repo`, `task`, `ref`, `run`, `comment`,
-`template`, `trigger`, `gate`, `suite`, `design`, `moved`, `include`
-and `exclude`. *For 4479:* `schedule` is gone, folded into `trigger`,
+`common` (shared definitions), `config`, `task`, `ref`, `run`, `comment`,
+`template`, `trigger`, `gate`, `suite`, `design`, `memory`, `moved`,
+`asset`, `capability` and `capability-base`, plus `grainconfig` for the
+`.grainconfig` YAML file. `GRAINOWNERS` is not YAML and has no JSON
+Schema; its grammar is §3.5.
+
+*For 4487:* `repo`, `include` and `exclude` are gone. `config` is new:
+`grain` (or, in a team's intake, `team`), `owner`, `backlog`
+(`mode`, `expedite`, `lanes` of `{name, path, ref_mode, weight, ignore}`),
+`triggers` and `memory` (lists of `{path, ref_mode, ignore}`, and
+`write` on a memory entry) and `limits`. `memory` is new: `title`,
+`applies_to` (`repos`, `teams`, `kinds`), `updated_by`, `updated_at`,
+and a body. `grainconfig` takes over the old `repo` schema's repo-wide
+fields: `owner`, `host`, `default_ref`, `ref_policy`, `aliases`,
+`task_home`, `grain_folder`, `orphans`, `limits`, `archive_repo`,
+`moved_to` and `require_signed`; `writers` moves to `GRAINOWNERS`.
+Every schema's `kind` must equal the file's suffix (§3.2), which the hook
+and lint check outside JSON Schema.
+
+*For 4479:* `schedule` is gone, folded into `trigger`,
 which is rewritten: `on` (one or more of `schedule`, `push`, `merge`,
 `design-change` and `manual`, each with its own options, and
 `task-closed` reserved and refused), `fires` (a template with `inputs`,
@@ -4797,17 +4815,11 @@ merge-gate keys (`gate`, `human`, `sensitive`, `paths`, `requires`).
 `requires` (`human`, `security_review`, `second_review`) and
 `sensitive`, refusing every trigger key. `task`'s `schedule` becomes
 `trigger: {ref, on, key, fired_at, event}`, and `submitted_via` gains
-`trigger` and `gate` in place of `schedule` and `planning`. `include`'s
-and `writers`' `kinds` accept `trigger` and `gate`. The principal
-`silo:schedule` becomes `silo:trigger`. `repo` covers a grain folder's README as well as a root
-one, with `scope` and `task_home` (§3, §3.1, §5.5), and a Grain root's
-`grain`, `lanes` and `include_limits` (§3.2, §5.2). Its `writers` is a
-list of principals, or, for an intake, the list of rules. An intake's
-`schedules:` is gone: adoption is an include (§6.2). `ref` gains
+`trigger` and `gate` in place of `schedule` and `planning`. The principal
+`silo:schedule` becomes `silo:trigger`. `ref` gains
 `fired_at` for inline firings (§6.2). A trigger has `derived_from`.
 `run`'s `superseded` is written by the Grain and records `withdrawn_at`
-(§8.8). `include` has `target`, `ref_mode`, `kinds` and `max_depth`, and
-no `transitive` field, because includes are always transitive (§3.3).
+(§8.8).
 `task` and `template` replace `repo` and `base` with `context` (§5.6), and
 `template` inputs gain `type: ref`; a trigger has neither, and may
 carry `fires.context`. `run` gains `context` (what was materialised and
@@ -4821,10 +4833,9 @@ an optional `approval`, and secret slots bound by name. So is
 implements: its dimensions with their maximums and where each narrows,
 what it materialises, what it implies, its proxies, its secret slots and
 its approval. A `context:` entry gains `mode: use` and `reducers`; `task`
-loses `capabilities` and gains `capability_approvals`; `include`'s
-`kinds` accept `capability`; `run` gains `capabilities`, and its
-`refusal` and `waiting` name a capability's link, reducer or secret
-(§5.7).
+loses `capabilities` and gains `capability_approvals`; `run` gains
+`capabilities`, and its `refusal` and `waiting` name a capability's
+link, reducer or secret (§5.7).
 
 - **Every file names its schema** (`grain/task@v1`). A minor addition,
   an optional field, keeps `v1`. Readers ignore fields they do not know
@@ -4926,7 +4937,8 @@ messages to commits plus notifications.
 8. **The accepted risk, and the upgrade.** Today a Grain trusts Silo's
    claims (hub.md §1.2). With task repos it also trusts Silo's hook to
    have checked who pushed. **Signed commits are the natural upgrade.**
-   - The README lists each principal's SSH or GPG signing keys.
+   - The repo's `.grainconfig` lists each principal's SSH or GPG
+     signing keys.
    - Approvers sign their approval commits.
    - Grains verify that a task's `approved_by` change is in a commit
      signed by that approver's key.
@@ -4935,14 +4947,15 @@ messages to commits plus notifications.
    which the JWT alone cannot do. It also covers repos on other hosts.
 9. **A rogue writer** can only do what its rules allow. Examples:
    - a compromised Grain can change only its own root: its execution
-     records, its own lane and its namespace. It cannot write any task,
+     records, its own lane and its memory. Its owner's `grain.config.md`
+     is not the Grain's to write (§3.5). It cannot write any task,
      so it cannot rewrite what it was asked to do. It cannot write a
      placement, so it cannot claim it was asked, and it cannot write
      another Grain's records, so it cannot claim another Grain's work;
    - Silo, or a credential for it, can write placements and the intake,
      and nothing in any Grain's root. It cannot rewrite a Grain's history,
-     forge its runs, or reach past the `kinds` each Grain's include of
-     its folder accepts;
+     forge its runs, or make anything active on a Grain beyond the
+     references and triggers in the folders that Grain's config names;
    - a compromised member can reorder the team's unplaced work, and
      nothing else;
    - a compromised approver can approve, and the commit names them.
@@ -4966,11 +4979,11 @@ messages to commits plus notifications.
     - Silo validates every object it reads from a code repo (schema,
       paths, references, ID allocation, the §5.5 invariants) and uses
       none that fails.
-    - The design's limits do not depend on the folder's README, which
-      anyone who can merge may edit (§8.13).
+    - The design's limits do not depend on the repo's `GRAINOWNERS` or
+      `.grainconfig`, which anyone who can merge may edit (§8.13).
     - Grains apply local policy as PEPs. A placed task's spec must match
       the attestation's digest, and a Grain's policy may refuse code
-      repos it does not trust for templates, includes or designs.
+      repos it does not trust for templates, triggers or designs.
     - **Disclosure.** A task homed in a code repo is readable by
       everyone who can read that repo. The team's `task_home.allow`
       decides whether a code repo may choose that for itself, so a team
@@ -4989,11 +5002,11 @@ messages to commits plus notifications.
       other end: the intake path must be a tombstone pointing back, and
       only the team's admins and Silo can write a tombstone in the
       intake, under the hook (§8.1).
-    - **Edit a template or include.** A task already filed pins
+    - **Edit a template or trigger.** A task already filed pins
       `template.rev`. A trigger renders its template's tip, so a firing
       after the edit uses it. That firing is filed `proposed`, and an
-      approver reads the rendered prompt, unless the team's adopting
-      include is pinned to a reviewed commit: then an edit does not reach
+      approver reads the rendered prompt, unless the trigger root that
+      names it is pinned to a reviewed commit: then an edit does not reach
       the team at all until an admin re-pins it. What remains is prompt injection, bounded by
       local policy (item 5).
     - **Grant itself access.** A template, trigger, gate or suite
@@ -5008,9 +5021,10 @@ messages to commits plus notifications.
       design edit files at most a capped number of proposals (item 10).
       Silo reads at most 1,000 changed files per code-repo push, as the
       hook caps pushes (§14).
-    - **Widen its own rules.** It can edit `.grain/README.md`'s
-      `writers`, which are advisory there, and its `task_home`, which the
-      team's `allow` bounds.
+    - **Widen its own rules.** It can edit its `GRAINOWNERS`, which is
+      advisory there, and its `.grainconfig`'s `task_home`, which the
+      team's `allow` bounds. It cannot make anything active on a Grain:
+      only Grains' configs do that.
     - **Reference a private Silo repo** to make Silo reveal it. Silo
       resolves code-repo references with the rights of the principal
       using them, never its own (item 4).
@@ -5026,69 +5040,51 @@ messages to commits plus notifications.
     reviews code that touches credentials, which bwsalmon/silo already
     does with a path trigger that requires a human (`grain-declarations`),
     a gate in this design (§6.3).
-14. **An include is a trust grant.** Adding one says "act on what this
-    folder holds, of these kinds":
-    - **`kinds:` narrows it**, and narrowing is intersected down every
-      path, so nothing reached through an include can bring a kind its
-      includer did not accept. Silo's placements come in as `kind: ref`
-      only: a compromised placements folder cannot add a trigger to a
-      Grain, or a gate, or a template, or another include that widens
-      anything. The team triggers Silo assigns come in as `kind:
-      trigger` only, so the folder that assigns them cannot slip in a
-      gate either.
-    - **The local policy still applies** to everything that arrives. A
-      placement is still a claim with an attestation (item 7); a trigger
-      that fires still files a task the Grain's policy may refuse; a
-      template is still data (§8.10). An include decides what a Grain
-      *considers*, never what it is *allowed*.
-    - **Only `kind: include` widens a namespace**, and only the root's
-      writers can add one to the root. A reference names anything, but
-      adds nothing (§3.3), so a task cannot smuggle a folder into a
-      namespace by referencing it.
-15. **Excludes are scoped, so nothing included can hide anything else.**
-    An exclude subtracts only from the contribution of the space that
-    holds it (§3.3). A folder you include can hide its own objects from
-    you, which it could do anyway by deleting them, but it cannot hide
-    an object you hold yourself, or one another include brings: a
-    global, unscoped exclude could have hidden a placement, or one of
-    the root's own tasks, from anywhere in the graph. Silo's
-    hook and readers therefore need not trust an included folder's
-    excludes at all.
-16. **The root's excludes are the final word.** They are applied last,
-    to everything, so the root's owner can always cut anything that
-    reached them, however deep. Excluding an include object cuts its
-    whole branch (rule 4). There is no re-include, so no later layer can
-    undo a cut. An exclude that cannot be read fails its space closed
-    (contributes nothing) rather than open. The one thing an exclude
-    cannot cut is a gate from a mandatory source, which is not in the
-    namespace at all (§6.3, item 39).
-17. **Malicious include chains are bounded.** An attacker who controls a
-    folder you include can put more includes in it. It cannot:
-    - **go deep:** the depth limit (8, counting down; `max_depth` and the
-      root's `include_limits` only lower it) cuts the chain;
-    - **loop:** a cycle is detected on the path and cut. Cutting loses
-      nothing, because whatever is on a cycle is already in the union
-      of an ancestor, and it cannot re-add a name an ancestor cut;
-    - **fan out:** at most 64 includes in one space (more fails that
-      space closed), 256 spaces, 32 distinct repos and 50,000 names per
-      namespace. Over a global limit, resolution fails and the Grain
-      keeps its last good namespace, so the limits are deterministic,
-      not first-come;
-    - **widen:** every level intersects `kinds`, and an unreadable or
-      dangling include is skipped, never replaced by something broader.
-18. **Following an include is a read, with the reader's own credential.**
-    A Grain follows includes with its node credential, Silo with the
-    rights of the principal the namespace belongs to, and nobody with
-    Silo's own. An include of a repo the reader cannot read is reported
-    and skipped (item 4). Silo grants a Grain read on its own folder in
-    the team's placements repo, and on what its placements need (item
-    4); it never grants read because an include names a repo. The hook
-    checks a new include's target with the pusher's rights, so an
-    include cannot be used to make Silo reveal a repo, and Silo resolves
-    a Grain's namespace for its views with the Grain's grants, not its
-    own. Read access is per repo, so a team's placements repo is
-    readable by all the team's Grains (§8.12); a deployment that must
-    isolate Grains from one another gives each its own placements repo.
+14. **A root entry is a trust grant, and only the Grain's owner makes
+    one.** Adding an entry to `grain.config.md` says "act on what this
+    folder holds, of this type". **Nothing Silo writes can activate
+    anything on a Grain unless the Grain's owner pointed a root at it**:
+    Silo can fill its own per-Grain folder, but a folder no entry names
+    is never listed, and `GRAINOWNERS` keeps `grain.config.md` the
+    owner's, never Silo's (§3.5). That is the PEP property of §1, and it
+    holds for every root type:
+    - **The type narrows it.** A backlog entry lists `*.ref.md` only, so
+      Silo's placements can only ever be references, whatever that folder
+      holds; a trigger entry lists `*.trigger.md` only, so a team's
+      triggers folder cannot bring a gate, a capability or a reference.
+    - **References are not grants.** A task's template, a capability
+      definition or a design is read when something already active needs
+      it, with the reader's rights, and makes nothing active (§3.1). A
+      foreign template is still data (§8.10).
+15. **Nothing outside an entry can change what it activates.** An entry
+    activates its folder's subtree, less its own `ignore:` and any
+    `archive/`. There are no ignore files and no inherited patterns, so
+    no file in a parent folder, in another repo, or written by another
+    principal can hide or add an object for that entry. A producer can
+    change its folder's contents (that is its right: the entry trusts
+    that folder), and nothing else can.
+16. **The owner's `ignore:` is the final word for their entries.** A
+    Grain can cut any object a root would activate, and no producer can
+    undo the cut except by renaming the object, which the owner's
+    status shows as a new arrival. Gates are not cut this way, because
+    they are not in any root (§6.3, item 39).
+17. **Listing is bounded and fails loudly.** An attacker who controls a
+    folder a Grain names can fill it, but cannot make the Grain read more
+    than `objects_per_entry` names from it, or more than `objects` in
+    total: over a limit the entry is unknown, and nothing is truncated,
+    so the attacker cannot choose which of its objects survive (§3.7).
+    Entries are not transitive, so there is no chain to bound and no
+    cycle to cut. References are bounded per resolution (8 hops, cycle
+    detection) and by `context:`'s limits (§5.6).
+18. **Listing and resolving are reads, with the reader's own
+    credential.** A Grain lists its entries and resolves references with
+    its node credential, Silo with the rights of the principal it acts
+    for, and nobody with Silo's own. An entry naming a repo the reader
+    cannot read is unknown, not an error that widens anything (§3.7).
+    The hook checks a new entry's folder with the pusher's rights, so
+    `grain.config.md` cannot be used to make Silo reveal a repo, and
+    Silo lists a Grain's entries for its views with the Grain's grants,
+    not its own.
 19. **`context:` is the sandbox's whole world.** A run sees its task file,
     its execution record and thread, and the entries of `context:`, and
     nothing else: no other repo, no other file, no reference that is not
@@ -5204,14 +5200,12 @@ messages to commits plus notifications.
     different digest refuses the claim, so a changed chain needs a new
     grant, and a new approval where one is required. A policy may also
     require pinned links (`capabilities.require_pinned`).
-29. **Including never grants.** An include of capability objects puts
-    them in a namespace, and so in the catalog Silo shows and a Grain
-    offers (§3.3, item 14). It decides what a Grain *offers*, never what
-    it *allows*. A grant needs all of these: a task's `use` entry, frozen
-    on approval; Silo's claim for a placed task; and the Grain's policy
-    admitting the base, every source in the chain, every secret and every
-    implication. An object reached only as a link of some chain is not
-    offered on its own.
+29. **Referencing never grants.** A capability definition is reached
+    only from a task's `context:`; there is no capability root, and
+    Silo's catalog is a view for authors (§5.7). A grant needs all of
+    these: a task's `use` entry, frozen on approval; Silo's claim for a
+    placed task; and the Grain's policy admitting the base, every source
+    in the chain, every secret and every implication.
 30. **Definition sources are allowlisted, for every link.** The Grain's
     policy lists the repos and folders whose capability objects it
     honours, and for which bases (`capabilities.sources`). Only the
@@ -5302,16 +5296,18 @@ messages to commits plus notifications.
 37. **Who may author triggers, and where.** A trigger fires only where
     its definition was admitted by the writer of the folder that holds
     it, and only for a team that chose it:
-    - in a **Grain root**, only the Grain and its owner (§3); it fires
+    - in a **Grain root**, only the Grain and its owner (§3.5); it fires
       on that Grain only;
     - in a **shared repo**, the team's maintainers, or a review branch an
       approver merged (§8.11); a `fires_in: silo` trigger fires only for
       the team the repo belongs to, and a `fires_in: grain` one only on
-      a Grain Silo assigned it to, or whose root includes it;
-    - in an **intake**, only the team's admins, and only as includes
-      (adoption), never as `kind: trigger` objects;
+      a Grain whose trigger root names its folder (Silo's per-Grain
+      folder, for an assigned trigger);
+    - in an **intake**, only the team's admins, as the team's own
+      triggers or as entries in the intake's `grain.config.md`
+      (adoption);
     - in a **code repo**, whoever its review lets merge (§8.13); it
-      fires for a team only if the team adopts it, and its firings never
+      fires only where a trigger root names it, and its firings never
       land in the code repo (§6.2).
 
     `push:` and `merge:` may watch only protected refs, so a contributor
@@ -5321,29 +5317,21 @@ messages to commits plus notifications.
     trigger with `auto_approve_proposals` does not turn a non-approver's
     push into approved work. And a trigger grants nothing: its firing is
     a task, held to the Grain's policy like any other (items 21, 29).
-38. **A gate is policy, and included folders cannot weaken it.** Gates
-    combine by conjunction: there is no negative gate, and no key in any
-    object releases another's hold (§6.3). A gate reaches a namespace
-    only through includes that accept `gate`, so a team's triggers
-    folder, included with `kinds: [trigger]`, cannot hold or release a
-    Grain's merges. An exclude inside an included folder subtracts only
-    from that folder's contribution (item 15), so it cannot cut the
-    root's gates or the repo's own. A gate is read at the target
-    branch's tip, so the change it holds cannot edit it away. And a
+38. **A gate is policy of the repo it guards, and no Grain can weaken
+    it.** Gates combine by conjunction: there is no negative gate, and no
+    key in any object releases another's hold (§6.3). A gate is never in
+    a Grain's roots, so no entry, no `ignore:` and no `archive/` move in
+    someone else's folder adds or removes one; the merge queue reads the
+    gates in the merged-into repo's own grain folder, at the target
+    branch's tip, so the change it holds cannot edit them away. And a
     trigger never holds or releases a merge: the two kinds share no
     keys, and their schemas refuse each other's.
-39. **The root can exclude an included gate; a mandatory one it cannot.**
-    An included gate is one the root's owner chose to adopt, and the
-    root's excludes are the final word on what it adopted (item 16): an
-    exclude stops this Grain's merge queue applying it, and nothing
-    else. It never removes a gate the target repo holds itself. **The
-    design recommends that gates from sanctioned sources be
-    non-excludable:** the Grain's local policy (and Silo's, for the
-    repos it hosts) names mandatory gate sources, which the merge queue
-    and the hook read directly, outside the namespace, and a mandatory
-    source that cannot be read holds every change it might cover. So an
-    org's "every `**/*.tf` change gets a security review" holds wherever
-    it is mandatory, whatever any root excludes.
+39. **Mandatory gate sources are read directly.** The Grain's local
+    policy (and Silo's, for the repos it hosts) may name mandatory gate
+    sources, which the merge queue and the hook read themselves; a
+    mandatory source that cannot be read holds every change it might
+    cover. So an org's "every `**/*.tf` change gets a security review"
+    holds wherever it is mandatory, whatever any Grain's config says.
 40. **A gate's review tasks are bounded too.** A gate files at most the
     tasks its `requires` names, once per change per gate (their paths
     are derived from the change and the gate, so a re-push files no
