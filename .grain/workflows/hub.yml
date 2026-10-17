@@ -76,6 +76,14 @@ jobs:
           SILO_REQUIRE_POSTGRES: "1"
         run: go test -race -timeout 15m ./...
 
+      # The conformance kit (docs/conformance.md), from the command
+      # line, against the reference Grain: what someone checking their
+      # own Grain runs. hub/conformance's tests drive the same kit.
+      - name: Conformance
+        run: |
+          go build -o /tmp/silo ./cmd/silo
+          /tmp/silo conformance -json /tmp/conformance.json -- /tmp/silo conformance grain
+
   # The stores that run on Cloud Spanner's PostgreSQL dialect, against
   # Spanner's emulator behind PGAdapter (docs/spanner-evaluation.md), so
   # they stay Spanner-compatible. hub/notify and hub/server are not run:

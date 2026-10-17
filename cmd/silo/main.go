@@ -49,9 +49,19 @@ const usage = `usage:
   silo hub migrate [flags] create the hub's tables, and grant the hub's runtime role its rows
   silo hub team [flags]    create a team, or add admins and repositories to one
   silo hub token [flags]   mint a node token
+  silo conformance [flags] [-- command...]
+                           check that a Grain speaks the task interface (docs/conformance.md)
+  silo conformance grain [flags]
+                           run the reference Grain, which passes it
 Run a command with -h for its flags.`
 
 func run(args []string) error {
+	if len(args) >= 1 && args[0] == "conformance" {
+		if len(args) >= 2 && args[1] == "grain" {
+			return conformanceGrain(args[2:])
+		}
+		return conformanceKit(args[1:])
+	}
 	if len(args) < 2 || args[0] != "hub" {
 		fmt.Fprintln(os.Stderr, usage)
 		return flag.ErrHelp
