@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/identity"
@@ -82,6 +83,41 @@ func TestOfferAndResumeAttested(t *testing.T) {
 	verifyAttestation(t, s, r.first, "ws-1")
 	r.send(t, Message{Type: TypeAccept})
 	h.await(t, task.ID, "running again", inState(Running))
+}
+
+// TestReattested: while a node has a task, the dispatcher sends it a
+// fresh attestation for the task every Reattest, which the node can
+// check against the task it was offered.
+func TestReattested(t *testing.T) {
+	s := testSigner(t)
+	h := newHarness(t, func(d *Dispatcher) { d.Claims, d.Reattest = s, 200*time.Millisecond })
+	n := h.node(t, "alice@example.com", silo("ws-1", 1))
+	task := h.submit(t, Spec{Team: "infra", Repo: "bwsalmon/silo", Title: "Fix it", Prompt: "fix the parser", Submitter: "carol@example.com"})
+
+	o := n.next(t, TypeOffer)
+	first := verifyAttestation(t, s, o.first, "ws-1")
+	o.send(t, Message{Type: TypeAccept})
+	h.await(t, task.ID, "running", inState(Running))
+
+	last := o.first.Attestation
+	for range 2 {
+		m, err := o.Read()
+		check(t, err)
+		if m.Type != TypeAttest || m.Task == nil || m.Task.ID != task.ID {
+			t.Fatalf("got %+v, want an attest for %s", m, task.ID)
+		}
+		if m.Attestation == last {
+			t.Error("the attest repeats the last attestation")
+		}
+		last = m.Attestation
+		// The node checks it against the task it was offered.
+		m.Task = o.first.Task
+		if c := verifyAttestation(t, s, m, "ws-1"); c.Requester != first.Requester || c.Team != first.Team || c.SpecDigest != first.SpecDigest {
+			t.Errorf("fresh claims %+v, offered %+v", c, first)
+		}
+	}
+	o.send(t, Message{Type: TypeResult, State: Done})
+	h.await(t, task.ID, "done", inState(Done))
 }
 
 // TestOfferApprovedBy: a task approved at the hub is offered with its

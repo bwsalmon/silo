@@ -97,6 +97,12 @@ type Dispatcher struct {
 	// carries (docs/hub.md §6.4), which a node's local policy may
 	// require before it runs the task. Without it they carry none.
 	Claims *claims.Signer
+	// Reattest is how often, while a node has a task, the dispatcher
+	// writes it a freshly signed attestation for the task (TypeAttest):
+	// a node checks the attestation again before each dispatch, which
+	// may be long after it accepted the task. Half the Claims signer's
+	// lifetime when zero; unused without Claims.
+	Reattest time.Duration
 	// Bus, when set, carries Wake and Cancel to the dispatcher of
 	// whichever pod holds the lease (docs/hub.md §2.2.4), which hears
 	// them through Notice. Without one they stay in this process.
@@ -171,6 +177,13 @@ func (d *Dispatcher) offerTimeout() time.Duration {
 		return d.OfferTimeout
 	}
 	return DefaultOfferTimeout
+}
+
+func (d *Dispatcher) reattest() time.Duration {
+	if d.Reattest > 0 {
+		return d.Reattest
+	}
+	return d.Claims.Lifetime() / 2
 }
 
 func (d *Dispatcher) retry() time.Duration {
@@ -793,14 +806,14 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 	answer := time.NewTimer(d.offerTimeout())
 	defer answer.Stop()
 	answered, unansweredC := false, answer.C
-	var grace <-chan time.Time
+	var grace, reattest <-chan time.Time
 	cancelled := l.cancel
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-cancelled:
-			cancelled = nil
+			cancelled, reattest = nil, nil
 			if !answered {
 				release()
 			}
@@ -812,6 +825,18 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 			grace = time.After(d.offerTimeout())
 		case <-grace:
 			return
+		case <-reattest:
+			reattest = time.After(d.reattest())
+			jwt, err := d.Claims.Sign(Attest(spec, t.Node))
+			if err != nil {
+				d.logf("tasks: %s: could not sign a fresh attestation for node %s: %v", t.ID, t.Node, err)
+				continue
+			}
+			// A write that fails is the node going away, which the
+			// reader reports.
+			if err := st.Write(Message{Type: TypeAttest, Task: &Spec{ID: t.ID}, Attestation: jwt}); err != nil {
+				d.logf("tasks: %s: could not send node %s a fresh attestation: %v", t.ID, t.Node, err)
+			}
 		case <-unansweredC:
 			d.observe(EventTimeout, t)
 			unanswered(fmt.Sprintf("no answer to the %s within %s", kind, d.offerTimeout()), true)
@@ -834,6 +859,9 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					continue
 				}
 				answered, unansweredC = true, nil
+				if d.Claims != nil && cancelled != nil {
+					reattest = time.After(d.reattest())
+				}
 				d.logf("tasks: node %s accepted %s as %s", t.Node, t.ID, logsafe.Quote(r.m.NodeTask))
 				if kind == TypeOffer {
 					d.observe(EventAccepted, t)

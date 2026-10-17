@@ -43,6 +43,7 @@ The hub opens one stream per task (hub.md §6.2):
 ```
 hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}    run this task
             {"type":"resume","task":{...},"requester_attestation":"<JWT>"}   a task you ran when the hub lost you: still yours?
+            {"type":"attest","task":{"id":...},"requester_attestation":"<JWT>"}  a fresh attestation for a task you accepted
             {"type":"cancel","task":{"id":...}}                              stop it
 node → hub  {"type":"accept","node_task":"<local id>"}
             {"type":"refuse","reason":"..."}
@@ -77,6 +78,17 @@ Grain may ignore it. `spec_digest` is over the task's `repo`, `title`
 and `prompt` exactly as offered, so a Grain that checks it files the
 task's body as the prompt, unchanged, and links the task to the hub by
 `hub_task_id` rather than by anything added to the body.
+
+An attestation is good for an hour (`exp`), and a Grain checks the one
+kept beside a hub task again before each dispatch of it, which may be
+hours after it accepted the task. So while the task is the Grain's,
+the hub writes `attest` on its stream every half hour: a newly signed
+`requester_attestation` for the same task, with the same claims but
+`iat` and `exp`. A Grain verifies it as it did the offer's, against
+the task it filed, and keeps it in place of the old one; one it cannot
+verify it drops, keeping the old. A Grain that does not know `attest`
+may ignore it, and then holds a task whose attestation has lapsed
+until the hub next resumes it.
 
 The Grain takes these claims on trust and holds the task to its own
 local policy, refusing what that policy does not allow (hub.md §1.2).

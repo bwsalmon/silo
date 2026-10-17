@@ -37,7 +37,9 @@ const KeysPath = "/v1/claims/keys"
 
 // DefaultTTL is how long a signed attestation is good for. A node
 // checks it when it is offered the task, within the dispatcher's offer
-// timeout; a resume is signed afresh.
+// timeout, and again before each dispatch of it; a resume is signed
+// afresh, and while the task's stream is open the dispatcher sends a
+// fresh one well before the last lapses (tasks.TypeAttest).
 const DefaultTTL = time.Hour
 
 // MaxTTL is the longest an attestation may be good for: grain's local
@@ -242,6 +244,10 @@ func thumbprint(jwk map[string]string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+// Lifetime is how long the attestations s signs are good for: TTL, or
+// DefaultTTL when that is zero.
+func (s *Signer) Lifetime() time.Duration { return cmp.Or(s.TTL, DefaultTTL) }
+
 // KeyID is the kid of the key the signer signs with.
 func (s *Signer) KeyID() string { return s.keys[0].kid }
 
@@ -252,7 +258,7 @@ func (s *Signer) Sign(c Claims) (string, error) {
 	if s.Now != nil {
 		now = s.Now
 	}
-	ttl := cmp.Or(s.TTL, DefaultTTL)
+	ttl := s.Lifetime()
 	if ttl < 0 || ttl > MaxTTL {
 		return "", fmt.Errorf("claims: a TTL of %s is outside (0, %s]", ttl, MaxTTL)
 	}
