@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/design.schema.json",
+  "title": "grain/design@v1: a design doc whose requirement headings carry {#PREFIX-n} anchors (docs/grainfiles.md §6.9)",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "const": "design"
+    },
+    "schema": {
+      "const": "grain/design@v1"
+    },
+    "aka": {
+      "$ref": "common.schema.json#/$defs/aka"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "proposed",
+        "accepted",
+        "implementing",
+        "implemented",
+        "superseded",
+        "withdrawn"
+      ]
+    },
+    "owners": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/principal"
+      },
+      "minItems": 1
+    },
+    "applies_to": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/refString"
+      }
+    },
+    "superseded_by": {
+      "$ref": "common.schema.json#/$defs/refString"
+    },
+    "requirements": {
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9]*$"
+        },
+        "next": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retired": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$"
+          }
+        }
+      },
+      "required": [
+        "prefix",
+        "next"
+      ]
+    },
+    "planning": {
+      "type": "object",
+      "properties": {
+        "team": {
+          "type": "string"
+        },
+        "max_tasks_per_change": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10
+        },
+        "approval": {
+          "enum": [
+            "required",
+            "inherit"
+          ],
+          "default": "required"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "moved_from": {
+      "$ref": "common.schema.json#/$defs/movedFrom"
+    }
+  },
+  "required": [
+    "kind",
+    "schema",
+    "title",
+    "status",
+    "owners",
+    "requirements"
+  ]
+}

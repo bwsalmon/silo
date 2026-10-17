@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/capability.schema.json",
+  "title": "grain/capability@v1: a capability object, which is a base plus an ordered chain of reducers that only narrow it. Its effective authority is base ∩ reducer₁ ∩ reducer₂ ∩ …, and nothing in this file can add authority (docs/grainfiles.md §6.8). Defining a capability grants nothing: a Grain honours it only from a source its local policy sanctions, for a task that requests it",
+  "type": "object",
+  "properties": {
+    "kind": {"const": "capability"},
+    "schema": {"const": "grain/capability@v1"},
+    "aka": {"$ref": "common.schema.json#/$defs/aka"},
+    "moved_from": {"$ref": "common.schema.json#/$defs/movedFrom"},
+    "title": {"type": "string", "minLength": 1},
+    "base": {
+      "description": "Exactly one of: a base type the Grain implements in trusted provider code, or another capability object to narrow further",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {"$ref": "#/$defs/baseType"}
+          },
+          "required": ["type"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "capability": {
+              "$ref": "common.schema.json#/$defs/refString",
+              "description": "A kind: capability object, by reference (§3). A target in another repo should carry its @ref, usually a tag: the chain's digest changes whenever any link does (§6.8)"
+            }
+          },
+          "required": ["capability"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reducers": {
+      "description": "Applied in order, after every reducer of the base's own chain. Each one only narrows",
+      "type": "array",
+      "items": {"$ref": "#/$defs/reducer"},
+      "maxItems": 32
+    },
+    "secrets": {
+      "description": "Secret slots the base declares, bound to names in the materialising Grain's own secret store: <secret> or <secret>/<key>. Names only, never material (§6.8, §12.33)",
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/secretName"}
+    },
+    "approval": {"$ref": "#/$defs/approval"},
+    "owners": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/principal"}},
+    "created_at": {"$ref": "common.schema.json#/$defs/time"},
+    "grants": false,
+    "implies": false,
+    "maximum": false
+  },
+  "required": ["kind", "schema", "title", "base"],
+  "additionalProperties": false,
+  "$defs": {
+    "baseType": {
+      "description": "A base capability type and its contract version, as in gcp-service-account@v1",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*@v[0-9]+$"
+    },
+    "secretName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?$"
+    },
+    "approval": {
+      "description": "Opt in to requiring a human's approval before the capability is used (§6.8). It can only make a capability harder to use",
+      "type": "object",
+      "properties": {
+        "by": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/principal"}, "minItems": 1},
+        "scope": {"enum": ["task", "run"], "default": "task", "description": "task: once per task, recorded by Silo; run: before every run, by the Grain's owner"}
+      },
+      "required": ["by"],
+      "additionalProperties": false
+    },
+    "reducer": {
+      "description": "One narrowing step. language: builtin is the interim set of fixed reducer types; language: anselm is the reducer language this design names but does not specify, carried opaquely until it is adopted (§6.8)",
+      "type": "object",
+      "properties": {
+        "language": {"enum": ["builtin", "anselm"]},
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$", "description": "Optional label for the audit log; the reducer is always also named by its index"},
+        "on": {"enum": ["credential", "use"], "description": "Where it is enforced: once, on the credential the provider mints; or on each use, at the Grain's proxy. Default for a builtin: wherever the base enforces its dimension. Required for anselm"},
+        "note": {"type": "string"},
+        "type": {"enum": ["subset", "limit", "not_after", "require_approval"]},
+        "dimension": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "allow": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "subset: the values (glob patterns) the dimension may keep"},
+        "max": {"type": ["integer", "string"], "description": "limit: the new upper bound, in the dimension's unit (a duration such as 1h, or a number)"},
+        "at": {"$ref": "common.schema.json#/$defs/time"},
+        "by": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/principal"}, "minItems": 1},
+        "scope": {"enum": ["task", "run"]},
+        "version": {"type": "string", "description": "anselm: the Anselm version the body is written for. A Grain that cannot evaluate it refuses the request"},
+        "body": {"type": "string", "description": "anselm: the reducer's source, opaque to this schema"}
+      },
+      "required": ["language"],
+      "allOf": [
+        {
+          "if": {"properties": {"language": {"const": "anselm"}}},
+          "then": {
+            "required": ["on", "version", "body"],
+            "properties": {"type": false, "dimension": false, "allow": false, "max": false, "at": false, "by": false, "scope": false}
+          },
+          "else": {
+            "required": ["type"],
+            "properties": {"version": false, "body": false},
+            "allOf": [
+              {"if": {"properties": {"type": {"const": "subset"}}}, "then": {"required": ["dimension", "allow"]}},
+              {"if": {"properties": {"type": {"const": "limit"}}}, "then": {"required": ["dimension", "max"]}},
+              {"if": {"properties": {"type": {"const": "not_after"}}}, "then": {"required": ["at"]}},
+              {"if": {"properties": {"type": {"const": "require_approval"}}}, "then": {"required": ["by"]}}
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# CI stays YAML, in the GitHub Actions dialect grain already runs
+# (docs/grainfiles.md §9.4): it is not a kind: object, and no Markdown
+# front matter is read here.
+name: ci
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test ./...

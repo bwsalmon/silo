@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/grainconfig.schema.json",
+  "title": "grain/repo-config@v1: .grainconfig, a repo's settings at its root (YAML, not an object; docs/grainfiles.md \u00a73.4)",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "grain/repo-config@v1"
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "team": {
+          "type": "string"
+        },
+        "grain": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "silo": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "additionalProperties": false
+    },
+    "host": {
+      "enum": [
+        "silo",
+        "other"
+      ]
+    },
+    "default_ref": {
+      "type": "string"
+    },
+    "ref_policy": {
+      "type": "object",
+      "properties": {
+        "protected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fast_forward_only": {
+          "type": "boolean"
+        },
+        "review_prefix": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "aliases": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "format": "uri"
+      }
+    },
+    "task_home": {
+      "oneOf": [
+        {
+          "enum": [
+            "intake",
+            "code-repo",
+            "promote"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "intake",
+                "code-repo",
+                "promote"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "allow": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "intake",
+                  "code-repo",
+                  "promote"
+                ]
+              }
+            },
+            "repos": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": [
+                  "intake",
+                  "code-repo",
+                  "promote"
+                ]
+              }
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "grain_folder": {
+      "type": "string"
+    },
+    "orphans": {
+      "enum": [
+        "warn",
+        "refuse"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "objects_per_entry": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "archive_repo": {
+      "type": "string",
+      "format": "uri"
+    },
+    "moved_to": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "require_signed": {
+      "type": "boolean"
+    },
+    "keys": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "required": [
+    "schema"
+  ],
+  "additionalProperties": false
+}

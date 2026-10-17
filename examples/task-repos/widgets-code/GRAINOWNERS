@@ -1,5 +1,0 @@
-# Advisory in a code repo: the forge's review decides what lands, and
-# readers validate on read (docs/task-repos.md §8.13).
-/.grain/                           @team:hub#member
-/.grain/tasks/                     @silo
-/docs/design/                      @team:hub#member

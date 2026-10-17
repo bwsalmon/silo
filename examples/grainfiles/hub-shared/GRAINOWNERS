@@ -1,0 +1,7 @@
+# Hub team shared definitions (docs/grainfiles.md §8.2). main changes by
+# merging review branches; the hook's merge_of rule (§8.5) is fixed for a
+# repo whose ref_policy names a review_prefix.
+*                                  @team:hub#maintainer @team:hub#approver
+/designs/**/*.design.md:requirements,body   @team:hub#maintainer @silo
+/.grainconfig                      @team:hub#admin
+/GRAINOWNERS                       @team:hub#admin
