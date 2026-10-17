@@ -607,9 +607,9 @@ to, and referenced from it**:
 
 - **New attachments** are commits like everything else. Silo's UI and API
   add the file in the same commit as the task or comment it belongs to,
-  so the intake's `authenticated` rule covers it: its `kinds` list
-  `asset`, which in a `writers` rule means files that are not objects, and
-  its `paths` limit those to the new task's `attachments/` (§3). A Grain
+  so the intake's `GRAINOWNERS` line `/tasks/ @authenticated(create)`
+  covers it, and the hook limits a new task's assets to its own
+  `<name>/attachments/` (§3.5). A Grain
   commits the attachments of a reply in its root with the reply (§5.4).
 - **They are part of the task's spec.** A relative `context:` entry reads
   the task's own commit (§5.6), and the hook freezes a task's
@@ -5421,8 +5421,8 @@ not `kind:` objects. The reasons:
 
 The cost is that grain keeps its workflow parser beside the front-matter
 parser. It has that parser already, and needs it for GitHub
-compatibility anyway. A grain folder's `scope` covers `workflows/`, but
-only `*.md` files with `kind:` are objects, so YAML there is never misread.
+compatibility anyway. Only files with a kind suffix are objects (§3.2),
+so YAML in `.grain/workflows/` is never misread.
 
 ### 12.3 Design docs in place
 
