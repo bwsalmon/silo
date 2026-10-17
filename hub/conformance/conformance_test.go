@@ -112,3 +112,63 @@ func TestNonconformingGrainFails(t *testing.T) {
 		t.Errorf("scenarios %v, passed %v; want refuse failed", got, rep.Passed)
 	}
 }
+
+// runViews runs the unlisted scenario, and the run it needs, against a
+// reference Grain answering views as views does.
+func runViews(t *testing.T, views refgrain.Views) *conformance.Report {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	grainCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	defer func() { stop(); <-done }()
+	rep, err := conformance.Run(ctx, conformance.Config{
+		Dir:     t.TempDir(),
+		Timeout: 10 * time.Second,
+		Only:    []string{"run", "unlisted"},
+		Logf:    t.Logf,
+		Start: func(env conformance.Env) error {
+			g := &refgrain.Grain{Hub: env.Hub, Token: env.Token, ID: env.Node,
+				Repos: []string{env.Repo}, Allow: []string{env.Repo},
+				Slots: 2, Views: views, Logf: t.Logf}
+			go func() { defer close(done); g.Run(grainCtx) }()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rep
+}
+
+// A Grain asked directly, past the hub's check, for a ref it never
+// listed, a traversal, or another task's ref, refuses: by an error, or
+// by closing the stream unanswered (SA1-M3, INV-11). One that serves
+// whatever it is asked fails, and so does one that serves no views at
+// all, whose refusals prove nothing.
+func TestUnlistedViews(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		views refgrain.Views
+		want  conformance.Status
+	}{
+		{"listed", refgrain.ViewListed, conformance.Pass},
+		{"close", refgrain.ViewClose, conformance.Pass},
+		{"any", refgrain.ViewAny, conformance.Fail},
+		{"none", refgrain.ViewNone, conformance.Fail},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rep := runViews(t, c.views)
+			for _, v := range rep.Scenarios {
+				if v.Name == "unlisted" && v.Status != c.want {
+					t.Errorf("unlisted: %s (%s), want %s", v.Status, v.Detail, c.want)
+				} else if v.Name == "unlisted" {
+					t.Logf("unlisted: %s (%s)", v.Status, v.Detail)
+				}
+			}
+			if got := statuses(rep); got["unlisted"] == "" {
+				t.Errorf("no unlisted scenario in %v", got)
+			}
+		})
+	}
+}
