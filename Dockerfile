@@ -14,6 +14,8 @@ WORKDIR /src/ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY ui ./
+# The UI's API client, built from source with the UI (ui/vite.config.ts).
+COPY sdk/ts/src /src/sdk/ts/src
 RUN npm run build
 
 FROM golang:1.26-bookworm AS build

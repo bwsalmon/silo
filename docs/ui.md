@@ -1,9 +1,10 @@
 # The hub's human UI: a new UI in silo, or grain's UI pointed at the hub
 
 Part of the [hub design](hub.md). Status: **option (a) chosen by the
-owner; stages U1, U2, U3's silo side and U7's silo side built**
-(`hub/ui`, `ui/`; §6, §7 for running it, §8 for U2's writes, §9 for
-proposals and approvals, and §10 for interactive sessions).
+owner; stages U1, U2, U3's silo side, U4 and U7's silo side built**
+(`hub/ui`, `ui/`, `sdk/ts`; §6, §7 for running it, §8 for U2's writes,
+§9 for proposals and approvals, §10 for interactive sessions, and §11
+for the client SDK).
 
 People need a page where they file, approve and watch tasks across
 teams. The hub (hub.md) has the APIs for it: intake (§6), the directory
@@ -150,6 +151,9 @@ client of grain's `/api`, not of the hub's. A team that wants its own
 page, or a customised Grain that wants to show hub context, builds on
 the SDK instead of forking either UI.
 
+As built (U4, §11), the SDK is `sdk/ts`, and the hub UI reaches the
+API through it and nothing else.
+
 ## 5. Recommendation
 
 **Option (a): a new, small UI in bwsalmon/silo, served by `silo hub
@@ -174,7 +178,7 @@ Each stage is a candidate task, to be filed once the owner chooses.
 | U1 | `silo hub serve` serves an embedded SPA at `/`. Read-only pages: backlog, task with live events and the view-through, nodes. The frontend build in silo CI, or a committed bundle (the owner's choice). **Built:** `hub/ui` and `ui/`, built in silo CI (`.grain/workflows/ui.yml` and the image's Dockerfile); §7. | silo |
 | U2 | Filing, cancel and requeue. Team admin. Minting and revoking node tokens. **Built:** `ui/src/pages/FileTask.tsx`, `Teams.tsx`, `TeamPage.tsx`, the task page's actions and `ui/src/components/NodeTokens.tsx`, with `GET /v1/teams/{team}` added to the public API (hub.md §5.3); §8. | silo |
 | U3 | The two API gaps from §1: a `proposed` state with team-member approval, and answering `approval_request` through the hub to the node. The UI for both. **Built (silo side):** `proposed` and `rejected` in `hub/tasks`, `approve`, `reject` and `approvals` in its API, the `approve` message on the task stream (hub.md §6.1, §6.2; [hub-interface.md](hub-interface.md)), `ui/src/pages/Proposals.tsx`, `ProposalActions.tsx` and `ApprovalPrompt.tsx`; §9. The node's side of `approve` is bwsalmon/grain's. | silo (API and UI), then bwsalmon/grain for the node's side of `approve` |
-| U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. | silo |
+| U4 | A TypeScript client SDK carved from the UI's API layer, which the UI then uses. **Built:** `sdk/ts` (`@silo/hub-sdk`, not published yet), which `ui/src/api.ts` instantiates and the UI uses for every request; `ui/src/sdkonly.test.ts` fails on a request of the UI's own, and the SDK's routes test on a route `docs/hub.md` does not document (the team settings routes were added to its §5.3 table); §11. | silo |
 | U5 | A Grain's local UI shows the hub task ID and links to the hub page for tasks the hub placed. | bwsalmon/grain |
 | U7 | Interactive sessions: long-lived chat tasks with an agent, like grain's chat and director tasks, viewable and answerable from the hub. **Built (silo side):** the `interactive` task kind, a Grain's `interactive` feature in `hello` and placement by it, `POST`/`GET /v1/tasks/{id}/messages`, the `message` message on the task stream, and the `awaiting_reply` and `message` events (hub.md §6.5, §7.1; [hub-interface.md](hub-interface.md)); in the UI, *Start a session*, the reply box and "waiting for you" (`ui/src/components/Session.tsx`); §10. The node's side is bwsalmon/grain's. | silo (API and UI), then bwsalmon/grain for the node's side |
 | U6 | Future: "Open Grain UI" for team admins, a Grain's own UI proxied by the hub on its own origin, read-only unless the Grain's owner opts in. Designed in [grain-ui-proxy.md](grain-ui-proxy.md), with its own silo (S1–S5) and grain (G1–G4) stages. | silo, then bwsalmon/grain |
@@ -465,3 +469,69 @@ accepted. `hub/server`'s `TestInteractiveSession` runs a session
 through a whole hub: a fake node is offered it, sends `awaiting_reply`,
 is sent a member's message, echoes it with a forged sender, which the
 subscriber sees replaced by the hub's record, and resumes.
+
+## 11. As built: U4
+
+**The package.** `sdk/ts` is `@silo/hub-sdk`, a TypeScript client for
+the hub's public API with no runtime dependencies, for browsers and
+Node 20 or later. Its README has the examples: listing a team's
+backlog, filing a task, following its events, and fetching an artifact
+without persisting it. `HubClient` has one method per route the UI
+used: the caller, the backlog and its writes, proposals and
+approvals, sessions' messages, the event stream, the view-through,
+nodes, node tokens, teams and team settings. The models are
+`src/models.ts`, and `src/errors.ts` turns the API's refusals into an
+`ApiError` with a subclass for each common status (400, 401, 403, 404,
+409, 503).
+
+**Sign-on.** With no options the client acts as the UI always has:
+requests are same-origin and carry only the browser's own credentials.
+Given `baseURL` and `token` (a string or a function that refreshes it),
+it sends `Authorization: Bearer`, or another header via `tokenHeader`
+(`Proxy-Authorization` behind IAP). That is how it works from Node.
+
+**Events.** `follow(task, {from, onEvent, onState})` and the async
+iterable `events(task, {from})` deliver each seq once and in order,
+and reconnect from the cursor. Two transports carry the stream. The
+browser's `EventSource` is the default with no token, since it can
+send only the browser's cookie and it reconnects by itself through
+Last-Event-ID. A streamed `fetch`, parsed by the SDK's `SSEParser`,
+carries a token and reconnects with `?from=`. A 4xx closes the stream
+and is reported as its `ApiError`. The SDK does not use the API's
+WebSocket form of the same stream.
+
+**The UI on the SDK.** `ui/src/api.ts` creates the one `HubClient` and
+re-exports its methods and types. `ui/src/events.ts`'s
+`useEventStream` is `hub.follow`. The UI builds the SDK from source:
+`ui/tsconfig.json`'s `paths` and `ui/vite.config.ts`'s alias map
+`@silo/hub-sdk` to `sdk/ts/src`, and the image's Dockerfile copies it
+in. `ui/src/sdkonly.test.ts` reads every app file (not tests) with its
+comments removed, and fails on a call to `fetch`, a string starting
+`/v1/`, an `EventSource`, a `WebSocket`, `XMLHttpRequest` or
+`sendBeacon`.
+
+**No private endpoints.** The extraction found none. Every route the
+UI calls was already in hub.md, but the team settings routes were
+only in §6.3's prose, so they were added to §5.3's route table.
+`sdk/ts/test/routes.test.ts` checks that every `HubClient` method
+sends the method and path hub.md documents for it, and that every
+method is covered, so a new one fails until hub.md names its route.
+
+**Tests.** `sdk/ts/test/*.test.ts` (vitest, in Node) cover the
+browser and token modes, writes, the error mapping, the view-through
+(uncached, 503 as unavailable), the SSE parser, and fetch-stream
+resume after a drop with each seq once. They also cover closing on a
+refusal and on an abort signal, the async iterator, and the
+EventSource transport's URL and dedupe. `sdk/ts/test/integration`
+builds `silo` and `internal/fakegrain` from the tree and runs the
+README's examples in Node against `silo hub serve`: set up a team
+through the SDK, mint a node token, file a task and list the backlog,
+follow its events, close, then resume from the cursor until the end.
+It also fetches an artifact through the view-through and checks the
+404 and 409 errors. Grain CI runs all of it in `ui.yml`'s `sdk` job.
+
+**Publishing.** Not yet. The package is `private: true`, and the
+README's *Publishing* section records the decision: publish when a
+client outside this repository needs it, versioned by the hub API
+(`0.x` until `/v1` is declared stable, then the major version matches
+the API's), and released from a tag by a workflow with the credential.
