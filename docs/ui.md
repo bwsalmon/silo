@@ -1,20 +1,26 @@
 # The hub's human UI: a new UI in silo, or grain's UI pointed at the hub
 
 Part of the [hub design](hub.md). Status: **option (a) chosen by the
-owner; stages U1, U2, U3's silo side, U4 and U7's silo side built**
+owner; stages U1, U2, U3's silo side, U4, U7's silo side, and the
+Grainfiles & Subscriptions multi-tenant views built**
 (`hub/ui`, `ui/`, `sdk/ts`; §6, §7 for running it, §8 for U2's writes,
-§9 for proposals and approvals, §10 for interactive sessions, and §11
-for the client SDK).
+§9 for proposals and approvals, §10 for interactive sessions, §11
+for the client SDK, and §12 for Grainfiles, subscriptions, and
+multi-tenant deployment views).
 
-People need a page where they file, approve and watch tasks across
-teams. The hub (hub.md) has the APIs for it: intake (§6), the directory
-and sign-on (§5), and live events with the view-through (§7). It does
-not have a page yet. This doc compares two places that page could come
-from and recommends one.
+People need a multi-tenant **Grain Hub** page where they inspect
+`.task.md` tasks and `.process.md` standing processes across watched
+repositories, view connected Grain deployments and their subscriptions,
+open tunneled local Grain UIs, and file, approve and watch tasks across
+teams. The hub (hub.md) has the APIs for it: Grainfile discovery and
+intake (§6), the directory and sign-on (§5), live events with the
+view-through (§7), and the node UI proxy (§11). This doc compares two
+places that page could come from and documents the built UI and SDK.
 
-- **(a) A new web UI in bwsalmon/silo,** served by `silo hub serve` and
-  built only on the hub's public API. It may copy some of grain's
-  frontend components.
+- **(a) A dedicated Grain Hub web UI in bwsalmon/silo,** served by
+  `silo hub serve` and built only on the hub's public API. It copies
+  grain's leaf frontend components and theme (`theme.ts`, `Markdown.tsx`,
+  `DiffView.tsx`, `StateChip.tsx`, `Timeline.tsx`).
 - **(b) Grain's existing UI made hub-capable:** the same frontend
   (bwsalmon/grain `ui/`, served by `pkg/ui`) talking to the hub's API
   instead of, or as well as, a local grain daemon.
@@ -23,13 +29,14 @@ from and recommends one.
 
 | Surface | Hub API today | Missing under either option |
 | --- | --- | --- |
+| Grainfiles & Processes across repositories | `GET /v1/grainfiles`, filterable by `kind` (`task` \| `process`), `recipient`, `repo`, `draft`, `node`, `url` | nothing |
 | Backlog across teams | `GET /v1/tasks?team=&state=`, filtered by `Access` | nothing |
 | Filing | `POST /v1/tasks`, `cancel`, `requeue` | nothing |
 | Proposals | `proposed`, `POST /v1/tasks/{id}/approve` and `/reject` for members of the owning team (U3) | nothing |
 | Approvals inside a run | `approval_request` is stored as conversation (§7.1); `POST /v1/tasks/{id}/approvals/{request_id}` answers it with an `approve` message to the node, on the task stream as `cancel` is (U3) | nothing (grain's side of `approve` is its own task) |
 | Live run view | SSE / WebSocket `GET /v1/tasks/{id}/events?from=` | nothing |
 | View-through | `GET /v1/tasks/{id}/artifacts?ref=` | nothing |
-| Grain/node directory, node tokens | `GET /v1/nodes`, `/v1/node-tokens` | nothing |
+| Grain deployments, subscriptions, tunneled local UIs, node tokens | `GET /v1/nodes` (including `recipients`, `repos`, `folders`, `grainfiles`, `ui`, `ui_url`), `/v1/node-tokens` | nothing |
 | Team admin | `/v1/me`, `/v1/teams/...` | nothing |
 
 The two gaps were API work in `hub/tasks` and `hub/live`, which both
@@ -45,15 +52,18 @@ paths, `pkg/ui/approvals.go`), PR state, CI and the merge queue are
 [hub-interface.md](hub-interface.md)). A customised Grain may have none
 of them. The hub sees them, if at all, as conversation text and links.
 
-## 2. Option (a): a new UI in silo
+## 2. Option (a): the Grain Hub UI in silo
 
-**Shape.** A small single-page app, embedded in the hub binary and
-served at `/` from the same origin as `/v1/...`. It is a client of the
-public API only, the same API a custom UI or the SDK uses, with no
-private endpoints. The pages are: backlog (per team and across the
-caller's teams), task (prompt, lifecycle, the event stream, the
-artifacts), file a task, proposals and approvals, nodes and node
-tokens, and teams.
+**Shape.** A single-page app branded **Grain Hub**, embedded in the hub
+binary and served at `/` from the same origin as `/v1/...`. It is a
+client of the public API only, the same API a custom UI or the SDK uses,
+with no private endpoints. The pages are: backlog (per team and across
+the caller's teams), Grainfiles & Processes (`/grainfiles`), task
+(prompt, lifecycle, the event stream, the artifacts), file a task,
+proposals and approvals, deployments/nodes (`/nodes`, showing each
+deployment's `recipient` identities, subscribed repositories and
+processes, online/capacity status, tunneled local Grain UI links, and
+node tokens), and teams.
 
 **Customised Grains.** The UI renders only what the task interface
 defines: the lifecycle, the conversation, the token stream and
@@ -536,3 +546,78 @@ README's *Publishing* section records the decision: publish when a
 client outside this repository needs it, versioned by the hub API
 (`0.x` until `/v1` is declared stable, then the major version matches
 the API's), and released from a tag by a workflow with the credential.
+
+## 12. As built: Grain Hub Branding, Grainfiles & Subscriptions, and Deployment Views
+
+**Branding and navigation.** The web UI (`ui/index.html`,
+`hub/ui/static/placeholder.html`, `ui/src/App.tsx`) is branded **Grain
+Hub**, retaining the shared Grain MUI theme (`ui/src/theme.ts`) and
+shared leaf components (`Markdown.tsx`, `DiffView.tsx`, `StateChip.tsx`,
+`Timeline.tsx`). The top navigation bar includes **Grainfiles**
+(`/grainfiles`) alongside **Backlog** (`/`), **Teams** (`/teams`),
+**Nodes** (`/nodes`), and **File a task** (`/file`).
+
+**TypeScript SDK (`sdk/ts`, `@silo/hub-sdk`).** `HubClient` provides
+typed methods and models (`Grainfile`, `GrainfileKind`,
+`GrainfileTriggers`, `GrainfileSubscriptions`, `GrainfileEvent`,
+`GrainfilesOverview`, `GrainfileInspection`, `GrainfileQuery`, `NodeUI`)
+for the Grainfile discovery and subscription endpoints ([hub.md](hub.md)
+§6):
+
+- `getGrainfilesOverview(query)` — fetches `GET /v1/grainfiles` filtered
+  by `kind` (`'task' | 'process'`), `recipient`, `repo`, `draft`,
+  `include_drafts`, `node`, or `url`, normalizing `on` trigger metadata
+  and timestamps.
+- `listGrainfiles(query)` — lists indexed `.task.md` tasks and
+  `.process.md` standing processes matching `query`.
+- `inspectGrainfile(urlOrPath)` — inspects a single Grainfile's resolved
+  front-matter metadata (`title`, `recipient`, `requestor`, `draft`,
+  `not_before`, `created_at`, `references`, `authorized_references`,
+  `depends_on`, `trigger_with`, `on`, `gate`), matching node
+  subscriptions, and recent trigger/execution events.
+- `listGrainfileSubscriptions(nodeId)` — lists node Grainfile
+  subscriptions (`recipients`, `repos`, `folders`, `grainfiles`).
+- `listGrainfileEvents(query)` — lists discoverable Grainfile trigger
+  and completion events (`task_ready`, `process_updated`,
+  `process_triggered`, `dependency_completed`).
+- `listNodes()` (`GET /v1/nodes`) — returns each node's `recipients`,
+  subscribed `repos`, `folders`, and `grainfiles`, and tunneled local UI
+  metadata (`ui`, `ui_url`) when `nodeui` is offered.
+
+**Grainfiles & Processes page (`/grainfiles`, `ui/src/pages/Grainfiles.tsx`).**
+Displays indexed `.task.md` tasks and `.process.md` standing processes
+across watched repositories, filterable by `kind` (`task` | `process`),
+`draft` status (`all` | `active` | `draft`), `recipient` deployment URL,
+and `repo`:
+
+- Each row displays its `kind` chip (`GrainfileKindChip`), `title`,
+  source repository and file path link (`safeUrl`), `recipient`
+  deployment URL, optional `requestor`, `Draft` and `Not before`
+  badges, `on` trigger summary (`schedule`, `push`, `merge`,
+  `pull_request`, `manual`, `scenario`) and `Gate` badge, and
+  `depends_on` / `trigger_with` target links.
+- Selecting any Grainfile opens the inspection panel showing its full
+  resolved front-matter metadata (`title`, `recipient`, `requestor`,
+  `draft`, `not_before`, `created_at`, `commit_sha`, `references`,
+  `authorized_references`, `depends_on`, `trigger_with`, `on`, `gate`),
+  subscribed deployments, and recent trigger and execution events.
+
+**Deployments / Nodes page (`/nodes`, `ui/src/pages/Nodes.tsx`).**
+Displays each connected Grain deployment's:
+
+- `recipient` identity URL(s) (`recipients`), linked safely via
+  `safeUrl`.
+- Subscribed repositories (`repos`), folders (`folders`), and explicit
+  standing processes / Grainfiles (`grainfiles`).
+- Online/stale/offline status (`NodeStatusChip`) and free slot capacity
+  (`free - claimed of slots`).
+- Direct link (**Open Grain UI**) to open the deployment's tunneled
+  local Grain UI ([grain-ui-proxy.md](grain-ui-proxy.md)) when `nodeui`
+  is offered and the deployment is online (and `Offline (nodeui)` when
+  offline).
+
+**Invariants preserved.** All UI requests go exclusively through
+`@silo/hub-sdk` (`ui/src/sdkonly.test.ts`), all untrusted/external links
+pass through `safeUrl` (`ui/src/content.test.tsx`), and no source code,
+tokens, or artifacts are ever written to browser storage or service
+workers (`ui/src/trust.test.tsx`, `sdk/ts/test/trust.test.ts`).

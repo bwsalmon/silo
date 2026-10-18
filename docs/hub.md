@@ -1155,10 +1155,11 @@ routes over `Server.Open` to the Grain deployment that owns the run
   a `message` event on its event stream (§7.1) and signals waiting state
   with `awaiting_reply` (`waiting` / `resumed`).
 
-The task and interactive-action HTTP API routes (`tasks.API`, verified by
-`sdk/ts/test/routes.test.ts`):
+The Grainfile discovery (`grainfiles.API`), task, and interactive-action
+HTTP API routes (`tasks.API`, verified by `sdk/ts/test/routes.test.ts`):
 
 ```
+GET  /v1/grainfiles?kind=task|process&recipient=...&repo=...&draft=true|false&node=...&url=...   indexed Grainfile metadata, subscriptions, and events
 POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}
 GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
 GET  /v1/tasks/{id}

@@ -20,6 +20,12 @@ import type {
   Approval,
   ArtifactResult,
   Decision,
+  Grainfile,
+  GrainfileEvent,
+  GrainfileInspection,
+  GrainfileQuery,
+  GrainfilesOverview,
+  GrainfileSubscriptions,
   HubEvent,
   Me,
   MintedToken,
@@ -68,6 +74,75 @@ const teamPath = (team: string) => `/v1/teams/${enc(team)}`;
 // repoPath keeps the slash between a repository's owner and name: the
 // API's route is /repos/{owner}/{name}.
 const repoPath = (team: string, repo: string) => `${teamPath(team)}/repos/${repo.split('/').map(enc).join('/')}`;
+
+function cleanTimestamp(ts?: string): string | undefined {
+  if (!ts || ts.startsWith('0001-01-01')) return undefined;
+  return ts;
+}
+
+function normalizeGrainfile(g: Grainfile): Grainfile {
+  const out: Grainfile = { ...g };
+  const on = g.on ?? g.on_spec;
+  if (on && Object.keys(on).length > 0) {
+    out.on = on;
+  } else {
+    delete out.on;
+  }
+  out.not_before = cleanTimestamp(g.not_before);
+  if (!out.not_before) delete out.not_before;
+  out.created_at = cleanTimestamp(g.created_at);
+  if (!out.created_at) delete out.created_at;
+  return out;
+}
+
+function normalizeGrainfileEvent(e: GrainfileEvent): GrainfileEvent {
+  const out: GrainfileEvent = { ...e };
+  const on = e.on ?? e.on_spec;
+  if (on && Object.keys(on).length > 0) {
+    out.on = on;
+  } else {
+    delete out.on;
+  }
+  out.not_before = cleanTimestamp(e.not_before);
+  if (!out.not_before) delete out.not_before;
+  out.created_at = cleanTimestamp(e.created_at);
+  if (!out.created_at) delete out.created_at;
+  return out;
+}
+
+function grainfilesQueryString(q: GrainfileQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.kind) p.set('kind', q.kind);
+  if (q.recipient) p.set('recipient', q.recipient);
+  if (q.repo) p.set('repo', q.repo);
+  if (q.draft !== undefined) p.set('draft', q.draft ? 'true' : 'false');
+  if (q.include_drafts !== undefined) p.set('include_drafts', q.include_drafts ? 'true' : 'false');
+  if (q.node) p.set('node', q.node);
+  if (q.url) p.set('url', q.url);
+  const qs = p.toString();
+  return `/v1/grainfiles${qs ? `?${qs}` : ''}`;
+}
+
+function matchesRepoFilter(itemRepo: string, filterRepo: string): boolean {
+  const norm = (s: string) => s.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/^\/+|\/+$/g, '').toLowerCase();
+  return norm(itemRepo) === norm(filterRepo);
+}
+
+function matchesRecipientFilter(itemRecipient: string, filterRecipient: string): boolean {
+  const norm = (s: string) => s.trim().replace(/\/+$/, '').toLowerCase();
+  return norm(itemRecipient) === norm(filterRecipient);
+}
+
+function matchesGrainfileTarget(g: Grainfile, urlOrPath: string): boolean {
+  const target = urlOrPath.trim().replace(/\/+$/, '');
+  const repoSlug = g.repo.replace(/^https?:\/\/github\.com\//i, '').replace(/\/+$/, '');
+  return (
+    g.url.replace(/\/+$/, '') === target ||
+    g.path === target.replace(/^\/+/, '') ||
+    `${repoSlug}/${g.path}` === target ||
+    `${g.repo.replace(/\/+$/, '')}/${g.path}` === target
+  );
+}
 
 export class HubClient {
   private readonly base: string;
@@ -344,5 +419,81 @@ export class HubClient {
 
   setTeamSettings(team: string, s: TeamSettings): Promise<TeamSettings> {
     return this.write<TeamSettings>('PUT', `${teamPath(team)}/settings`, s);
+  }
+
+  // Grainfile discovery, metadata inspection, and node subscriptions (docs/hub.md §6).
+
+  async getGrainfilesOverview(q: GrainfileQuery = {}, signal?: AbortSignal): Promise<GrainfilesOverview> {
+    const r = await this.getJSON<Partial<GrainfilesOverview>>(grainfilesQueryString(q), signal);
+    let grainfiles = (r.grainfiles ?? []).map(normalizeGrainfile);
+    let subscriptions = r.subscriptions ?? [];
+    let events = (r.events ?? []).map(normalizeGrainfileEvent);
+
+    if (q.kind) {
+      grainfiles = grainfiles.filter((g) => g.kind === q.kind);
+      events = events.filter((e) => !e.kind || e.kind === q.kind);
+    }
+    if (q.recipient) {
+      grainfiles = grainfiles.filter((g) => matchesRecipientFilter(g.recipient, q.recipient!));
+      events = events.filter((e) => !e.recipient || matchesRecipientFilter(e.recipient, q.recipient!));
+    }
+    if (q.repo) {
+      grainfiles = grainfiles.filter((g) => matchesRepoFilter(g.repo, q.repo!));
+      events = events.filter((e) => matchesRepoFilter(e.repo, q.repo!));
+    }
+    if (q.draft !== undefined) {
+      grainfiles = grainfiles.filter((g) => Boolean(g.draft) === q.draft);
+    } else if (q.include_drafts === false) {
+      grainfiles = grainfiles.filter((g) => !g.draft);
+    }
+    if (q.node) {
+      subscriptions = subscriptions.filter((s) => s.node_id === q.node);
+    }
+    if (q.url) {
+      grainfiles = grainfiles.filter((g) => matchesGrainfileTarget(g, q.url!));
+      events = events.filter(
+        (e) =>
+          e.grainfile_url === q.url ||
+          e.path === q.url ||
+          e.dependency_url === q.url ||
+          e.triggered_by === q.url,
+      );
+    }
+
+    return { grainfiles, subscriptions, events };
+  }
+
+  async listGrainfiles(q: GrainfileQuery = {}, signal?: AbortSignal): Promise<Grainfile[]> {
+    const r = await this.getGrainfilesOverview(q, signal);
+    return r.grainfiles;
+  }
+
+  async inspectGrainfile(urlOrPath: string, signal?: AbortSignal): Promise<GrainfileInspection> {
+    const r = await this.getGrainfilesOverview({ url: urlOrPath, include_drafts: true }, signal);
+    const grainfile = r.grainfiles.find((g) => matchesGrainfileTarget(g, urlOrPath)) ?? r.grainfiles[0] ?? null;
+    const targetUrl = grainfile?.url ?? urlOrPath;
+    const events = r.events.filter(
+      (e) =>
+        e.grainfile_url === targetUrl ||
+        e.grainfile_url === urlOrPath ||
+        (grainfile && e.path === grainfile.path && matchesRepoFilter(e.repo, grainfile.repo)) ||
+        e.dependency_url === targetUrl ||
+        e.triggered_by === targetUrl,
+    );
+    return {
+      grainfile,
+      events,
+      subscriptions: r.subscriptions,
+    };
+  }
+
+  async listGrainfileSubscriptions(node?: string, signal?: AbortSignal): Promise<GrainfileSubscriptions[]> {
+    const r = await this.getGrainfilesOverview(node ? { node } : {}, signal);
+    return r.subscriptions;
+  }
+
+  async listGrainfileEvents(q: GrainfileQuery = {}, signal?: AbortSignal): Promise<GrainfileEvent[]> {
+    const r = await this.getGrainfilesOverview(q, signal);
+    return r.events;
   }
 }

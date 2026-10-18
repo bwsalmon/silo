@@ -5,7 +5,7 @@
 // brand mark's animation for a running task. The colours are the
 // copied theme's palette (theme.ts).
 import { Chip, type ChipProps } from '@mui/material';
-import type { TaskState } from '../api';
+import type { GrainfileKind, TaskState } from '../api';
 
 const colors: Record<TaskState, ChipProps['color']> = {
   proposed: 'secondary',
@@ -34,4 +34,13 @@ const nodeColors: Record<string, ChipProps['color']> = { online: 'success', stal
 
 export function NodeStatusChip({ status }: { status: string }) {
   return <Chip size="small" label={status} color={nodeColors[status] ?? 'default'} />;
+}
+
+const grainfileKindColors: Record<GrainfileKind, ChipProps['color']> = {
+  task: 'info',
+  process: 'primary',
+};
+
+export function GrainfileKindChip({ kind }: { kind: GrainfileKind }) {
+  return <Chip size="small" label={kind} color={grainfileKindColors[kind] ?? 'default'} />;
 }

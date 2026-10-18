@@ -78,6 +78,14 @@ export interface Me {
   teams: Record<string, Role> | null;
 }
 
+// NodeUI describes a node's tunneled local Grain web UI status on GET /v1/nodes.
+export interface NodeUI {
+  offered?: boolean;
+  url?: string;
+  team?: string;
+  access?: string;
+}
+
 // NodeEntry is a node as the directory (GET /v1/nodes) lists it.
 export interface NodeEntry {
   id: string;
@@ -85,12 +93,167 @@ export interface NodeEntry {
   slots: number;
   version?: string;
   labels?: Record<string, string>;
+  features?: string[];
+  recipients?: string[];
+  folders?: string[];
+  grainfiles?: string[];
+  ui?: NodeUI;
+  ui_url?: string;
   owner: string;
   status: 'online' | 'stale' | 'offline' | string;
   free: number;
   claimed: number;
   connected_at: string;
   last_seen: string;
+}
+
+export type GrainfileKind = 'task' | 'process';
+
+export const GRAINFILE_KINDS: GrainfileKind[] = ['task', 'process'];
+
+export interface ScheduleTrigger {
+  cron: string;
+  timezone?: string;
+}
+
+export interface EventFilter {
+  branches?: string[];
+  paths?: string[];
+  ignore?: string[];
+  types?: string[];
+  action?: string;
+  base?: string;
+}
+
+export interface ManualTrigger {
+  inputs?: Record<string, string>;
+}
+
+export interface ScenarioTrigger {
+  description?: string;
+  ref?: string;
+  repo?: string;
+  path?: string;
+  ref_pin?: string;
+}
+
+export interface GrainfileTriggers {
+  schedule?: ScheduleTrigger | ScheduleTrigger[];
+  push?: EventFilter;
+  merge?: EventFilter;
+  pull_request?: EventFilter;
+  workflow_run?: EventFilter;
+  release?: EventFilter;
+  manual?: ManualTrigger;
+  scenario?: ScenarioTrigger | ScenarioTrigger[];
+}
+
+// Grainfile is an indexed .task.md or .process.md metadata record from GET /v1/grainfiles (hub.md §6.3).
+export interface Grainfile {
+  repo: string;
+  path: string;
+  commit_sha?: string;
+  sha?: string;
+  ref?: string;
+  url: string;
+  kind: GrainfileKind;
+  title: string;
+  recipient: string;
+  requestor?: string;
+  draft?: boolean;
+  not_before?: string;
+  created_at?: string;
+  references?: string[];
+  authorized_references?: string[];
+  depends_on?: string[];
+  trigger_with?: string[];
+  on?: GrainfileTriggers;
+  on_spec?: GrainfileTriggers;
+  gate?: boolean;
+  updated_at?: string;
+}
+
+// GrainfileSubscriptions is a node's registered Grainfile subscription record on GET /v1/grainfiles (hub.md §6.2).
+export interface GrainfileSubscriptions {
+  node_id: string;
+  owner?: string;
+  recipients?: string[];
+  repos?: string[];
+  folders?: string[];
+  grainfiles?: string[];
+  cursor?: number;
+  revision?: number;
+  updated_at?: string;
+}
+
+export type GrainfileEventType =
+  | 'task_ready'
+  | 'process_updated'
+  | 'process_triggered'
+  | 'dependency_completed'
+  | (string & {});
+
+export const GRAINFILE_EVENT_TYPES: GrainfileEventType[] = [
+  'task_ready',
+  'process_updated',
+  'process_triggered',
+  'dependency_completed',
+];
+
+// GrainfileEvent is a discoverable Grainfile trigger or execution event on GET /v1/grainfiles (hub.md §6.4, §6.5).
+export interface GrainfileEvent {
+  seq?: number;
+  id?: string;
+  type: GrainfileEventType;
+  repo: string;
+  path?: string;
+  commit_sha?: string;
+  ref?: string;
+  grainfile_url: string;
+  kind?: GrainfileKind;
+  title?: string;
+  recipient?: string;
+  requestor?: string;
+  not_before?: string;
+  references?: string[];
+  authorized_references?: string[];
+  depends_on?: string[];
+  trigger_with?: string[];
+  on?: GrainfileTriggers;
+  on_spec?: GrainfileTriggers;
+  gate?: boolean;
+  trigger_source?: string;
+  triggered_by?: string;
+  changed_paths?: string[];
+  dependency_url?: string;
+  dependency_state?: string;
+  reason?: string;
+  created_at?: string;
+}
+
+// GrainfilesOverview is the full response of GET /v1/grainfiles.
+export interface GrainfilesOverview {
+  grainfiles: Grainfile[];
+  subscriptions: GrainfileSubscriptions[];
+  events: GrainfileEvent[];
+}
+
+// GrainfileInspection is the result of inspecting a single Grainfile's metadata, subscriptions, and recent trigger/execution events.
+export interface GrainfileInspection {
+  grainfile: Grainfile | null;
+  events: GrainfileEvent[];
+  subscriptions: GrainfileSubscriptions[];
+}
+
+// GrainfileQuery narrows GET /v1/grainfiles by kind, recipient, repo, draft state, node, or Grainfile URL.
+export interface GrainfileQuery {
+  kind?: GrainfileKind;
+  recipient?: string;
+  repo?: string;
+  draft?: boolean;
+  include_drafts?: boolean;
+  node?: string;
+  url?: string;
 }
 
 // HubEvent is an event as the hub relays it (hub/live.Event): the

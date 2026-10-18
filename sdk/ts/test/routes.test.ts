@@ -45,6 +45,11 @@ const cases: Record<string, Case> = {
   releaseRepo: ['DELETE', '/v1/teams/{team}/repos/{owner}/{name}', (h) => h.releaseRepo('infra', 'acme/app')],
   getTeamSettings: ['GET', '/v1/teams/{team}/settings', (h) => h.getTeamSettings('infra')],
   setTeamSettings: ['PUT', '/v1/teams/{team}/settings', (h) => h.setTeamSettings('infra', { lost_requeue_after_seconds: 0 })],
+  getGrainfilesOverview: ['GET', '/v1/grainfiles', (h) => h.getGrainfilesOverview({ kind: 'process' })],
+  listGrainfiles: ['GET', '/v1/grainfiles', (h) => h.listGrainfiles({ kind: 'task', repo: 'acme/app', draft: false })],
+  inspectGrainfile: ['GET', '/v1/grainfiles', (h) => h.inspectGrainfile('https://github.com/acme/app/blob/main/tasks/deploy.task.md')],
+  listGrainfileSubscriptions: ['GET', '/v1/grainfiles', (h) => h.listGrainfileSubscriptions('node-1')],
+  listGrainfileEvents: ['GET', '/v1/grainfiles', (h) => h.listGrainfileEvents({ recipient: 'https://github.com/acme/grain-eu' })],
 };
 
 const pattern = (template: string) => new RegExp(`^${template.replace(/\{[a-z_]+\}/g, '[^/?]+')}(\\?|$)`);

@@ -423,7 +423,7 @@ func TestWebUI(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp, string(b)
 	}
-	for _, p := range []string{"/", "/tasks/t-1", "/nodes", "/teams", "/teams/infra/members", "/file"} {
+	for _, p := range []string{"/", "/tasks/t-1", "/grainfiles", "/nodes", "/teams", "/teams/infra/members", "/file"} {
 		resp, body := get(p, "")
 		if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(body, "<html") {
 			t.Errorf("%s: %d %q, want the UI's page", p, resp.StatusCode, resp.Header.Get("Content-Type"))

@@ -120,3 +120,154 @@ describe('fetchArtifact', () => {
     });
   });
 });
+
+describe('Grainfiles and node subscriptions', () => {
+  const sampleOverview = {
+    grainfiles: [
+      {
+        repo: 'https://github.com/acme/app',
+        path: 'tasks/01-deploy.task.md',
+        commit_sha: '1111111',
+        ref: 'main',
+        url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
+        kind: 'task',
+        title: 'Deploy staging service',
+        recipient: 'https://github.com/acme/grain-eu',
+        requestor: 'Alice <alice@example.com>',
+        draft: false,
+        not_before: '2026-10-19T00:00:00Z',
+        created_at: '2026-10-18T10:00:00Z',
+        references: ['/docs/arch.md'],
+        authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
+        depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.md'],
+        updated_at: '2026-10-18T10:05:00Z',
+      },
+      {
+        repo: 'https://github.com/acme/app',
+        path: '.grain/processes/ci.process.md',
+        commit_sha: '1111111',
+        ref: 'main',
+        url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md',
+        kind: 'process',
+        title: 'Continuous verification gate',
+        recipient: 'https://github.com/acme/grain-eu',
+        draft: true,
+        not_before: '0001-01-01T00:00:00Z',
+        created_at: '0001-01-01T00:00:00Z',
+        trigger_with: ['https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md'],
+        on_spec: { push: { branches: ['main'] }, schedule: { cron: '0 * * * *' } },
+        gate: true,
+        updated_at: '2026-10-18T10:06:00Z',
+      },
+    ],
+    subscriptions: [
+      {
+        node_id: 'ws-eu-1',
+        owner: 'alice@example.com',
+        recipients: ['https://github.com/acme/grain-eu'],
+        repos: ['https://github.com/acme/app'],
+        folders: ['https://github.com/acme/app/tree/main/.grain/processes'],
+        grainfiles: ['https://github.com/acme/app/blob/main/tasks/01-deploy.task.md'],
+        cursor: 4,
+        revision: 2,
+        updated_at: '2026-10-18T10:07:00Z',
+      },
+    ],
+    events: [
+      {
+        seq: 1,
+        type: 'task_ready',
+        repo: 'https://github.com/acme/app',
+        path: 'tasks/01-deploy.task.md',
+        grainfile_url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
+        kind: 'task',
+        title: 'Deploy staging service',
+        recipient: 'https://github.com/acme/grain-eu',
+        created_at: '2026-10-18T10:05:00Z',
+      },
+      {
+        seq: 2,
+        type: 'process_triggered',
+        repo: 'https://github.com/acme/app',
+        path: '.grain/processes/ci.process.md',
+        grainfile_url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md',
+        kind: 'process',
+        title: 'Continuous verification gate',
+        recipient: 'https://github.com/acme/grain-eu',
+        trigger_source: 'push',
+        gate: true,
+        on_spec: { push: { branches: ['main'] } },
+        created_at: '2026-10-18T10:06:00Z',
+      },
+    ],
+  };
+
+  it('lists grainfiles filtered by kind, recipient, repo, and draft', async () => {
+    const f = stub(200, JSON.stringify(sampleOverview));
+    const h = new HubClient({ fetch: f });
+    const tasks = await h.listGrainfiles({
+      kind: 'task',
+      recipient: 'https://github.com/acme/grain-eu',
+      repo: 'acme/app',
+      draft: false,
+    });
+    expect(f.mock.calls[0][0]).toBe(
+      '/v1/grainfiles?kind=task&recipient=https%3A%2F%2Fgithub.com%2Facme%2Fgrain-eu&repo=acme%2Fapp&draft=false',
+    );
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].title).toBe('Deploy staging service');
+    expect(tasks[0].requestor).toBe('Alice <alice@example.com>');
+    expect(tasks[0].depends_on).toEqual(['https://github.com/acme/app/blob/main/tasks/00-prep.task.md']);
+  });
+
+  it('inspects a grainfile’s metadata, normalized on triggers, and recent events', async () => {
+    const f = stub(200, JSON.stringify(sampleOverview));
+    const h = new HubClient({ fetch: f });
+    const insp = await h.inspectGrainfile('https://github.com/acme/app/blob/main/.grain/processes/ci.process.md');
+    expect(insp.grainfile?.title).toBe('Continuous verification gate');
+    expect(insp.grainfile?.gate).toBe(true);
+    expect(insp.grainfile?.on?.push?.branches).toEqual(['main']);
+    expect(insp.grainfile?.not_before).toBeUndefined();
+    expect(insp.grainfile?.trigger_with).toEqual([
+      'https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md',
+    ]);
+    expect(insp.events).toHaveLength(1);
+    expect(insp.events[0].type).toBe('process_triggered');
+    expect(insp.events[0].trigger_source).toBe('push');
+    expect(insp.subscriptions).toHaveLength(1);
+    expect(insp.subscriptions[0].node_id).toBe('ws-eu-1');
+  });
+
+  it('reads node recipient identities, subscriptions, and nodeui URLs on GET /v1/nodes', async () => {
+    const f = stub(
+      200,
+      JSON.stringify({
+        nodes: [
+          {
+            id: 'ws-eu-1',
+            repos: ['acme/app'],
+            slots: 2,
+            owner: 'alice@example.com',
+            status: 'online',
+            free: 1,
+            claimed: 0,
+            connected_at: '2026-10-18T10:00:00Z',
+            last_seen: '2026-10-18T10:08:00Z',
+            features: ['grainfiles', 'nodeui'],
+            recipients: ['https://github.com/acme/grain-eu'],
+            folders: ['https://github.com/acme/app/tree/main/.grain/processes'],
+            grainfiles: ['https://github.com/acme/app/blob/main/tasks/01-deploy.task.md'],
+            ui: { offered: true, url: 'https://ws-eu-1.nodes.hub.example.com/' },
+            ui_url: 'https://ws-eu-1.nodes.hub.example.com/',
+          },
+        ],
+      }),
+    );
+    const nodes = await new HubClient({ fetch: f }).listNodes();
+    expect(nodes[0].recipients).toEqual(['https://github.com/acme/grain-eu']);
+    expect(nodes[0].folders).toEqual(['https://github.com/acme/app/tree/main/.grain/processes']);
+    expect(nodes[0].grainfiles).toEqual(['https://github.com/acme/app/blob/main/tasks/01-deploy.task.md']);
+    expect(nodes[0].ui?.offered).toBe(true);
+    expect(nodes[0].ui_url).toBe('https://ws-eu-1.nodes.hub.example.com/');
+  });
+});

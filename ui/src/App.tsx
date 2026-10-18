@@ -8,6 +8,7 @@ import { useLoad } from './load';
 import { navigate, useRoute } from './router';
 import { Backlog } from './pages/Backlog';
 import { TaskPage } from './pages/TaskPage';
+import { Grainfiles } from './pages/Grainfiles';
 import { Nodes } from './pages/Nodes';
 import { FileTask } from './pages/FileTask';
 import { Teams } from './pages/Teams';
@@ -24,10 +25,13 @@ export function App() {
       <AppBar position="static" elevation={0}>
         <Toolbar variant="dense" sx={{ gap: 1 }}>
           <Typography variant="h6" sx={{ mr: 2 }}>
-            Silo
+            Grain Hub
           </Typography>
           <Button color="inherit" onClick={() => navigate('/')}>
             Backlog
+          </Button>
+          <Button color="inherit" onClick={() => navigate('/grainfiles')}>
+            Grainfiles
           </Button>
           <Button color="inherit" onClick={() => navigate('/teams')}>
             Teams
@@ -55,6 +59,7 @@ export function App() {
             {me.error && <Alert severity="error">{me.error.message}</Alert>}
             {route.page === 'backlog' && <Backlog me={me.data} team={route.team} />}
             {route.page === 'task' && <TaskPage id={route.id} me={me.data} />}
+            {route.page === 'grainfiles' && <Grainfiles me={me.data} />}
             {route.page === 'nodes' && <Nodes me={me.data} />}
             {route.page === 'file' && <FileTask me={me.data} team={route.team} />}
             {route.page === 'teams' && <Teams me={me.data} />}

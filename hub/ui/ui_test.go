@@ -35,7 +35,7 @@ func body(t *testing.T, r *http.Response) string {
 func TestHandler(t *testing.T) {
 	h := Handler(app)
 	// The app's own routes are its page, never cached, under its CSP.
-	for _, p := range []string{"/", "/index.html", "/tasks/t-1", "/teams/infra", "/nodes"} {
+	for _, p := range []string{"/", "/index.html", "/tasks/t-1", "/grainfiles", "/teams/infra", "/nodes"} {
 		r := get(t, h, "GET", p)
 		if r.StatusCode != http.StatusOK || !strings.Contains(body(t, r), `id="root"`) {
 			t.Errorf("%s: %d, want the app's page", p, r.StatusCode)

@@ -419,4 +419,43 @@ Run post-deploy verification once 01-deploy.task.md completes.
 	if len(outsiderView.Grainfiles) != 0 || len(outsiderView.Subscriptions) != 0 || len(outsiderView.Events) != 0 {
 		t.Errorf("outsider view leaked data: %+v", outsiderView)
 	}
+
+	// 7. Verify GET /v1/grainfiles query filters (kind, draft, url) and GET /v1/nodes recipient & subscription enrichment.
+	var kindFiltered, urlFiltered struct {
+		Grainfiles    []grainfiles.IndexRecord   `json:"grainfiles"`
+		Subscriptions []grainfiles.Subscriptions `json:"subscriptions"`
+		Events        []grainfiles.Event         `json:"events"`
+	}
+	if code := call(t, "GET", h.url+grainfiles.GrainfilesPath+"?kind=process&draft=false", "alice@example.com", nil, &kindFiltered); code != http.StatusOK {
+		t.Fatalf("alice GET /v1/grainfiles?kind=process&draft=false = %d", code)
+	}
+	if len(kindFiltered.Grainfiles) != 1 || kindFiltered.Grainfiles[0].Kind != grainfiles.KindProcess {
+		t.Errorf("process grainfiles = %+v, want 1 process", kindFiltered.Grainfiles)
+	}
+	if len(kindFiltered.Grainfiles[0].On.Push.Branches) != 1 || kindFiltered.Grainfiles[0].On.Push.Branches[0] != "main" {
+		t.Errorf("process grainfile On = %+v, want push branch main", kindFiltered.Grainfiles[0].On)
+	}
+
+	if code := call(t, "GET", h.url+grainfiles.GrainfilesPath+"?url=https://github.com/acme/repo-a/blob/main/tasks/01-deploy.task.md", "alice@example.com", nil, &urlFiltered); code != http.StatusOK {
+		t.Fatalf("alice GET /v1/grainfiles?url=... = %d", code)
+	}
+	if len(urlFiltered.Grainfiles) != 1 || urlFiltered.Grainfiles[0].Path != "tasks/01-deploy.task.md" {
+		t.Errorf("urlFiltered grainfiles = %+v, want tasks/01-deploy.task.md", urlFiltered.Grainfiles)
+	}
+
+	var nodesResp struct {
+		Nodes []registry.Entry `json:"nodes"`
+	}
+	if code := call(t, "GET", h.url+rendezvous.DirectoryPath, "bob@example.com", nil, &nodesResp); code != http.StatusOK {
+		t.Fatalf("bob GET /v1/nodes = %d", code)
+	}
+	if len(nodesResp.Nodes) != 2 || nodesResp.Nodes[0].ID != "node-b" || nodesResp.Nodes[1].ID != "node-c" {
+		t.Fatalf("bob nodes = %+v, want [node-b, node-c]", nodesResp.Nodes)
+	}
+	if len(nodesResp.Nodes[0].Recipients) != 1 || nodesResp.Nodes[0].Recipients[0] != recipientB {
+		t.Errorf("node-b recipients on GET /v1/nodes = %v, want [%s]", nodesResp.Nodes[0].Recipients, recipientB)
+	}
+	if len(nodesResp.Nodes[1].Recipients) != 1 || nodesResp.Nodes[1].Recipients[0] != recipientC {
+		t.Errorf("node-c recipients on GET /v1/nodes = %v, want [%s]", nodesResp.Nodes[1].Recipients, recipientC)
+	}
 }
