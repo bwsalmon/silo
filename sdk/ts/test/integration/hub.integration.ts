@@ -405,6 +405,43 @@ describe('the SDK against silo hub serve', () => {
     });
     expect(combined.map((g) => g.path)).toEqual(['tasks/verify.process.md']);
 
+    // Direct getGrainfilesOverview and filter parameters (kind, recipient, repo, draft, node)
+    const overview = await h.getGrainfilesOverview({ include_drafts: true });
+    expect(overview.grainfiles.map((g) => g.path)).toEqual([
+      'processes/lint.process.md',
+      'tasks/draft-idea.task.md',
+      'tasks/migrate.task.md',
+      'tasks/verify.process.md',
+    ]);
+    expect(overview.subscriptions.some((s) => s.node_id === node && s.recipients?.includes(recipientAlpha))).toBe(true);
+    expect(overview.events.map((e) => e.type)).toEqual(expect.arrayContaining(['task_ready', 'process_updated']));
+
+    const overviewByKind = await h.getGrainfilesOverview({ kind: 'task', draft: false });
+    expect(overviewByKind.grainfiles.map((g) => g.path)).toEqual(['tasks/migrate.task.md']);
+    expect(overviewByKind.events.every((e) => !e.kind || e.kind === 'task')).toBe(true);
+
+    const overviewByRecipient = await h.getGrainfilesOverview({ recipient: recipientBeta });
+    expect(overviewByRecipient.grainfiles.map((g) => g.path)).toEqual(['processes/lint.process.md']);
+    expect(overviewByRecipient.events.every((e) => !e.recipient || e.recipient === recipientBeta)).toBe(true);
+
+    const overviewByRepo = await h.getGrainfilesOverview({ repo, draft: true });
+    expect(overviewByRepo.grainfiles.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md']);
+
+    // Verify node recipient subscription reporting via listNodes and listGrainfileSubscriptions
+    const nodes = await h.listNodes();
+    const sdkNode = nodes.find((n) => n.id === node);
+    expect(sdkNode).toBeDefined();
+    expect(sdkNode?.features).toContain('grainfiles');
+    expect(sdkNode?.recipients).toEqual([recipientAlpha]);
+
+    const nodeSubs = await h.listGrainfileSubscriptions(node);
+    expect(nodeSubs).toHaveLength(1);
+    expect(nodeSubs[0].node_id).toBe(node);
+    expect(nodeSubs[0].recipients).toEqual([recipientAlpha]);
+
+    const alphaEvents = await h.listGrainfileEvents({ recipient: recipientAlpha, kind: 'task' });
+    expect(alphaEvents.some((e) => e.type === 'task_ready' && e.path === 'tasks/migrate.task.md')).toBe(true);
+
     // Inspect a Grainfile for detail metadata, authorized_references, recent_events, and subscriptions
     const inspection = await h.inspectGrainfile(`https://github.com/${repo}/blob/main/tasks/migrate.task.md`);
     expect(inspection.grainfile).not.toBeNull();

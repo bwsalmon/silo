@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ import (
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/server"
 	"github.com/bwsalmon/silo/hub/tasks"
+	"github.com/bwsalmon/silo/internal/pgtest"
 )
 
 // The people the suite signs in as. Team A is "team-a", owning the
@@ -167,7 +169,11 @@ func startHub(t *testing.T, o options) *hub {
 	t.Cleanup(ks.Close)
 	lg := &logs{t: t}
 	if o.database == "" {
-		o.database = "sqlite:" + t.TempDir() + "/hub.db"
+		if os.Getenv("SILO_SECURITY_POSTGRES") != "" {
+			o.database = pgtest.Start(t).URL
+		} else {
+			o.database = "sqlite:" + t.TempDir() + "/hub.db"
+		}
 	}
 	whSecret := webhookSecret
 	if o.noWebhookSecret {

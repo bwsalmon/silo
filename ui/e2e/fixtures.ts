@@ -252,7 +252,14 @@ async function startHub(dir: string): Promise<Hub> {
 
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
-  const database = process.env.SILO_E2E_DATABASE || `sqlite:${join(dir, 'hub.db')}`;
+  let database = process.env.SILO_E2E_DATABASE || `sqlite:${join(dir, 'hub.db')}`;
+  if (database.startsWith('postgres://') || database.startsWith('postgresql://')) {
+    const dbName = `silo_e2e_${port}_${process.pid}`;
+    execFileSync('psql', [database, '-c', `CREATE DATABASE ${dbName}`], { stdio: 'ignore' });
+    const parsed = new URL(database);
+    parsed.pathname = `/${dbName}`;
+    database = parsed.toString();
+  }
   const log = createWriteStream(join(dir, 'hub.log'));
   const proc = spawn(
     `${binDir}/silo`,

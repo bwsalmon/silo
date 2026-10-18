@@ -51,7 +51,8 @@ jobs:
   # §11): type-checked, built as the package would be, unit-tested with
   # vitest (its routes among them: each is one docs/hub.md documents),
   # then run in Node against a real `silo hub serve` and a fake Grain
-  # built from this tree.
+  # built from this tree (including live Grainfile discovery, filtering,
+  # overview inspection, and node recipient subscription reporting).
   sdk:
     name: sdk
     paths-ignore:
