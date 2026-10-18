@@ -170,6 +170,8 @@ export interface Grainfile {
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
   gate?: boolean;
+  subscribed_nodes?: string[];
+  recent_events?: GrainfileEvent[];
   updated_at?: string;
 }
 
@@ -245,13 +247,16 @@ export interface GrainfileInspection {
   subscriptions: GrainfileSubscriptions[];
 }
 
-// GrainfileQuery narrows GET /v1/grainfiles by kind, recipient, repo, draft state, node, or Grainfile URL.
+// GrainfileQuery narrows GET /v1/grainfiles by kind, recipient, repo, draft state, gate, requestor, path, node, or Grainfile URL.
 export interface GrainfileQuery {
   kind?: GrainfileKind;
   recipient?: string;
   repo?: string;
   draft?: boolean;
   include_drafts?: boolean;
+  gate?: boolean;
+  requestor?: string;
+  path?: string;
   node?: string;
   url?: string;
 }

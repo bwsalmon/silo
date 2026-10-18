@@ -249,6 +249,8 @@ type IndexRecord struct {
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
+	SubscribedNodes      []string  `json:"subscribed_nodes,omitempty"`
+	RecentEvents         []Event   `json:"recent_events,omitempty"`
 	UpdatedAt            time.Time `json:"updated_at"`
 
 	readyEmitted bool
@@ -343,6 +345,10 @@ type eventPayload struct {
 // also records the corresponding discoverable event (task_ready for .task.md,
 // process_updated for .process.md) in grainfile_events.
 func (s *Store) IndexGrainfile(ctx context.Context, g *Grainfile) (IndexRecord, error) {
+	return s.indexGrainfileAt(ctx, g, s.now())
+}
+
+func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time) (IndexRecord, error) {
 	if g == nil {
 		return IndexRecord{}, fmt.Errorf("%w: nil grainfile", ErrInvalid)
 	}
@@ -398,7 +404,10 @@ func (s *Store) IndexGrainfile(ctx context.Context, g *Grainfile) (IndexRecord, 
 		tw = []string{}
 	}
 
-	now := s.now().Truncate(time.Millisecond)
+	if at.IsZero() {
+		at = s.now()
+	}
+	now := at.UTC().Truncate(time.Millisecond)
 	activeNow := cp.ActiveAt(now)
 
 	rec := IndexRecord{
@@ -779,7 +788,7 @@ func (s *Store) loadLatestIndexQ(q rowQueryer, ctx context.Context, canonRepo st
 		query += ` WHERE repo = ?`
 		args = append(args, canonRepo)
 	}
-	query += ` ORDER BY updated_at DESC, commit_sha DESC`
+	query += ` ORDER BY updated_at DESC, repo ASC, path ASC, commit_sha DESC`
 
 	rows, err := q.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
@@ -823,13 +832,30 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 	at = at.UTC()
 	ev.At = at
 
+	changedTaskSet := map[string]bool{}
+	if ev.Source == TriggerPush || ev.Source == TriggerMerge {
+		for _, p := range ev.ChangedPaths {
+			if clean := normalizeRepoRelPath(p); clean != "" {
+				changedTaskSet[clean] = true
+			}
+		}
+	}
+
 	repoRecords, err := s.loadLatestIndexQ(s.db, ctx, canonRepo)
 	if err != nil {
 		return nil, err
 	}
 	hasMatch := false
 	for _, rec := range repoRecords {
-		if !rec.removed && !rec.Draft && rec.Kind == KindProcess && rec.ToGrainfile().MatchesEvent(ev) {
+		if rec.removed || rec.Draft {
+			continue
+		}
+		gf := rec.ToGrainfile()
+		if rec.Kind == KindProcess && gf.MatchesEvent(ev) {
+			hasMatch = true
+			break
+		}
+		if rec.Kind == KindTask && changedTaskSet[rec.Path] && gf.ActiveAt(at) {
 			hasMatch = true
 			break
 		}
@@ -845,26 +871,45 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 		if err != nil {
 			return err
 		}
+		slices.SortFunc(allRecords, func(a, b IndexRecord) int {
+			if c := strings.Compare(a.Repo, b.Repo); c != 0 {
+				return c
+			}
+			return strings.Compare(a.Path, b.Path)
+		})
 
 		type trigItem struct {
 			rec         IndexRecord
 			source      string
 			triggeredBy string
+			emit        bool
 		}
 		var queue []trigItem
+		var discovered []trigItem
 		visited := map[string]bool{}
 
 		for _, rec := range allRecords {
-			if rec.removed || rec.Draft || rec.Repo != canonRepo || rec.Kind != KindProcess {
+			if rec.removed || rec.Draft || rec.Repo != canonRepo {
 				continue
 			}
 			gf := rec.ToGrainfile()
-			if gf.MatchesEvent(ev) {
+			if rec.Kind == KindProcess && gf.MatchesEvent(ev) {
+				key := rec.Repo + "\x00" + rec.Path
+				visited[key] = true
+				item := trigItem{
+					rec:    rec,
+					source: ev.Source,
+					emit:   true,
+				}
+				queue = append(queue, item)
+				discovered = append(discovered, item)
+			} else if rec.Kind == KindTask && changedTaskSet[rec.Path] && gf.ActiveAt(at) {
 				key := rec.Repo + "\x00" + rec.Path
 				visited[key] = true
 				queue = append(queue, trigItem{
 					rec:    rec,
 					source: ev.Source,
+					emit:   false,
 				})
 			}
 		}
@@ -873,6 +918,99 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 			curr := queue[0]
 			queue = queue[1:]
 
+			// Evaluate trigger_with co-triggers referencing curr.rec.
+			for _, candidate := range allRecords {
+				if candidate.removed || candidate.Draft || len(candidate.TriggerWith) == 0 {
+					continue
+				}
+				if !candidate.ToGrainfile().ActiveAt(at) {
+					continue
+				}
+				candKey := candidate.Repo + "\x00" + candidate.Path
+				if visited[candKey] {
+					continue
+				}
+				for _, twURL := range candidate.TriggerWith {
+					if matchesGrainfileRef(curr.rec, twURL) {
+						visited[candKey] = true
+						item := trigItem{
+							rec:         candidate,
+							source:      TriggerWith,
+							triggeredBy: curr.rec.URL,
+							emit:        true,
+						}
+						queue = append(queue, item)
+						discovered = append(discovered, item)
+						break
+					}
+				}
+			}
+		}
+
+		if len(discovered) == 0 {
+			return nil
+		}
+
+		// Topologically sort discovered items so any item listed in another
+		// item's depends_on or trigger_with fires first.
+		n := len(discovered)
+		inDegree := make([]int, n)
+		edges := make([][]int, n)
+		for i := 0; i < n; i++ {
+			for j := 0; j < n; j++ {
+				if i == j {
+					continue
+				}
+				// Does j depend on or trigger_with i?
+				depends := false
+				for _, depURL := range discovered[j].rec.DependsOn {
+					if matchesGrainfileRef(discovered[i].rec, depURL) {
+						depends = true
+						break
+					}
+				}
+				if !depends {
+					for _, twURL := range discovered[j].rec.TriggerWith {
+						if matchesGrainfileRef(discovered[i].rec, twURL) {
+							depends = true
+							break
+						}
+					}
+				}
+				if depends {
+					edges[i] = append(edges[i], j)
+					inDegree[j]++
+				}
+			}
+		}
+
+		ordered := make([]trigItem, 0, n)
+		used := make([]bool, n)
+		for len(ordered) < n {
+			picked := -1
+			for i := 0; i < n; i++ {
+				if !used[i] && inDegree[i] == 0 {
+					picked = i
+					break
+				}
+			}
+			if picked < 0 {
+				// Fallback if a cycle exists: pick the first unused item in discovery order.
+				for i := 0; i < n; i++ {
+					if !used[i] {
+						picked = i
+						break
+					}
+				}
+			}
+			used[picked] = true
+			ordered = append(ordered, discovered[picked])
+			for _, next := range edges[picked] {
+				inDegree[next]--
+			}
+		}
+
+		for _, curr := range ordered {
 			cSHA := commitSHA
 			if curr.rec.Repo != canonRepo || cSHA == "" {
 				cSHA = curr.rec.CommitSHA
@@ -909,31 +1047,6 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				return err
 			}
 			triggeredEvents = append(triggeredEvents, recorded)
-
-			// Evaluate trigger_with co-triggers referencing curr.rec.
-			for _, candidate := range allRecords {
-				if candidate.removed || candidate.Draft || len(candidate.TriggerWith) == 0 {
-					continue
-				}
-				if !candidate.ToGrainfile().ActiveAt(at) {
-					continue
-				}
-				candKey := candidate.Repo + "\x00" + candidate.Path
-				if visited[candKey] {
-					continue
-				}
-				for _, twURL := range candidate.TriggerWith {
-					if matchesGrainfileRef(curr.rec, twURL) {
-						visited[candKey] = true
-						queue = append(queue, trigItem{
-							rec:         candidate,
-							source:      TriggerWith,
-							triggeredBy: curr.rec.URL,
-						})
-						break
-					}
-				}
-			}
 		}
 		return nil
 	})
