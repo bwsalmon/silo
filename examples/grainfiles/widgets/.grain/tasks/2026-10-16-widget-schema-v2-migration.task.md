@@ -1,7 +1,6 @@
 ---
 title: Migrate stored widgets to the v2 binary header
-requestor: Bruce Salmon <bsalmon@google.com>
-recipient: git::https://github.com/acme/grain-eu.git
+recipient: https://github.com/acme/grain-eu
 created_at: "2026-10-16T09:15:00Z"
 not_before: "2026-10-25T09:00:00Z"
 depends_on:

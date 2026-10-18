@@ -12,7 +12,7 @@
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/requestor"
     },
     "recipient": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deploymentIdentity"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deployment"
     },
     "created_at": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
@@ -36,7 +36,6 @@
   },
   "required": [
     "title",
-    "requestor",
     "recipient"
   ],
   "patternProperties": {

@@ -7,7 +7,7 @@
                              check the spec, schemas and linter agree
 
 A TREE is a directory of repositories, one per child directory (or a single
-repository). Remote references (git::https://…) are resolved through stubs.yaml
+repository). Remote references (https://…) are resolved through stubs.yaml
 at the tree's top, mapping a repository URL to a child directory; an unmapped
 repository is external and is not resolved.
 
@@ -47,6 +47,8 @@ def valid_time_or_date(s, allow_date=False):
         return True
     except ValueError:
         return False
+
+
 EXPECTS = {
     ("task", "depends_on"): ("task", "process"),
     ("task", "trigger_with"): ("task", "process"),
@@ -152,8 +154,10 @@ def sections(body):
 
 class Ref:
     """A parsed reference: form is remote, rooted or relative."""
-    def __init__(self, form, repo=None, path="", gitref=None, anchor=None):
-        self.form, self.repo, self.path, self.gitref, self.anchor = form, repo, path, gitref, anchor
+    def __init__(self, form, repo=None, path="", gitref=None, anchor=None, mode=None):
+        self.form, self.repo, self.path, self.gitref, self.anchor, self.mode = (
+            form, repo, path, gitref, anchor, mode
+        )
 
 
 def canon_repo(url):
@@ -177,26 +181,72 @@ def parse_ref(s):
         anchor = None
     if not s:
         raise Finding("GF035", "", "empty reference path before anchor")
-    if s.startswith("git::"):
-        rest = s[5:]
-        m = re.match(r"^(https|file)://([^?]*)(?:\?(.*))?$", rest)
-        if not m:
-            raise Finding("GF035", "", "only git::https:// and git::file:// sources are allowed: %r" % s)
-        scheme, body, query = m.groups()
-        q = urllib.parse.parse_qs(query or "", keep_blank_values=True)
-        if set(q) - {"ref"} or any(len(v) != 1 or not v[0] for v in q.values()):
-            raise Finding("GF035", "", "only one ?ref= parameter is allowed: %r" % s)
-        host_end = body.find("/") if scheme == "https" else 0
-        if scheme == "https" and host_end <= 0:
-            raise Finding("GF035", "", "no repository path: %r" % s)
-        i = body.find("//", host_end if scheme == "https" else 1)
-        repo, sub = (body[:i], body[i + 2:]) if i >= 0 else (body, "")
-        if not repo.strip("/"):
-            raise Finding("GF035", "", "no repository path: %r" % s)
-        return Ref("remote", repo=canon_repo("%s://%s" % (scheme, repo)), path=sub,
-                   gitref=q.get("ref", [None])[0], anchor=anchor)
-    if "://" in s or s.startswith("git@") or "::" in s or "?" in s:
-        raise Finding("GF035", "", "remote references are go-getter strings beginning git::https:// (%r)" % s)
+    if s.startswith("git::") or "::" in s:
+        raise Finding("GF035", "", "go-getter git:: syntax is not allowed; use a plain https:// URL (%r)" % s)
+    if "?" in s:
+        raise Finding("GF035", "", "query parameters are not allowed in references (%r)" % s)
+    if s.startswith("git@"):
+        raise Finding("GF035", "", "SSH references are not allowed; use https:// (%r)" % s)
+    if "://" in s or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", s):
+        if not s.startswith(("https://", "file://")):
+            raise Finding("GF035", "", "only https:// (and file:// in tests) URLs are allowed: %r" % s)
+        u = urllib.parse.urlsplit(s)
+        if u.username or u.password or "@" in (u.netloc or ""):
+            raise Finding("GF035", "", "credentials are not allowed in reference URLs: %r" % s)
+        if "//" in u.path:
+            raise Finding("GF035", "", "empty path segments (//) are not allowed in reference URLs: %r" % s)
+        if u.scheme == "https":
+            if not u.hostname:
+                raise Finding("GF035", "", "missing host in reference URL: %r" % s)
+            segs = [seg for seg in u.path.split("/") if seg]
+            if not segs:
+                raise Finding("GF035", "", "no repository path: %r" % s)
+            trailing = "/" if u.path.endswith("/") else ""
+            if "-" in segs:
+                idx = segs.index("-")
+                if idx == 0 or idx + 2 >= len(segs) or segs[idx + 1] not in ("blob", "tree"):
+                    raise Finding("GF035", "", "malformed GitLab reference URL: %r" % s)
+                repo_segs, mode, gitref, sub_segs = segs[:idx], segs[idx + 1], segs[idx + 2], segs[idx + 3:]
+            elif "+" in segs:
+                idx = segs.index("+")
+                if idx == 0 or idx + 1 >= len(segs):
+                    raise Finding("GF035", "", "malformed Gitiles reference URL: %r" % s)
+                repo_segs, mode, gitref, sub_segs = segs[:idx], None, segs[idx + 1], segs[idx + 2:]
+            elif len(segs) >= 3 and segs[2] in ("blob", "tree"):
+                if len(segs) < 4:
+                    raise Finding("GF035", "", "missing ref in %s URL: %r" % (segs[2], s))
+                repo_segs, mode, gitref, sub_segs = segs[:2], segs[2], segs[3], segs[4:]
+            else:
+                if any(seg.endswith(".git") for seg in segs[:-1]):
+                    raise Finding("GF035", "", "sub-path in repository URL must use /blob/<ref>/ or /tree/<ref>/: %r" % s)
+                repo_segs, mode, gitref, sub_segs = segs, None, None, []
+            if mode == "blob" and (not sub_segs or trailing):
+                raise Finding("GF035", "", "blob URL must name a file path: %r" % s)
+            host = u.hostname.lower()
+            if u.port and u.port != 443:
+                host += ":%d" % u.port
+            repo_url = canon_repo("https://%s/%s" % (host, "/".join(repo_segs)))
+            sub = "/".join(sub_segs) + (trailing if sub_segs else "")
+            return Ref("remote", repo=repo_url, path=sub, gitref=gitref, anchor=anchor, mode=mode)
+        else:
+            raw = s[7:].lstrip("/")
+            if not raw or "//" in raw:
+                raise Finding("GF035", "", "no repository path: %r" % s)
+            trailing = "/" if raw.endswith("/") else ""
+            segs = [seg for seg in raw.split("/") if seg]
+            if not segs:
+                raise Finding("GF035", "", "no repository path: %r" % s)
+            if len(segs) >= 2 and segs[1] in ("blob", "tree"):
+                if len(segs) < 3:
+                    raise Finding("GF035", "", "missing ref in %s URL: %r" % (segs[1], s))
+                repo_name, mode, gitref, sub_segs = segs[0], segs[1], segs[2], segs[3:]
+            else:
+                repo_name, mode, gitref, sub_segs = segs[0], None, None, segs[1:]
+            if mode == "blob" and (not sub_segs or trailing):
+                raise Finding("GF035", "", "blob URL must name a file path: %r" % s)
+            repo_url = canon_repo("file://" + repo_name)
+            sub = "/".join(sub_segs) + (trailing if sub_segs else "")
+            return Ref("remote", repo=repo_url, path=sub, gitref=gitref, anchor=anchor, mode=mode)
     if s.startswith("/"):
         return Ref("rooted", path=s[1:], anchor=anchor)
     return Ref("relative", path=s, anchor=anchor)
@@ -271,7 +321,12 @@ class Schemas:
                 data["on"] = on
         v = jsonschema.Draft202012Validator(s, resolver=jsonschema.RefResolver.from_schema(s, store=self.store))
         for e in sorted(v.iter_errors(data), key=lambda e: list(e.path)):
-            where = ".".join(str(x) for x in e.path) or "(top)"
+            p = list(e.path)
+            if p and p[0] in ("references", "depends_on", "trigger_with") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
+                continue
+            if p in (["recipient"], ["requestor"]) and isinstance(e.instance, str) and e.instance and not any(ch in e.instance for ch in "<>@\\ "):
+                continue
+            where = ".".join(str(x) for x in p) or "(top)"
             out.append(Finding("GF020", path, "%s: %s" % (where, e.message)))
         return out
 
@@ -343,6 +398,10 @@ class Linter:
         repo = it.repo
         if r.form == "remote":
             stub = self.stubs.get(r.repo)
+            if stub is None and r.gitref is None:
+                for stub_url in self.stubs:
+                    if r.repo.startswith(stub_url + "/"):
+                        raise Finding("GF035", "", "%s: sub-path in repository URL %r must use /blob/<ref>/ or /tree/<ref>/" % (field, s))
             if stub is None and r.repo.startswith("file://") and (self.top / r.repo[7:].strip("/")).is_dir():
                 stub = r.repo[7:].strip("/")
             target_repo = next((x for x in self.repos if x.dir.name == stub), None)
@@ -351,7 +410,7 @@ class Linter:
             if r.path and posixpath.normpath(r.path).startswith(".."):
                 raise Finding("GF036", "", "%s: %r climbs above the repository root" % (field, s))
             path = posixpath.normpath(r.path.strip("/")) if r.path.strip("/") else ""
-            trailing_slash = r.path.endswith("/") or not r.path
+            trailing_slash = r.path.endswith("/") or not r.path or r.mode == "tree"
         else:
             target_repo = repo
             if r.form == "rooted":
@@ -385,7 +444,7 @@ class Linter:
                 if r.anchor not in slugs:
                     raise Finding("GF030", "", "%s: no heading #%s in %s" % (field, r.anchor, path))
             return "asset"
-        if is_dir:
+        if is_dir and r.mode != "blob":
             if r.anchor:
                 raise Finding("GF030", "", "%s: folder reference %r may not carry an anchor" % (field, s))
             return "folder"
@@ -400,8 +459,11 @@ class Linter:
         if r.anchor:
             self.add("GF035", where, "%s: deployment identity %r may not carry an anchor" % (field, s))
             return
+        if r.mode == "blob":
+            self.add("GF032", where, "%s: %r is a file reference (/blob/), expected a repository or folder" % (field, s))
+            return
         for k in KINDS:
-            if r.path.endswith(".%s.md" % k):
+            if r.path.endswith(".%s.md" % k) or (r.repo and r.repo.endswith(".%s.md" % k)):
                 self.add("GF032", where, "%s: %r is a %s grainfile, expected a repository or folder" % (field, s, k))
                 return
         try:
@@ -470,7 +532,8 @@ class Linter:
             elif want and t in ("asset", "folder"):
                 self.add("GF032", where, "%s: %r is a %s, expected %s" % (field, s, t, " or ".join(want)))
             elif want and t is None:
-                if not any(s.split("?", 1)[0].split("#", 1)[0].endswith(".%s.md" % k) for k in want):
+                r = parse_ref(s)
+                if r.mode == "tree" or not any(r.path.endswith(".%s.md" % k) for k in want):
                     self.add("GF032", where, "%s: %r is not a %s grainfile" % (field, s, " or ".join(want)))
             it.targets.setdefault(field, []).append((s, t))
 
@@ -553,6 +616,31 @@ def self_test():
     uncovered = set(CODES) - seen
     if uncovered:
         fail("codes with no broken fixture: %s" % sorted(uncovered))
+    for url, want_repo, want_path, want_ref, want_mode, want_anchor in [
+        ("https://github.com/acme/grain-eu", "https://github.com/acme/grain-eu", "", None, None, None),
+        ("https://github.com/acme/deployments/tree/main/grain-eu", "https://github.com/acme/deployments", "grain-eu", "main", "tree", None),
+        ("https://github.com/acme/widgets/blob/main/docs/widget-schema.md#req-1", "https://github.com/acme/widgets", "docs/widget-schema.md", "main", "blob", "req-1"),
+        ("https://gitlab.com/acme/group/widgets/-/blob/main/docs/widget-schema.md", "https://gitlab.com/acme/group/widgets", "docs/widget-schema.md", "main", "blob", None),
+        ("https://gitlab.com/acme/group/widgets/-/tree/main/src", "https://gitlab.com/acme/group/widgets", "src", "main", "tree", None),
+        ("https://gerrit.googlesource.com/widgets/+/main/docs/widget-schema.md", "https://gerrit.googlesource.com/widgets", "docs/widget-schema.md", "main", None, None),
+    ]:
+        r = parse_ref(url)
+        if (r.form, r.repo, r.path, r.gitref, r.mode, r.anchor) != ("remote", want_repo, want_path, want_ref, want_mode, want_anchor):
+            fail("parse_ref(%r) -> %r" % (url, (r.form, r.repo, r.path, r.gitref, r.mode, r.anchor)))
+    for bad_ref in [
+        "git::https://github.com/acme/widgets.git//docs/d.md",
+        "http://github.com/acme/widgets/blob/main/docs/d.md",
+        "ssh://git@github.com/acme/widgets.git",
+        "git@github.com:acme/widgets.git",
+        "https://github.com/acme/widgets/blob/main/docs/d.md?ref=main",
+        "https://github.com/acme/widgets//docs/d.md",
+    ]:
+        try:
+            parse_ref(bad_ref)
+            fail("parse_ref(%r) should have raised GF035" % bad_ref)
+        except Finding as e:
+            if e.code != "GF035":
+                fail("parse_ref(%r) raised %s, want GF035" % (bad_ref, e.code))
     print("self-test", "passed" if ok else "FAILED")
     return 0 if ok else 1
 

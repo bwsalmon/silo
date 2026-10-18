@@ -8,7 +8,7 @@ This document explains the design rationale for the Grainfile Format. The normat
 
 1. Purpose and scope
 2. Two kinds executed directly: `.task.md` and `.process.md`
-3. Identities: `requestor` and `recipient`
+3. Source authority and identities: `recipient` and optional `requestor`
 4. References, dependencies, and `trigger_with` grouping
 5. Triggers (`on`) and merge gating (`gate`)
 6. Direct execution model
@@ -18,7 +18,7 @@ This document explains the design rationale for the Grainfile Format. The normat
 
 A Grainfile is a plain Markdown file with YAML front matter stored in git. Its goal is to let people and deployments author work in ordinary git repositories—reviewed through standard pull requests and protected branches—in a form that a Grain deployment can pick up and run directly without an intermediate translation layer.
 
-Everything needed to specify **what to run, who asked for it, which deployment runs it, when it triggers, what it depends on, and what references it reads** lives in two file suffixes:
+Everything needed to specify **what to run, which deployment runs it, optional requestor attribution, when it triggers, what it depends on, and what references it reads** lives in two file suffixes:
 
 - **`<name>.task.md` (`task`):** A discrete task to execute once.
 - **`<name>.process.md` (`process`):** A standing, repeatable process with structured triggers (`on` and/or `trigger_with`) and an optional `gate` flag.
@@ -35,16 +35,18 @@ Collapsing the format to **`.task.md`** and **`.process.md`** eliminates that in
 - **No separate `config` or `GRAINOWNERS` files.** Any repository can hold `.task.md` and `.process.md` files (for example under `.grain/` in a code repository or in a dedicated tasks repository) without needing a marker file, and standard forge branch protection and `CODEOWNERS` govern who can merge changes.
 - **No Jinja2 rendering or container folders.** Prompts are plain Markdown written directly for the agent, with context linked through `references`.
 
-## 3. Identities: `requestor` and `recipient`
+## 3. Source authority and identities: `recipient` and optional `requestor`
 
-Every `.task.md` and `.process.md` declares two required identity fields (spec §6.2):
+The **authoritative source** of a `.task.md` or `.process.md` is the URL of the repository and folder where the file itself lives (spec §6.2, §11.1). Because a front-matter string can be written by anyone who can propose a commit, trust comes from the repository's branch protection, merge policy, and `CODEOWNERS` reviews—not from an unverified string inside YAML front matter.
 
-- **`requestor`:** Who requested or owns the work. This may be either:
-  - A **user identity** in standard git author notation, `Name <email>` (for example, `Bruce Salmon <bsalmon@google.com>`), matching how git commits themselves identify authors across any forge.
-  - A **deployment identity**, when a deployment files follow-up work or owns a standing process.
-- **`recipient`:** Which deployment is intended to execute the task or process. This is always a **deployment identity**: the go-getter URL of a git repository or folder that the deployment controls (for example, `git::https://github.com/acme/grain-eu.git` or `git::https://github.com/acme/deployments.git//grain-eu`), or a repo-relative / `/`-rooted folder path when referencing within the same repository.
+Accordingly, `.task.md` and `.process.md` files separate required routing from optional attribution:
 
-Using git author strings for people and go-getter repository/folder URLs for deployments avoids inventing a forge-specific `@handle` grammar or maintaining a separate identity-mapping file.
+- **`recipient` (required):** Which deployment is intended to execute the task or process. This is always a **deployment identity**: a plain `https://` URL naming the git repository or folder that the deployment controls (for example, `https://github.com/acme/grain-eu` or `https://github.com/acme/deployments/tree/main/grain-eu`), or a repo-local relative / `/`-rooted folder path when referencing within the same repository.
+- **`requestor` (optional):** Attribution metadata recording who requested or owns the work. When present, this may be either:
+  - A **user identity** in standard RFC 5322 / git author notation, `Name <email>` (for example, `Bruce Salmon <bsalmon@google.com>`), matching how git commits themselves identify authors across any forge.
+  - A **plain `https://` URL** (or repo-local deployment path), such as a user profile, team URL, or a deployment URL when a deployment files follow-up work or owns a standing process.
+
+Using plain `https://` URLs and git author strings avoids inventing a forge-specific `@handle` grammar, a custom `git::` getter prefix, or a separate identity-mapping file.
 
 ## 4. References, dependencies, and `trigger_with` grouping
 
@@ -56,12 +58,14 @@ Grainfiles refer to other files, folders, and repositories using three optional 
 
 ### Reference syntax
 
-- **Remote references** use HashiCorp `go-getter` syntax:
+- **Remote references** are plain `https://` URLs (and `file://` in local tests), optionally with `#<anchor>` naming a Markdown heading slug:
   ```
-  git::https://github.com/acme/widgets.git//docs/widget-schema.md?ref=main#schema-version-header
+  https://github.com/acme/widgets/blob/main/docs/widget-schema.md#schema-version-header
+  https://github.com/acme/widgets/tree/main/src
+  https://github.com/acme/grain-eu/blob/main/processes/smoke.process.md
   ```
-  Only the forced `git::` getter, `https://` (`file://` in local tests), and `?ref=` are permitted, with an optional `#<anchor>` naming a Markdown heading slug.
-- **Local references** are either `/`-rooted (resolved from the repository root, such as `/docs/widget-schema.md`) or relative to the grainfile's own directory (`./smoke.process.md`, `../tasks/setup.task.md`).
+  Standard forge file and tree URL forms are supported—GitHub/Gitea `/<owner>/<repo>/blob/<ref>/<path>` and `/tree/<ref>/<path>`, GitLab `/-/blob/<ref>/<path>` and `/-/tree/<ref>/<path>`, Gitiles `/+/<ref>/<path>`, and direct repository URLs `https://<host>/<owner>/<repo>`. Legacy `git::` getter prefixes, `//` subdirectory separators, and `?ref=` query parameters are not used.
+- **Local references** are either `/`-rooted (resolved from the repository root, such as `/docs/widget-schema.md`) or relative to the grainfile's own directory (`./smoke.process.md`, `../tasks/setup.task.md`), and must not climb above the repository root (`GF036`).
 
 ### Multi-task groups and suites without folder templates
 
@@ -89,13 +93,13 @@ Deployments watch their attached repositories for `.task.md` and `.process.md` f
 
 1. **Drafts (`draft: true`):** Authors can commit work-in-progress `.task.md` and `.process.md` files with `draft: true` (default `false`; spec §6.3). The linter still checks draft grainfiles for schema and reference errors so authors get full feedback while iterating, but recipient deployments ignore any grainfile with `draft: true` (neither queuing a task nor registering or firing a process trigger or merge gate) until `draft` is set to `false` or removed.
 2. **Deferred execution (`not_before`):** Both `.task.md` and `.process.md` accept an optional `not_before` field (spec §6.4) formatted as an RFC 3339 UTC timestamp (`2026-10-25T09:00:00Z`) or a UTC calendar date (`2026-10-25`, meaning `00:00:00Z` of that day). On a `.task.md`, the deployment holds the task as deferred and does not execute it before `not_before` (in addition to waiting for any `depends_on`). On a `.process.md`, the process does not fire before `not_before`.
-3. **Direct task execution:** When a non-draft `.task.md` is present on a watched repository for that `recipient`, the deployment queues and runs it directly once its `not_before` time (if any) is reached and its `depends_on` are satisfied. Its Markdown body is the prompt, its `references` are materialised or linked as context, and the source `.task.md` reference is recorded on the task.
+3. **Direct task execution:** When a non-draft `.task.md` is present on a watched repository for that `recipient`, the deployment queues and runs it directly once its `not_before` time (if any) is reached and its `depends_on` are satisfied. Its Markdown body is the prompt, its `references` are materialised or linked as context, and the source `.task.md` URL (plus any optional `requestor` attribution) is recorded on the task.
 4. **Direct process registration:** When a non-draft `.process.md` is present for that `recipient`, the deployment registers its `on` and `trigger_with` triggers (and its `gate` flag), active once `not_before` (if set) is reached. Each firing dispatches a run with the `.process.md` Markdown body as the prompt, ordered by `depends_on`.
 
 ## 7. Prior art and design evolution
 
 - **Markdown with YAML front matter** (Jekyll, Hugo, Obsidian) for human-readable, reviewable files in git.
-- **Terraform module sources and `go-getter`** (`git::https://<host>/<repo>//<path>?ref=<ref>`) for cross-repository references.
-- **Git author notation** (`Name <email>`) for user identities.
+- **Standard forge `https://` URLs** (`/blob/<ref>/<path>`, `/tree/<ref>/<path>`, `/-/blob|tree/<ref>/<path>`, `/+/<ref>/<path>`) for clickable cross-repository references and deployment identities.
+- **Git author notation** (`Name <email>`) for optional user attribution.
 - **POSIX `crontab(5)` and GitHub Actions path/branch filters** for `on:` trigger sources.
 - **Evolution from earlier drafts:** Tasks 4446–4635 explored storing full runtime state, backlogs, lanes, and execution folders in git; Task 4658 narrowed the format to an authoring language with eleven kinds; the current revision simplifies the authoring format further to `.task.md` and `.process.md` executed directly by deployments.

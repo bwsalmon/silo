@@ -7,18 +7,20 @@ B = pathlib.Path(__file__).resolve().parent
 for d in ("bad", "good"):
     shutil.rmtree(B / d, ignore_errors=True)
 
-DEP = "git::https://github.com/acme/grain-eu.git"
+DEP = "https://github.com/acme/grain-eu"
 USR = "Bruce Salmon <bsalmon@google.com>"
 
 
 def task(extra="", body="Run the task.\n", title="T", requestor=USR, recipient=DEP):
-    return ('---\ntitle: %s\nrequestor: "%s"\nrecipient: "%s"\n%s---\n%s'
-            % (title, requestor, recipient, extra, body))
+    req_line = 'requestor: "%s"\n' % requestor if requestor is not None else ""
+    return ('---\ntitle: %s\n%srecipient: "%s"\n%s---\n%s'
+            % (title, req_line, recipient, extra, body))
 
 
 def process(extra='"on":\n  manual: {}\n', body="Run the process.\n", title="P", requestor=USR, recipient=DEP):
-    return ('---\ntitle: %s\nrequestor: "%s"\nrecipient: "%s"\n%s---\n%s'
-            % (title, requestor, recipient, extra, body))
+    req_line = 'requestor: "%s"\n' % requestor if requestor is not None else ""
+    return ('---\ntitle: %s\n%srecipient: "%s"\n%s---\n%s'
+            % (title, req_line, recipient, extra, body))
 
 
 def put(top, fs):
@@ -80,7 +82,7 @@ case("gf020-bad-not-before-format", ["GF020"], {
     "r/processes/p.process.md": process(extra='"on":\n  manual: {}\nnot_before: "2026-10-25T09:00:00+02:00"\n'),
 })
 case("gf022-unknown-field", ["GF022"], {
-    "r/tasks/a.task.md": task("colour: blue\nx_note: allowed\n"),
+    "r/tasks/a.task.md": task("colour: blue\nx_note: allowed\n", requestor=None),
 })
 case("gf030-dangling-depends", ["GF030"], {
     "r/tasks/a.task.md": task("depends_on: [./missing.task.md]\n"),
@@ -110,10 +112,10 @@ case("gf034-trigger-with-cycle", ["GF034"], {
     "r/processes/b.process.md": process(extra="trigger_with: [./a.process.md]\n"),
 })
 case("gf035-malformed-ref", ["GF035"], {
-    "r/tasks/a.task.md": task('references: ["https://github.com/acme/widgets.git//docs/d.md"]\n'),
+    "r/tasks/a.task.md": task('references: ["git::https://github.com/acme/widgets.git//docs/d.md"]\n'),
 })
 case("gf035-query-parameter", ["GF035"], {
-    "r/tasks/a.task.md": task('references: ["git::https://github.com/acme/widgets.git//docs/d.md?ref=main&depth=1"]\n'),
+    "r/tasks/a.task.md": task('references: ["https://github.com/acme/widgets/blob/main/docs/d.md?ref=main"]\n'),
 })
 case("gf036-escapes-repo", ["GF036"], {
     "r/tasks/a.task.md": task("depends_on: [../../../outside.task.md]\n"),

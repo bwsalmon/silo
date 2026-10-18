@@ -1,7 +1,7 @@
 ---
 title: Security review for widget schema and parser changes
 requestor: Bruce Salmon <bsalmon@google.com>
-recipient: git::https://github.com/acme/grain-eu.git
+recipient: https://github.com/acme/grain-eu
 created_at: "2026-10-16T10:00:00Z"
 "on":
   pull_request:
