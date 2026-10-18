@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +91,10 @@ type Server struct {
 	// Bus, when set, broadcasts grainfile event wake-ups across hub pods
 	// so nodes connected to other pods receive notifications.
 	Bus *notify.Bus
+	// NodeUIDomain, when set, is the domain suffix under which online
+	// nodes offering FeatureNodeUI have their tunneled local web UI served
+	// (https://<id>.<NodeUIDomain>/).
+	NodeUIDomain string
 
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
@@ -174,10 +180,61 @@ func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 		}
 		nodes = seen
 	}
+	var subsByNode map[string]grainfiles.Subscriptions
+	if s.Grainfiles != nil {
+		if subs, err := s.Grainfiles.ListSubscriptions(r.Context()); err == nil && len(subs) > 0 {
+			subsByNode = make(map[string]grainfiles.Subscriptions, len(subs))
+			for _, sub := range subs {
+				subsByNode[sub.NodeID] = sub
+			}
+		}
+	}
+	uiDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s.NodeUIDomain)), ".")
+	for i := range nodes {
+		if sub, ok := subsByNode[nodes[i].ID]; ok {
+			nodes[i].Recipients = mergeStrings(nodes[i].Recipients, sub.Recipients)
+			nodes[i].Folders = mergeStrings(nodes[i].Folders, sub.Folders)
+			nodes[i].Grainfiles = mergeStrings(nodes[i].Grainfiles, sub.Grainfiles)
+		}
+		offered := nodes[i].Supports(registry.FeatureNodeUI) || (nodes[i].UI != nil && nodes[i].UI.Offered)
+		if offered {
+			if nodes[i].UI == nil {
+				nodes[i].UI = &registry.NodeUI{Offered: true}
+			} else {
+				nodes[i].UI.Offered = true
+			}
+			if uiDomain != "" && nodes[i].Status == registry.Online {
+				u := "https://" + strings.ToLower(nodes[i].ID) + "." + uiDomain + "/"
+				if nodes[i].UIURL == "" {
+					nodes[i].UIURL = u
+				}
+				if nodes[i].UI.URL == "" {
+					nodes[i].UI.URL = nodes[i].UIURL
+				}
+			} else if nodes[i].UI.URL != "" && nodes[i].UIURL == "" {
+				nodes[i].UIURL = nodes[i].UI.URL
+			} else if nodes[i].UIURL != "" && nodes[i].UI.URL == "" {
+				nodes[i].UI.URL = nodes[i].UIURL
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
 		Nodes []registry.Entry `json:"nodes"`
 	}{nodes})
+}
+
+func mergeStrings(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	out := slices.Clone(base)
+	for _, s := range extra {
+		if s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (s *Server) serveConnect(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +308,16 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		case <-time.After(time.Second):
 		}
 	}
-	node, err := registry.Validate(*hello.Node)
+	rawNode := *hello.Node
+	if hello.Subscriptions != nil {
+		rawNode.Recipients = mergeStrings(rawNode.Recipients, hello.Subscriptions.Recipients)
+		rawNode.Folders = mergeStrings(rawNode.Folders, hello.Subscriptions.Folders)
+		rawNode.Grainfiles = mergeStrings(rawNode.Grainfiles, hello.Subscriptions.Grainfiles)
+	}
+	rawNode.Recipients = mergeStrings(rawNode.Recipients, hello.Recipients)
+	rawNode.Folders = mergeStrings(rawNode.Folders, hello.Folders)
+	rawNode.Grainfiles = mergeStrings(rawNode.Grainfiles, hello.Grainfiles)
+	node, err := registry.Validate(rawNode)
 	if err == nil && id.Node != "" && node.ID != id.Node {
 		err = fmt.Errorf("rendezvous: this credential is for node %q, not %q", id.Node, node.ID)
 	}

@@ -43,6 +43,7 @@ test('every page passes axe', async ({ world, newWorld, pageAs, grain, fileTask 
     ["a team's members", `/teams/${world.team}/members`, () => page.getByText(world.member).first().waitFor()],
     ['the file form', `/teams/${world.team}/file`, () => expect(page.getByRole('combobox', { name: 'Repository' })).not.toHaveAttribute('aria-disabled', 'true')],
     ["a team's proposals", `/teams/${world.team}/proposals`, () => page.getByText('A proposal').waitFor()],
+    ['the grainfiles', '/grainfiles', () => page.getByText('Grainfiles & Processes').waitFor()],
     ['the nodes', '/nodes', () => page.getByRole('row', { name: new RegExp(node.id) }).first().waitFor()],
     ['a task', `/tasks/${t.id}`, () => page.getByRole('button', { name: 'Allow' }).waitFor()],
     ['a session', `/tasks/${session.id}`, () => page.getByLabel('Reply to the session').waitFor()],

@@ -8,6 +8,7 @@ import { Link as MuiLink, type LinkProps } from '@mui/material';
 export type Route =
   | { page: 'backlog'; team?: string }
   | { page: 'task'; id: string }
+  | { page: 'grainfiles' }
   | { page: 'nodes' }
   | { page: 'file'; team?: string }
   | { page: 'teams' }
@@ -25,6 +26,7 @@ export function parseRoute(path: string): Route {
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'proposals') return { page: 'proposals', team: parts[1] };
   if (parts[0] === 'file' && parts.length === 1) return { page: 'file' };
   if (parts[0] === 'tasks' && parts.length === 2) return { page: 'task', id: parts[1] };
+  if (parts[0] === 'grainfiles' && parts.length === 1) return { page: 'grainfiles' };
   if (parts[0] === 'nodes' && parts.length === 1) return { page: 'nodes' };
   return { page: 'notfound', path };
 }
@@ -35,6 +37,8 @@ export function routePath(r: Route): string {
       return r.team ? `/teams/${encodeURIComponent(r.team)}` : '/';
     case 'task':
       return `/tasks/${encodeURIComponent(r.id)}`;
+    case 'grainfiles':
+      return '/grainfiles';
     case 'nodes':
       return '/nodes';
     case 'file':

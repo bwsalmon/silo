@@ -67,6 +67,19 @@ type Node struct {
 	Folders []string `json:"folders,omitempty"`
 	// Grainfiles are explicit grainfile URLs this node subscribes to.
 	Grainfiles []string `json:"grainfiles,omitempty"`
+	// UI describes the node's tunneled local Grain web UI when offered.
+	UI *NodeUI `json:"ui,omitempty"`
+	// UIURL is the direct URL to open the node's tunneled local Grain UI
+	// when offered and NodeUIDomain is configured on the hub.
+	UIURL string `json:"ui_url,omitempty"`
+}
+
+// NodeUI describes a node's tunneled local Grain web UI status.
+type NodeUI struct {
+	Offered bool   `json:"offered,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Team    string `json:"team,omitempty"`
+	Access  string `json:"access,omitempty"`
 }
 
 // FeatureInteractive is a node that runs interactive tasks: sessions
@@ -76,6 +89,10 @@ const FeatureInteractive = "interactive"
 // FeatureGrainfiles is a node that subscribes to grainfile events and
 // fetches grainfile content through the hub.
 const FeatureGrainfiles = "grainfiles"
+
+// FeatureNodeUI is a node that offers its local Grain web UI over the
+// reverse tunnel (hub/nodeui).
+const FeatureNodeUI = "nodeui"
 
 // maxFeatures bounds what a node may list.
 const maxFeatures = 32
@@ -469,6 +486,13 @@ func (r *Registry) entry(n *node, now time.Time) Entry {
 		e.Labels = labels
 	}
 	e.Features = slices.Clone(e.Features)
+	e.Recipients = slices.Clone(e.Recipients)
+	e.Folders = slices.Clone(e.Folders)
+	e.Grainfiles = slices.Clone(e.Grainfiles)
+	if e.UI != nil {
+		uiCopy := *e.UI
+		e.UI = &uiCopy
+	}
 	return e
 }
 

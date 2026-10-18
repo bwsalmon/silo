@@ -240,13 +240,14 @@ type IndexRecord struct {
 	Recipient            string    `json:"recipient"`
 	Requestor            string    `json:"requestor,omitempty"`
 	Draft                bool      `json:"draft"`
-	NotBefore            time.Time `json:"not_before,omitempty"`
-	CreatedAt            time.Time `json:"created_at,omitempty"`
+	NotBefore            time.Time `json:"not_before,omitempty,omitzero"`
+	CreatedAt            time.Time `json:"created_at,omitempty,omitzero"`
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
 	TriggerWith          []string  `json:"trigger_with,omitempty"`
-	OnSpec               Triggers  `json:"on_spec,omitempty"`
+	On                   Triggers  `json:"on,omitempty,omitzero"`
+	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
 	UpdatedAt            time.Time `json:"updated_at"`
 
@@ -307,12 +308,13 @@ type Event struct {
 	Title                string    `json:"title,omitempty"`
 	Recipient            string    `json:"recipient,omitempty"`
 	Requestor            string    `json:"requestor,omitempty"`
-	NotBefore            time.Time `json:"not_before,omitempty"`
+	NotBefore            time.Time `json:"not_before,omitempty,omitzero"`
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
 	TriggerWith          []string  `json:"trigger_with,omitempty"`
-	OnSpec               Triggers  `json:"on_spec,omitempty"`
+	On                   Triggers  `json:"on,omitempty,omitzero"`
+	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
 	TriggerSource        string    `json:"trigger_source,omitempty"`
 	TriggeredBy          string    `json:"triggered_by,omitempty"`
@@ -320,7 +322,7 @@ type Event struct {
 	DependencyURL        string    `json:"dependency_url,omitempty"`
 	DependencyState      string    `json:"dependency_state,omitempty"`
 	Reason               string    `json:"reason,omitempty"`
-	CreatedAt            time.Time `json:"created_at"`
+	CreatedAt            time.Time `json:"created_at,omitzero"`
 }
 
 type eventPayload struct {
@@ -416,6 +418,7 @@ func (s *Store) IndexGrainfile(ctx context.Context, g *Grainfile) (IndexRecord, 
 		AuthorizedReferences: authRefs,
 		DependsOn:            deps,
 		TriggerWith:          tw,
+		On:                   cp.On,
 		OnSpec:               cp.On,
 		Gate:                 cp.Gate,
 		UpdatedAt:            now,
@@ -668,6 +671,7 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	_ = json.Unmarshal([]byte(depsStr), &rec.DependsOn)
 	_ = json.Unmarshal([]byte(twStr), &rec.TriggerWith)
 	_ = json.Unmarshal([]byte(onStr), &rec.OnSpec)
+	rec.On = rec.OnSpec
 	return rec, nil
 }
 
@@ -1101,6 +1105,7 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 	if ev.CreatedAt.IsZero() {
 		ev.CreatedAt = s.now().Truncate(time.Millisecond)
 	}
+	ev.On = ev.OnSpec
 
 	var nbMS int64
 	if !ev.NotBefore.IsZero() {
@@ -1172,6 +1177,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.DependsOn = pl.DependsOn
 		ev.TriggerWith = pl.TriggerWith
 		ev.OnSpec = pl.OnSpec
+		ev.On = pl.OnSpec
 		ev.ChangedPaths = pl.ChangedPaths
 		ev.Reason = pl.Reason
 	}

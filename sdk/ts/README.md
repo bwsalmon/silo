@@ -1,11 +1,11 @@
 # @silo/hub-sdk
 
-A TypeScript client for the Silo hub's public API
-([docs/hub.md](../../docs/hub.md) §5-§7): typed models for tasks,
-events, artifacts, nodes, node tokens, teams, proposals and approvals; a
-live event stream that resumes from a cursor; and the API's refusals as
-typed errors. It has no runtime dependencies and runs in browsers and in
-Node 20 or later.
+A TypeScript client for the Grain Hub public API
+([docs/hub.md](../../docs/hub.md) §5-§7): typed models for Grainfiles
+(`.task.md` and `.process.md`), subscriptions, tasks, events, artifacts,
+nodes, node tokens, teams, proposals and approvals; a live event stream
+that resumes from a cursor; and the API's refusals as typed errors. It
+has no runtime dependencies and runs in browsers and in Node 20 or later.
 
 The hub's own web UI (`ui/`, [docs/ui.md](../../docs/ui.md)) is its
 first client and reaches the API through nothing else
@@ -54,6 +54,21 @@ or from a client that is not a browser. A page on another origin can
 read with `credentials: 'include'` but cannot write.
 
 ## Examples
+
+### List and inspect Grainfiles and subscriptions
+
+```ts
+const grainfiles = await hub.listGrainfiles({
+  kind: 'process',
+  recipient: 'https://github.com/acme/grain-eu',
+  repo: 'acme/app',
+  draft: false,
+});
+for (const g of grainfiles) console.log(g.kind, g.title, g.url);
+
+const detail = await hub.inspectGrainfile('https://github.com/acme/app/blob/main/.grain/processes/ci.process.md');
+console.log(detail.grainfile?.on, detail.events);
+```
 
 ### List a team's backlog
 

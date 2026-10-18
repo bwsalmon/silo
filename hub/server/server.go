@@ -419,9 +419,10 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Logf:      cfg.Logf,
 		Observe:   h.metrics.observeRendezvous,
 
-		InternalKey: cfg.InternalKey,
-		Grainfiles:  h.Grainfiles,
-		Bus:         h.Bus,
+		InternalKey:  cfg.InternalKey,
+		Grainfiles:   h.Grainfiles,
+		Bus:          h.Bus,
+		NodeUIDomain: cfg.NodeUIDomain,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
 	dirAPI.Unbind = h.Registry.Unbind

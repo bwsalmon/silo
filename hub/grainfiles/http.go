@@ -1160,7 +1160,26 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 	rawRecipient := strings.TrimSpace(q.Get("recipient"))
 	rawKind := strings.TrimSpace(q.Get("kind"))
 	rawNode := strings.TrimSpace(q.Get("node"))
+	rawDraft := strings.ToLower(strings.TrimSpace(q.Get("draft")))
+	rawURL := strings.TrimSpace(q.Get("url"))
+	rawPath := strings.TrimSpace(q.Get("path"))
 	includeDrafts := q.Get("include_drafts") != "false" && q.Get("include_drafts") != "0"
+
+	var filterDraft *bool
+	if rawDraft != "" {
+		switch rawDraft {
+		case "true", "1":
+			t := true
+			filterDraft = &t
+			includeDrafts = true
+		case "false", "0":
+			f := false
+			filterDraft = &f
+		default:
+			http.Error(w, fmt.Sprintf("invalid draft filter %q", rawDraft), http.StatusBadRequest)
+			return
+		}
+	}
 
 	var filterRepo string
 	if rawRepo != "" {
@@ -1202,10 +1221,19 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if !includeDrafts && rec.Draft {
 			continue
 		}
+		if filterDraft != nil && rec.Draft != *filterDraft {
+			continue
+		}
 		if filterRecipient != "" && rec.Recipient != filterRecipient {
 			continue
 		}
 		if rawKind != "" && string(rec.Kind) != rawKind {
+			continue
+		}
+		if rawURL != "" && !matchesGrainfileRef(rec, rawURL) && rec.URL != rawURL && rec.Path != rawURL {
+			continue
+		}
+		if rawPath != "" && rec.Path != rawPath {
 			continue
 		}
 		if !canSeeRecord(acc, rec) {
@@ -1225,6 +1253,26 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if filterRepo != "" && !subTouchesRepo(sub, filterRepo) {
 			continue
 		}
+		if rawURL != "" {
+			matched := false
+			for _, rec := range visibleRecords {
+				if sub.MatchesRecord(rec) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				for _, gf := range sub.Grainfiles {
+					if sameURLOrRepoPath(gf, rawURL) {
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
 		if !canSeeSubscription(acc, sub) {
 			continue
 		}
@@ -1240,6 +1288,12 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if rawKind != "" && string(ev.Kind) != rawKind {
+			continue
+		}
+		if rawURL != "" && !sameURLOrRepoPath(ev.GrainfileURL, rawURL) && ev.GrainfileURL != rawURL && ev.Path != rawURL {
+			continue
+		}
+		if rawPath != "" && ev.Path != rawPath {
 			continue
 		}
 		if !canSeeEvent(acc, ev) {
