@@ -39,6 +39,10 @@ func (f *recordingFetcher) FetchFile(_ context.Context, repoURL, ref, filePath s
 	return b, nil
 }
 
+func (f *recordingFetcher) ListGrainfiles(_ context.Context, _, ref string) ([]string, string, error) {
+	return nil, ref, nil
+}
+
 func (f *recordingFetcher) sawRef(ref string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -158,7 +158,8 @@ function matchesRepoFilter(itemRepo: string, filterRepo: string): boolean {
   return norm(itemRepo) === norm(filterRepo);
 }
 
-function matchesRecipientFilter(itemRecipient: string, filterRecipient: string): boolean {
+function matchesRecipientFilter(itemRecipient: string | undefined, filterRecipient: string): boolean {
+  if (!itemRecipient) return false;
   const norm = (s: string) => s.trim().replace(/\/+$/, '').toLowerCase();
   return norm(itemRecipient) === norm(filterRecipient);
 }

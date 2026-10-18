@@ -205,11 +205,10 @@ describe('Grainfiles and node subscriptions', () => {
         url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md',
         kind: 'process',
         title: 'Continuous verification gate',
-        recipient: 'https://github.com/acme/grain-eu',
         draft: true,
         not_before: '0001-01-01T00:00:00Z',
         created_at: '0001-01-01T00:00:00Z',
-        trigger_with: ['https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md'],
+        depends_on: ['https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md'],
         on_spec: { push: { branches: ['main'] }, schedule: { cron: '0 * * * *' } },
         gate: true,
         updated_at: '2026-10-18T10:06:00Z',
@@ -287,7 +286,7 @@ describe('Grainfiles and node subscriptions', () => {
     expect(insp.grainfile?.when?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.on?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.not_before).toBeUndefined();
-    expect(insp.grainfile?.trigger_with).toEqual([
+    expect(insp.grainfile?.depends_on).toEqual([
       'https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md',
     ]);
     expect(insp.events).toHaveLength(1);

@@ -221,19 +221,16 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseFile(rep): %v", err)
 	}
-	if rep.Recipient != "/" {
-		t.Errorf("rep.Recipient before Resolve = %q, want \"/\"", rep.Recipient)
+	if rep.Recipient != "" {
+		t.Errorf("rep.Recipient before Resolve = %q, want empty", rep.Recipient)
 	}
 	if err := rep.Resolve("https://github.com/acme/grain-eu", "main", "processes/qualification/report.process.grain.md"); err != nil {
 		t.Fatalf("rep.Resolve: %v", err)
 	}
-	if rep.Recipient != "https://github.com/acme/grain-eu" {
-		t.Errorf("rep.Recipient after Resolve = %q, want https://github.com/acme/grain-eu", rep.Recipient)
+	if rep.Recipient != "" {
+		t.Errorf("rep.Recipient after Resolve = %q, want empty", rep.Recipient)
 	}
 	wantSmokeURL := []string{"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.grain.md"}
-	if !reflect.DeepEqual(rep.TriggerWith, wantSmokeURL) {
-		t.Errorf("rep.TriggerWith = %v, want %v", rep.TriggerWith, wantSmokeURL)
-	}
 	if !reflect.DeepEqual(rep.DependsOn, wantSmokeURL) {
 		t.Errorf("rep.DependsOn = %v, want %v", rep.DependsOn, wantSmokeURL)
 	}
@@ -445,7 +442,6 @@ Execute the task.
 		raw := []byte(`---
 grainfile: v1
 title: Nightly check
-recipient: https://github.com/acme/grain-eu
 when:
   schedule:
     cron: "30 4 * * 1-5"
@@ -667,7 +663,10 @@ Prompt body.
 
 	procRaw := []byte(`---
 title: Co-triggered process
-trigger_with: ../processes/nightly.process.grain.md
+depends_on:
+  - ../processes/nightly.process.grain.md
+when:
+  manual: {}
 ---
 Run co-triggered check.
 `)
@@ -678,11 +677,11 @@ Run co-triggered check.
 	if err := gp.Resolve("https://GitHub.com:443/acme/widgets.git/", "refs/heads/main", ".grain/processes/follow.process.grain.md"); err != nil {
 		t.Fatalf("gp.Resolve: %v", err)
 	}
-	wantTW := []string{
+	wantProcDeps := []string{
 		"https://github.com/acme/widgets/blob/main/.grain/processes/nightly.process.grain.md",
 	}
-	if !reflect.DeepEqual(gp.TriggerWith, wantTW) {
-		t.Errorf("gp.TriggerWith = %v, want %v", gp.TriggerWith, wantTW)
+	if !reflect.DeepEqual(gp.DependsOn, wantProcDeps) {
+		t.Errorf("gp.DependsOn = %v, want %v", gp.DependsOn, wantProcDeps)
 	}
 
 	sameRepo, crossRepo := g.AuthorizedReferences("https://github.com/acme/widgets")

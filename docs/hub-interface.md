@@ -26,7 +26,7 @@ The interface reflects Grain Hub's two core responsibilities
    connect/reconnect, on-demand fetching of matched `.task.md` /
    `.process.md` bodies and authorized same-repo `references` through the
    hub (`fetch_grainfile`, `fetch_reference`), and cross-deployment
-   `depends_on` / `trigger_with` completion and co-trigger notices.
+   `depends_on` completion and co-trigger notices.
 
 > **Current build note:** In the current repository build
 > (`github.com/bwsalmon/silo`, `cmd/silo`), the wire subprotocol
@@ -93,10 +93,10 @@ hub → node  {"type":"goodbye","error":"<why>"}  the hub is shutting down, then
 
 | Field | Meaning |
 | --- | --- |
-| `recipients` | Plain `https://` deployment identity URL(s) (repository or `/tree/<ref>/<folder>` URL, [`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.2) that identify this Grain deployment as a `recipient`. The hub notifies the node whenever a non-draft `.task.md` or `.process.md` naming one of these URLs as its resolved `recipient` is added, updated, or removed in any connected repository the node's owner/teams may access. |
-| `repos` | Repository URLs (`https://github.com/owner/name`, or `owner/name` shorthand) that the deployment watches for `.task.md` and `.process.md` changes and forge trigger events (`push`, `pull_request`, `merge`). |
+| `recipients` | Plain `https://` deployment identity URL(s) (repository or `/tree/<ref>/<folder>` URL, [`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.1) that identify this Grain deployment as a `recipient`. The hub notifies the node whenever a non-draft `.task.grain.md` naming one of these URLs as its resolved `recipient` is added, updated, or removed in any connected repository the node's owner/teams may access. |
+| `repos` | Repository URLs (`https://github.com/owner/name`, or `owner/name` shorthand) that the deployment watches for `.task.grain.md` and `.process.grain.md` changes and forge trigger events (`push`, `pull_request`, `merge`). |
 | `folders` | Specific repository folder URLs (`https://.../tree/<ref>/<path>`) the deployment watches for Grainfiles. |
-| `grainfiles` | Specific `.task.md` or `.process.md` `https://` URLs the deployment subscribes to — including shared processes and cross-deployment `depends_on` or `trigger_with` targets executed by other deployments ([hub.md](hub.md) §6.5). |
+| `grainfiles` | Specific `.task.grain.md` or `.process.grain.md` `https://` URLs the deployment subscribes to — including shared processes and cross-deployment `depends_on` targets executed by other deployments ([hub.md](hub.md) §6.5). |
 
 - `subscribe` updates the deployment's active subscription set on the
   live control stream without reconnecting. Each `subscribe` replaces
@@ -158,23 +158,21 @@ node (on a hub-opened notification stream or the control stream):
 
 ```
 hub → node  {"type":"grainfile_event","cursor":"...","action":"added"|"updated"|"removed","grainfile":{
-              "url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md",
+              "url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md",
               "kind":"task"|"process",
               "repo":"https://github.com/acme/widgets",
               "ref":"refs/heads/main",
               "commit":"<git commit SHA>",
-              "path":".grain/tasks/2026-10-16-widget-schema-v2.task.md",
+              "path":".grain/tasks/2026-10-16-widget-schema-v2.task.grain.md",
               "front_matter":{
-                "title":"Migrate widget schema to v2",
+                "grainfile":"v1",
                 "recipient":"https://github.com/acme/grain-eu",
                 "requestor":"Alice <alice@example.com>",
                 "draft":false,
                 "not_before":"2026-10-25T09:00:00Z",
-                "created_at":"2026-10-16T13:58:30Z",
                 "references":["/docs/widget-schema.md"],
-                "depends_on":["https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-prep.task.md"],
-                "trigger_with":[],
-                "on":{},
+                "depends_on":["https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-prep.task.grain.md"],
+                "when":{},
                 "gate":false
               }}}
 ```
@@ -183,10 +181,10 @@ hub → node  {"type":"grainfile_event","cursor":"...","action":"added"|"updated
 | --- | --- |
 | `cursor` | Monotonic hub cursor for resuming with `catchup` after a disconnect. |
 | `action` | `added` (new non-draft Grainfile, or a draft whose `draft: true` was removed), `updated` (front matter or commit SHA changed while non-draft), or `removed` (file deleted, or `draft` changed from `false` to `true`). |
-| `url` | Canonical plain `https://` forge URL of the `.task.md` or `.process.md` file ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.1). |
-| `kind` | `task` (`.task.md`) or `process` (`.process.md`). |
+| `url` | Canonical plain `https://` forge URL of the `.task.grain.md` or `.process.grain.md` file ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.1). |
+| `kind` | `task` (`.task.grain.md`) or `process` (`.process.grain.md`). |
 | `repo`, `ref`, `commit`, `path` | The authoritative repository URL, branch/ref, commit SHA, and repository-relative path where the Grainfile lives ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.3, §11.1). |
-| `front_matter` | Parsed YAML front-matter metadata (`title`, `recipient`, `requestor`, `draft`, `not_before`, `created_at`, `references`, `depends_on`, `trigger_with`, `on`, `gate`) with repo-local references resolved against `repo` and `ref`. Never includes the Markdown prompt body or repository source files. |
+| `front_matter` | Parsed YAML front-matter metadata (`grainfile`, `recipient`, `requestor`, `draft`, `not_before`, `references`, `depends_on`, `when`, `gate`) with repo-local references resolved against `repo` and `ref`. Never includes the Markdown prompt body or repository source files. |
 
 **How the Grain deployment acts on `grainfile_event`:**
 
@@ -203,13 +201,13 @@ hub → node  {"type":"grainfile_event","cursor":"...","action":"added"|"updated
    deployment holds the task or process inactive until that UTC time or
    date (`YYYY-MM-DD`, meaning `00:00:00Z`) is reached.
 3. **On-demand fetch and direct execution:** The deployment fetches the
-   `.task.md` or `.process.md` body and its authorized same-repo
+   `.task.grain.md` or `.process.grain.md` body and its authorized same-repo
    `references` at `commit` — either **on demand through the hub**
    (`fetch_grainfile`, `fetch_reference`, below, without needing
    standing git credentials for `repo`) or directly from git when it
    holds host-scoped credentials for that repository — and either queues
-   the `.task.md` in its own backlog (waiting on any `depends_on`) or
-   registers the `.process.md` triggers (`on`, `trigger_with`, and
+   the `.task.grain.md` in its own backlog (waiting on any `depends_on`) or
+   registers the `.process.grain.md` triggers (`when` and
    `gate`).
 
 ### Cross-repository content access and on-demand fetch (`fetch_grainfile`, `fetch_reference`)
@@ -242,11 +240,11 @@ permanent git credentials for Repo A ([hub.md](hub.md) §6.4.1,
   demand:
 
 ```
-node → hub  {"type":"fetch_grainfile","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md","commit":"<git commit SHA>"}
-hub → node  {"type":"ok","commit":"<resolved commit SHA>","size":N}, then the raw UTF-8 .task.md / .process.md bytes until the hub closes the stream
+node → hub  {"type":"fetch_grainfile","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md","commit":"<git commit SHA>"}
+hub → node  {"type":"ok","kind":"file","commit":"<resolved commit SHA>","size":N}, then the raw UTF-8 .task.grain.md / .process.grain.md bytes until the hub closes the stream
             or {"type":"error","error":"..."}
 
-node → hub  {"type":"fetch_reference","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md","commit":"<git commit SHA>","reference":"/docs/widget-schema.md#schema-version-header"}
+node → hub  {"type":"fetch_reference","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md","commit":"<git commit SHA>","reference":"/docs/widget-schema.md#schema-version-header"}
 hub → node  {"type":"ok","kind":"file"|"tree","commit":"<resolved commit SHA>","size":N}, then the file bytes (or tar stream for a tree/folder reference) until the hub closes the stream
             or {"type":"error","error":"..."}
 ```
@@ -281,16 +279,15 @@ hub → node  {"type":"ok","kind":"file"|"tree","commit":"<resolved commit SHA>"
    to the node, and closes the stream without storing or caching the
    content in the hub database or disk.
 
-### Forge and co-trigger notifications (`trigger_event`)
+### Forge trigger notifications (`trigger_event`)
 
-When a forge webhook (`push`, `pull_request`, `merge`) matches the `on`
-filter (`branches`, `paths`, `ignore`) of a non-draft `.process.md`
-that a deployment subscribes to, or when a cross-deployment
-`trigger_with` target fires, the hub sends `trigger_event`:
+When a forge webhook (`push`, `pull_request`, `merge`) matches the `when`
+filter (`branches`, `paths`, `ignore`) of a non-draft `.process.grain.md`
+that a deployment subscribes to (by `repos`, `folders`, or `grainfiles`), the hub sends `trigger_event`:
 
 ```
 hub → node  {"type":"trigger_event","cursor":"...","id":"trig-...","process_url":"https://...",
-              "source":"push"|"pull_request"|"merge"|"trigger_with",
+              "source":"push"|"pull_request"|"merge",
               "gate":true|false,
               "event":{
                 "repo":"https://github.com/acme/widgets",
@@ -298,56 +295,44 @@ hub → node  {"type":"trigger_event","cursor":"...","id":"trig-...","process_ur
                 "commit":"<git commit SHA>",
                 "pull_request":42,
                 "base_ref":"refs/heads/main",
-                "changed_paths":["src/widget.go"]},
-              "triggered_by":{
-                "grainfile_url":"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.md",
-                "run_id":"..."}}
+                "changed_paths":["src/widget.go"]}}
 ```
 
 - `id` deduplicates the trigger firing across reconnects (delivery is
   at least once).
 - `source` names the trigger kind (`push`, `pull_request`, `merge` from
-  a forge webhook, or `trigger_with` when co-triggered by another
-  process). Schedule (`on.schedule`), `manual`, and `scenario` triggers
-  can be evaluated locally by the deployment that owns the `.process.md`
+  a forge webhook). Schedule (`when.schedule`), `manual`, and `scenario` triggers
+  can be evaluated locally by the subscribed deployment
   (or triggered via the UI for `manual`).
-- When `gate` is `true`, the deployment runs the `.process.md` as a
+- When `gate` is `true`, the deployment runs the `.process.grain.md` as a
   commit or pull-request merge gate ([`docs/grainfiles-spec.md`](grainfiles-spec.md)
   §7.2.2).
 
-### Cross-deployment `depends_on` and `trigger_with` notices (`dependency_done`)
+### Cross-deployment `depends_on` notices (`dependency_done`)
 
-A `.task.md` or `.process.md` on one Grain deployment may declare
-`depends_on` or `trigger_with` referencing a `.task.md` or
-`.process.md` whose `recipient` is a different Grain deployment
-([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.3, §8.4). The
+A `.task.grain.md` or `.process.grain.md` on one Grain deployment may declare
+`depends_on` referencing a `.task.grain.md` or
+`.process.grain.md` executed by a different Grain deployment
+([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.3). The
 waiting deployment includes those target Grainfile URLs in its
 `subscriptions.grainfiles`.
 
-When the executing deployment streams lifecycle events (below) reporting
-that a run of a Grainfile has started or finished (`result` with state
+When the executing deployment streams lifecycle events (below) or `grainfile_complete` reporting
+that a run of a Grainfile has finished (`result` with state
 `done`, `failed`, or `cancelled`), Grain Hub routes notices to every
 subscribed deployment watching that Grainfile URL ([hub.md](hub.md)
 §6.5):
 
-- **For `trigger_with`:** when the target `.process.md` fires, the hub
-  sends `trigger_event` with `"source":"trigger_with"` and
-  `triggered_by` naming the target `grainfile_url` and `run_id`.
-- **For `depends_on`:** when the target `.task.md` or `.process.md` run
-  reaches a terminal state, the hub sends `dependency_done`:
-
 ```
 hub → node  {"type":"dependency_done","cursor":"...",
-              "grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md",
+              "grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md",
               "run_id":"...",
               "state":"done"|"failed"|"cancelled",
               "reason":"..."}
 ```
 
-- `done` unblocks the waiting deployment's `.task.md` or `.process.md`
-  run (for a co-triggered process that declares both `trigger_with` and
-  `depends_on`, the run triggered by `trigger_with` starts once the
-  matching `run_id` reports `done`).
+- `done` unblocks the waiting deployment's `.task.grain.md` or `.process.grain.md`
+  run.
 - `failed` or `cancelled` means the upstream run did not succeed; the
   waiting deployment must not execute its dependent run as if the
   dependency succeeded, and marks or cancels its waiting run according

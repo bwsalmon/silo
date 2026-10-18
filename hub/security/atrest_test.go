@@ -55,6 +55,10 @@ func (m memoryRepoFetcher) FetchFile(_ context.Context, repoURL, ref, filePath s
 	return nil, fmt.Errorf("not found: %s %s @ %s", repoURL, filePath, ref)
 }
 
+func (m memoryRepoFetcher) ListGrainfiles(_ context.Context, _, ref string) ([]string, string, error) {
+	return nil, ref, nil
+}
+
 func signWebhook(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)

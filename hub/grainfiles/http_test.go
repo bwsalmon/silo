@@ -51,6 +51,7 @@ func TestWebhookIngestionAndContentProxy(t *testing.T) {
 			NodeID:     "node-eu",
 			Owner:      "alice@example.com",
 			Recipients: []string{"https://github.com/acme/grain-eu"},
+			Folders:    []string{"https://github.com/acme/widgets/tree/main/.grain/processes"},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -58,6 +59,7 @@ func TestWebhookIngestionAndContentProxy(t *testing.T) {
 			NodeID:     "node-us",
 			Owner:      "bob@example.com",
 			Recipients: []string{"https://github.com/acme/grain-us"},
+			Folders:    []string{"https://github.com/acme/grain-us/tree/main/processes"},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -111,9 +113,8 @@ Drop v1 support on Nov 1.
 
 		gateProcessContent := `---
 title: Schema security review gate
-recipient: https://github.com/acme/grain-eu
 gate: true
-on:
+when:
   pull_request:
     branches: ["main"]
     paths: ["src/**", "docs/**"]
@@ -127,11 +128,10 @@ Review schema changes.
 
 		coTriggeredProcessContent := `---
 title: Post-merge qualification report
-recipient: https://github.com/acme/grain-us
-trigger_with:
-  - https://github.com/acme/widgets/blob/main/.grain/processes/schema-security-review.process.md
 depends_on:
   - https://github.com/acme/widgets/blob/main/.grain/processes/schema-security-review.process.md
+when:
+  manual: {}
 ---
 Generate post-merge report.
 `
@@ -380,6 +380,24 @@ Generate post-merge report.
 			t.Fatalf("recipient fetching file under authorized folder: status=%d, body=%q", rPkg.StatusCode, bodyPkg)
 		}
 
+		// Fetching the folder reference itself (/src/pkg/) returns a JSON TreeListing or tar archive!
+		rTreeJSON, bodyTreeJSON := getContent(tokEU, map[string]string{
+			"grainfile_url": v2URL,
+			"reference":     "/src/pkg/",
+		})
+		var treeListing TreeListing
+		if rTreeJSON.StatusCode != http.StatusOK || json.Unmarshal([]byte(bodyTreeJSON), &treeListing) != nil || len(treeListing.Entries) != 1 || !strings.Contains(string(treeListing.Entries[0].Data), widgetCodeSentinel) {
+			t.Fatalf("recipient fetching folder reference as JSON: status=%d, body=%q", rTreeJSON.StatusCode, bodyTreeJSON)
+		}
+		rTreeTar, bodyTreeTar := getContent(tokEU, map[string]string{
+			"grainfile_url": v2URL,
+			"reference":     "/src/pkg/",
+			"format":        "tar",
+		})
+		if rTreeTar.StatusCode != http.StatusOK || !strings.Contains(rTreeTar.Header.Get("Content-Type"), "application/x-tar") || !strings.Contains(bodyTreeTar, widgetCodeSentinel) {
+			t.Fatalf("recipient fetching folder reference as tar: status=%d, content-type=%q", rTreeTar.StatusCode, rTreeTar.Header.Get("Content-Type"))
+		}
+
 		// Also works via repo + path query without explicit grainfile_url!
 		rByRepoPath, bodyByRepoPath := getContent(tokEU, map[string]string{
 			"repo": repoWidgets,
@@ -429,6 +447,29 @@ Generate post-merge report.
 			"reference":     "/src/unreferenced.go",
 		}); rDraftRef.StatusCode != http.StatusForbidden {
 			t.Errorf("fetching reference through draft grainfile: got %d, want 403", rDraftRef.StatusCode)
+		}
+
+		// 5i. Test installation ("created") and installation_repositories ("added") webhooks scanning existing *.grain.md files.
+		repoScanned := "https://github.com/acme/scanned-repo"
+		fetcher.SetString(repoScanned, "main", ".grain/tasks/existing.task.grain.md", "---\ntitle: Existing scanned task\nrecipient: https://github.com/acme/grain-eu\n---\nScan body.\n")
+		fetcher.SetString(repoScanned, "main", ".grain/processes/existing.process.grain.md", "---\ntitle: Existing scanned process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nScan process.\n")
+		fetcher.SetString(repoScanned, "main", "README.md", "# Readme\n")
+
+		rInst, bInst := postWebhook("installation_repositories", "valid", map[string]any{
+			"action": "added",
+			"repositories_added": []map[string]any{
+				{"full_name": "acme/scanned-repo", "default_branch": "main"},
+			},
+		})
+		if rInst.StatusCode != http.StatusOK {
+			t.Fatalf("installation_repositories webhook: %d %s", rInst.StatusCode, bInst)
+		}
+		var instResp WebhookResponse
+		if err := json.Unmarshal(bInst, &instResp); err != nil {
+			t.Fatal(err)
+		}
+		if len(instResp.Indexed) != 2 {
+			t.Fatalf("expected installation_repositories webhook to scan and index 2 *.grain.md files, got %d (%+v)", len(instResp.Indexed), instResp)
 		}
 
 		// 6. Verify that none of the file bodies or sentinels were stored in the database!
@@ -483,6 +524,15 @@ func TestGitHubFetcher(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"type": "submodule",
 			})
+		case "/repos/acme/widgets/git/trees/sha123":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"sha": "sha123",
+				"tree": []map[string]any{
+					{"path": ".grain/tasks/hello.task.grain.md", "mode": "100644", "type": "blob", "size": len(wantRaw)},
+					{"path": "src/main.go", "mode": "100644", "type": "blob", "size": len(wantBase64File)},
+				},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -510,5 +560,10 @@ func TestGitHubFetcher(t *testing.T) {
 	}
 	if _, err := gh.FetchFile(ctx, "https://github.com/acme/widgets", "sha123", "vendor/sub"); err == nil {
 		t.Fatalf("expected submodule object to be rejected by GitHubFetcher")
+	}
+
+	listed, resolvedSHA, err := gh.ListGrainfiles(ctx, "https://github.com/acme/widgets", "sha123")
+	if err != nil || resolvedSHA != "sha123" || len(listed) != 1 || listed[0] != ".grain/tasks/hello.task.grain.md" {
+		t.Fatalf("ListGrainfiles: listed=%v sha=%q err=%v", listed, resolvedSHA, err)
 	}
 }

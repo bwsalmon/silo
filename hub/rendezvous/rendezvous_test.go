@@ -369,12 +369,13 @@ func TestShutdownSaysGoodbye(t *testing.T) {
 }
 
 func TestGrainfileSubscriptionsNotificationsAndCompletions(t *testing.T) {
-	s, ts := hub(t)
 	gfStore, err := grainfiles.Open(ctx(t), "sqlite:"+filepath.Join(t.TempDir(), "gf.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { gfStore.Close() })
+	s, ts := hub(t)
+	t.Cleanup(func() { _ = s.Shutdown(context.Background(), "test done") })
 	s.Grainfiles = gfStore
 
 	// 1. Backward compatibility: a node that omits subscriptions connects normally.

@@ -191,6 +191,7 @@ func TestStoreDraftAndNotBeforeFiltering(t *testing.T) {
 			NodeID:     "node-eu",
 			Owner:      "alice@example.com",
 			Recipients: []string{"https://github.com/acme/grain-eu"},
+			Folders:    []string{"https://github.com/acme/widgets/tree/main/.grain/processes"},
 		}); err != nil {
 			t.Fatalf("SetSubscriptions: %v", err)
 		}
@@ -256,17 +257,16 @@ Run on Oct 25.
 		// Also index a process with future not_before.
 		defProcYAML := `---
 title: Deferred security gate
-recipient: https://github.com/acme/grain-eu
 not_before: "2026-10-25T09:00:00Z"
 gate: true
-on:
+when:
   push:
     branches: ["main"]
     paths: ["src/**"]
 ---
 Check security.
 `
-		defProc, err := Parse(".grain/processes/sec.process.md", []byte(defProcYAML))
+		defProc, err := Parse(".grain/processes/sec.process.grain.md", []byte(defProcYAML))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -274,7 +274,7 @@ Check security.
 			RepoURL: "https://github.com/acme/widgets",
 			Ref:     "refs/heads/main",
 			Commit:  "c-def-1",
-			Path:    ".grain/processes/sec.process.md",
+			Path:    ".grain/processes/sec.process.grain.md",
 		})
 		if _, err := s.IndexGrainfile(ctx, defProc); err != nil {
 			t.Fatal(err)
@@ -358,41 +358,64 @@ Check security.
 		if len(delta2) != 1 || delta2[0].Type != EventTaskReady || delta2[0].CommitSHA != "c-draft-2" {
 			t.Fatalf("expected task_ready when draft flipped to false, got %+v", delta2)
 		}
+
+		// 4. Updating active draft: false -> draft: true at a new commit emits task_removed (with action="removed").
+		reDraftGF, err := Parse(".grain/tasks/wip.task.md", []byte(draftYAML))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = reDraftGF.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/main",
+			Commit:  "c-draft-3",
+			Path:    ".grain/tasks/wip.task.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, reDraftGF); err != nil {
+			t.Fatal(err)
+		}
+		delta3, _, err := s.CatchupNode(ctx, "node-eu", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(delta3) != 1 || delta3[0].Type != EventTaskRemoved || delta3[0].Action != "removed" {
+			t.Fatalf("expected task_removed when draft flipped to true, got %+v", delta3)
+		}
 	})
 }
 
-func TestStoreTriggerWithAndDependsOn(t *testing.T) {
+func TestStoreProcessFanoutAndDependsOn(t *testing.T) {
 	eachStore(t, func(t *testing.T, s *Store, _ string) {
 		ctx := context.Background()
 		s.Now = func() time.Time { return time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC) }
 
-		// Subscribe node-eu to recipient grain-eu, and node-us to recipient grain-us.
+		// Subscribe node-eu to repo acme/widgets, and node-us to specific grainfiles (1-to-many process subscription).
 		if _, err := s.SetSubscriptions(ctx, Subscriptions{
 			NodeID:     "node-eu",
 			Recipients: []string{"https://github.com/acme/grain-eu"},
+			Repos:      []string{"https://github.com/acme/widgets"},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.SetSubscriptions(ctx, Subscriptions{
 			NodeID:     "node-us",
 			Recipients: []string{"https://github.com/acme/grain-us"},
-			Grainfiles: []string{"https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.md"},
+			Folders:    []string{"https://github.com/acme/grain-us/tree/main/processes"},
+			Grainfiles: []string{"https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.grain.md"},
 		}); err != nil {
 			t.Fatal(err)
 		}
 
-		// 1. Primary process smoke.process.md in acme/widgets targeting grain-eu.
+		// 1. Primary process smoke.process.grain.md in acme/widgets (no recipient; subscribed by both node-eu and node-us).
 		smokeYAML := `---
 title: Nightly smoke check on push
-recipient: https://github.com/acme/grain-eu
-on:
+when:
   push:
     branches: ["main"]
     paths: ["src/**"]
 ---
 Run smoke suite.
 `
-		smokeGF, err := Parse(".grain/processes/smoke.process.md", []byte(smokeYAML))
+		smokeGF, err := Parse(".grain/processes/smoke.process.grain.md", []byte(smokeYAML))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -400,24 +423,23 @@ Run smoke suite.
 			RepoURL: "https://github.com/acme/widgets",
 			Ref:     "refs/heads/main",
 			Commit:  "sha-1",
-			Path:    ".grain/processes/smoke.process.md",
+			Path:    ".grain/processes/smoke.process.grain.md",
 		})
 		if _, err := s.IndexGrainfile(ctx, smokeGF); err != nil {
 			t.Fatal(err)
 		}
 
-		// 2. Co-triggered process report.process.md in acme/grain-us with trigger_with and depends_on pointing to smoke.process.md.
+		// 2. Dependent process report.process.grain.md in acme/grain-us with depends_on pointing to smoke.process.grain.md.
 		reportYAML := `---
 title: Publish qualification report
-recipient: https://github.com/acme/grain-us
-trigger_with:
-  - https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.md
 depends_on:
-  - https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.md
+  - https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.grain.md
+when:
+  manual: {}
 ---
 Summarize smoke results.
 `
-		reportGF, err := Parse("processes/report.process.md", []byte(reportYAML))
+		reportGF, err := Parse("processes/report.process.grain.md", []byte(reportYAML))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -425,27 +447,33 @@ Summarize smoke results.
 			RepoURL: "https://github.com/acme/grain-us",
 			Ref:     "refs/heads/main",
 			Commit:  "sha-us-1",
-			Path:    "processes/report.process.md",
+			Path:    "processes/report.process.grain.md",
 		})
 		reportRec, err := s.IndexGrainfile(ctx, reportGF)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		// Advance cursors past initial process_updated events.
-		_, _, _ = s.CatchupNode(ctx, "node-eu", true)
-		_, _, _ = s.CatchupNode(ctx, "node-us", true)
+		// Both node-eu (by repo) and node-us (by grainfile_url) receive process_updated for smoke.process.grain.md!
+		euInit, _, _ := s.CatchupNode(ctx, "node-eu", true)
+		usInit, _, _ := s.CatchupNode(ctx, "node-us", true)
+		if len(euInit) != 1 || euInit[0].Type != EventProcessUpdated || euInit[0].GrainfileURL != smokeGF.URL {
+			t.Fatalf("expected node-eu to receive process_updated for smoke, got %+v", euInit)
+		}
+		if len(usInit) != 2 {
+			t.Fatalf("expected node-us to receive process_updated for both smoke and report, got %+v", usInit)
+		}
 
-		// Verify report.process.md dependencies are not yet satisfied.
+		// Verify report.process.grain.md dependencies are not yet satisfied.
 		sat, err := s.DependenciesSatisfied(ctx, reportRec.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if sat {
-			t.Fatal("expected report.process.md dependencies to be unsatisfied before smoke completes")
+			t.Fatal("expected report.process.grain.md dependencies to be unsatisfied before smoke completes")
 		}
 
-		// 3. Evaluate push trigger on acme/widgets -> triggers both smoke.process.md AND report.process.md (via trigger_with)!
+		// 3. Evaluate push trigger on acme/widgets -> triggers both smoke.process.grain.md AND report.process.grain.md (via depends_on)!
 		trigEvs, err := s.EvaluateTriggers(ctx, "https://github.com/acme/widgets", "sha-2", ForgeEvent{
 			Source:       TriggerPush,
 			Branch:       "refs/heads/main",
@@ -455,21 +483,21 @@ Summarize smoke results.
 			t.Fatal(err)
 		}
 		if len(trigEvs) != 2 {
-			t.Fatalf("expected 2 triggered events (primary + trigger_with co-trigger), got %+v", trigEvs)
+			t.Fatalf("expected 2 triggered events (primary + depends_on co-trigger), got %+v", trigEvs)
 		}
 		if trigEvs[0].GrainfileURL != smokeGF.URL || trigEvs[0].TriggerSource != TriggerPush {
 			t.Errorf("unexpected primary trigger event: %+v", trigEvs[0])
 		}
-		if trigEvs[1].GrainfileURL != reportGF.URL || trigEvs[1].TriggerSource != TriggerWith || trigEvs[1].TriggeredBy != smokeGF.URL {
+		if trigEvs[1].GrainfileURL != reportGF.URL || trigEvs[1].TriggerSource != TriggerDependsOn || trigEvs[1].TriggeredBy != smokeGF.URL {
 			t.Errorf("unexpected co-trigger event: %+v", trigEvs[1])
 		}
 
-		// 4. Complete smoke.process.md -> records dependency_completed for node-us and satisfies report.process.md's depends_on!
+		// 4. Complete smoke.process.grain.md -> records dependency_completed for report.process.grain.md and satisfies its depends_on!
 		depEvs, err := s.RecordDependencyCompleted(ctx, smokeGF.URL, "sha-2", "done", "all checks passed")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(depEvs) != 1 || depEvs[0].Type != EventDependencyCompleted || depEvs[0].Recipient != "https://github.com/acme/grain-us" {
+		if len(depEvs) != 1 || depEvs[0].Type != EventDependencyCompleted || depEvs[0].GrainfileURL != reportGF.URL {
 			t.Fatalf("unexpected dependency_completed events: %+v", depEvs)
 		}
 
@@ -478,7 +506,7 @@ Summarize smoke results.
 			t.Fatal(err)
 		}
 		if !sat {
-			t.Fatal("expected report.process.md dependencies to be satisfied after smoke completed with done")
+			t.Fatal("expected report.process.grain.md dependencies to be satisfied after smoke completed with done")
 		}
 
 		usEvents, _, err := s.CatchupNode(ctx, "node-us", true)
@@ -487,7 +515,7 @@ Summarize smoke results.
 		}
 		var sawCoTrigger, sawDepDone bool
 		for _, ev := range usEvents {
-			if ev.Type == EventProcessTriggered && ev.TriggerSource == TriggerWith && ev.GrainfileURL == reportGF.URL {
+			if ev.Type == EventProcessTriggered && ev.TriggerSource == TriggerDependsOn && ev.GrainfileURL == reportGF.URL {
 				sawCoTrigger = true
 			}
 			if ev.Type == EventDependencyCompleted && ev.DependencyURL == smokeGF.URL && ev.DependencyState == "done" {
@@ -650,7 +678,7 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 			t.Fatalf("deleting completed task must be a no-op, got %+v (err=%v)", evs4, err)
 		}
 
-		// 4. Deleting a queued (uncompleted) task emits a cancellation event (dependency_completed with state=cancelled).
+		// 4. Deleting a queued (uncompleted) task emits a task_removed event (with action=removed and state=cancelled).
 		qTask, _ := Parse(".grain/tasks/cancel-me.task.grain.md", []byte("---\ntitle: Cancel me\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n"))
 		_ = qTask.ResolveSource(Source{
 			RepoURL: "https://github.com/acme/widgets",
@@ -666,19 +694,19 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 			t.Fatalf("RemoveGrainfile(queued): %v", err)
 		}
 		delEvs, _, err := s.CatchupNode(ctx, "node-eu", true)
-		if err != nil || len(delEvs) != 1 || delEvs[0].Type != EventDependencyCompleted || delEvs[0].DependencyState != "cancelled" {
-			t.Fatalf("deleting queued task: expected cancelled event, got %+v (err=%v)", delEvs, err)
+		if err != nil || len(delEvs) != 1 || delEvs[0].Type != EventTaskRemoved || delEvs[0].Action != "removed" || delEvs[0].DependencyState != "cancelled" {
+			t.Fatalf("deleting queued task: expected task_removed event, got %+v (err=%v)", delEvs, err)
 		}
 
-		// 5. Bounded trigger_with chain depth (MaxTriggerWithDepth = 8) & cycle safety.
-		for i := 0; i <= MaxTriggerWithDepth+3; i++ {
+		// 5. Bounded depends_on chain depth (MaxDependsOnDepth = 8) & cycle safety.
+		for i := 0; i <= MaxDependsOnDepth+3; i++ {
 			path := fmt.Sprintf(".grain/processes/p%02d.process.grain.md", i)
 			var yamlBody string
 			if i == 0 {
-				yamlBody = "---\ntitle: Root process\nrecipient: https://github.com/acme/grain-eu\nwhen:\n  push:\n    branches: [\"main\"]\n---\nRoot.\n"
+				yamlBody = "---\ntitle: Root process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nRoot.\n"
 			} else {
 				prevURL := fmt.Sprintf("https://github.com/acme/widgets/blob/main/.grain/processes/p%02d.process.grain.md", i-1)
-				yamlBody = fmt.Sprintf("---\ntitle: Step %d\nrecipient: https://github.com/acme/grain-eu\ntrigger_with:\n  - %s\n---\nStep.\n", i, prevURL)
+				yamlBody = fmt.Sprintf("---\ntitle: Step %d\ndepends_on:\n  - %s\nwhen:\n  manual: {}\n---\nStep.\n", i, prevURL)
 			}
 			pg, err := Parse(path, []byte(yamlBody))
 			if err != nil {
@@ -702,9 +730,9 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Root (depth 0) + MaxTriggerWithDepth (8) transitive hops = 9 total events (p00..p08).
-		if len(chainEvs) != MaxTriggerWithDepth+1 {
-			t.Fatalf("expected bounded trigger_with chain of %d events (1 root + %d hops), got %d", MaxTriggerWithDepth+1, MaxTriggerWithDepth, len(chainEvs))
+		// Root (depth 0) + MaxDependsOnDepth (8) transitive hops = 9 total events (p00..p08).
+		if len(chainEvs) != MaxDependsOnDepth+1 {
+			t.Fatalf("expected bounded depends_on chain of %d events (1 root + %d hops), got %d", MaxDependsOnDepth+1, MaxDependsOnDepth, len(chainEvs))
 		}
 	})
 }

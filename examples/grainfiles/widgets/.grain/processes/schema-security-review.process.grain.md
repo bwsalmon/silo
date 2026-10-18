@@ -1,8 +1,6 @@
 ---
 grainfile: v1
 title: Security review for widget schema and parser changes
-requestor: Bruce Salmon <bsalmon@google.com>
-recipient: https://github.com/acme/grain-eu
 when:
   pull_request:
     branches: ["main"]

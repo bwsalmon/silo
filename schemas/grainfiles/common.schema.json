@@ -56,20 +56,6 @@
         "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
       }
     },
-    "triggerWith": {
-      "oneOf": [
-        {
-          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-        },
-        {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-          }
-        }
-      ]
-    },
     "eventFilter": {
       "type": "object",
       "properties": {

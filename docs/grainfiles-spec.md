@@ -2,7 +2,7 @@
 
 **Status:** draft for review (bsalmon@google.com). Normative.
 
-This document specifies the Grainfile Format (`grainfile: v1`): a portable, git-native format for authoring discrete **tasks** (`<name>.task.grain.md`) and standing **processes** (`<name>.process.grain.md`) that Grain deployments execute directly. It defines the two grainfile kinds (`**/*.grain.md`), their YAML front matter (`grainfile: v1`) and Markdown prompt bodies, repository source authority, deployment identities (`recipient`, defaulting to `/`) and optional attribution metadata (`requestor`), draft and deferral controls (`draft`, `not_before`), cross-repository and repo-local references (`references`, `depends_on`, `trigger_with`), structured process triggers (`when`) and merge gating (`gate`), the direct execution lifecycle model, security invariants, and the lint rules that validate a repository tree.
+This document specifies the Grainfile Format (`grainfile: v1`): a portable, git-native format for authoring discrete **tasks** (`<name>.task.grain.md`) and standing **processes** (`<name>.process.grain.md`) that Grain deployments execute directly. It defines the two grainfile kinds (`**/*.grain.md`), their YAML front matter (`grainfile: v1`) and Markdown prompt bodies, repository source authority, task deployment identities (`recipient`, defaulting to `/`) and optional attribution metadata (`requestor`), draft and deferral controls (`draft`, `not_before`), cross-repository and repo-local references (`references`, `depends_on`), structured process triggers (`when`) and merge gating (`gate`), the direct execution lifecycle model, security invariants, and the lint rules that validate a repository tree.
 
 It is **not** an engine's internal database schema. Live run state, sandbox orchestration, queue ranking, and execution logs are each deployment's own concern (§2.3); deployments watch repositories for `.task.grain.md` and `.process.grain.md` files addressed to them and execute them directly (§9).
 
@@ -50,16 +50,16 @@ Where this specification makes a normative design choice, the choice is marked *
 : A `<name>.task.grain.md` grainfile (§7.1): a discrete unit of work to run once per canonical `(repo_url, file_path)` on the repository's default or protected branch. Its Markdown body is the prompt given directly to the run.
 
 **process**
-: A `<name>.process.grain.md` grainfile (§7.2): a standing, repeatable process with structured triggers (`when` and/or `trigger_with`) and an optional `gate` flag. Its Markdown body is the prompt dispatched whenever the process fires.
+: A `<name>.process.grain.md` grainfile (§7.2): a standing, repeatable process with structured triggers (`when`) and an optional `gate` flag. Its Markdown body is the prompt dispatched whenever the process fires.
 
 **deployment**
 : An execution engine (such as a Grain deployment) identified by the plain `https://` URL of a git repository or folder that it controls (§6.2.2).
 
 **requestor**
-: Optional attribution metadata recording who requested or owns the task or process: either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (§6.2). The authoritative source of a grainfile is the URL of the repository/folder where the file itself lives (§6.2.3, §11.1).
+: Optional attribution metadata on a `.task.grain.md` recording who requested or owns the task: either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (§6.2). The authoritative source of a grainfile is the URL of the repository/folder where the file itself lives (§6.2.3, §11.1).
 
 **recipient**
-: The deployment identity (`https://...` repository or folder URL, or repo-local folder reference) intended to execute the task or process (§6.2.2). When omitted, `recipient` defaults to `"/"` (the root of the enclosing repository).
+: The deployment identity (`https://...` repository or folder URL, or repo-local folder reference) on a `.task.grain.md` intended to execute the task (§6.2.2). When omitted on a `.task.grain.md`, `recipient` defaults to `"/"` (the root of the enclosing repository). A `.process.grain.md` does not declare `recipient`: any number of deployments may subscribe to a `.process.grain.md` (by repository, folder, or `.process.grain.md` URL).
 
 **asset**
 : Any file in a repository that is not a grainfile: source code, design documents, images, configuration files, or `README.md`.
@@ -69,11 +69,11 @@ Where this specification makes a normative design choice, the choice is marked *
 The format defines:
 - the two grainfile kinds, `task` (`<name>.task.grain.md`) and `process` (`<name>.process.grain.md`) (§7);
 - the format version field `grainfile: v1` (optional, defaulting to `"v1"`) and programmatic version mapping to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3);
-- source authority from the repository/folder URL where the grainfile lives, `recipient` deployment identities (defaulting to `"/"` when omitted), and optional `requestor` attribution (`Name <email>` or plain `https://` URL) (§6);
+- source authority from the repository/folder URL where the grainfile lives, task `recipient` deployment identities (defaulting to `"/"` when omitted), and optional task `requestor` attribution (`Name <email>` or plain `https://` URL) (§6);
 - work-in-progress drafting (`draft: true`) and deferred execution/activation (`not_before`) (§6.3, §6.4);
-- plain `https://` remote references (including standard forge `/blob/<ref>/<path>` and `/tree/<ref>/<path>` URLs) and repo-local references in `references`, `depends_on`, and `trigger_with` (§8);
+- plain `https://` remote references (including standard forge `/blob/<ref>/<path>` and `/tree/<ref>/<path>` URLs) and repo-local references in `references` and `depends_on` (§8);
 - structured process triggers (`when`: `schedule`, `push`, `merge`, `pull_request`, `manual`, `scenario`) and commit/pull-request gating (`gate: true`) (§7.2);
-- multi-step process workflows and suites expressed by combining `trigger_with` and `depends_on` (§7.2.3, §8.3, §8.4);
+- multi-step process workflows and suites expressed via `depends_on` and `when` (§7.2.3, §8.3, §8.4);
 - the direct execution and lifecycle model by which deployments watch repositories and execute matching `.task.grain.md` and `.process.grain.md` files (§9);
 - the validation rules, lint codes (§10), and security invariants (§11).
 
@@ -168,25 +168,28 @@ A reader MUST support at least, and MAY refuse beyond (GF006): a grainfile of 1 
 
 ### 6.1 Common fields
 
+The entire Grainfile `v1` front-matter vocabulary consists of **9 orthogonal fields** (plus `title` and `x_*` extensions):
+- **Shared (5):** `grainfile`, `draft`, `not_before`, `references`, `depends_on`
+- **`.task.grain.md` only (2):** `recipient` (optional, default `"/"`), `requestor` (optional)
+- **`.process.grain.md` only (2):** `when` (required), `gate` (optional, default `false`)
+
 Every `.task.grain.md` and `.process.grain.md` shares the following base fields and MAY include `x_*` extension fields (§3.3):
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `grainfile` | `"v1"` | Opt. | `"v1"` | Grainfile specification version (§3.1, GF020). |
 | `title` | single-line string | Req. | | Non-empty one-line summary of the task or process (GF020). |
-| `requestor` | *user identity* or *deployment identity* | Opt. | | Optional attribution metadata recording who requested or owns the task or process (§6.2). |
-| `recipient` | *deployment identity* | Opt. | `"/"` | The deployment intended to execute the task or process (§6.2.2); defaults to `"/"` (the enclosing repository root). |
-| `draft` | boolean | Opt. | `false` | When `true`, marks the grainfile as a work-in-progress draft that recipient deployments MUST ignore until `draft` is `false` or omitted (§6.3, §9). |
+| `draft` | boolean | Opt. | `false` | When `true`, marks the grainfile as a work-in-progress draft that deployments MUST ignore until `draft` is `false` or omitted (§6.3, §9). |
 | `not_before` | *time* or `YYYY-MM-DD` (§1.4) | Opt. | | Earliest UTC timestamp (`2026-10-25T09:00:00Z`) or UTC date (`2026-10-25`, meaning `00:00:00Z` of that day) at which the task may execute or the process may fire (§6.4, §9). |
 | `depends_on` | list of *ref* (§8) | Opt. | `[]` | References to prerequisite grainfiles that must complete first (§8.3, §8.4). |
 | `references` | list of *ref* (§8) | Opt. | `[]` | References to relevant documents, code paths, design docs, or grainfiles provided as context to the run. |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
 
-**Decision:** There is no `created_at` front-matter field; git commit history already records creation and modification timestamps authoritatively.
+**Decision:** There is no `created_at` or `trigger_with` front-matter field; git commit history already records creation and modification timestamps authoritatively, and multi-step process chains are expressed via `depends_on` and `when`.
 
 ### 6.2 Source authority and identities (`recipient` and `requestor`)
 
-**Decision:** The authoritative, authenticated source of a `.task.grain.md` or `.process.grain.md` is the canonical URL of the repository and folder where the grainfile itself lives—governed by that repository's branch protection, merge policy, and `CODEOWNERS` reviews (§11.1). Because any unreviewed text inside YAML front matter is only as trustworthy as the repository commit that carries it, `requestor` is **optional** attribution metadata, while `recipient` identifies the deployment that executes the grainfile (defaulting to `"/"`, the root of the enclosing repository, when omitted). Grainfiles use two kinds of identity—**user identities** and **deployment / URL identities**—rather than forge-specific `@handle` strings or custom principal namespaces:
+**Decision:** The authoritative, authenticated source of a `.task.grain.md` or `.process.grain.md` is the canonical URL of the repository and folder where the grainfile itself lives—governed by that repository's branch protection, merge policy, and `CODEOWNERS` reviews (§11.1). `.task.grain.md` is a 1-to-1 work item directed to a single `recipient` deployment (defaulting to `"/"`, the root of the enclosing repository, when omitted) with optional `requestor` attribution, whereas `.process.grain.md` is a 1-to-many reusable/standing process that any number of Grain deployments can subscribe to (by repository, enclosing folder, or `.process.grain.md` URL) and therefore does not take `recipient` or `requestor`. Grainfiles use two kinds of identity—**user identities** and **deployment / URL identities**—rather than forge-specific `@handle` strings or custom principal namespaces:
 
 #### 6.2.1 User identity
 
@@ -211,8 +214,8 @@ A **deployment identity** is a reference (§8.1) naming the git repository or fo
 
 #### 6.2.3 Rules for `recipient` and `requestor`
 
-- **`recipient`** (OPTIONAL on both `.task.grain.md` and `.process.grain.md`, default `"/"`) MUST be a deployment identity when present (GF020). When omitted, `recipient` defaults to `"/"` (resolving to the root of the repository where the grainfile lives). A user identity or empty string in `recipient` is an error (GF020).
-- **`requestor`** (OPTIONAL on both `.task.grain.md` and `.process.grain.md`) MAY be omitted; when present, it MUST be either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (GF020, GF035).
+- **`recipient`** (OPTIONAL on `.task.grain.md` only, default `"/"`) MUST be a deployment identity when present (GF020). When omitted on a `.task.grain.md`, `recipient` defaults to `"/"` (resolving to the root of the repository where the grainfile lives). A user identity or empty string in `recipient` is an error (GF020). `recipient` is not permitted on `.process.grain.md` (GF022 / GF020).
+- **`requestor`** (OPTIONAL on `.task.grain.md` only) MAY be omitted; when present, it MUST be either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (GF020, GF035). `requestor` is not permitted on `.process.grain.md` (GF022 / GF020).
 
 ### 6.3 Drafts (`draft`)
 
@@ -249,7 +252,7 @@ A `task` grainfile describes a discrete unit of work to be executed once by its 
 | `references` | list of *ref* | Opt. | `[]` | Relevant files, folders, repositories, design docs, or grainfiles made available to the run. |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
 
-**Decision:** `trigger_with` is not permitted on `.task.grain.md` (it is restricted to `.process.grain.md` only), and a `.task.grain.md`'s `depends_on` entries MUST resolve only to `.task.grain.md` files (GF032; §8.3).
+**Decision:** `recipient` and `requestor` are restricted to `.task.grain.md` only, `trigger_with` is removed, and a `.task.grain.md`'s `depends_on` entries MUST resolve only to `.task.grain.md` files (GF032; §8.3).
 
 Example (`2026-10-16-widget-schema-v2.task.grain.md`):
 
@@ -270,28 +273,25 @@ decoder compatible with v1 payloads.
 
 ### 7.2 `process` (`<name>.process.grain.md`)
 
-A `process` grainfile describes a standing, repeatable process registered on its `recipient` deployment. Whenever triggered via `when` or `trigger_with`, the deployment dispatches a run with the `.process.grain.md` Markdown body as the prompt.
+A `process` grainfile describes a standing, repeatable 1-to-many process that any number of Grain deployments can subscribe to (by repository, enclosing folder, or `.process.grain.md` URL). Whenever triggered via `when`, each subscribed deployment dispatches a run with the `.process.grain.md` Markdown body as the prompt.
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `grainfile` | `"v1"` | Opt. | `"v1"` | Specification version (§3.1). |
 | `title` | string | Req. | | One-line summary. |
-| `requestor` | *user identity* or *deployment identity* | Opt. | | Optional attribution: who requested or owns the process (§6.2). |
-| `recipient` | *deployment identity* | Opt. | `"/"` | Deployment that registers and executes the process (§6.2.2); defaults to `"/"`. |
-| `draft` | boolean | Opt. | `false` | When `true`, recipient deployments ignore the process until `draft` is `false` or omitted (§6.3, §9). |
+| `draft` | boolean | Opt. | `false` | When `true`, subscribed deployments ignore the process until `draft` is `false` or omitted (§6.3, §9). |
 | `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest UTC timestamp or UTC date (`00:00:00Z`) at which the process may fire (§6.4, §9). |
-| `depends_on` | list of *ref* to `task` / `process` | Opt. | `[]` | `.task.grain.md` files, or `.process.grain.md` files in the same `trigger_with` group, that must complete before this process's run starts (§8.3). |
-| `trigger_with` | *ref* or list of *ref* to `task` / `process` | Req. unless `when` | | Fires this process whenever any referenced grainfile is triggered (§7.2.3). |
+| `depends_on` | list of *ref* to `task` / `process` | Opt. | `[]` | `.task.grain.md` or `.process.grain.md` files that must complete before this process's run starts (§8.3). |
 | `references` | list of *ref* | Opt. | `[]` | Relevant files, folders, repositories, design docs, or grainfiles made available to each run. |
-| `when` | mapping of source → options | Req. unless `trigger_with` | | Structured triggers specifying when the process fires (§7.2.1). |
+| `when` | mapping of source → options | Req. | | Structured triggers specifying when the process fires (§7.2.1). |
 | `gate` | boolean | Opt. | `false` | When `true`, gates the triggering commit or pull request on this process passing (§7.2.2). |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
 
-A `.process.grain.md` MUST specify at least one of `when` or `trigger_with` (GF020), and MAY specify both.
+A `.process.grain.md` MUST specify `when` (GF020) and MUST NOT specify `recipient`, `requestor`, or `trigger_with`.
 
 #### 7.2.1 Trigger sources (`when`)
 
-When present, `when` is a non-empty mapping from one or more registered trigger sources (§12.2) to their options. An unknown trigger source key is an error (GF020, §3.4).
+`when` is a non-empty mapping from one or more registered trigger sources (§12.2) to their options. An unknown trigger source key is an error (GF020, §3.4).
 
 - **`schedule: {cron, timezone}`**
   - `cron` (REQUIRED, string): A five-field POSIX `crontab(5)` expression (`minute hour day-of-month month day-of-week`). A `cron` string that does not consist of five whitespace-separated fields is an error (GF020).
@@ -310,12 +310,12 @@ When present, `when` is a non-empty mapping from one or more registered trigger 
 
 When `gate: true`, the process acts as a gate on the commit or pull request that triggered it (such as a security review, architectural check, or release verification). The deployment holds merge approval for that commit or pull request until the run dispatched from the `.process.grain.md` completes and approves/passes.
 
-#### 7.2.3 Multi-step groups and suites (`trigger_with` and `depends_on`)
+#### 7.2.3 Multi-step process chains and suites (`depends_on` and `when`)
 
-**Decision:** Multi-step process groups and suites are expressed directly by combining `trigger_with` and `depends_on` across `.process.grain.md` files, without a separate suite or folder-template kind:
-- A lead process (for example, `smoke.process.grain.md`) declares when the group runs in `when:` (such as a nightly schedule).
-- Downstream steps (for example, `report.process.grain.md`) set `trigger_with: ["./smoke.process.grain.md"]` and `depends_on: ["./smoke.process.grain.md"]`.
-- Whenever `smoke.process.grain.md` fires, every `.process.grain.md` that names it in `trigger_with` is queued for the same firing (subject to bounded fan-out limits; §11.4), and `depends_on` orders their execution so `report.process.grain.md` runs after `smoke.process.grain.md` succeeds.
+**Decision:** Multi-step process chains and suites are expressed either within a single `.process.grain.md` or by combining `depends_on` and `when` across `.process.grain.md` files, without `trigger_with` or a separate suite kind:
+- Upstream and downstream processes declare their trigger conditions in `when:` (for example, a shared nightly `schedule` or `manual` trigger).
+- Downstream steps (for example, `report.process.grain.md`) set `depends_on: ["./smoke.process.grain.md"]`.
+- Whenever both fire for a trigger wave, `depends_on` orders their execution so `report.process.grain.md` runs after `smoke.process.grain.md` succeeds.
 
 Example (`schema-security-review.process.grain.md`):
 
@@ -323,8 +323,6 @@ Example (`schema-security-review.process.grain.md`):
 ---
 grainfile: v1
 title: Security review for widget schema and parser changes
-requestor: Bruce Salmon <bsalmon@google.com>
-recipient: https://github.com/acme/grain-eu
 when:
   pull_request:
     branches: ["main"]
@@ -390,16 +388,13 @@ To resolve a reference from a grainfile in repository `R`:
 
 References in fields that expect a specific kind of target MUST resolve to that target kind when the target repository is available (GF032):
 - **`depends_on` on a `.task.grain.md` (`task`):** each entry MUST resolve only to a `.task.grain.md` (`task`) grainfile. A `.task.grain.md` that depends on a `.process.grain.md` is an error (GF032), because a standing process has no single terminal completion.
-- **`depends_on` on a `.process.grain.md` (`process`):** each entry MUST resolve either to a `.task.grain.md` (`task`) grainfile or to a `.process.grain.md` (`process`) grainfile in the same `trigger_with` group (i.e., connected by `trigger_with` so both fire in the same execution wave; GF032 otherwise).
-- **`trigger_with` (on `.process.grain.md` only):** each entry MUST resolve to a `.task.grain.md` (`task`) or `.process.grain.md` (`process`) grainfile (GF032).
-- **`recipient` (and `requestor` when it is a deployment or URL identity):** MUST resolve to a repository or directory, never a file (GF032).
+- **`depends_on` on a `.process.grain.md` (`process`):** each entry MUST resolve to either a `.task.grain.md` (`task`) grainfile or a `.process.grain.md` (`process`) grainfile directly (GF032 otherwise).
+- **`recipient` (and `requestor` when it is a deployment or URL identity on a `.task.grain.md`):** MUST resolve to a repository or directory, never a file (GF032).
 - **`references`:** MAY resolve to any grainfile, asset file, directory, or repository.
 
-### 8.4 Dependency and trigger graphs
+### 8.4 Dependency graphs
 
 8.4.1. **`depends_on` graph.** The directed graph whose edges run from each grainfile to the grainfiles it lists in `depends_on` MUST be acyclic. Any cycle in `depends_on` is an error (GF034).
-
-8.4.2. **`trigger_with` graph.** The directed graph whose edges run from each grainfile to the grainfiles it lists in `trigger_with` MUST be acyclic. Any cycle in `trigger_with` is an error (GF034). At runtime, evaluators MUST enforce a visited set, a maximum transitive depth of 8, and a maximum fan-out of 32 per trigger wave (§11.4).
 
 ### 8.5 Canonical form
 
@@ -407,17 +402,17 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 
 ## 9. Direct execution and lifecycle model
 
-9.1. **Repository watching and drafts.** A Grain deployment watches its attached repositories for `.task.grain.md` and `.process.grain.md` files whose resolved `recipient` (defaulting to `/` when omitted) matches the deployment's own canonical identity. When `draft: true` (§6.3), the deployment MUST ignore the grainfile—neither queuing a `.task.grain.md` nor registering or firing a `.process.grain.md` trigger or merge gate—until `draft` is set to `false` or omitted.
+9.1. **Repository watching, subscriptions, and drafts.** A Grain deployment watches its attached repositories for `.task.grain.md` files whose resolved `recipient` (defaulting to `/` when omitted) matches the deployment's own canonical identity, and subscribes to `.process.grain.md` files by repository, enclosing folder, or `.process.grain.md` URL (so multiple deployments can subscribe to the same `.process.grain.md`). When `draft: true` (§6.3), deployments MUST ignore the grainfile—neither queuing a `.task.grain.md` nor registering or firing a `.process.grain.md` trigger or merge gate—until `draft` is set to `false` or omitted.
 
 9.2. **No translation step.** Non-draft grainfiles are executed directly without an intermediate template-rendering or task-compilation agent:
 - **Executing a `.task.grain.md`:** `.task.grain.md` files execute only from default or protected branches (§11.1), never from unmerged pull-request heads. If `not_before` is set (§6.4), the deployment holds the task as deferred and MUST NOT execute it before `not_before`. Once `not_before` (if any) has been reached and every `.task.grain.md` in `depends_on` has completed successfully, the deployment queues and runs the task directly. The `.task.grain.md`'s `title` is the task title, its Markdown body is the prompt, its `references` are provided as context to the run (structurally delimited from the prompt; §11.5), and the source `.task.grain.md` URL (along with optional `requestor` attribution) is recorded on the task.
-- **Executing a `.process.grain.md`:** The deployment registers the `.process.grain.md` directly as a standing trigger (and merge gate when `gate: true`). If `not_before` is set (§6.4), the process does not fire before `not_before`. Once active, whenever any condition in `when` matches—or whenever any grainfile referenced in `trigger_with` is triggered—the deployment dispatches a run once `depends_on` are satisfied, using the `.process.grain.md`'s Markdown body as the prompt and `references` as context. When `gate: true`, the deployment holds the triggering commit or pull request until the run succeeds.
+- **Executing a `.process.grain.md`:** Subscribed deployments register the `.process.grain.md` directly as a standing trigger (and merge gate when `gate: true`). If `not_before` is set (§6.4), the process does not fire before `not_before`. Once active, whenever any condition in `when` matches, each subscribed deployment dispatches a run once `depends_on` are satisfied, using the `.process.grain.md`'s Markdown body as the prompt and `references` as context. When `gate: true`, the deployment holds the triggering commit or pull request until the run succeeds.
 
-9.3. **`.task.grain.md` lifecycle: identity, idempotency, edits, and deletion.**
-- **Canonical identity:** A `.task.grain.md`'s identity is its canonical `(repo_url, file_path)` pair on the repository's default/protected branch.
+9.3. **Lifecycle: identity, idempotency, edits, deletion, and `draft: true` withdrawal.**
+- **Canonical identity:** A grainfile's identity is its canonical `(repo_url, file_path)` pair on the repository's default/protected branch.
 - **Idempotency after completion:** Once a `.task.grain.md` identified by `(repo_url, file_path)` has completed (`done` / `completed` / `success`), subsequent pushes or edits to that file path MUST NOT re-queue or re-run the task.
 - **Editing an incomplete task:** Editing a `.task.grain.md` while it is still queued or deferred (not yet completed) updates its indexed definition (`title`, prompt body, `not_before`, `depends_on`, `references`, `recipient`) in place.
-- **Deleting a task:** Deleting a `.task.grain.md` that is currently queued, deferred, or running cancels the task and records its state as `cancelled`. Deleting a `.task.grain.md` that has already completed is a no-op (its completion record remains intact so downstream `depends_on` consumers stay satisfied).
+- **Deleting or drafting a grainfile (`task_removed` / `process_removed`):** Deleting an active `.task.grain.md` or updating it from `draft: false` to `draft: true` emits a `task_removed` event (`action: "removed"`) and, if the task has not yet completed, cancels any queued/running run (`dependency_completed` with `cancelled`). Deleting a `.task.grain.md` that has already completed preserves its completion record so downstream `depends_on` consumers stay satisfied. Deleting an active `.process.grain.md` or updating it from `draft: false` to `draft: true` emits a `process_removed` event (`action: "removed"`) so subscribed deployments unregister the process trigger immediately.
 
 ## 10. Errors and lint
 
@@ -432,11 +427,11 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 | GF004 | error | Front matter outside the YAML subset: not a mapping, non-string key, duplicate key, or uses YAML anchors, aliases, merge keys, or tags (§5.3). |
 | GF005 | warning | A Markdown file has an unregistered `.<kind>.grain.md` (or legacy `.<kind>.md`) suffix (§4.2.3). |
 | GF006 | error | A path or file size limit of §4.1.4 or §4.3 is exceeded, or two paths in a repository differ only in case. |
-| GF020 | error | Schema or field validation failure: unsupported or non-string `grainfile` version, missing required field (`title`, or `when`/`trigger_with` on `process`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `not_before` date/time, unknown `when` trigger source, or invalid `schedule.cron` / event filter (§3.1, §6, §7). |
-| GF022 | warning | Unknown front-matter field not beginning with `x_` (including removed `created_at`, legacy `on`, or `trigger_with` on a `task`) (§3.3). |
+| GF020 | error | Schema or field validation failure: unsupported or non-string `grainfile` version, missing required field (`title`, or `when` on `process`), prohibited field (`trigger_with`, `recipient`/`requestor` on a `process`, or `when`/`gate` on a `task`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `not_before` date/time, unknown `when` trigger source, or invalid `schedule.cron` / event filter (§3.1, §6, §7). |
+| GF022 | warning | Unknown front-matter field not beginning with `x_` (§3.3). |
 | GF030 | error | A reference does not resolve: missing file, missing directory, or missing Markdown heading `#<anchor>` (§8.2). |
-| GF032 | error | A reference resolves to the wrong kind: `task` `depends_on` targets a `process` instead of a `task`, `process` `depends_on` targets a `process` not in the same `trigger_with` group, `depends_on` or `trigger_with` target is not a grainfile, or a deployment identity resolves to a file instead of a repository or folder (§6.2.2, §8.3). |
-| GF034 | error | Cycle in `depends_on` or `trigger_with` (§8.4). |
+| GF032 | error | A reference resolves to the wrong kind: `task` `depends_on` targets a `process` instead of a `task`, `depends_on` target is not a grainfile, or a deployment identity resolves to a file instead of a repository or folder (§6.2.2, §8.3). |
+| GF034 | error | Cycle in `depends_on` (§8.4). |
 | GF035 | error | Malformed reference: not a valid `https://` (or `file://`) URL or local path, uses a `git::` prefix, `//` path separator, unsupported scheme, or query parameter, or attaches `#<anchor>` to a deployment identity (§6.2.2, §8.1). |
 | GF036 | error | A relative reference climbs above its repository root (§8.1.2). |
 
@@ -444,13 +439,13 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 
 11.1. **Base-branch execution and `pull_request` trigger safety.** The authenticated source of a `.task.grain.md` or `.process.grain.md` is the repository and folder URL where the file lives, not its optional `requestor` attribution field (§6.2).
 - `.task.grain.md` files MUST execute only from default or protected branches, never from unmerged pull-request heads or non-default feature branches.
-- On `when: {pull_request: ...}`, the `.process.grain.md` definition (its prompt body, `recipient`, `when`, `gate`, and `references`) MUST be read from the target base branch, never from the untrusted pull-request head commit.
+- On `when: {pull_request: ...}`, the `.process.grain.md` definition (its prompt body, `when`, `gate`, and `references`) MUST be read from the target base branch, never from the untrusted pull-request head commit.
 
-11.2. **Directory-verified `recipient` authorization.** Grain Hub MUST verify that a node's authenticated owner is admitted by the directory for the repository of any `recipient` URL that the node subscribes to, fetches `/v1/grainfiles/content` for, or reports `grainfile_complete` for, preventing an un-admitted node from claiming events, reading references, or spoofing completion for another team's recipient deployment.
+11.2. **Directory-verified subscription authorization.** Grain Hub MUST verify that a node's authenticated owner is admitted by the directory for the repository of any `recipient`, `repo`, or `folder` URL that the node subscribes to, fetches `/v1/grainfiles/content` (or mux-stream `fetch_grainfile` / `fetch_reference`) for, or reports `grainfile_complete` for, preventing an un-admitted node from claiming events, reading references, or spoofing completion for another team's repository or deployment.
 
-11.3. **Commit-SHA pinning and regular-file check on `/v1/grainfiles/content`.** When a grainfile is indexed at a commit SHA, its `authorized_references` MUST be pinned to that exact commit SHA, and `/v1/grainfiles/content` MUST fetch referenced files at that pinned commit SHA rather than a mutable branch ref. The GitHub content fetcher MUST verify that the git object is a regular file (`type: "file"`) and reject `symlink` and `submodule` git objects.
+11.3. **Commit-SHA pinning and regular-file/tree check on `/v1/grainfiles/content` and mux streams.** When a grainfile is indexed at a commit SHA, its `authorized_references` MUST be pinned to that exact commit SHA, and content fetches MUST fetch referenced files or directory trees at that pinned commit SHA rather than a mutable branch ref. The GitHub content fetcher MUST verify that fetched objects are regular files or directories and reject `symlink` and `submodule` git objects.
 
-11.4. **Bounded `trigger_with` fan-out.** When evaluating `trigger_with` chains, the Hub MUST maintain a visited set of grainfiles and enforce a maximum transitive depth of 8 (`MaxTriggerWithDepth = 8`) and a maximum total fan-out of 32 (`MaxTriggerWithFanOut = 32`) per trigger evaluation to prevent cyclic or amplification denial-of-service.
+11.4. **Bounded `depends_on` evaluation.** When evaluating `depends_on` graphs across processes and tasks, evaluators MUST maintain a visited set of grainfiles and enforce cycle detection (`GF034`) to prevent cyclic denial-of-service.
 
 11.5. **Structural separation of prompt and references.** Executors MUST structurally delimit the Grainfile Markdown body (trusted instructions from the base branch) from materialized `references` and pull-request diffs (untrusted data), tagging each materialized reference and diff with its source URL and pinned commit SHA so the executing agent never confuses untrusted reference contents with trusted grainfile instructions.
 
@@ -472,8 +467,8 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 
 [`examples/grainfiles/`](../examples/grainfiles/README.md) contains two example repositories mapped via `stubs.yaml`; `python3 tools/grainfiles/grainlint.py examples/grainfiles` validates them all:
 
-- **`widgets/`** (`https://github.com/acme/widgets`): a code repository with design notes (`docs/widget-schema.md`), Go source (`src/widget.go`), three discrete tasks in `.grain/tasks/` (`2026-10-16-widget-schema-v2.task.grain.md`, `2026-10-16-widget-schema-v2-migration.task.grain.md` omitting optional `requestor` and using `depends_on` and `not_before: "2026-10-25T09:00:00Z"`, and `2026-11-01-drop-widget-v1-support.task.grain.md` with `draft: true` and `not_before: "2026-11-01"`), and two processes in `.grain/processes/` (`schema-security-review.process.grain.md` with `gate: true` on pull requests and pushes under `when:`, and `release-cut-check.process.grain.md` with `scenario` and `manual` triggers under `when:`).
-- **`grain-eu/`** (`https://github.com/acme/grain-eu`): a deployment repository with a two-step nightly qualification group in `processes/qualification/`: `smoke.process.grain.md` (with `when.schedule` in `Europe/Berlin` and cross-repo `https://` `/tree/` and `/blob/` `references`) and `report.process.grain.md` (omitting `recipient` so it defaults to `"/"` — the enclosing `grain-eu` repository — paired via `trigger_with: ["./smoke.process.grain.md"]` and ordered via `depends_on: ["./smoke.process.grain.md"]`).
+- **`widgets/`** (`https://github.com/acme/widgets`): a code repository with design notes (`docs/widget-schema.md`), Go source (`src/widget.go`), three discrete tasks in `.grain/tasks/` (`2026-10-16-widget-schema-v2.task.grain.md`, `2026-10-16-widget-schema-v2-migration.task.grain.md` omitting optional `requestor` and using `depends_on` and `not_before: "2026-10-25T09:00:00Z"`, and `2026-11-01-drop-widget-v1-support.task.grain.md` with `draft: true` and `not_before: "2026-11-01"`), and two reusable processes in `.grain/processes/` (`schema-security-review.process.grain.md` with `gate: true` on pull requests and pushes under `when:`, and `release-cut-check.process.grain.md` with `scenario` and `manual` triggers under `when:`).
+- **`grain-eu/`** (`https://github.com/acme/grain-eu`): a deployment repository with a two-step nightly qualification suite in `processes/qualification/`: `smoke.process.grain.md` (with `when.schedule` in `Europe/Berlin` and cross-repo `https://` `/tree/` and `/blob/` `references`) and `report.process.grain.md` (with `when.schedule` and `when.manual`, ordered after `smoke.process.grain.md` via `depends_on: ["./smoke.process.grain.md"]`).
 
 Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/testdata/bad/`, generated by `tools/grainfiles/testdata/mkfixtures.py` and checked by `python3 tools/grainfiles/grainlint.py --self-test`.
 
@@ -482,7 +477,7 @@ Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/te
 1. **Two directly executed kinds (`<name>.task.grain.md` and `<name>.process.grain.md`).** Discrete one-off tasks are `<name>.task.grain.md` and standing/repeatable processes are `<name>.process.grain.md` (`**/*.grain.md`), both executed directly with their Markdown body as the prompt (§2.1, §7, §9).
 2. **Version field (`grainfile: v1`) and agent quick-reference.** Front matter optionally declares `grainfile: v1` (defaulting to `"v1"`), programmatically mapped to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3.1).
 3. **Lower-case ASCII stems (`^[a-z0-9][a-z0-9._-]*$`).** Grainfile stems use only lower-case ASCII letters, digits, `.`, `-`, and `_` (without uppercase compact-UTC `T`/`Z` exceptions) so filenames are portable across case-insensitive file systems (§4.1.3).
-4. **`when` trigger key, no `created_at`, `trigger_with` on processes only, and default `recipient: "/"`.** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` is omitted because git tracks commit timestamps (§6.1); `trigger_with` is restricted to `.process.grain.md` (§7.1); and omitted `recipient` defaults to `"/"` (the enclosing repository) (§6.2.3).
+4. **Nine orthogonal front-matter fields: `when` trigger key, no `created_at` or `trigger_with`, and `recipient`/`requestor` on `.task.grain.md` only.** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` and `trigger_with` are omitted (§6.1, §7.2); and `recipient` (defaulting to `"/"`) and `requestor` are restricted to `.task.grain.md` because tasks are 1-to-1 while processes are 1-to-many (§6.2.3, §7).
 5. **Unknown fields warn; `x_*` extends; unknown trigger sources fail closed.** Unrecognised fields emit a warning (`GF022`) while `x_*` extension fields are silent; unknown `when` trigger sources are an error (`GF020`) (§3.3, §3.4).
-6. **Task lifecycle idempotency and `depends_on` target kind rules.** A `.task.grain.md`'s identity is `(repo_url, file_path)`: once completed, pushes do not re-run it; editing a queued task updates it; deleting a queued/running task cancels it; deleting a completed task is a no-op (§9.3). A `.task.grain.md` may only `depends_on` `.task.grain.md` files (`GF032`), while a `.process.grain.md` may `depends_on` a `.task.grain.md` or a `.process.grain.md` in the same `trigger_with` group (§8.3).
-7. **Security invariants.** `.task.grain.md` executes only from default/protected branches and `when.pull_request` reads `.process.grain.md` definitions from the base branch (§11.1); Hub enforces directory-verified `recipient` authorization (§11.2), commit-SHA pinning and regular-file checks on `/v1/grainfiles/content` (§11.3), bounded `trigger_with` depth (8) and fan-out (32) (§11.4), and structural separation between trusted prompts and untrusted references/diffs (§11.5).
+6. **Task lifecycle idempotency, withdrawal events, and `depends_on` target kind rules.** A `.task.grain.md`'s identity is `(repo_url, file_path)`: once completed, pushes do not re-run it; editing a queued task updates it; deleting or drafting an active task or process emits `task_removed` / `process_removed` (`action: "removed"`); deleting a completed task is a no-op (§9.3). A `.task.grain.md` may only `depends_on` `.task.grain.md` files (`GF032`), while a `.process.grain.md` may `depends_on` `.process.grain.md` or `.task.grain.md` files directly (§8.3).
+7. **Security invariants.** `.task.grain.md` executes only from default/protected branches and `when.pull_request` reads `.process.grain.md` definitions from the base branch (§11.1); Hub enforces directory-verified subscription authorization (§11.2), commit-SHA pinning and regular-file/tree checks on `/v1/grainfiles/content` and mux streams (§11.3), `depends_on` DAG cycle detection (§11.4), and structural separation between trusted prompts and untrusted references/diffs (§11.5).

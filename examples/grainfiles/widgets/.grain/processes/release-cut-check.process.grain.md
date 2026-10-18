@@ -1,8 +1,6 @@
 ---
 grainfile: v1
 title: Verify backwards compatibility when cutting a release branch
-requestor: Bruce Salmon <bsalmon@google.com>
-recipient: https://github.com/acme/grain-eu
 when:
   scenario:
     description: "When a release candidate branch (release/*) is cut or cherry-picked"

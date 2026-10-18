@@ -145,23 +145,22 @@ deployments and has two core responsibilities:
     organization, the hub receives forge webhooks (`push`,
     `pull_request`, `merge`) and indexes Grainfile metadata across
     connected repositories (§6.3): the file's `https://` URL,
-    commit/ref, and parsed YAML front matter (`title`, `recipient`,
-    `requestor`, `draft`, `not_before`, `created_at`, `references`,
-    `depends_on`, `trigger_with`, `on`, `gate` — metadata only, no
-    source code at rest).
-  - When a non-draft `.task.md` or `.process.md` matching a deployment's
-    `recipient` or subscriptions is added or updated, or when a forge
-    event (`push`, `pull_request`, `merge`) matches a subscribed
-    `.process.md` trigger, the hub notifies the subscribed Grain
+    commit/ref, and parsed YAML front matter (`grainfile`, `title`,
+    `recipient`, `requestor`, `draft`, `not_before`, `references`,
+    `depends_on`, `when`, `gate` — metadata only, no source code at rest).
+  - When a non-draft `.task.grain.md` or `.process.grain.md` matching a
+    deployment's `recipient` or subscriptions is added or updated, or when
+    a forge event (`push`, `pull_request`, `merge`) matches a subscribed
+    `.process.grain.md` trigger, the hub notifies the subscribed Grain
     deployment over its connection (and answers catch-up queries on
     connect/reconnect, §6.4) so the node can fetch the Grainfile body and
     its authorized same-repo `references` on demand through the hub (or
     directly from git when it holds credentials for that repo) and
     execute it directly.
-  - When `.task.md` or `.process.md` files declare cross-deployment
-    `depends_on` or `trigger_with` references, the hub routes
-    completion and trigger notices between the subscribed deployments
-    based on the task and process lifecycle events nodes report (§6.5).
+  - When `.task.grain.md` or `.process.grain.md` files declare
+    cross-deployment `depends_on` references, the hub routes completion
+    and co-trigger notices between the subscribed deployments based on the
+    task and process lifecycle events nodes report (§6.5).
 
 ### 1.3 The node–hub interface is the contract
 
@@ -668,7 +667,7 @@ Either side opens further streams once the node is welcomed:
 
 - **The hub to a node:** `Server.Open(ctx, nodeID)`. This is how the
   hub delivers Grainfile and trigger notifications (§6.4),
-  cross-deployment `depends_on` / `trigger_with` notices (§6.5), and
+  cross-deployment `depends_on` notices (§6.5), and
   interactive UI actions (`cancel`, `approve`, `message`, §6.6), how an
   authorized viewer reads a diff or tool log through (`view`, §7.2), and
   how an authorized viewer reaches a node's own full UI (`http`, §11).
@@ -943,21 +942,25 @@ a separate Hub-owned imperative task queue.
 In the Grainfile model ([`docs/grainfiles-spec.md`](grainfiles-spec.md)):
 
 - **Two directly executed kinds:**
-  - **`<name>.task.md` (`task`):** A discrete unit of work to execute
+  - **`<name>.task.grain.md` (`task`):** A discrete 1-to-1 unit of work to execute
     once. Its YAML front matter declares metadata and references; its
     Markdown body is the prompt given directly to the run.
-  - **`<name>.process.md` (`process`):** A standing, repeatable process
-    with structured triggers (`on` and/or `trigger_with`) and an
+  - **`<name>.process.grain.md` (`process`):** A standing, reusable 1-to-many process
+    with structured triggers (`when`) and an
     optional `gate: true` flag for commit/pull-request gating. Its
     Markdown body is the prompt dispatched whenever the process fires.
-- **Authoritative source and `recipient`:** The authoritative source of
-  a `.task.md` or `.process.md` is the `https://` URL of the git
+- **Authoritative source and `recipient` (`.task.grain.md` only):** The authoritative source of
+  a `.task.grain.md` or `.process.grain.md` is the `https://` URL of the git
   repository and folder where the file lives
-  ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.3, §11.1). The
-  required `recipient` field (a plain `https://` deployment repository
-  or `/tree/<ref>/<folder>` URL, or a repo-local path) names the Grain
-  deployment intended to execute it; the optional `requestor` field
-  records attribution (`Name <email>` or a plain `https://` URL).
+  ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.3, §11.1). On
+  `.task.grain.md`, the optional `recipient` field (defaulting to `/`,
+  or a plain `https://` deployment repository or `/tree/<ref>/<folder>`
+  URL, or a repo-local path) names the Grain deployment intended to
+  execute the task, and the optional `requestor` field records
+  attribution (`Name <email>` or a plain `https://` URL). On
+  `.process.grain.md`, `recipient` and `requestor` are prohibited so any
+  number of deployments can subscribe to the process by `repo`,
+  enclosing `folder`, or `grainfile_url`.
 - **Local policy enforcement on each Grain deployment:** Because write
   access to a git repository and folder is governed by the forge's
   branch protection, merge rules, and `CODEOWNERS` reviews, the hub does
@@ -1002,15 +1005,15 @@ any time with a `subscribe` message on the control stream
 - **`recipients`:** The deployment's own `recipient` identity URL(s)
   (for example, `https://github.com/acme/grain-eu` or
   `https://github.com/acme/deployments/tree/main/grain-eu`). The hub
-  matches any `.task.md` or `.process.md` whose resolved `recipient`
-  equals one of these URLs.
+  matches any `.task.grain.md` whose resolved `recipient` equals one of
+  these URLs.
 - **`repos` and `folders`:** Repositories (`https://github.com/owner/name`
   or `owner/name`) and repository folder paths (`https://.../tree/<ref>/<path>`)
-  that the deployment watches for `.task.md` and `.process.md` files and
+  that the deployment watches for `.task.grain.md` and `.process.grain.md` files and
   forge trigger events.
-- **`grainfiles`:** Specific shared `.process.md` or `.task.md`
+- **`grainfiles`:** Specific shared `.process.grain.md` or `.task.grain.md`
   `https://` URLs the deployment subscribes to — including cross-repository
-  or cross-deployment `depends_on` and `trigger_with` targets executed
+  or cross-deployment `depends_on` targets executed
   by other Grain deployments (§6.5).
 
 Subscriptions are checked against `directory.Store.Admit` (§5.3) for the
@@ -1026,25 +1029,25 @@ repository in an organization — Grain Hub receives forge webhooks
 (`push`, `pull_request`, `merge`) and indexes Grainfile metadata across
 connected repositories:
 
-- **What the hub indexes (metadata only):** For each `.task.md` and
-  `.process.md` in a connected repository, the hub stores:
+- **What the hub indexes (metadata only):** For each `.task.grain.md` and
+  `.process.grain.md` in a connected repository (discovered via initial
+  repository tree scan on `installation` / `installation_repositories`
+  or `SyncRepository`, and kept current on `push` / `merge` webhooks),
+  the hub stores:
   - The file's canonical `https://` URL, repository URL, branch/ref,
     commit SHA, and repository-relative path.
   - The parsed YAML front matter ([`docs/grainfiles-spec.md`](grainfiles-spec.md)
     §5–§8):
-    - `title`
-    - `recipient` (resolved to a canonical `https://` deployment URL)
-    - `requestor` (optional attribution)
+    - `grainfile` (schema version, `"v1"`, default `"v1"`)
+    - `recipient` (`.task.grain.md` only; resolved to a canonical `https://` deployment URL, default `"/"`)
+    - `requestor` (`.task.grain.md` only; optional attribution)
     - `draft` (boolean, default `false`)
     - `not_before` (optional RFC 3339 UTC timestamp or `YYYY-MM-DD` UTC
-      date)
-    - `created_at` (optional RFC 3339 UTC timestamp)
-    - `references` (resolved list of `https://` or repo-local reference
+      date, promoted automatically by the leader-leased `PromoteDeferred` ticker)
+    - `references` (resolved list of `https://` or repo-local file or folder
       URLs)
-    - `depends_on` (resolved list of `.task.md` / `.process.md` URLs)
-    - `trigger_with` (resolved list of `.process.md` URLs on process
-      files)
-    - `on` (`schedule`, `push`, `merge`, `pull_request`, `manual`,
+    - `depends_on` (resolved list of `.task.grain.md` / `.process.grain.md` URLs)
+    - `when` (`schedule`, `push`, `merge`, `pull_request`, `manual`,
       `scenario` trigger definitions on process files)
     - `gate` (boolean merge/commit gate flag on process files)
 - **No source code at rest:** The hub never stores repository checkouts,
@@ -1140,30 +1143,24 @@ permanent git credentials for Repo A ([hub-interface.md](hub-interface.md),
   credentials and streams the bytes directly to the node — never storing
   Grainfile bodies or source files at rest in the hub database.
 
-### 6.5 Cross-deployment `depends_on` and `trigger_with` routing
+### 6.5 Cross-deployment `depends_on` routing
 
-`.task.md` and `.process.md` files can form multi-step workflows and
+`.task.grain.md` and `.process.grain.md` files can form multi-step workflows and
 qualification suites across repositories and across Grain deployments
-using `depends_on` and `trigger_with`
-([`docs/grainfiles-spec.md`](grainfiles-spec.md) §7.2.3, §8.3, §8.4):
+using `depends_on`
+([`docs/grainfiles-spec.md`](grainfiles-spec.md) §7.2.3, §8.3):
 
-- **Subscription:** When Deployment A has a `.task.md` or `.process.md`
-  that declares `depends_on: ["https://.../b.task.md"]` or
-  `trigger_with: ["https://.../smoke.process.md"]` whose `recipient` is
+- **Subscription:** When Deployment A has a `.task.grain.md` or `.process.grain.md`
+  that declares `depends_on: ["https://.../b.task.grain.md"]` or
+  `depends_on: ["https://.../smoke.process.grain.md"]` executed by
   Deployment B, Deployment A includes that target Grainfile URL in its
   `subscriptions.grainfiles`.
-- **Co-trigger routing (`trigger_with`):** When Deployment B starts a
-  run of `smoke.process.md` (reported via its lifecycle events on
-  `NodeStream`, §7.1, or triggered via the hub), the hub sends a
-  `trigger_event` (`source: "trigger_with"`, with `triggered_by` naming
-  `smoke.process.md` and its `run_id`) to Deployment A so Deployment A
-  triggers its paired `.process.md`.
 - **Completion routing (`depends_on`):** When Deployment B reports on
-  its event stream (§7.1) that a run of `b.task.md` or
-  `smoke.process.md` has finished (`result` with `done`, `failed`, or
+  its event stream (§7.1, or `grainfile_complete`) that a run of `b.task.grain.md` or
+  `smoke.process.grain.md` has finished (`result` with `done`, `failed`, or
   `cancelled`), the hub sends a `dependency_done` notice to Deployment A
   naming the `grainfile_url`, `run_id`, terminal `state`, and `reason`.
-  Deployment A unblocks its waiting `.task.md` or `.process.md` run on
+  Deployment A unblocks its waiting `.task.grain.md` or `.process.grain.md` run on
   `done`, or fails/cancels the dependent run according to its local
   policy on `failed` or `cancelled`.
 

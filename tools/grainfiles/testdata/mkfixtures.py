@@ -18,11 +18,9 @@ def task(extra="", body="Run the task.\n", title="T", requestor=USR, recipient=D
             % (title, req_line, rec_line, extra, body))
 
 
-def process(extra="when:\n  manual: {}\n", body="Run the process.\n", title="P", requestor=USR, recipient=DEP):
-    req_line = 'requestor: "%s"\n' % requestor if requestor is not None else ""
-    rec_line = 'recipient: "%s"\n' % recipient if recipient is not None else ""
-    return ('---\ngrainfile: v1\ntitle: %s\n%s%s%s---\n%s'
-            % (title, req_line, rec_line, extra, body))
+def process(extra="when:\n  manual: {}\n", body="Run the process.\n", title="P"):
+    return ('---\ngrainfile: v1\ntitle: %s\n%s---\n%s'
+            % (title, extra, body))
 
 
 def put(top, fs):
@@ -63,6 +61,12 @@ case("gf020-user-recipient", ["GF020"], {
 case("gf020-bad-requestor", ["GF020"], {
     "r/tasks/a.task.grain.md": task(requestor="@alice"),
 })
+case("gf020-process-recipient", ["GF020"], {
+    "r/processes/p.process.grain.md": process(extra='recipient: "%s"\nwhen:\n  manual: {}\n' % DEP),
+})
+case("gf020-trigger-with-removed", ["GF020"], {
+    "r/processes/p.process.grain.md": process(extra="when:\n  manual: {}\ntrigger_with: [./b.process.grain.md]\n"),
+})
 case("gf020-process-without-trigger", ["GF020"], {
     "r/processes/p.process.grain.md": process(extra="gate: true\n"),
 })
@@ -102,14 +106,6 @@ case("gf032-task-depends-on-process", ["GF032"], {
     "r/processes/p.process.grain.md": process(),
     "r/tasks/a.task.grain.md": task("depends_on: [../processes/p.process.grain.md]\n"),
 })
-case("gf032-process-depends-ungrouped-process", ["GF032"], {
-    "r/processes/a.process.grain.md": process(extra="when:\n  manual: {}\ndepends_on: [./b.process.grain.md]\n"),
-    "r/processes/b.process.grain.md": process(extra="when:\n  manual: {}\n"),
-})
-case("gf032-trigger-with-asset", ["GF032"], {
-    "r/docs/design.md": "# Design\n",
-    "r/processes/p.process.grain.md": process(extra="trigger_with: /docs/design.md\n"),
-})
 case("gf032-recipient-is-file", ["GF032"], {
     "r/tasks/b.task.grain.md": A,
     "r/tasks/a.task.grain.md": task(recipient="./b.task.grain.md"),
@@ -118,9 +114,9 @@ case("gf034-depends-cycle", ["GF034"], {
     "r/tasks/a.task.grain.md": task("depends_on: [./b.task.grain.md]\n"),
     "r/tasks/b.task.grain.md": task("depends_on: [./a.task.grain.md]\n"),
 })
-case("gf034-trigger-with-cycle", ["GF034"], {
-    "r/processes/a.process.grain.md": process(extra="trigger_with: [./b.process.grain.md]\n"),
-    "r/processes/b.process.grain.md": process(extra="trigger_with: [./a.process.grain.md]\n"),
+case("gf034-process-depends-cycle", ["GF034"], {
+    "r/processes/a.process.grain.md": process(extra="when:\n  manual: {}\ndepends_on: [./b.process.grain.md]\n"),
+    "r/processes/b.process.grain.md": process(extra="when:\n  manual: {}\ndepends_on: [./a.process.grain.md]\n"),
 })
 case("gf035-malformed-ref", ["GF035"], {
     "r/tasks/a.task.grain.md": task('references: ["git::https://github.com/acme/widgets.git//docs/d.md"]\n'),

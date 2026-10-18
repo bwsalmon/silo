@@ -1,6 +1,7 @@
 package rendezvous
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -272,6 +274,67 @@ func (c *Conn) Accept() (net.Conn, error) { return c.m.AcceptStream() }
 
 // Open opens a stream to the hub, for events.
 func (c *Conn) Open(ctx context.Context) (net.Conn, error) { return c.m.OpenStream(ctx) }
+
+// FetchGrainfile opens a mux stream to the hub and fetches the raw content of
+// an authorized .task.grain.md or .process.grain.md on demand without storing
+// content at rest.
+func (c *Conn) FetchGrainfile(ctx context.Context, grainfileURL, commitSHA string) (MuxFetchHeader, []byte, error) {
+	return c.fetchMuxContent(ctx, muxFetchRequest{
+		Type:         "fetch_grainfile",
+		GrainfileURL: grainfileURL,
+		Commit:       commitSHA,
+	})
+}
+
+// FetchReference opens a mux stream to the hub and fetches an authorized
+// same-repository file or directory tree reference declared in grainfileURL's
+// front matter. For directory references, format may be "" (JSON TreeListing)
+// or "tar" (POSIX tar archive).
+func (c *Conn) FetchReference(ctx context.Context, grainfileURL, commitSHA, reference, format string) (MuxFetchHeader, []byte, error) {
+	return c.fetchMuxContent(ctx, muxFetchRequest{
+		Type:         "fetch_reference",
+		GrainfileURL: grainfileURL,
+		Commit:       commitSHA,
+		Reference:    reference,
+		Format:       format,
+	})
+}
+
+func (c *Conn) fetchMuxContent(ctx context.Context, req muxFetchRequest) (MuxFetchHeader, []byte, error) {
+	st, err := c.Open(ctx)
+	if err != nil {
+		return MuxFetchHeader{}, nil, err
+	}
+	defer st.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = st.SetDeadline(dl)
+	}
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return MuxFetchHeader{}, nil, err
+	}
+	reqBytes = append(reqBytes, '\n')
+	if _, err := st.Write(reqBytes); err != nil {
+		return MuxFetchHeader{}, nil, err
+	}
+	br := bufio.NewReader(st)
+	line, err := br.ReadBytes('\n')
+	if err != nil {
+		return MuxFetchHeader{}, nil, fmt.Errorf("rendezvous: reading fetch header: %w", err)
+	}
+	var hdr MuxFetchHeader
+	if err := json.Unmarshal(line, &hdr); err != nil {
+		return MuxFetchHeader{}, nil, fmt.Errorf("rendezvous: decoding fetch header: %w", err)
+	}
+	if hdr.Type == "error" || hdr.Error != "" {
+		return hdr, nil, fmt.Errorf("rendezvous: fetch error: %s", hdr.Error)
+	}
+	data, err := io.ReadAll(br)
+	if err != nil {
+		return hdr, nil, fmt.Errorf("rendezvous: reading fetch body: %w", err)
+	}
+	return hdr, data, nil
+}
 
 // Done is closed when the connection ends.
 func (c *Conn) Done() <-chan struct{} { return c.m.Done() }

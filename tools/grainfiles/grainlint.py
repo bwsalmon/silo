@@ -76,7 +76,6 @@ def valid_time_or_date(s, allow_date=False):
 EXPECTS = {
     ("task", "depends_on"): ("task",),
     ("process", "depends_on"): ("task", "process"),
-    ("process", "trigger_with"): ("task", "process"),
 }
 MAX_FILE_BYTES = 1024 * 1024
 MAX_FM_BYTES = 64 * 1024
@@ -291,7 +290,7 @@ class Item:
         self.grainfile = DEFAULT_VERSION
         self.spec_summary_path = VERSIONS[DEFAULT_VERSION]["spec_summary_path"]
         self.spec_path = VERSIONS[DEFAULT_VERSION]["spec_path"]
-        self.recipient = "/"
+        self.recipient = "/" if kind == "task" else None
         self.targets = {}
 
     @property
@@ -332,7 +331,14 @@ class Schemas:
         out, data = [], dict(fm)
         for k in list(fm):
             if k not in props and not k.startswith("x_"):
-                out.append(Finding("GF022", path, "unknown field %r" % k))
+                if k == "trigger_with":
+                    out.append(Finding("GF020", path, "trigger_with is not allowed; use depends_on and when"))
+                elif kind == "process" and k in ("recipient", "requestor"):
+                    out.append(Finding("GF020", path, "%s is only valid on .task.grain.md files" % k))
+                elif kind == "task" and k in ("when", "on", "gate"):
+                    out.append(Finding("GF020", path, "%s is only valid on .process.grain.md files" % k))
+                else:
+                    out.append(Finding("GF022", path, "unknown field %r" % k))
                 del data[k]
         if kind == "process" and isinstance(data.get("when"), dict):
             when = dict(data["when"])
@@ -343,14 +349,13 @@ class Schemas:
             if not when and "when" in data:
                 # Avoid a duplicate minProperties error when the only source was unknown
                 del data["when"]
-                if "trigger_with" not in data:
-                    return out
+                return out
             else:
                 data["when"] = when
         v = jsonschema.Draft202012Validator(s, resolver=jsonschema.RefResolver.from_schema(s, store=self.store))
         for e in sorted(v.iter_errors(data), key=lambda e: list(e.path)):
             p = list(e.path)
-            if p and p[0] in ("references", "depends_on", "trigger_with") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
+            if p and p[0] in ("references", "depends_on") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
                 continue
             if p in (["recipient"], ["requestor"]) and isinstance(e.instance, str) and e.instance and not any(ch in e.instance for ch in "<>@\\ "):
                 continue
@@ -514,13 +519,6 @@ class Linter:
             if isinstance(val, list):
                 for v in val:
                     add(f, v)
-        if it.kind == "process":
-            tw = fm.get("trigger_with")
-            if isinstance(tw, str):
-                add("trigger_with", tw)
-            elif isinstance(tw, list):
-                for v in tw:
-                    add("trigger_with", v)
         return out
 
     def check_item(self, it):
@@ -538,14 +536,15 @@ class Linter:
         nb = fm.get("not_before")
         if isinstance(nb, str) and (DATE_RE.match(nb) or TIME_RE.match(nb)) and not valid_time_or_date(nb, allow_date=True):
             self.add("GF020", where, "not_before: invalid calendar date or UTC time %r" % nb)
-        req = fm.get("requestor")
-        if isinstance(req, str) and not USER_IDENTITY.match(req):
-            if not any(ch in req for ch in "<>@\\ ") and req:
-                self.check_deployment_ref(it, req, "requestor", where)
-        rec = fm.get("recipient", "/")
-        it.recipient = rec if isinstance(rec, str) and rec else "/"
-        if isinstance(rec, str) and not any(ch in rec for ch in "<>@\\ ") and rec:
-            self.check_deployment_ref(it, rec, "recipient", where)
+        if it.kind == "task":
+            req = fm.get("requestor")
+            if isinstance(req, str) and not USER_IDENTITY.match(req):
+                if not any(ch in req for ch in "<>@\\ ") and req:
+                    self.check_deployment_ref(it, req, "requestor", where)
+            rec = fm.get("recipient", "/")
+            it.recipient = rec if isinstance(rec, str) and rec else "/"
+            if isinstance(rec, str) and not any(ch in rec for ch in "<>@\\ ") and rec:
+                self.check_deployment_ref(it, rec, "recipient", where)
         if it.kind == "process":
             when = fm.get("when")
             if isinstance(when, dict):
@@ -571,46 +570,13 @@ class Linter:
             it.targets.setdefault(field, []).append((s, t))
 
     def check_graphs(self):
-        # Build undirected trigger_with adjacency to verify process->process depends_on grouping (§8.3).
-        tw_adj = {}
+        graph = {}
         for it in self.items.values():
             if it.ok:
-                tw_adj.setdefault(it, set())
-                for _, t in it.targets.get("trigger_with", []):
-                    if isinstance(t, Item) and t.ok:
-                        tw_adj.setdefault(it, set()).add(t)
-                        tw_adj.setdefault(t, set()).add(it)
-
-        def same_trigger_group(a, b):
-            if a == b:
-                return True
-            seen = {a}
-            stack = [a]
-            while stack:
-                cur = stack.pop()
-                for nxt in tw_adj.get(cur, ()):
-                    if nxt == b:
-                        return True
-                    if nxt not in seen:
-                        seen.add(nxt)
-                        stack.append(nxt)
-            return False
-
-        for it in self.items.values():
-            if it.ok and it.kind == "process":
-                where = self.show(it.repo, it.rel)
-                for s, t in it.targets.get("depends_on", []):
-                    if isinstance(t, Item) and t.kind == "process" and not same_trigger_group(it, t):
-                        self.add("GF032", where, "depends_on: %r is a process not in the same trigger_with group" % s)
-
-        for field in ("depends_on", "trigger_with"):
-            graph = {}
-            for it in self.items.values():
-                if it.ok:
-                    graph[it] = [t for _, t in it.targets.get(field, []) if isinstance(t, Item)]
-            for cyc in cycles(graph):
-                self.add("GF034", self.show(cyc[0].repo, cyc[0].rel),
-                         "%s cycle: %s" % (field, " -> ".join(x.rel for x in cyc)))
+                graph[it] = [t for _, t in it.targets.get("depends_on", []) if isinstance(t, Item)]
+        for cyc in cycles(graph):
+            self.add("GF034", self.show(cyc[0].repo, cyc[0].rel),
+                     "depends_on cycle: %s" % (" -> ".join(x.rel for x in cyc)))
 
 
 def cycles(graph):

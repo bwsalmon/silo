@@ -44,9 +44,8 @@ const sampleOverview = {
       url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md',
       kind: 'process',
       title: 'Continuous verification gate',
-      recipient: 'https://github.com/acme/grain-us',
       draft: true,
-      trigger_with: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
+      depends_on: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
       when: {
         push: { branches: ['main'] },
         schedule: { cron: '0 * * * *' },
