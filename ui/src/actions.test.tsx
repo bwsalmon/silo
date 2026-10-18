@@ -63,8 +63,13 @@ function open(path: string) {
 }
 
 async function choose(label: string, option: string) {
-  fireEvent.mouseDown(await screen.findByRole('combobox', { name: label }));
-  fireEvent.click(await screen.findByRole('option', { name: option }));
+  let opt: HTMLElement | undefined;
+  await waitFor(async () => {
+    const box = await screen.findByRole('combobox', { name: label });
+    fireEvent.mouseDown(box);
+    opt = screen.getByRole('option', { name: option });
+  });
+  fireEvent.click(opt!);
 }
 
 describe('the API layer’s writes', () => {
