@@ -44,7 +44,7 @@ import { adminOf } from '../may';
 import { Link, navigate, routePath } from '../router';
 import { ConfirmButton } from '../components/ConfirmButton';
 
-const roles: Role[] = ['member', 'admin'];
+const roles: Role[] = ['member', 'admin', 'proposer', 'viewer'];
 
 function Members({ team, admin, onDone }: { team: Team; admin: boolean; onDone: () => void }) {
   const [principal, setPrincipal] = useState('');
@@ -218,11 +218,26 @@ function Repos({ team, admin, hubAdmin, onDone }: { team: Team; admin: boolean; 
 function Settings({ team, admin }: { team: string; admin: boolean }) {
   const settings = useLoad((signal) => getTeamSettings(team, signal), [team]);
   const [value, setValue] = useState<string>();
+  const [anyoneMayPropose, setAnyoneMayPropose] = useState<boolean>();
+  const [requireApproval, setRequireApproval] = useState<boolean>();
   const shown = value ?? String(settings.data?.lost_requeue_after_seconds ?? 0);
-  const save = useAction(() => setTeamSettings(team, { lost_requeue_after_seconds: Number(shown) }), () => {
-    setValue(undefined);
-    settings.reload();
-  });
+  const shownAnyoneMayPropose = anyoneMayPropose ?? (settings.data?.anyone_may_propose ?? true);
+  const shownRequireApproval = requireApproval ?? (settings.data?.require_approval ?? false);
+  const dirty = value !== undefined || anyoneMayPropose !== undefined || requireApproval !== undefined;
+  const save = useAction(
+    () =>
+      setTeamSettings(team, {
+        lost_requeue_after_seconds: Number(shown),
+        anyone_may_propose: shownAnyoneMayPropose,
+        require_approval: shownRequireApproval,
+      }),
+    () => {
+      setValue(undefined);
+      setAnyoneMayPropose(undefined);
+      setRequireApproval(undefined);
+      settings.reload();
+    },
+  );
   return (
     <Paper sx={{ p: 2 }}>
       <Typography variant="h6">Settings</Typography>
@@ -237,18 +252,28 @@ function Settings({ team, admin }: { team: string; admin: boolean }) {
               void save.run();
             }}
           >
-            <Stack direction="row" spacing={1}>
-              <TextField
-                size="small"
-                type="number"
-                label="Requeue a lost task after (seconds, 0 for never)"
-                value={shown}
-                onChange={(e) => setValue(e.target.value)}
-                sx={{ minWidth: 340 }}
+            <Stack spacing={1}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: { sm: 'center' } }}>
+                <TextField
+                  size="small"
+                  type="number"
+                  label="Requeue a lost task after (seconds, 0 for never)"
+                  value={shown}
+                  onChange={(e) => setValue(e.target.value)}
+                  sx={{ minWidth: 340 }}
+                />
+                <Button type="submit" variant="contained" disabled={save.busy || !dirty}>
+                  Save
+                </Button>
+              </Stack>
+              <FormControlLabel
+                control={<Checkbox checked={shownAnyoneMayPropose} onChange={(e) => setAnyoneMayPropose(e.target.checked)} />}
+                label="Anyone may propose"
               />
-              <Button type="submit" variant="contained" disabled={save.busy || value === undefined}>
-                Save
-              </Button>
+              <FormControlLabel
+                control={<Checkbox checked={shownRequireApproval} onChange={(e) => setRequireApproval(e.target.checked)} />}
+                label="Require two-person approval for member tasks"
+              />
             </Stack>
             {save.error && (
               <Alert severity="error" sx={{ mt: 1 }}>
@@ -257,9 +282,17 @@ function Settings({ team, admin }: { team: string; admin: boolean }) {
             )}
           </Box>
         ) : (
-          <Typography variant="body2">
-            A lost task is requeued {settings.data.lost_requeue_after_seconds ? `after ${settings.data.lost_requeue_after_seconds}s` : 'never'}.
-          </Typography>
+          <Stack spacing={0.5}>
+            <Typography variant="body2">
+              A lost task is requeued {settings.data.lost_requeue_after_seconds ? `after ${settings.data.lost_requeue_after_seconds}s` : 'never'}.
+            </Typography>
+            <Typography variant="body2">
+              {(settings.data.anyone_may_propose ?? true) ? 'Anyone may propose.' : 'Only team members, proposers, and admins may submit tasks.'}
+            </Typography>
+            <Typography variant="body2">
+              {settings.data.require_approval ? 'Require two-person approval for member tasks.' : 'Member tasks are queued without approval.'}
+            </Typography>
+          </Stack>
         ))}
     </Paper>
   );

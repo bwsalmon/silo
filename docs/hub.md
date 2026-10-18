@@ -797,10 +797,42 @@ The store (`directory.Store`: PostgreSQL; SQLite in development and
 tests) holds:
 
 - `teams(id, name)`.
-- `team_members(team, principal, role: member | admin)`. A principal
+- `team_members(team, principal, role: viewer | proposer | member | admin)`. A principal
   is IAM-style, `user:<email>` or `group:<name>`, lower-cased, and is
   matched only against its own claim: `user:` against the signed-in
-  email, `group:` against each of the IdP's groups. A group named like
+  email, `group:` against each of the IdP's groups. When a user matches
+  more than one principal on a team, the highest-ranked role wins
+  (`viewer < proposer < member < admin`). The four team roles are:
+  - **`admin`:** full team management (members, repositories, team
+    settings), node admission (`Admit`), team-admin Node UI proxy
+    access (`nodeui`), approving/rejecting proposals and answering
+    in-run `approval_request`s, posting to interactive sessions, and
+    submitting tasks (filed `queued` immediately unless the team's
+    `require_approval` is `true`).
+  - **`member`:** node admission (`Admit`), approving/rejecting
+    proposals and answering in-run `approval_request`s, posting to team
+    interactive sessions, viewing all team
+    tasks/events/artifacts/nodes/Grainfiles, and submitting tasks
+    (filed `queued` immediately unless `require_approval` is `true`).
+  - **`proposer`:** read visibility into the team (same read access as
+    `viewer`) plus permission to submit tasks as `proposed` (waiting for
+    a `member` or `admin` of the team to approve) even when the team
+    sets `anyone_may_propose: false`. Cannot approve/reject proposals,
+    cannot answer in-run `approval_request`s, cannot post to interactive
+    sessions they did not submit, and cannot register/admit nodes
+    (`Store.Admit` and `AuthorizeOwnerRepo` require `member` or
+    `admin`).
+  - **`viewer`:** read-only visibility into the team
+    (`GET /v1/teams/{team}`, `GET /v1/tasks`,
+    `GET /v1/tasks/{id}/events`, `GET /v1/tasks/{id}/artifacts`,
+    `GET /v1/nodes`, `GET /v1/grainfiles`). Cannot submit tasks when
+    `anyone_may_propose: false` (when `anyone_may_propose: true`, a
+    `viewer` can submit a `proposed` task like any signed-in user),
+    cannot approve/reject proposals, cannot answer in-run
+    `approval_request`s, cannot post to interactive sessions they did
+    not submit, and cannot register/admit nodes (`Store.Admit` requires
+    `member` or `admin`).
+  A group named like
   an email (`group:alice@corp.example`) is still only a group, so an
   IdP that lets users create or rename groups cannot make one stand in
   for a user, or for a group an admin listed under `user:` (SA1-L6).
@@ -808,6 +840,15 @@ tests) holds:
   emails, so the hub does not guess. Rows from before principals had
   prefixes are made `user:` when the tables are migrated (the only
   deployment then was behind IAP, which has no groups).
+- `team_settings(team, lost_requeue_after_seconds, anyone_may_propose, require_approval)`:
+  per-team settings including `lost_requeue_after_seconds` (0 for never),
+  `anyone_may_propose` (default `true`; when `false`, only `admin`,
+  `member`, or `proposer` on the owning team may submit a task to that
+  team or its repositories, and any other caller receives `403 Forbidden`),
+  and `require_approval` (default `false`; when `true`, even tasks
+  submitted by a `member` or `admin` of the owning team are filed in
+  state `proposed` and require two-person approval from a different
+  `member` or `admin` of the team before entering `queued`).
 - `team_repos(repo, team, history)`, keyed by repository, so every
   repository has at most one owning team. Assigning a repository that
   another team owns is refused: it has to be released first, so no team
@@ -874,8 +915,8 @@ PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin; principal is 
 DELETE /v1/teams/{team}/members/{principal}            team admin
 PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history": true}]   hub admin; history also gives the team the repository's earlier tasks
 DELETE /v1/teams/{team}/repos/{owner}/{name}           team admin
-GET    /v1/teams/{team}/settings                       its members (§6.6.1)
-PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds"}   team admin (§6.6.1)
+GET    /v1/teams/{team}/settings                       its members (§5.3, §6.6.1)
+PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds","anyone_may_propose","require_approval"}   team admin (§5.3, §6.6.1)
 GET    /v1/node-tokens                                 the caller's (all, for a hub admin)
 POST   /v1/node-tokens {"node"}                        mint one for the caller
 DELETE /v1/node-tokens/{id}                            its owner, or a hub admin

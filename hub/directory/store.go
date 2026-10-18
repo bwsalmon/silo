@@ -34,15 +34,40 @@ import (
 type Role string
 
 const (
-	// Member may serve the team's repositories from their nodes and see
-	// its tasks and nodes.
+	// Viewer has read-only visibility into the team's tasks, events,
+	// artifacts, nodes, and Grainfiles.
+	Viewer Role = "viewer"
+	// Proposer has read visibility into the team and may submit tasks to
+	// the team or its repositories as proposals even when
+	// anyone_may_propose is false.
+	Proposer Role = "proposer"
+	// Member may serve the team's repositories from their nodes, approve
+	// or reject proposals, answer in-run approval requests, post to team
+	// interactive sessions, and submit tasks.
 	Member Role = "member"
 	// Admin is a member who also assigns repositories to the team and
-	// manages its members.
+	// manages its members and settings.
 	Admin Role = "admin"
 )
 
-func (r Role) valid() bool { return r == Member || r == Admin }
+func (r Role) valid() bool {
+	return r == Viewer || r == Proposer || r == Member || r == Admin
+}
+
+func (r Role) rank() int {
+	switch r {
+	case Admin:
+		return 4
+	case Member:
+		return 3
+	case Proposer:
+		return 2
+	case Viewer:
+		return 1
+	default:
+		return 0
+	}
+}
 
 var (
 	// ErrNotFound is a team, member, repository or token that does not
@@ -152,7 +177,7 @@ CREATE TABLE IF NOT EXISTS teams (
 CREATE TABLE IF NOT EXISTS team_members (
 	team TEXT NOT NULL REFERENCES teams (id) ON DELETE CASCADE,
 	principal TEXT NOT NULL,
-	role TEXT NOT NULL CHECK (role IN ('member', 'admin')),
+	role TEXT NOT NULL CHECK (role IN ('viewer', 'proposer', 'member', 'admin')),
 	PRIMARY KEY (team, principal)
 );
 CREATE INDEX IF NOT EXISTS team_members_principal ON team_members (principal);
@@ -175,7 +200,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS node_tokens_hash ON node_tokens (hash);
 CREATE INDEX IF NOT EXISTS node_tokens_node ON node_tokens (node);
 CREATE TABLE IF NOT EXISTS team_settings (
 	team TEXT PRIMARY KEY REFERENCES teams (id) ON DELETE CASCADE,
-	lost_requeue_seconds BIGINT NOT NULL
+	lost_requeue_seconds BIGINT NOT NULL DEFAULT 0,
+	anyone_may_propose INTEGER NOT NULL DEFAULT 1,
+	require_approval INTEGER NOT NULL DEFAULT 0
 );
 `
 
@@ -205,6 +232,8 @@ const legacyPrincipals = `UPDATE team_members SET principal = 'user:' || princip
 var added = []dbaccess.Column{
 	{Table: "node_tokens", Name: "released_at", Add: `ALTER TABLE node_tokens ADD COLUMN released_at BIGINT`},
 	{Table: "team_repos", Name: "history", Add: `ALTER TABLE team_repos ADD COLUMN history INTEGER NOT NULL DEFAULT 0`},
+	{Table: "team_settings", Name: "anyone_may_propose", Add: `ALTER TABLE team_settings ADD COLUMN anyone_may_propose INTEGER NOT NULL DEFAULT 1`},
+	{Table: "team_settings", Name: "require_approval", Add: `ALTER TABLE team_settings ADD COLUMN require_approval INTEGER NOT NULL DEFAULT 0`},
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -611,8 +640,8 @@ func (s *Store) memberships(ctx context.Context, principals []string) (map[strin
 		if err := rows.Scan(&team, &role); err != nil {
 			return nil, err
 		}
-		if out[team] != Admin {
-			out[team] = Role(role)
+		if r := Role(role); r.rank() > out[team].rank() {
+			out[team] = r
 		}
 	}
 	return out, rows.Err()
@@ -638,8 +667,10 @@ func (s *Store) membershipsOf(ctx context.Context, principals []string, out map[
 		if err := rows.Scan(&p, &team, &role); err != nil {
 			return err
 		}
-		if teams := out[p]; teams != nil && teams[team] != Admin {
-			teams[team] = Role(role)
+		if teams := out[p]; teams != nil {
+			if r := Role(role); r.rank() > teams[team].rank() {
+				teams[team] = r
+			}
 		}
 	}
 	return rows.Err()

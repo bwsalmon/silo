@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -135,12 +136,62 @@ func (a *Admission) Admit(owner string, n registry.Node) error {
 			refused = append(refused, repo+" (no team owns it)")
 		case teams[team] == "":
 			refused = append(refused, fmt.Sprintf("%s (owned by team %s, which %s is not in)", repo, team, o))
+		case teams[team] != Member && teams[team] != Admin:
+			refused = append(refused, fmt.Sprintf("%s (owned by team %s, where %s has role %s, want member or admin)", repo, team, o, teams[team]))
 		}
 	}
 	if len(refused) > 0 {
 		return fmt.Errorf("%w: %s may not serve %s", ErrNotAdmitted, o, strings.Join(refused, ", "))
 	}
 	return nil
+}
+
+// AuthorizeOwnerRepo reports whether owner has role member or admin in the
+// team that owns repoURL (accepting either an "owner/name" slug or a full
+// repository/file URL). Viewer and proposer roles are not authorized to serve
+// or subscribe to a team's repositories from a node.
+func (s *Store) AuthorizeOwnerRepo(ctx context.Context, owner, repoURL string) bool {
+	if s == nil {
+		return false
+	}
+	slug := extractRepoSlug(repoURL)
+	if slug == "" {
+		return false
+	}
+	team, err := s.RepoOwner(ctx, slug)
+	if err != nil || team == "" {
+		return false
+	}
+	acc, err := s.Access(ctx, identity.Principal{Email: owner}, false)
+	if err != nil {
+		return false
+	}
+	return acc.MemberOf(team)
+}
+
+func extractRepoSlug(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil || u.Host == "" {
+			return ""
+		}
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) < 2 {
+			return ""
+		}
+		s = parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
+	} else {
+		s = strings.TrimSuffix(s, ".git")
+	}
+	norm, err := normRepo(s)
+	if err != nil {
+		return ""
+	}
+	return norm
 }
 
 // ValidateNodeUI validates n.UI.Team when n offers a UI with a team
@@ -189,7 +240,7 @@ func (a *Admission) ValidateNodeUI(owner string, n *registry.Node) error {
 	if !ok {
 		return fmt.Errorf("%w: owner %s", ErrNotRead, o)
 	}
-	if teams[team] == "" {
+	if r := teams[team]; r != Member && r != Admin {
 		uiCopy.Team = ""
 		uiCopy.Reason = fmt.Sprintf("owner %s is not a member of team %s", o, team)
 		n.UI = &uiCopy
@@ -277,6 +328,19 @@ func (a *Access) SeesTeam(team string) bool {
 // AdminOf is whether the principal manages team.
 func (a *Access) AdminOf(team string) bool {
 	return a.HubAdmin || a.Teams[team] == Admin
+}
+
+// MemberOf is whether the principal has role member or admin in team
+// (or is an active hub admin). Viewer and proposer are not members.
+func (a *Access) MemberOf(team string) bool {
+	if a == nil {
+		return false
+	}
+	if a.HubAdmin {
+		return true
+	}
+	r := a.Teams[team]
+	return r == Member || r == Admin
 }
 
 // SeesRepo is whether repo is one of the principal's teams'
