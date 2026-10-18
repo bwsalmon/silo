@@ -75,6 +75,7 @@ export interface Me {
   email: string;
   groups?: string[];
   hub_admin: boolean;
+  can_hub_admin?: boolean;
   teams: Record<string, Role> | null;
 }
 

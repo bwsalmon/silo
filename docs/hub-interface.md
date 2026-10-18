@@ -508,6 +508,27 @@ A Grain deployment serves only the streams defined in this document. It
 serves a `view` stream only for an artifact reference it has itself
 emitted, and an `http` stream only to its own UI handler.
 
+## Human directory & Hub Admin mode (`GET /v1/me`, `X-Silo-Admin-Mode`)
+
+Human callers signed in through IAP or OIDC query `GET /v1/me` and
+the team, task, node, Grainfile, and node-token endpoints
+([hub.md](hub.md) §5, [ui.md](ui.md)). Configured Hub Admins
+(`SILO_HUB_ADMINS` / `directory.API.HubAdmins`) can toggle global Hub
+Admin privileges per request via the `X-Silo-Admin-Mode` request header:
+
+- `GET /v1/me` returns both `"can_hub_admin"` (whether the signed-in
+  principal is configured in `SILO_HUB_ADMINS`) and `"hub_admin"`
+  (whether Hub Admin mode is active on this request).
+- When a configured Hub Admin sends `X-Silo-Admin-Mode: off`
+  (case-insensitive `off`, `false`, `0`), `Access.CanHubAdmin` remains
+  `true` while `Access.HubAdmin` is `false`, scoping `/v1/teams`,
+  `/v1/tasks`, `/v1/nodes`, `/v1/grainfiles`, and `/v1/node-tokens` to
+  the caller's normal team memberships.
+- When `X-Silo-Admin-Mode: on` is sent (or when the header is omitted by
+  CLI or backend callers), `Access.HubAdmin` is `true` for configured
+  Hub Admins. Non-admins sending `X-Silo-Admin-Mode: on` receive
+  `can_hub_admin: false` and `hub_admin: false`.
+
 ---
 
 ## Legacy imperative task stream in the current build

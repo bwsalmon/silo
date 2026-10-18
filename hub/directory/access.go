@@ -223,8 +223,12 @@ func (a *Admission) ValidateNodeUI(owner string, n *registry.Node) error {
 // visibility rules of docs/hub.md §5.3.
 type Access struct {
 	identity.Principal
-	// HubAdmin creates and deletes teams, and sees everything.
+	// HubAdmin creates and deletes teams, and sees everything, when
+	// admin mode is active on the request.
 	HubAdmin bool
+	// CanHubAdmin is whether the principal is configured as a hub admin
+	// (API.HubAdmins), regardless of the request's X-Silo-Admin-Mode.
+	CanHubAdmin bool
 	// Teams are the teams the principal is in, as user:<email> or as
 	// group:<name> for any of its groups, with the higher role where
 	// both match.
@@ -261,7 +265,7 @@ func (s *Store) Access(ctx context.Context, p identity.Principal, hubAdmin bool)
 	if err != nil {
 		return nil, err
 	}
-	return &Access{Principal: p, HubAdmin: hubAdmin, Teams: teams, repos: repos}, nil
+	return &Access{Principal: p, HubAdmin: hubAdmin, CanHubAdmin: hubAdmin, Teams: teams, repos: repos}, nil
 }
 
 // SeesTeam is whether the principal may see team and its tasks: a

@@ -381,3 +381,76 @@ describe('node tokens', () => {
     expect(screen.queryByTestId('minted-token')).toBeNull();
   });
 });
+
+describe('hub admin mode toggle', () => {
+  const web = {
+    id: 'web',
+    name: 'Web',
+    members: { 'user:bob@example.com': 'admin' },
+    repos: ['acme/web'],
+  };
+
+  it('starts a hub admin with admin mode off, toggles it on with visual marker and reload, and persists in localStorage', async () => {
+    const calls: Call[] = [];
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      const hdrs = new Headers(init?.headers);
+      const adminHeader = hdrs.get('X-Silo-Admin-Mode');
+      const isOn = adminHeader === 'on';
+      calls.push({ method, url, init });
+      if (url === '/v1/me') {
+        return Response.json({
+          email: 'root@example.com',
+          can_hub_admin: true,
+          hub_admin: isOn,
+          teams: { infra: 'member' },
+        });
+      }
+      if (url === '/v1/teams') {
+        return Response.json({ teams: isOn ? [infra, web] : [infra] });
+      }
+      return new Response('not found\n', { status: 404 });
+    });
+    vi.stubGlobal('fetch', f);
+
+    const view = render((window.history.replaceState(null, '', '/teams'), <App />));
+    await screen.findByText('Infra (infra)');
+
+    // Starts with Admin mode off: header sent X-Silo-Admin-Mode: off, only own team visible, no marker or Create team form.
+    const toggle = await screen.findByLabelText('Admin mode');
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    expect(screen.queryByTestId('admin-mode-marker')).toBeNull();
+    expect(screen.queryByText(/\(hub admin\)/)).toBeNull();
+    expect(screen.queryByText('Web (web)')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create team' })).toBeNull();
+    expect(new Headers(calls[0].init?.headers).get('X-Silo-Admin-Mode')).toBe('off');
+
+    // Toggle Admin mode on.
+    fireEvent.click(toggle);
+    await screen.findByText('Web (web)');
+    expect((screen.getByLabelText('Admin mode') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId('admin-mode-marker')).toBeTruthy();
+    expect(screen.getByText(/root@example\.com \(hub admin\)/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create team' })).toBeTruthy();
+    expect(localStorage.getItem('silo.adminMode')).toBe('true');
+    expect(new Headers(calls[calls.length - 1].init?.headers).get('X-Silo-Admin-Mode')).toBe('on');
+
+    // Remounting reads localStorage and starts with Admin mode on.
+    view.unmount();
+    render(<App />);
+    await screen.findByText('Web (web)');
+    expect((screen.getByLabelText('Admin mode') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId('admin-mode-marker')).toBeTruthy();
+  });
+
+  it('hides the admin mode switch from non-admins', async () => {
+    stubHub({
+      'GET /v1/me': () => Response.json({ email: 'alice@example.com', can_hub_admin: false, hub_admin: false, teams: { infra: 'admin' } }),
+      'GET /v1/teams': () => Response.json({ teams: [infra] }),
+    });
+    open('/teams');
+    await screen.findByText('Infra (infra)');
+    expect(screen.queryByLabelText('Admin mode')).toBeNull();
+    expect(screen.queryByTestId('admin-mode-marker')).toBeNull();
+  });
+});

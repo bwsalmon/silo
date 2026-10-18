@@ -16,6 +16,8 @@ export * from '@silo/hub-sdk';
 export const hub = new HubClient();
 
 export const getMe = hub.getMe.bind(hub);
+export const setAdminMode = hub.setAdminMode.bind(hub);
+export const getAdminMode = hub.getAdminMode.bind(hub);
 export const listTasks = hub.listTasks.bind(hub);
 export const getTask = hub.getTask.bind(hub);
 export const submitTask = hub.submitTask.bind(hub);
