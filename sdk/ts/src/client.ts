@@ -92,6 +92,9 @@ function normalizeGrainfile(g: Grainfile): Grainfile {
   if (!out.not_before) delete out.not_before;
   out.created_at = cleanTimestamp(g.created_at);
   if (!out.created_at) delete out.created_at;
+  if (g.recent_events) {
+    out.recent_events = g.recent_events.map(normalizeGrainfileEvent);
+  }
   return out;
 }
 
@@ -117,6 +120,9 @@ function grainfilesQueryString(q: GrainfileQuery = {}): string {
   if (q.repo) p.set('repo', q.repo);
   if (q.draft !== undefined) p.set('draft', q.draft ? 'true' : 'false');
   if (q.include_drafts !== undefined) p.set('include_drafts', q.include_drafts ? 'true' : 'false');
+  if (q.gate !== undefined) p.set('gate', q.gate ? 'true' : 'false');
+  if (q.requestor) p.set('requestor', q.requestor);
+  if (q.path) p.set('path', q.path);
   if (q.node) p.set('node', q.node);
   if (q.url) p.set('url', q.url);
   const qs = p.toString();
@@ -445,6 +451,17 @@ export class HubClient {
       grainfiles = grainfiles.filter((g) => Boolean(g.draft) === q.draft);
     } else if (q.include_drafts === false) {
       grainfiles = grainfiles.filter((g) => !g.draft);
+    }
+    if (q.gate !== undefined) {
+      grainfiles = grainfiles.filter((g) => Boolean(g.gate) === q.gate);
+    }
+    if (q.requestor) {
+      const wantReq = q.requestor.trim().replace(/\/+$/, '').toLowerCase();
+      grainfiles = grainfiles.filter((g) => (g.requestor ?? '').trim().replace(/\/+$/, '').toLowerCase() === wantReq);
+    }
+    if (q.path) {
+      const wantPath = q.path.trim().replace(/^\/+/, '');
+      grainfiles = grainfiles.filter((g) => g.path === wantPath);
     }
     if (q.node) {
       subscriptions = subscriptions.filter((s) => s.node_id === q.node);

@@ -634,6 +634,7 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	webhookNow := a.Store.now()
 	for _, p := range upsertPaths {
 		_, _, isGF, _ := ClassifyPath(p)
 		if !isGF {
@@ -666,13 +667,15 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("resolving %s: %v", p, err), http.StatusUnprocessableEntity)
 			return
 		}
-		rec, err := a.Store.IndexGrainfile(r.Context(), gf)
+		rec, err := a.Store.indexGrainfileAt(r.Context(), gf, webhookNow)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("indexing %s: %v", p, err), http.StatusInternalServerError)
 			return
 		}
 		indexed = append(indexed, rec)
 	}
+
+	_, _ = a.Store.PromoteDeferred(r.Context(), a.Store.now())
 
 	trigEvents, err := a.Store.EvaluateTriggers(r.Context(), canonRepo, commitSHA, ForgeEvent{
 		Source:       source,
@@ -1140,6 +1143,9 @@ type OverviewResponse struct {
 	Events        []Event         `json:"events"`
 }
 
+// GrainfilesResponse is an alias for OverviewResponse.
+type GrainfilesResponse = OverviewResponse
+
 func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 	if a.Store == nil {
 		http.Error(w, "grainfiles store not configured", http.StatusInternalServerError)
@@ -1158,9 +1164,11 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rawRepo := strings.TrimSpace(q.Get("repo"))
 	rawRecipient := strings.TrimSpace(q.Get("recipient"))
+	rawRequestor := strings.TrimSpace(q.Get("requestor"))
 	rawKind := strings.TrimSpace(q.Get("kind"))
 	rawNode := strings.TrimSpace(q.Get("node"))
 	rawDraft := strings.ToLower(strings.TrimSpace(q.Get("draft")))
+	rawGate := strings.ToLower(strings.TrimSpace(q.Get("gate")))
 	rawURL := strings.TrimSpace(q.Get("url"))
 	rawPath := strings.TrimSpace(q.Get("path"))
 	includeDrafts := q.Get("include_drafts") != "false" && q.Get("include_drafts") != "0"
@@ -1178,6 +1186,32 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.Error(w, fmt.Sprintf("invalid draft filter %q", rawDraft), http.StatusBadRequest)
 			return
+		}
+	}
+
+	var filterGate *bool
+	if rawGate != "" {
+		switch rawGate {
+		case "true", "1":
+			t := true
+			filterGate = &t
+		case "false", "0":
+			f := false
+			filterGate = &f
+		default:
+			http.Error(w, fmt.Sprintf("invalid gate filter %q", rawGate), http.StatusBadRequest)
+			return
+		}
+	}
+
+	var filterRequestor string
+	if rawRequestor != "" {
+		if IsUserIdentity(rawRequestor) {
+			filterRequestor = rawRequestor
+		} else if normReq, err := normalizeRecipientURL(rawRequestor); err == nil {
+			filterRequestor = normReq
+		} else {
+			filterRequestor = rawRequestor
 		}
 	}
 
@@ -1224,7 +1258,13 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if filterDraft != nil && rec.Draft != *filterDraft {
 			continue
 		}
+		if filterGate != nil && rec.Gate != *filterGate {
+			continue
+		}
 		if filterRecipient != "" && rec.Recipient != filterRecipient {
+			continue
+		}
+		if filterRequestor != "" && rec.Requestor != filterRequestor && !strings.EqualFold(rec.Requestor, rawRequestor) {
 			continue
 		}
 		if rawKind != "" && string(rec.Kind) != rawKind {
@@ -1239,6 +1279,23 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if !canSeeRecord(acc, rec) {
 			continue
 		}
+		var subNodes []string
+		for _, sub := range subs {
+			if sub.MatchesRecord(rec) && canSeeSubscription(acc, sub) {
+				subNodes = append(subNodes, sub.NodeID)
+			}
+		}
+		slices.Sort(subNodes)
+		rec.SubscribedNodes = slices.Compact(subNodes)
+
+		var recEvents []Event
+		for _, ev := range events {
+			if IsSameRepo(ev.Repo, rec.Repo) && ev.Path == rec.Path && canSeeEvent(acc, ev) {
+				recEvents = append(recEvents, ev)
+			}
+		}
+		rec.RecentEvents = recEvents
+
 		visibleRecords = append(visibleRecords, rec)
 	}
 
@@ -1285,6 +1342,12 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if filterRecipient != "" && ev.Recipient != filterRecipient {
+			continue
+		}
+		if filterGate != nil && ev.Gate != *filterGate {
+			continue
+		}
+		if filterRequestor != "" && ev.Requestor != "" && ev.Requestor != filterRequestor && !strings.EqualFold(ev.Requestor, rawRequestor) {
 			continue
 		}
 		if rawKind != "" && string(ev.Kind) != rawKind {

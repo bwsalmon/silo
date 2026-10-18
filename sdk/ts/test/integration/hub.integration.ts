@@ -3,11 +3,13 @@
 // rendezvous: the README's examples, run in Node. Sign-on is the hub's
 // development user header, sent with the client's headers option as a
 // bearer token would be with token.
-import { spawn, type ChildProcess } from 'node:child_process';
-import { createWriteStream, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { createHmac } from 'node:crypto';
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ConflictError, HubClient, NotFoundError, type HubEvent, type Task } from '../../src/index.js';
 import { binDir } from './paths.js';
@@ -18,12 +20,19 @@ const alice = 'alice@sdk.test';
 const outsider = 'carol@sdk.test';
 const team = 'sdk';
 const repo = 'sdk/app';
+const repoDocs = 'sdk/docs';
 const node = 'ws-sdk';
+const recipientAlpha = 'https://github.com/sdk/grain-alpha';
+const recipientBeta = 'https://github.com/sdk/grain-beta';
+const webhookSecret = 'sdk-webhook-secret';
+const githubToken = 'ghs_sdk_sim_token';
 
 const procs: ChildProcess[] = [];
 let dir: string;
 let url: string;
 let grain: string;
+let githubSim: HttpServer;
+let githubSimUrl: string;
 
 const as = (user: string) => new HubClient({ baseURL: url, headers: { [userHeader]: user } });
 
@@ -72,13 +81,118 @@ async function control(method: string, path: string, body?: unknown): Promise<an
 const emit = (task: string, ...events: Record<string, unknown>[]) => control('POST', `/tasks/${task}/emit`, events);
 const status = (message: string) => ({ type: 'status', status: { phase: 'running', state: 'info', message } });
 
+function gitRepoDir(slug: string): string {
+  return join(dir, 'repos', ...slug.split('/'));
+}
+
+function initGitRepo(slug: string): void {
+  const repoDir = gitRepoDir(slug);
+  mkdirSync(repoDir, { recursive: true });
+  execFileSync('git', ['init', '-b', 'main', repoDir], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repoDir, 'config', 'user.name', 'SDK Simulator'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repoDir, 'config', 'user.email', 'sim@sdk.test'], { stdio: 'ignore' });
+}
+
+async function commitAndPushWebhook(slug: string, branch: string, files: Record<string, string>): Promise<string> {
+  const repoDir = gitRepoDir(slug);
+  if (!existsSync(join(repoDir, '.git'))) initGitRepo(slug);
+  let beforeSha = '0000000000000000000000000000000000000000';
+  try {
+    beforeSha = execFileSync('git', ['-C', repoDir, 'rev-parse', `refs/heads/${branch}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    // first commit on branch
+  }
+  const modified: string[] = [];
+  for (const [relPath, content] of Object.entries(files)) {
+    const abs = join(repoDir, relPath);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content, 'utf8');
+    modified.push(relPath);
+  }
+  execFileSync('git', ['-C', repoDir, 'add', '-A'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repoDir, 'commit', '--allow-empty', '-m', `update ${modified.join(', ')}`], { stdio: 'ignore' });
+  const afterSha = execFileSync('git', ['-C', repoDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+  const payload = JSON.stringify({
+    ref: `refs/heads/${branch}`,
+    before: beforeSha,
+    after: afterSha,
+    repository: {
+      full_name: slug,
+      html_url: `https://github.com/${slug}`,
+      default_branch: 'main',
+    },
+    head_commit: {
+      id: afterSha,
+      added: [],
+      modified,
+      removed: [],
+    },
+    commits: [
+      {
+        id: afterSha,
+        added: [],
+        modified,
+        removed: [],
+      },
+    ],
+  });
+  const sig = 'sha256=' + createHmac('sha256', webhookSecret).update(payload).digest('hex');
+  const res = await fetch(`${url}/v1/webhooks/github`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-GitHub-Event': 'push',
+      'X-Hub-Signature-256': sig,
+    },
+    body: payload,
+  });
+  if (!res.ok) {
+    throw new Error(`webhook failed: ${res.status} ${await res.text()}`);
+  }
+  return afterSha;
+}
+
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'silo-sdk-'));
+
+  githubSim = createHttpServer((req, res) => {
+    const auth = req.headers['authorization'];
+    if (auth !== `Bearer ${githubToken}`) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ message: 'Bad credentials' }));
+      return;
+    }
+    const u = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const m = u.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)$/);
+    if (!m) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    const [, owner, repoName, rawPath] = m;
+    const filePath = rawPath.split('/').map(decodeURIComponent).join('/');
+    const ref = u.searchParams.get('ref') || 'HEAD';
+    const repoDir = gitRepoDir(`${owner}/${repoName}`);
+    try {
+      const out = execFileSync('git', ['-C', repoDir, 'show', `${ref}:${filePath}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.end(out);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ message: 'Not Found' }));
+    }
+  });
+  await new Promise<void>((resolve) => githubSim.listen(0, '127.0.0.1', () => resolve()));
+  const simAddr = githubSim.address();
+  githubSimUrl = `http://127.0.0.1:${simAddr && typeof simAddr === 'object' ? simAddr.port : 0}`;
+
   const port = await freePort();
   url = `http://127.0.0.1:${port}`;
   const hub = start('silo', [
     'hub', 'serve', '-addr', `127.0.0.1:${port}`, '-database', `sqlite:${join(dir, 'hub.db')}`,
     '-dev-user-header', userHeader, '-admins', `user:${admin}`, '-heartbeat', '1s', '-dispatch-retry', '1s', '-shutdown-grace', '2s',
+    '-webhook-secret', webhookSecret, '-github-token', githubToken, '-github-api-url', githubSimUrl,
   ]);
   await until('the hub to answer /healthz', async () => {
     if (hub.exitCode !== null) throw new Error(`the hub exited ${hub.exitCode}; see ${join(dir, 'silo.log')}`);
@@ -90,17 +204,23 @@ beforeAll(async () => {
   await a.createTeam(team, 'SDK');
   await a.setMember(team, `user:${alice}`, 'admin');
   await a.assignRepo(team, repo);
+  await a.assignRepo(team, repoDocs);
 
   // A fake Grain with a token alice mints through the SDK.
   const { token } = await as(alice).mintNodeToken(node);
   writeFileSync(join(dir, 'token'), token, { mode: 0o600 });
-  start('fakegrain', ['-hub', url, '-token-file', join(dir, 'token'), '-id', node, '-repos', repo, '-addr-file', join(dir, 'addr')]);
+  start('fakegrain', [
+    '-hub', url, '-token-file', join(dir, 'token'), '-id', node,
+    '-repos', `${repo},${repoDocs}`, '-recipients', recipientAlpha,
+    '-addr-file', join(dir, 'addr'),
+  ]);
   grain = 'http://' + (await until('the fake grain to listen', async () => (existsSync(join(dir, 'addr')) ? readFileSync(join(dir, 'addr'), 'utf8') : undefined)));
   await until('the fake grain to be online', async () => ((await control('GET', '/state')).online ? true : undefined));
 }, 60_000);
 
 afterAll(() => {
   for (const p of procs) p.kill('SIGTERM');
+  githubSim?.close();
 });
 
 describe('the SDK against silo hub serve', () => {
@@ -153,5 +273,167 @@ describe('the SDK against silo hub serve', () => {
 
   it('answers a write the task’s state does not allow with a ConflictError', async () => {
     await expect(as(alice).cancelTask(task.id)).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it('indexes Grainfiles from real git repos and filters/inspects them through the SDK', async () => {
+    const h = as(alice);
+
+    await commitAndPushWebhook(repo, 'main', {
+      'docs/spec.md': '# Spec\n',
+      'tasks/schema.json': '{"type":"object"}\n',
+      'tasks/migrate.task.md': [
+        '---',
+        'title: Migrate Database',
+        `recipient: ${recipientAlpha}`,
+        'requestor: Alice <alice@sdk.test>',
+        'draft: false',
+        'references:',
+        '  - /docs/spec.md',
+        '  - ./schema.json',
+        '  - https://github.com/other/repo/blob/main/secret.md',
+        'depends_on:',
+        `  - https://github.com/${repoDocs}/blob/main/processes/lint.process.md`,
+        'trigger_with:',
+        '  - ./verify.process.md',
+        '---',
+        '# Migrate Database',
+        '',
+        'Run the migration.',
+      ].join('\n'),
+      'tasks/draft-idea.task.md': [
+        '---',
+        'title: Draft Idea',
+        `recipient: ${recipientAlpha}`,
+        'requestor: https://github.com/sdk/grain-beta',
+        'draft: true',
+        '---',
+        '# Draft Idea',
+        '',
+        'Work in progress.',
+      ].join('\n'),
+      'tasks/verify.process.md': [
+        '---',
+        'title: Verify Migration',
+        `recipient: ${recipientAlpha}`,
+        'requestor: Alice <alice@sdk.test>',
+        'gate: true',
+        'on:',
+        '  push:',
+        '    branches: [main]',
+        '    paths: ["src/**"]',
+        '---',
+        '# Verify Migration',
+        '',
+        'Verify migration step.',
+      ].join('\n'),
+    });
+
+    await commitAndPushWebhook(repoDocs, 'main', {
+      'processes/lint.process.md': [
+        '---',
+        'title: Lint Docs',
+        `recipient: ${recipientBeta}`,
+        'requestor: https://github.com/sdk/grain-alpha',
+        'gate: false',
+        'on:',
+        '  pull_request:',
+        '    branches: [main]',
+        '---',
+        '# Lint Docs',
+        '',
+        'Lint markdown files.',
+      ].join('\n'),
+    });
+
+    // Default listGrainfiles includes non-drafts and drafts unless filtered.
+    const all = await h.listGrainfiles({ include_drafts: true });
+    expect(all.map((g) => `${g.repo}:${g.path}`)).toEqual([
+      `https://github.com/${repoDocs}:processes/lint.process.md`,
+      `https://github.com/${repo}:tasks/draft-idea.task.md`,
+      `https://github.com/${repo}:tasks/migrate.task.md`,
+      `https://github.com/${repo}:tasks/verify.process.md`,
+    ]);
+
+    // Filter by kind
+    const tasksOnly = await h.listGrainfiles({ kind: 'task', include_drafts: true });
+    expect(tasksOnly.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md', 'tasks/migrate.task.md']);
+    const procsOnly = await h.listGrainfiles({ kind: 'process', include_drafts: true });
+    expect(procsOnly.map((g) => g.path)).toEqual(['processes/lint.process.md', 'tasks/verify.process.md']);
+
+    // Filter by recipient
+    const alphaOnly = await h.listGrainfiles({ recipient: recipientAlpha, include_drafts: true });
+    expect(alphaOnly.map((g) => g.path)).toEqual([
+      'tasks/draft-idea.task.md',
+      'tasks/migrate.task.md',
+      'tasks/verify.process.md',
+    ]);
+    const betaOnly = await h.listGrainfiles({ recipient: recipientBeta, include_drafts: true });
+    expect(betaOnly.map((g) => g.path)).toEqual(['processes/lint.process.md']);
+
+    // Filter by repo
+    const docsOnly = await h.listGrainfiles({ repo: repoDocs, include_drafts: true });
+    expect(docsOnly.map((g) => g.path)).toEqual(['processes/lint.process.md']);
+
+    // Filter by draft
+    const draftsOnly = await h.listGrainfiles({ draft: true });
+    expect(draftsOnly.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md']);
+    const nonDraftsOnly = await h.listGrainfiles({ draft: false });
+    expect(nonDraftsOnly.map((g) => g.path)).toEqual([
+      'processes/lint.process.md',
+      'tasks/migrate.task.md',
+      'tasks/verify.process.md',
+    ]);
+
+    // Filter by gate
+    const gatedOnly = await h.listGrainfiles({ gate: true, include_drafts: true });
+    expect(gatedOnly.map((g) => g.path)).toEqual(['tasks/verify.process.md']);
+
+    // Filter by requestor (both Name <email> and https:// URL)
+    const byEmail = await h.listGrainfiles({ requestor: 'Alice <alice@sdk.test>', include_drafts: true });
+    expect(byEmail.map((g) => g.path)).toEqual(['tasks/migrate.task.md', 'tasks/verify.process.md']);
+    const byUrl = await h.listGrainfiles({ requestor: 'https://github.com/sdk/grain-beta', include_drafts: true });
+    expect(byUrl.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md']);
+
+    // Combined filter
+    const combined = await h.listGrainfiles({
+      kind: 'process',
+      recipient: recipientAlpha,
+      repo,
+      draft: false,
+      gate: true,
+      requestor: 'Alice <alice@sdk.test>',
+    });
+    expect(combined.map((g) => g.path)).toEqual(['tasks/verify.process.md']);
+
+    // Inspect a Grainfile for detail metadata, authorized_references, recent_events, and subscriptions
+    const inspection = await h.inspectGrainfile(`https://github.com/${repo}/blob/main/tasks/migrate.task.md`);
+    expect(inspection.grainfile).not.toBeNull();
+    expect(inspection.grainfile?.title).toBe('Migrate Database');
+    expect(inspection.grainfile?.references).toEqual([
+      `https://github.com/${repo}/blob/main/docs/spec.md`,
+      `https://github.com/${repo}/blob/main/tasks/schema.json`,
+      'https://github.com/other/repo/blob/main/secret.md',
+    ]);
+    expect(inspection.grainfile?.authorized_references).toEqual([
+      `https://github.com/${repo}/blob/main/docs/spec.md`,
+      `https://github.com/${repo}/blob/main/tasks/schema.json`,
+    ]);
+    expect(inspection.grainfile?.depends_on).toEqual([
+      `https://github.com/${repoDocs}/blob/main/processes/lint.process.md`,
+    ]);
+    expect(inspection.grainfile?.trigger_with).toEqual([
+      `https://github.com/${repo}/blob/main/tasks/verify.process.md`,
+    ]);
+    expect(inspection.grainfile?.subscribed_nodes).toContain(node);
+    expect(inspection.grainfile?.recent_events?.map((e) => e.type)).toContain('task_ready');
+    expect(inspection.events.map((e) => e.type)).toContain('task_ready');
+    expect(inspection.subscriptions.some((s) => s.node_id === node)).toBe(true);
+
+    // Verify the live fakegrain node received the grainfile_events for recipientAlpha
+    await until('fakegrain to receive grainfile_events', async () => {
+      const st = await control('GET', '/state');
+      const evs: Array<{ type: string; path: string }> = st.grainfile_events ?? [];
+      return evs.some((e) => e.type === 'task_ready' && e.path === 'tasks/migrate.task.md') ? true : undefined;
+    });
   });
 });

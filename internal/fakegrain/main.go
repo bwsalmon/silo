@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
@@ -53,17 +54,18 @@ type task struct {
 type grain struct {
 	cl *rendezvous.Client
 
-	mu        sync.Mutex
-	conn      *rendezvous.Conn
-	offline   bool
-	refused   bool
-	connects  int
-	failures  int // connection attempts failed since the last success
-	lastError string
-	tasks     map[string]*task
-	order     []string
-	artifacts map[string][]byte
-	wake      chan struct{}
+	mu              sync.Mutex
+	conn            *rendezvous.Conn
+	offline         bool
+	refused         bool
+	connects        int
+	failures        int // connection attempts failed since the last success
+	lastError       string
+	tasks           map[string]*task
+	order           []string
+	artifacts       map[string][]byte
+	grainfileEvents []grainfiles.Event
+	wake            chan struct{}
 }
 
 func main() {
@@ -71,6 +73,8 @@ func main() {
 	tokenFile := flag.String("token-file", "", "the file holding the node's token")
 	id := flag.String("id", "", "the node's ID")
 	repos := flag.String("repos", "", "comma-separated repositories the node serves")
+	recipients := flag.String("recipients", "", "comma-separated recipient URLs the node subscribes to")
+	grainfilesFlag := flag.String("grainfiles", "", "comma-separated grainfile URLs the node subscribes to")
 	slots := flag.Int("slots", 2, "the node's slots")
 	interactive := flag.Bool("interactive", false, "list the interactive feature")
 	control := flag.String("control", "127.0.0.1:0", "the address to serve the control API on")
@@ -81,6 +85,12 @@ func main() {
 		log.Fatal(err)
 	}
 	node := registry.Node{ID: *id, Repos: strings.Split(*repos, ","), Slots: *slots, Version: "fakegrain"}
+	if *recipients != "" {
+		node.Recipients = strings.Split(*recipients, ",")
+	}
+	if *grainfilesFlag != "" {
+		node.Grainfiles = strings.Split(*grainfilesFlag, ",")
+	}
 	if *interactive {
 		node.Features = []string{registry.FeatureInteractive}
 	}
@@ -93,6 +103,11 @@ func main() {
 		tasks:     map[string]*task{},
 		artifacts: map[string][]byte{},
 		wake:      make(chan struct{}, 1),
+	}
+	g.cl.OnGrainfileEvent = func(ev grainfiles.Event) {
+		g.mu.Lock()
+		g.grainfileEvents = append(g.grainfileEvents, ev)
+		g.mu.Unlock()
 	}
 	l, err := net.Listen("tcp", *control)
 	if err != nil {
@@ -304,7 +319,7 @@ func (g *grain) routes() http.Handler {
 			ts = append(ts, g.tasks[id])
 		}
 		writeJSON(w, map[string]any{"online": g.conn != nil, "refused": g.refused, "connects": g.connects,
-			"failures": g.failures, "last_error": g.lastError, "tasks": ts})
+			"failures": g.failures, "last_error": g.lastError, "tasks": ts, "grainfile_events": g.grainfileEvents})
 	})
 	mux.HandleFunc("POST /tasks/{id}/emit", func(w http.ResponseWriter, r *http.Request) {
 		var evs []map[string]any
