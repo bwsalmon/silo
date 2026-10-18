@@ -74,9 +74,11 @@ func main() {
 	id := flag.String("id", "", "the node's ID")
 	repos := flag.String("repos", "", "comma-separated repositories the node serves")
 	recipients := flag.String("recipients", "", "comma-separated recipient URLs the node subscribes to")
+	folders := flag.String("folders", "", "comma-separated folder URLs the node subscribes to")
 	grainfilesFlag := flag.String("grainfiles", "", "comma-separated grainfile URLs the node subscribes to")
 	slots := flag.Int("slots", 2, "the node's slots")
 	interactive := flag.Bool("interactive", false, "list the interactive feature")
+	nodeui := flag.Bool("nodeui", false, "list the nodeui feature")
 	control := flag.String("control", "127.0.0.1:0", "the address to serve the control API on")
 	addrFile := flag.String("addr-file", "", "write the control API's address here once it listens")
 	flag.Parse()
@@ -88,11 +90,17 @@ func main() {
 	if *recipients != "" {
 		node.Recipients = strings.Split(*recipients, ",")
 	}
+	if *folders != "" {
+		node.Folders = strings.Split(*folders, ",")
+	}
 	if *grainfilesFlag != "" {
 		node.Grainfiles = strings.Split(*grainfilesFlag, ",")
 	}
 	if *interactive {
-		node.Features = []string{registry.FeatureInteractive}
+		node.Features = append(node.Features, registry.FeatureInteractive)
+	}
+	if *nodeui {
+		node.Features = append(node.Features, registry.FeatureNodeUI)
 	}
 	g := &grain{
 		cl: &rendezvous.Client{

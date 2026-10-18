@@ -37,3 +37,41 @@ test('a team admin mints a node token, shown once, and revoking it disconnects t
   await page.reload();
   await expect(page.getByRole('row', { name: new RegExp(id) }).filter({ hasText: 'online' })).toHaveCount(0);
 });
+
+test('connected Grain deployments display their recipient URLs, subscribed repositories/folders/processes, and tunneled local UI links on /nodes', async ({
+  world,
+  pageAs,
+  grain,
+}) => {
+  const id = `ws-sub-${world.n}`;
+  const recipient = `https://github.com/e2e/grain-deploy-${world.n}`;
+  const folder = `https://github.com/${world.repo}/tree/main/.grain/processes`;
+  const processUrl = `https://github.com/${world.repo}/blob/main/.grain/processes/ci.process.md`;
+
+  await grain({
+    owner: world.admin,
+    repos: [world.repo],
+    id,
+    nodeui: true,
+    recipients: [recipient],
+    folders: [folder],
+    grainfiles: [processUrl],
+  });
+
+  const page = await pageAs(world.admin);
+  await page.goto('/nodes');
+
+  const row = page.getByRole('row', { name: new RegExp(id) });
+  await expect(row.filter({ hasText: 'online' })).toBeVisible();
+  await expect(row.getByRole('link', { name: recipient })).toHaveAttribute('href', recipient);
+  await expect(row.getByText(world.repo, { exact: true })).toBeVisible();
+  await expect(row.getByText(`folder: ${world.repo}/tree/main/.grain/processes`)).toBeVisible();
+  await expect(row.getByRole('link', { name: `${world.repo}/blob/main/.grain/processes/ci.process.md` })).toHaveAttribute(
+    'href',
+    processUrl,
+  );
+  await expect(row.getByRole('link', { name: 'Open Grain UI' })).toHaveAttribute(
+    'href',
+    `https://${id.toLowerCase()}.nodes.hub.e2e.test/`,
+  );
+});

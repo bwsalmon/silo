@@ -17,8 +17,53 @@ async function check(page: Page, what: string): Promise<string[]> {
     .map((v) => `${what}: ${v.id} (${v.impact}): ${v.help}\n    ${v.nodes.map((n) => `${n.target.join(' ')}: ${n.failureSummary}`).join('\n    ')}`);
 }
 
-test('every page passes axe', async ({ world, newWorld, pageAs, grain, fileTask }) => {
-  const node = await grain({ owner: world.admin, repos: [world.repo], interactive: true });
+test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, fileTask }) => {
+  const recipient = `https://github.com/e2e/grain-a11y-${world.n}`;
+  const folder = `https://github.com/${world.repo}/tree/main/tasks`;
+  const processUrl = `https://github.com/${world.repo}/blob/main/.grain/processes/ci.process.md`;
+  const node = await grain({
+    owner: world.admin,
+    repos: [world.repo],
+    interactive: true,
+    nodeui: true,
+    recipients: [recipient],
+    folders: [folder],
+    grainfiles: [processUrl],
+  });
+  await hub.pushGitHub(world.repo, 'main', {
+    'docs/spec.md': '# Spec\n',
+    'tasks/01-a11y.task.md': [
+      '---',
+      'title: Accessible Grainfile task',
+      `recipient: ${recipient}`,
+      `requestor: Alice <${world.admin}>`,
+      'draft: false',
+      'not_before: 2020-01-01T00:00:00Z',
+      'references:',
+      '  - /docs/spec.md',
+      '  - https://github.com/external/other/blob/main/notes.md',
+      'trigger_with:',
+      '  - /.grain/processes/ci.process.md',
+      '---',
+      '# Accessible task',
+    ].join('\n'),
+    '.grain/processes/ci.process.md': [
+      '---',
+      'title: Accessible CI process',
+      `recipient: ${recipient}`,
+      `requestor: Alice <${world.admin}>`,
+      'draft: true',
+      'gate: true',
+      'on:',
+      '  schedule:',
+      '    cron: "0 * * * *"',
+      '    timezone: UTC',
+      '  push:',
+      '    branches: [main]',
+      '---',
+      '# Accessible process',
+    ].join('\n'),
+  });
   const t = await fileTask(world.member, { repo: world.repo, title: 'Accessible', prompt: 'A **prompt** with `code`.' });
   await node.task(t.id);
   await node.artifact('diff-a11y', 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n');
@@ -43,8 +88,8 @@ test('every page passes axe', async ({ world, newWorld, pageAs, grain, fileTask 
     ["a team's members", `/teams/${world.team}/members`, () => page.getByText(world.member).first().waitFor()],
     ['the file form', `/teams/${world.team}/file`, () => expect(page.getByRole('combobox', { name: 'Repository' })).not.toHaveAttribute('aria-disabled', 'true')],
     ["a team's proposals", `/teams/${world.team}/proposals`, () => page.getByText('A proposal').waitFor()],
-    ['the grainfiles', '/grainfiles', () => page.getByText('Grainfiles & Processes').waitFor()],
-    ['the nodes', '/nodes', () => page.getByRole('row', { name: new RegExp(node.id) }).first().waitFor()],
+    ['the grainfiles', '/grainfiles', () => page.getByTestId('grainfile-detail').getByRole('heading', { name: 'Accessible CI process' }).waitFor()],
+    ['the nodes', '/nodes', () => page.getByRole('row', { name: new RegExp(node.id) }).getByRole('link', { name: recipient }).waitFor()],
     ['a task', `/tasks/${t.id}`, () => page.getByRole('button', { name: 'Allow' }).waitFor()],
     ['a session', `/tasks/${session.id}`, () => page.getByLabel('Reply to the session').waitFor()],
     ['a task not found', '/tasks/nope', () => page.getByText('No task nope in your teams.').waitFor()],
@@ -56,6 +101,11 @@ test('every page passes axe', async ({ world, newWorld, pageAs, grain, fileTask 
     await ready();
     found.push(...(await check(page, what)));
   }
+  // A task Grainfile selected in the detail view on /grainfiles.
+  await page.goto('/grainfiles');
+  await page.locator('table').first().getByText('Accessible Grainfile task').click();
+  await page.getByTestId('grainfile-detail').getByRole('heading', { name: 'Accessible Grainfile task' }).waitFor();
+  found.push(...(await check(page, 'the grainfiles with a task selected')));
   // A task with its artifact open.
   await page.goto(`/tasks/${t.id}`);
   await page.getByRole('button', { name: 'View diff' }).click();
