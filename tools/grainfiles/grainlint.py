@@ -20,12 +20,36 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 SCHEMAS = ROOT / "schemas" / "grainfiles"
 SPEC = ROOT / "docs" / "grainfiles-spec.md"
+SPEC_SUMMARY = ROOT / "docs" / "grainfile-v1.md"
+
+DEFAULT_VERSION = "v1"
+VERSIONS = {
+    "v1": {
+        "grainfile": "v1",
+        "spec_summary_path": "docs/grainfile-v1.md",
+        "spec_path": "docs/grainfiles-spec.md",
+        "schemas": {
+            "common": "schemas/grainfiles/common.schema.json",
+            "task": "schemas/grainfiles/task.schema.json",
+            "process": "schemas/grainfiles/process.schema.json",
+        },
+    },
+}
+
+
+def resolve_version(version=None):
+    v = DEFAULT_VERSION if version is None else version
+    if not isinstance(v, str) or v not in VERSIONS:
+        return None
+    return dict(VERSIONS[v])
+
+
 KINDS = ["task", "process"]
 SOURCES = ["schedule", "push", "merge", "pull_request", "manual", "scenario"]
 SEVERITY = {"GF005": "warning", "GF022": "warning"}
 CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
          "GF030", "GF032", "GF034", "GF035", "GF036"]
-STEM = re.compile(r"^(\d{8}T\d{6}Z|[a-z0-9])[a-z0-9._-]*$")
+STEM = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 USER_IDENTITY = re.compile(r"^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$")
 ANCHOR_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$")
@@ -50,8 +74,7 @@ def valid_time_or_date(s, allow_date=False):
 
 
 EXPECTS = {
-    ("task", "depends_on"): ("task", "process"),
-    ("task", "trigger_with"): ("task", "process"),
+    ("task", "depends_on"): ("task",),
     ("process", "depends_on"): ("task", "process"),
     ("process", "trigger_with"): ("task", "process"),
 }
@@ -87,7 +110,7 @@ def _mapping(loader, node, deep=False):
 
 
 Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
-for _ch in "yYnN":  # §5.3: YAML 1.2 booleans only; a bare `on` key is the string "on"
+for _ch in "yYnN":  # §5.3: YAML 1.2 booleans only
     Loader.yaml_implicit_resolvers.pop(_ch, None)
 for _ch, _rs in list(Loader.yaml_implicit_resolvers.items()):
     Loader.yaml_implicit_resolvers[_ch] = [r for r in _rs if r[0] != "tag:yaml.org,2002:timestamp"]
@@ -244,9 +267,8 @@ def parse_ref(s):
                 repo_name, mode, gitref, sub_segs = segs[0], None, None, segs[1:]
             if mode == "blob" and (not sub_segs or trailing):
                 raise Finding("GF035", "", "blob URL must name a file path: %r" % s)
-            repo_url = canon_repo("file://" + repo_name)
             sub = "/".join(sub_segs) + (trailing if sub_segs else "")
-            return Ref("remote", repo=repo_url, path=sub, gitref=gitref, anchor=anchor, mode=mode)
+            return Ref("remote", repo="file://" + repo_name, path=sub, gitref=gitref, anchor=anchor, mode=mode)
     if s.startswith("/"):
         return Ref("rooted", path=s[1:], anchor=anchor)
     return Ref("relative", path=s, anchor=anchor)
@@ -262,10 +284,14 @@ class Repo:
 
 
 class Item:
-    """One grainfile (.task.md or .process.md)."""
+    """One grainfile (<name>.task.grain.md or <name>.process.grain.md)."""
     def __init__(self, repo, rel, kind, name):
         self.repo, self.rel, self.kind, self.name = repo, rel, kind, name
         self.fm, self.body, self.ok = {}, "", False
+        self.grainfile = DEFAULT_VERSION
+        self.spec_summary_path = VERSIONS[DEFAULT_VERSION]["spec_summary_path"]
+        self.spec_path = VERSIONS[DEFAULT_VERSION]["spec_path"]
+        self.recipient = "/"
         self.targets = {}
 
     @property
@@ -280,9 +306,11 @@ def classify(rel):
     """Repo-relative path -> ('grain', kind, stem) | ('asset',) | ('asset', 'GF005')."""
     leaf = rel.rsplit("/", 1)[-1]
     for k in KINDS:
-        suf = ".%s.md" % k
+        suf = ".%s.grain.md" % k
         if leaf.endswith(suf):
             return ("grain", k, leaf[:-len(suf)])
+    if re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.grain\.md$", leaf):
+        return ("asset", "GF005")
     m = re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.md$", leaf)
     if m and not leaf.lower().startswith("readme"):
         return ("asset", "GF005")
@@ -306,19 +334,19 @@ class Schemas:
             if k not in props and not k.startswith("x_"):
                 out.append(Finding("GF022", path, "unknown field %r" % k))
                 del data[k]
-        if kind == "process" and isinstance(data.get("on"), dict):
-            on = dict(data["on"])
-            for k in list(on):
+        if kind == "process" and isinstance(data.get("when"), dict):
+            when = dict(data["when"])
+            for k in list(when):
                 if k not in SOURCES:
-                    out.append(Finding("GF020", path, "unknown trigger source %r in on" % k))
-                    del on[k]
-            if not on and "on" in data:
+                    out.append(Finding("GF020", path, "unknown trigger source %r in when" % k))
+                    del when[k]
+            if not when and "when" in data:
                 # Avoid a duplicate minProperties error when the only source was unknown
-                del data["on"]
+                del data["when"]
                 if "trigger_with" not in data:
                     return out
             else:
-                data["on"] = on
+                data["when"] = when
         v = jsonschema.Draft202012Validator(s, resolver=jsonschema.RefResolver.from_schema(s, store=self.store))
         for e in sorted(v.iter_errors(data), key=lambda e: list(e.path)):
             p = list(e.path)
@@ -463,9 +491,10 @@ class Linter:
             self.add("GF032", where, "%s: %r is a file reference (/blob/), expected a repository or folder" % (field, s))
             return
         for k in KINDS:
-            if r.path.endswith(".%s.md" % k) or (r.repo and r.repo.endswith(".%s.md" % k)):
-                self.add("GF032", where, "%s: %r is a %s grainfile, expected a repository or folder" % (field, s, k))
-                return
+            for suf in (".%s.grain.md" % k, ".%s.md" % k):
+                if r.path.endswith(suf) or (r.repo and r.repo.endswith(suf)):
+                    self.add("GF032", where, "%s: %r is a %s grainfile, expected a repository or folder" % (field, s, k))
+                    return
         try:
             t = self.resolve(it, s, field)
         except Finding as e:
@@ -485,24 +514,27 @@ class Linter:
             if isinstance(val, list):
                 for v in val:
                     add(f, v)
-        tw = fm.get("trigger_with")
-        if isinstance(tw, str):
-            add("trigger_with", tw)
-        elif isinstance(tw, list):
-            for v in tw:
-                add("trigger_with", v)
+        if it.kind == "process":
+            tw = fm.get("trigger_with")
+            if isinstance(tw, str):
+                add("trigger_with", tw)
+            elif isinstance(tw, list):
+                for v in tw:
+                    add("trigger_with", v)
         return out
 
     def check_item(self, it):
         where = self.show(it.repo, it.rel)
         self.findings += self.schemas.validate(it.kind, it.fm, where)
         fm = it.fm
+        vinfo = resolve_version(fm.get("grainfile"))
+        if vinfo is not None:
+            it.grainfile = vinfo["grainfile"]
+            it.spec_summary_path = vinfo["spec_summary_path"]
+            it.spec_path = vinfo["spec_path"]
         title = fm.get("title")
         if isinstance(title, str) and "\n" in title:
             self.add("GF020", where, "title must be a single line")
-        ca = fm.get("created_at")
-        if isinstance(ca, str) and TIME_RE.match(ca) and not valid_time_or_date(ca, allow_date=False):
-            self.add("GF020", where, "created_at: invalid calendar date or UTC time %r" % ca)
         nb = fm.get("not_before")
         if isinstance(nb, str) and (DATE_RE.match(nb) or TIME_RE.match(nb)) and not valid_time_or_date(nb, allow_date=True):
             self.add("GF020", where, "not_before: invalid calendar date or UTC time %r" % nb)
@@ -510,13 +542,14 @@ class Linter:
         if isinstance(req, str) and not USER_IDENTITY.match(req):
             if not any(ch in req for ch in "<>@\\ ") and req:
                 self.check_deployment_ref(it, req, "requestor", where)
-        rec = fm.get("recipient")
+        rec = fm.get("recipient", "/")
+        it.recipient = rec if isinstance(rec, str) and rec else "/"
         if isinstance(rec, str) and not any(ch in rec for ch in "<>@\\ ") and rec:
             self.check_deployment_ref(it, rec, "recipient", where)
         if it.kind == "process":
-            on = fm.get("on")
-            if isinstance(on, dict):
-                sch = on.get("schedule")
+            when = fm.get("when")
+            if isinstance(when, dict):
+                sch = when.get("schedule")
                 if isinstance(sch, dict) and isinstance(sch.get("cron"), str) and len(sch["cron"].split()) != 5:
                     self.add("GF020", where, "schedule.cron must be a five-field cron expression")
         it.targets = {}
@@ -533,11 +566,43 @@ class Linter:
                 self.add("GF032", where, "%s: %r is a %s, expected %s" % (field, s, t, " or ".join(want)))
             elif want and t is None:
                 r = parse_ref(s)
-                if r.mode == "tree" or not any(r.path.endswith(".%s.md" % k) for k in want):
+                if r.mode == "tree" or not any(r.path.endswith(".%s.grain.md" % k) for k in want):
                     self.add("GF032", where, "%s: %r is not a %s grainfile" % (field, s, " or ".join(want)))
             it.targets.setdefault(field, []).append((s, t))
 
     def check_graphs(self):
+        # Build undirected trigger_with adjacency to verify process->process depends_on grouping (§8.3).
+        tw_adj = {}
+        for it in self.items.values():
+            if it.ok:
+                tw_adj.setdefault(it, set())
+                for _, t in it.targets.get("trigger_with", []):
+                    if isinstance(t, Item) and t.ok:
+                        tw_adj.setdefault(it, set()).add(t)
+                        tw_adj.setdefault(t, set()).add(it)
+
+        def same_trigger_group(a, b):
+            if a == b:
+                return True
+            seen = {a}
+            stack = [a]
+            while stack:
+                cur = stack.pop()
+                for nxt in tw_adj.get(cur, ()):
+                    if nxt == b:
+                        return True
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            return False
+
+        for it in self.items.values():
+            if it.ok and it.kind == "process":
+                where = self.show(it.repo, it.rel)
+                for s, t in it.targets.get("depends_on", []):
+                    if isinstance(t, Item) and t.kind == "process" and not same_trigger_group(it, t):
+                        self.add("GF032", where, "depends_on: %r is a process not in the same trigger_with group" % s)
+
         for field in ("depends_on", "trigger_with"):
             graph = {}
             for it in self.items.values():
@@ -578,6 +643,11 @@ def self_test():
         nonlocal ok
         ok = False
         print("FAIL", msg)
+    v1 = resolve_version("v1")
+    if not v1 or v1["spec_summary_path"] != "docs/grainfile-v1.md" or v1["spec_path"] != "docs/grainfiles-spec.md":
+        fail("resolve_version('v1') mismatch: %r" % (v1,))
+    if not SPEC_SUMMARY.exists():
+        fail("missing %s" % SPEC_SUMMARY)
     ex = ROOT / "examples" / "grainfiles"
     for f in lint(ex):
         fail("examples: %s" % f)
@@ -611,7 +681,7 @@ def self_test():
     if not m or sorted(re.findall(r"`([a-z_-]+)`", m.group(1))) != sorted(SOURCES):
         fail("spec §12.2 trigger sources disagree with the linter")
     common = json.loads((SCHEMAS / "common.schema.json").read_text())["$defs"]
-    if sorted(common["on"]["properties"]) != sorted(SOURCES):
+    if sorted(common["when"]["properties"]) != sorted(SOURCES):
         fail("common.schema.json trigger sources disagree with the linter")
     uncovered = set(CODES) - seen
     if uncovered:

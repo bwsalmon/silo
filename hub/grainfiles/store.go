@@ -60,6 +60,10 @@ type Store struct {
 	// least one team in the Hub directory (allowing nodes in the same team to
 	// subscribe to the same deployment recipient URL).
 	SameTeam func(ctx context.Context, ownerA, ownerB string) bool
+	// AuthorizeOwnerRepo, when set, reports whether a node owner is admitted in
+	// the Hub directory for the repository of a recipient, repo, folder, or
+	// grainfile URL.
+	AuthorizeOwnerRepo func(ctx context.Context, owner, repoURL string) bool
 }
 
 // Open opens the Grainfile store at url: "postgres://..." (or
@@ -234,6 +238,9 @@ func (s *Store) tx(ctx context.Context, f func(*sql.Tx) error) error {
 // front-matter metadata per (repo, path, commit_sha). It never holds the
 // Grainfile Markdown prompt body or source code.
 type IndexRecord struct {
+	Grainfile            string    `json:"grainfile"`
+	SpecSummaryPath      string    `json:"spec_summary_path"`
+	SpecPath             string    `json:"spec_path"`
 	Repo                 string    `json:"repo"`
 	Path                 string    `json:"path"`
 	CommitSHA            string    `json:"commit_sha"`
@@ -250,6 +257,7 @@ type IndexRecord struct {
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
 	TriggerWith          []string  `json:"trigger_with,omitempty"`
+	When                 Triggers  `json:"when,omitempty,omitzero"`
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
@@ -264,24 +272,46 @@ type IndexRecord struct {
 // ToGrainfile reconstructs a metadata-only *Grainfile (with an empty Body) from
 // an IndexRecord so trigger and reference-authorization methods can be invoked.
 func (r IndexRecord) ToGrainfile() *Grainfile {
+	ver := r.Grainfile
+	if ver == "" {
+		ver = VersionV1
+	}
+	specSummary := r.SpecSummaryPath
+	specPath := r.SpecPath
+	if spec, ok := LookupVersion(ver); ok {
+		if specSummary == "" {
+			specSummary = spec.SpecSummaryPath
+		}
+		if specPath == "" {
+			specPath = spec.SpecPath
+		}
+	}
+	triggers := r.When
+	if triggers.IsZero() {
+		triggers = r.OnSpec
+	}
 	return &Grainfile{
-		Kind:        r.Kind,
-		Path:        r.Path,
-		URL:         r.URL,
-		Repo:        r.Repo,
-		Ref:         r.Ref,
-		Commit:      r.CommitSHA,
-		Title:       r.Title,
-		Recipient:   r.Recipient,
-		Requestor:   r.Requestor,
-		Draft:       r.Draft,
-		NotBefore:   r.NotBefore,
-		CreatedAt:   r.CreatedAt,
-		References:  slices.Clone(r.References),
-		DependsOn:   slices.Clone(r.DependsOn),
-		TriggerWith: slices.Clone(r.TriggerWith),
-		On:          r.OnSpec,
-		Gate:        r.Gate,
+		Grainfile:       ver,
+		SpecSummaryPath: specSummary,
+		SpecPath:        specPath,
+		Kind:            r.Kind,
+		Path:            r.Path,
+		URL:             r.URL,
+		Repo:            r.Repo,
+		Ref:             r.Ref,
+		Commit:          r.CommitSHA,
+		Title:           r.Title,
+		Recipient:       r.Recipient,
+		Requestor:       r.Requestor,
+		Draft:           r.Draft,
+		NotBefore:       r.NotBefore,
+		CreatedAt:       r.CreatedAt,
+		References:      slices.Clone(r.References),
+		DependsOn:       slices.Clone(r.DependsOn),
+		TriggerWith:     slices.Clone(r.TriggerWith),
+		When:            triggers,
+		On:              triggers,
+		Gate:            r.Gate,
 	}
 }
 
@@ -305,6 +335,9 @@ type Subscriptions struct {
 type Event struct {
 	Seq                  int64     `json:"seq"`
 	Type                 string    `json:"type"`
+	Grainfile            string    `json:"grainfile,omitempty"`
+	SpecSummaryPath      string    `json:"spec_summary_path,omitempty"`
+	SpecPath             string    `json:"spec_path,omitempty"`
 	Repo                 string    `json:"repo"`
 	Path                 string    `json:"path,omitempty"`
 	CommitSHA            string    `json:"commit_sha,omitempty"`
@@ -319,6 +352,7 @@ type Event struct {
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
 	TriggerWith          []string  `json:"trigger_with,omitempty"`
+	When                 Triggers  `json:"when,omitempty,omitzero"`
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
@@ -332,6 +366,7 @@ type Event struct {
 }
 
 type eventPayload struct {
+	Grainfile            string   `json:"grainfile,omitempty"`
 	Requestor            string   `json:"requestor,omitempty"`
 	NotBeforeMillis      int64    `json:"not_before_ms,omitempty"`
 	References           []string `json:"references,omitempty"`
@@ -413,8 +448,33 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	}
 	now := at.UTC().Truncate(time.Millisecond)
 	activeNow := cp.ActiveAt(now)
+	if cp.Kind == KindTask && cp.Ref != "" && !isDefaultOrProtectedBranch(cp.Ref, "") {
+		activeNow = false
+	}
+
+	ver := cp.Grainfile
+	if ver == "" {
+		ver = VersionV1
+	}
+	specSummary := cp.SpecSummaryPath
+	specPath := cp.SpecPath
+	if spec, ok := LookupVersion(ver); ok {
+		if specSummary == "" {
+			specSummary = spec.SpecSummaryPath
+		}
+		if specPath == "" {
+			specPath = spec.SpecPath
+		}
+	}
+	triggers := cp.When
+	if triggers.IsZero() {
+		triggers = cp.On
+	}
 
 	rec := IndexRecord{
+		Grainfile:            ver,
+		SpecSummaryPath:      specSummary,
+		SpecPath:             specPath,
 		Repo:                 cp.Repo,
 		Path:                 cp.Path,
 		CommitSHA:            commitSHA,
@@ -431,8 +491,9 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		AuthorizedReferences: authRefs,
 		DependsOn:            deps,
 		TriggerWith:          tw,
-		On:                   cp.On,
-		OnSpec:               cp.On,
+		When:                 triggers,
+		On:                   triggers,
+		OnSpec:               triggers,
 		Gate:                 cp.Gate,
 		UpdatedAt:            now,
 		readyEmitted:         activeNow,
@@ -470,17 +531,35 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var prevReady int
-		err := tx.QueryRowContext(ctx, s.q(`SELECT ready_emitted FROM grainfile_index WHERE repo = ? AND path = ? AND commit_sha = ?`),
-			rec.Repo, rec.Path, rec.CommitSHA).Scan(&prevReady)
+		var prevTitle, prevRecipient string
+		var prevNotBeforeMS int64
+		err := tx.QueryRowContext(ctx, s.q(`SELECT ready_emitted, title, recipient, not_before FROM grainfile_index WHERE repo = ? AND path = ? AND commit_sha = ?`),
+			rec.Repo, rec.Path, rec.CommitSHA).Scan(&prevReady, &prevTitle, &prevRecipient, &prevNotBeforeMS)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 
-		emitNow := activeNow && prevReady == 0
+		editedIncomplete := prevReady != 0 && (prevTitle != rec.Title || prevRecipient != rec.Recipient || prevNotBeforeMS != notBeforeMS)
+		emitNow := activeNow && (prevReady == 0 || editedIncomplete)
 		readyFlag := 0
 		if activeNow || prevReady != 0 {
 			if !rec.Draft && activeNow {
 				readyFlag = 1
+			}
+		}
+
+		// Task idempotency rule (§9): once a .task.grain.md has completed (done),
+		// subsequent pushes, merges, or edits to that (repo_url, file_path) do not
+		// re-trigger or re-queue it.
+		if rec.Kind == KindTask {
+			done, err := s.isTaskCompletedTx(tx, ctx, rec.Repo, rec.Path)
+			if err != nil {
+				return err
+			}
+			if done {
+				emitNow = false
+				readyFlag = 1
+				rec.readyEmitted = true
 			}
 		}
 
@@ -524,6 +603,9 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			}
 			_, err = s.insertEventTx(tx, ctx, Event{
 				Type:                 evType,
+				Grainfile:            rec.Grainfile,
+				SpecSummaryPath:      rec.SpecSummaryPath,
+				SpecPath:             rec.SpecPath,
 				Repo:                 rec.Repo,
 				Path:                 rec.Path,
 				CommitSHA:            rec.CommitSHA,
@@ -538,6 +620,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
 				TriggerWith:          rec.TriggerWith,
+				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
 				CreatedAt:            now,
@@ -552,6 +635,56 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	return rec, nil
 }
 
+func (s *Store) isTaskCompletedTx(tx *sql.Tx, ctx context.Context, canonRepo, cleanPath string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, s.q(`SELECT repo, path, dependency_url, dependency_state FROM grainfile_events WHERE type = ?`), EventDependencyCompleted)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var evRepo, evPath, depURL, depState string
+		if err := rows.Scan(&evRepo, &evPath, &depURL, &depState); err != nil {
+			return false, err
+		}
+		if depState != "done" && depState != "completed" && depState != "success" {
+			continue
+		}
+		if depURL != "" {
+			if matchesRepoAndPath(canonRepo, cleanPath, depURL) {
+				return true, nil
+			}
+		} else if strings.EqualFold(evRepo, canonRepo) && cleanPosixPath(strings.TrimPrefix(evPath, "/")) == cleanPath {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func (s *Store) isTaskCancelledTx(tx *sql.Tx, ctx context.Context, canonRepo, cleanPath string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, s.q(`SELECT repo, path, dependency_url, dependency_state FROM grainfile_events WHERE type = ?`), EventDependencyCompleted)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var evRepo, evPath, depURL, depState string
+		if err := rows.Scan(&evRepo, &evPath, &depURL, &depState); err != nil {
+			return false, err
+		}
+		if depState != "cancelled" {
+			continue
+		}
+		if depURL != "" {
+			if matchesRepoAndPath(canonRepo, cleanPath, depURL) {
+				return true, nil
+			}
+		} else if strings.EqualFold(evRepo, canonRepo) && cleanPosixPath(strings.TrimPrefix(evPath, "/")) == cleanPath {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // UpsertIndex is an alias for IndexGrainfile.
 func (s *Store) UpsertIndex(ctx context.Context, g *Grainfile) (IndexRecord, error) {
 	return s.IndexGrainfile(ctx, g)
@@ -559,16 +692,62 @@ func (s *Store) UpsertIndex(ctx context.Context, g *Grainfile) (IndexRecord, err
 
 // RemoveGrainfile marks all indexed versions of (repo, path) as removed so they
 // no longer fire triggers or authorize references.
+// Per §9:
+//   - Deleting a .task.grain.md while its task is still queued, deferred, or
+//     running cancels the task (emitting dependency_completed with state "cancelled").
+//   - Deleting a .task.grain.md after its task has already completed (done) is
+//     a clean-up no-op on task completion state.
 func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) error {
 	canonRepo, err := canonicalRepoFromAnyRef(repo)
 	if err != nil {
 		return err
 	}
 	cleanPath := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(filePath), "/"))
-	now := s.now().UnixMilli()
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE grainfile_index SET removed = 1, updated_at = ? WHERE repo = ? AND path = ?`),
-		now, canonRepo, cleanPath)
-	return err
+	now := s.now().Truncate(time.Millisecond)
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
+			canonRepo, cleanPath)
+		latest, scanErr := scanIndexRecord(row)
+
+		if _, err := tx.ExecContext(ctx, s.q(`UPDATE grainfile_index SET removed = 1, updated_at = ? WHERE LOWER(repo) = LOWER(?) AND path = ?`),
+			now.UnixMilli(), canonRepo, cleanPath); err != nil {
+			return err
+		}
+		if scanErr != nil || latest.Kind != KindTask || latest.Draft {
+			return nil
+		}
+		done, err := s.isTaskCompletedTx(tx, ctx, canonRepo, cleanPath)
+		if err != nil {
+			return err
+		}
+		if done {
+			// Deleting a completed task is a clean-up no-op on task completion state.
+			return nil
+		}
+		cancelled, err := s.isTaskCancelledTx(tx, ctx, canonRepo, cleanPath)
+		if err != nil || cancelled {
+			return err
+		}
+		_, err = s.insertEventTx(tx, ctx, Event{
+			Type:            EventDependencyCompleted,
+			Grainfile:       latest.Grainfile,
+			SpecSummaryPath: latest.SpecSummaryPath,
+			SpecPath:        latest.SpecPath,
+			Repo:            latest.Repo,
+			Path:            latest.Path,
+			CommitSHA:       latest.CommitSHA,
+			Ref:             latest.Ref,
+			GrainfileURL:    latest.URL,
+			Kind:            latest.Kind,
+			Title:           latest.Title,
+			Recipient:       latest.Recipient,
+			DependencyURL:   latest.URL,
+			DependencyState: "cancelled",
+			Reason:          "task grainfile deleted",
+			CreatedAt:       now,
+		})
+		return err
+	})
 }
 
 // PromoteDeferred checks indexed non-draft Grainfiles whose not_before
@@ -586,6 +765,9 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 	hasWork := false
 	for _, rec := range precheck {
 		if !rec.removed && !rec.Draft && !rec.readyEmitted && rec.ToGrainfile().ActiveAt(at) {
+			if rec.Kind == KindTask && rec.Ref != "" && !isDefaultOrProtectedBranch(rec.Ref, "") {
+				continue
+			}
 			hasWork = true
 			break
 		}
@@ -607,12 +789,31 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 			if !rec.ToGrainfile().ActiveAt(at) {
 				continue
 			}
+			if rec.Kind == KindTask {
+				if rec.Ref != "" && !isDefaultOrProtectedBranch(rec.Ref, "") {
+					continue
+				}
+				done, err := s.isTaskCompletedTx(tx, ctx, rec.Repo, rec.Path)
+				if err != nil {
+					return err
+				}
+				if done {
+					if _, err := tx.ExecContext(ctx, s.q(`UPDATE grainfile_index SET ready_emitted = 1, updated_at = ? WHERE repo = ? AND path = ? AND commit_sha = ?`),
+						at.UnixMilli(), rec.Repo, rec.Path, rec.CommitSHA); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			evType := EventTaskReady
 			if rec.Kind == KindProcess {
 				evType = EventProcessUpdated
 			}
 			ev, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 evType,
+				Grainfile:            rec.Grainfile,
+				SpecSummaryPath:      rec.SpecSummaryPath,
+				SpecPath:             rec.SpecPath,
 				Repo:                 rec.Repo,
 				Path:                 rec.Path,
 				CommitSHA:            rec.CommitSHA,
@@ -627,6 +828,7 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
 				TriggerWith:          rec.TriggerWith,
+				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
 				CreatedAt:            at.Truncate(time.Millisecond),
@@ -667,6 +869,9 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	); err != nil {
 		return IndexRecord{}, err
 	}
+	rec.Grainfile = VersionV1
+	rec.SpecSummaryPath = SpecSummaryPathV1
+	rec.SpecPath = SpecPathV1
 	rec.Kind = Kind(kindStr)
 	rec.Draft = draftInt != 0
 	rec.Gate = gateInt != 0
@@ -684,6 +889,7 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	_ = json.Unmarshal([]byte(depsStr), &rec.DependsOn)
 	_ = json.Unmarshal([]byte(twStr), &rec.TriggerWith)
 	_ = json.Unmarshal([]byte(onStr), &rec.OnSpec)
+	rec.When = rec.OnSpec
 	rec.On = rec.OnSpec
 	return rec, nil
 }
@@ -909,10 +1115,12 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 			source      string
 			triggeredBy string
 			emit        bool
+			depth       int
 		}
 		var queue []trigItem
 		var discovered []trigItem
 		visited := map[string]bool{}
+		coTriggeredCount := 0
 
 		for _, rec := range allRecords {
 			if rec.removed || rec.Draft || rec.Repo != canonRepo {
@@ -926,6 +1134,7 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 					rec:    rec,
 					source: ev.Source,
 					emit:   true,
+					depth:  0,
 				}
 				queue = append(queue, item)
 				discovered = append(discovered, item)
@@ -936,6 +1145,7 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 					rec:    rec,
 					source: ev.Source,
 					emit:   false,
+					depth:  0,
 				})
 			}
 		}
@@ -944,9 +1154,18 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 			curr := queue[0]
 			queue = queue[1:]
 
+			// Enforce bounded trigger_with depth (MaxTriggerWithDepth = 8) and
+			// fan-out (MaxTriggerWithFanOut = 32) per §8.4 and §11.4.
+			if curr.depth >= MaxTriggerWithDepth || coTriggeredCount >= MaxTriggerWithFanOut {
+				continue
+			}
+
 			// Evaluate trigger_with co-triggers referencing curr.rec.
 			for _, candidate := range allRecords {
-				if candidate.removed || candidate.Draft || len(candidate.TriggerWith) == 0 {
+				if coTriggeredCount >= MaxTriggerWithFanOut {
+					break
+				}
+				if candidate.removed || candidate.Draft || candidate.Kind != KindProcess || len(candidate.TriggerWith) == 0 {
 					continue
 				}
 				if !candidate.ToGrainfile().ActiveAt(at) {
@@ -959,11 +1178,13 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				for _, twURL := range candidate.TriggerWith {
 					if matchesGrainfileRef(curr.rec, twURL) {
 						visited[candKey] = true
+						coTriggeredCount++
 						item := trigItem{
 							rec:         candidate,
 							source:      TriggerWith,
 							triggeredBy: curr.rec.URL,
 							emit:        true,
+							depth:       curr.depth + 1,
 						}
 						queue = append(queue, item)
 						discovered = append(discovered, item)
@@ -1038,16 +1259,19 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 
 		for _, curr := range ordered {
 			cSHA := commitSHA
-			if curr.rec.Repo != canonRepo || cSHA == "" {
+			if curr.rec.Repo != canonRepo || cSHA == "" || ev.Source == TriggerPullRequest {
 				cSHA = curr.rec.CommitSHA
 			}
 			ref := ev.Branch
-			if curr.rec.Repo != canonRepo || ref == "" {
+			if curr.rec.Repo != canonRepo || ref == "" || ev.Source == TriggerPullRequest {
 				ref = curr.rec.Ref
 			}
 
 			recorded, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 EventProcessTriggered,
+				Grainfile:            curr.rec.Grainfile,
+				SpecSummaryPath:      curr.rec.SpecSummaryPath,
+				SpecPath:             curr.rec.SpecPath,
 				Repo:                 curr.rec.Repo,
 				Path:                 curr.rec.Path,
 				CommitSHA:            cSHA,
@@ -1062,6 +1286,7 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				AuthorizedReferences: curr.rec.AuthorizedReferences,
 				DependsOn:            curr.rec.DependsOn,
 				TriggerWith:          curr.rec.TriggerWith,
+				When:                 curr.rec.When,
 				OnSpec:               curr.rec.OnSpec,
 				Gate:                 curr.rec.Gate,
 				TriggerSource:        curr.source,
@@ -1155,6 +1380,9 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 			}
 			ev, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 EventDependencyCompleted,
+				Grainfile:            dep.Grainfile,
+				SpecSummaryPath:      dep.SpecSummaryPath,
+				SpecPath:             dep.SpecPath,
 				Repo:                 dep.Repo,
 				Path:                 dep.Path,
 				CommitSHA:            dep.CommitSHA,
@@ -1169,6 +1397,7 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 				AuthorizedReferences: dep.AuthorizedReferences,
 				DependsOn:            dep.DependsOn,
 				TriggerWith:          dep.TriggerWith,
+				When:                 dep.When,
 				OnSpec:               dep.OnSpec,
 				Gate:                 dep.Gate,
 				DependencyURL:        canonCompleted,
@@ -1188,6 +1417,9 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 		if len(recorded) == 0 {
 			ev := Event{
 				Type:            EventDependencyCompleted,
+				Grainfile:       VersionV1,
+				SpecSummaryPath: SpecSummaryPathV1,
+				SpecPath:        SpecPathV1,
 				GrainfileURL:    canonCompleted,
 				CommitSHA:       commitSHA,
 				DependencyURL:   canonCompleted,
@@ -1196,6 +1428,9 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 				CreatedAt:       now,
 			}
 			if completedRec != nil {
+				ev.Grainfile = completedRec.Grainfile
+				ev.SpecSummaryPath = completedRec.SpecSummaryPath
+				ev.SpecPath = completedRec.SpecPath
 				ev.Repo = completedRec.Repo
 				ev.Path = completedRec.Path
 				ev.Ref = completedRec.Ref
@@ -1216,6 +1451,45 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 		return nil
 	})
 	return recorded, err
+}
+
+// RecordDependencyCompletedByNode verifies that nodeID is a registered
+// subscriber authorized for completedURL's recipient deployment (including
+// directory ownership admission when AuthorizeOwnerRepo is configured) before
+// recording dependency_completed.
+func (s *Store) RecordDependencyCompletedByNode(ctx context.Context, nodeID, completedURL, commitSHA, state, reason string) ([]Event, error) {
+	sub, err := s.GetSubscriptions(ctx, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
+	}
+	rec, err := s.GetIndexByURL(ctx, completedURL, commitSHA)
+	if err != nil {
+		return nil, err
+	}
+	authorized := false
+	if rec.Recipient != "" {
+		for _, r := range sub.Recipients {
+			if strings.EqualFold(r, rec.Recipient) || IsSameRepo(r, rec.Recipient) {
+				if s.AuthorizeOwnerRepo != nil && sub.Owner != "" {
+					recRepo, rErr := canonicalRepoFromAnyRef(rec.Recipient)
+					if rErr != nil || !s.AuthorizeOwnerRepo(ctx, sub.Owner, recRepo) {
+						return nil, fmt.Errorf("%w: owner %q is not admitted for recipient repository %q", ErrUnauthorized, sub.Owner, rec.Recipient)
+					}
+				}
+				authorized = true
+				break
+			}
+		}
+	} else if sub.MatchesRecord(rec) {
+		if s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
+			return nil, fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, sub.Owner, rec.Repo)
+		}
+		authorized = true
+	}
+	if !authorized {
+		return nil, fmt.Errorf("%w: node %q is not recipient of %q", ErrUnauthorized, nodeID, completedURL)
+	}
+	return s.RecordDependencyCompleted(ctx, completedURL, commitSHA, state, reason)
 }
 
 // DependenciesSatisfied reports whether every target in grainfileURL's
@@ -1259,6 +1533,21 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 	if ev.CreatedAt.IsZero() {
 		ev.CreatedAt = s.now().Truncate(time.Millisecond)
 	}
+	if ev.Grainfile == "" {
+		ev.Grainfile = VersionV1
+	}
+	if spec, ok := LookupVersion(ev.Grainfile); ok {
+		if ev.SpecSummaryPath == "" {
+			ev.SpecSummaryPath = spec.SpecSummaryPath
+		}
+		if ev.SpecPath == "" {
+			ev.SpecPath = spec.SpecPath
+		}
+	}
+	if ev.OnSpec.IsZero() && !ev.When.IsZero() {
+		ev.OnSpec = ev.When
+	}
+	ev.When = ev.OnSpec
 	ev.On = ev.OnSpec
 
 	var nbMS int64
@@ -1266,6 +1555,7 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 		nbMS = ev.NotBefore.UnixMilli()
 	}
 	pl := eventPayload{
+		Grainfile:            ev.Grainfile,
 		Requestor:            ev.Requestor,
 		NotBeforeMillis:      nbMS,
 		References:           ev.References,
@@ -1322,6 +1612,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 
 	var pl eventPayload
 	if err := json.Unmarshal([]byte(payloadJS), &pl); err == nil {
+		ev.Grainfile = pl.Grainfile
 		ev.Requestor = pl.Requestor
 		if pl.NotBeforeMillis > 0 {
 			ev.NotBefore = time.UnixMilli(pl.NotBeforeMillis).UTC()
@@ -1331,9 +1622,17 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.DependsOn = pl.DependsOn
 		ev.TriggerWith = pl.TriggerWith
 		ev.OnSpec = pl.OnSpec
+		ev.When = pl.OnSpec
 		ev.On = pl.OnSpec
 		ev.ChangedPaths = pl.ChangedPaths
 		ev.Reason = pl.Reason
+	}
+	if ev.Grainfile == "" {
+		ev.Grainfile = VersionV1
+	}
+	if spec, ok := LookupVersion(ev.Grainfile); ok {
+		ev.SpecSummaryPath = spec.SpecSummaryPath
+		ev.SpecPath = spec.SpecPath
 	}
 	return ev, nil
 }
@@ -1485,6 +1784,26 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+
+		if s.AuthorizeOwnerRepo != nil && out.Owner != "" {
+			for _, u := range out.Recipients {
+				repoURL, rErr := canonicalRepoFromAnyRef(u)
+				if rErr != nil || !s.AuthorizeOwnerRepo(ctx, out.Owner, repoURL) {
+					return fmt.Errorf("%w: owner %q is not admitted for recipient repository %q", ErrUnauthorized, out.Owner, u)
+				}
+			}
+			for _, u := range out.Repos {
+				if !s.AuthorizeOwnerRepo(ctx, out.Owner, u) {
+					return fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, out.Owner, u)
+				}
+			}
+			for _, u := range out.Folders {
+				repoURL, rErr := canonicalRepoFromAnyRef(u)
+				if rErr != nil || !s.AuthorizeOwnerRepo(ctx, out.Owner, repoURL) {
+					return fmt.Errorf("%w: owner %q is not admitted for folder repository %q", ErrUnauthorized, out.Owner, u)
+				}
+			}
 		}
 
 		if len(out.Recipients) > 0 && out.Owner != "" {
@@ -1869,4 +2188,29 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func isDefaultOrProtectedBranch(ref, defaultBranch string) bool {
+	branch := normalizeBranchName(ref)
+	if branch == "" {
+		return true
+	}
+	def := normalizeBranchName(defaultBranch)
+	if def != "" {
+		return strings.EqualFold(branch, def) || isProtectedBranchPattern(branch)
+	}
+	return strings.EqualFold(branch, "main") ||
+		strings.EqualFold(branch, "master") ||
+		strings.EqualFold(branch, "trunk") ||
+		isProtectedBranchPattern(branch)
+}
+
+func isProtectedBranchPattern(branch string) bool {
+	low := strings.ToLower(branch)
+	return strings.HasPrefix(low, "release/") ||
+		strings.HasPrefix(low, "releases/") ||
+		strings.HasPrefix(low, "candidate/") ||
+		strings.HasPrefix(low, "hotfix/") ||
+		low == "production" ||
+		low == "prod"
 }

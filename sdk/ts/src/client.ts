@@ -87,11 +87,18 @@ function cleanTimestamp(ts?: string): string | undefined {
 }
 
 function normalizeGrainfile(g: Grainfile): Grainfile {
-  const out: Grainfile = { ...g };
-  const on = g.on ?? g.on_spec;
-  if (on && Object.keys(on).length > 0) {
-    out.on = on;
+  const out: Grainfile = {
+    ...g,
+    grainfile: g.grainfile ?? 'v1',
+    spec_summary_path: g.spec_summary_path ?? 'docs/grainfile-v1.md',
+    spec_path: g.spec_path ?? 'docs/grainfiles-spec.md',
+  };
+  const triggers = g.when ?? g.on ?? g.on_spec;
+  if (triggers && Object.keys(triggers).length > 0) {
+    out.when = triggers;
+    out.on = triggers;
   } else {
+    delete out.when;
     delete out.on;
   }
   out.not_before = cleanTimestamp(g.not_before);
@@ -105,11 +112,18 @@ function normalizeGrainfile(g: Grainfile): Grainfile {
 }
 
 function normalizeGrainfileEvent(e: GrainfileEvent): GrainfileEvent {
-  const out: GrainfileEvent = { ...e };
-  const on = e.on ?? e.on_spec;
-  if (on && Object.keys(on).length > 0) {
-    out.on = on;
+  const out: GrainfileEvent = {
+    ...e,
+    grainfile: e.grainfile ?? 'v1',
+    spec_summary_path: e.spec_summary_path ?? 'docs/grainfile-v1.md',
+    spec_path: e.spec_path ?? 'docs/grainfiles-spec.md',
+  };
+  const triggers = e.when ?? e.on ?? e.on_spec;
+  if (triggers && Object.keys(triggers).length > 0) {
+    out.when = triggers;
+    out.on = triggers;
   } else {
+    delete out.when;
     delete out.on;
   }
   out.not_before = cleanTimestamp(e.not_before);

@@ -196,7 +196,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
   );
 
   const selectedTriggers = useMemo(
-    () => (selected ? summarizeTriggers(selected.on ?? selected.on_spec) : []),
+    () => (selected ? summarizeTriggers(selected.when ?? selected.on ?? selected.on_spec) : []),
     [selected],
   );
 
@@ -206,7 +206,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
         <Box>
           <Typography variant="h5">Grainfiles &amp; Processes</Typography>
           <Typography variant="body2" color="text.secondary">
-            Indexed <code>.task.md</code> tasks and <code>.process.md</code> standing processes across watched repositories.
+            Indexed <code>.task.grain.md</code> tasks and <code>.process.grain.md</code> standing processes across watched repositories.
           </Typography>
         </Box>
         <Button size="small" variant="outlined" onClick={overview.reload}>
@@ -225,8 +225,8 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
             sx={{ minWidth: 160 }}
           >
             <MenuItem value="all">All kinds</MenuItem>
-            <MenuItem value="task">Tasks (.task.md)</MenuItem>
-            <MenuItem value="process">Processes (.process.md)</MenuItem>
+            <MenuItem value="task">Tasks (.task.grain.md)</MenuItem>
+            <MenuItem value="process">Processes (.process.grain.md)</MenuItem>
           </TextField>
           <TextField
             select
@@ -276,7 +276,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
           </TableHead>
           <TableBody>
             {grainfiles.map((g) => {
-              const triggers = summarizeTriggers(g.on ?? g.on_spec);
+              const triggers = summarizeTriggers(g.when ?? g.on ?? g.on_spec);
               const isSelected = selected?.url === g.url;
               return (
                 <TableRow
@@ -421,6 +421,17 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                 <Typography variant="body2">
                   <strong>Path:</strong> <code>{selected.path}</code>
                 </Typography>
+                {selected.grainfile && (
+                  <Typography variant="body2">
+                    <strong>Format version:</strong> <code>{selected.grainfile}</code>
+                    {selected.spec_summary_path ? (
+                      <>
+                        {' '}
+                        (<code>{selected.spec_summary_path}</code>)
+                      </>
+                    ) : null}
+                  </Typography>
+                )}
                 <Typography variant="body2">
                   <strong>Recipient:</strong>{' '}
                   <SafeExternalLink url={selected.recipient} sx={{ fontFamily: mono }} />
@@ -448,7 +459,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                 {selectedTriggers.length > 0 && (
                   <Box>
                     <Typography variant="body2" sx={{ mb: 0.5 }}>
-                      <strong>Triggers (on):</strong>
+                      <strong>Triggers (when):</strong>
                     </Typography>
                     <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
                       {selectedTriggers.map((t) => (

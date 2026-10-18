@@ -63,14 +63,18 @@ func (g *Grainfile) MatchesTrigger(source, branch string, changedPaths []string,
 	if !g.ActiveAt(at) {
 		return false
 	}
+	triggers := g.When
+	if triggers.IsZero() {
+		triggers = g.On
+	}
 	var filter *EventFilter
 	switch source {
 	case TriggerPush:
-		filter = g.On.Push
+		filter = triggers.Push
 	case TriggerPullRequest:
-		filter = g.On.PullRequest
+		filter = triggers.PullRequest
 	case TriggerMerge:
-		filter = g.On.Merge
+		filter = triggers.Merge
 	default:
 		return false
 	}

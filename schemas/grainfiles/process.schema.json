@@ -1,9 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/process.schema.json",
-  "title": "A process grainfile (docs/grainfiles-spec.md §7.2)",
+  "title": "A process grainfile (<name>.process.grain.md, docs/grainfiles-spec.md §7.2)",
   "type": "object",
   "properties": {
+    "grainfile": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/grainfile"
+    },
     "title": {
       "type": "string",
       "minLength": 1
@@ -12,10 +15,8 @@
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/requestor"
     },
     "recipient": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deployment"
-    },
-    "created_at": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deployment",
+      "default": "/"
     },
     "draft": {
       "type": "boolean",
@@ -33,8 +34,8 @@
     "references": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     },
-    "on": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/on"
+    "when": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/when"
     },
     "gate": {
       "type": "boolean",
@@ -42,13 +43,12 @@
     }
   },
   "required": [
-    "title",
-    "recipient"
+    "title"
   ],
   "anyOf": [
     {
       "required": [
-        "on"
+        "when"
       ]
     },
     {

@@ -234,7 +234,11 @@ describe('Grainfiles and node subscriptions', () => {
     const h = new HubClient({ fetch: f });
     const insp = await h.inspectGrainfile('https://github.com/acme/app/blob/main/.grain/processes/ci.process.md');
     expect(insp.grainfile?.title).toBe('Continuous verification gate');
+    expect(insp.grainfile?.grainfile).toBe('v1');
+    expect(insp.grainfile?.spec_summary_path).toBe('docs/grainfile-v1.md');
+    expect(insp.grainfile?.spec_path).toBe('docs/grainfiles-spec.md');
     expect(insp.grainfile?.gate).toBe(true);
+    expect(insp.grainfile?.when?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.on?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.not_before).toBeUndefined();
     expect(insp.grainfile?.trigger_with).toEqual([
