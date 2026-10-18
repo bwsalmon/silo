@@ -274,7 +274,7 @@ func rewrite(pr *httputil.ProxyRequest) {
 		pr.Out.Header.Set("X-Forwarded-Proto", "https")
 	}
 	for _, h := range clientHeaders {
-		if h == identity.IAPHeader && t.legacy {
+		if strings.EqualFold(h, identity.IAPHeader) && t.legacy {
 			continue
 		}
 		pr.Out.Header.Del(h)
