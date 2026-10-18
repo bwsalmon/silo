@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/events"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
@@ -59,6 +60,18 @@ func TestOversizedPayloads(t *testing.T) {
 	if resp, err := http.DefaultClient.Do(req); err == nil {
 		if resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
 			t.Errorf("a 2 MiB header: %d, want 431", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	// An oversized webhook payload (> 5 MiB) signed with a valid HMAC is refused.
+	bigWebhook := []byte(`{"ref":"refs/heads/main","pad":"` + big + `"}`)
+	whReq, _ := http.NewRequest("POST", hb.url+grainfiles.GitHubWebhookPath, strings.NewReader(string(bigWebhook)))
+	whReq.Header.Set("Content-Type", "application/json")
+	whReq.Header.Set("X-GitHub-Event", "push")
+	whReq.Header.Set("X-Hub-Signature-256", signWebhook(webhookSecret, bigWebhook))
+	if resp, err := http.DefaultClient.Do(whReq); err == nil {
+		if resp.StatusCode < 400 || resp.StatusCode >= 500 {
+			t.Errorf("POST %s with 8 MiB webhook body: %d, want 4xx", grainfiles.GitHubWebhookPath, resp.StatusCode)
 		}
 		resp.Body.Close()
 	}

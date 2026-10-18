@@ -28,7 +28,7 @@ import { when } from './Backlog';
 function safeHref(raw?: string): string | undefined {
   if (!raw) return undefined;
   const clean = safeUrl(raw.trim());
-  if (!clean || !/^(https?:|mailto:|\/)/i.test(clean)) return undefined;
+  if (!clean || clean.startsWith('//') || clean.startsWith('/\\') || !/^(https?:|mailto:|\/[^/\\])/i.test(clean)) return undefined;
   return clean;
 }
 
@@ -93,7 +93,7 @@ export function Nodes({ me }: { me?: Me }) {
                               key={rec}
                               href={href}
                               target="_blank"
-                              rel="noreferrer"
+                              rel="noopener noreferrer"
                               underline="hover"
                               sx={{ fontFamily: mono, fontSize: 12 }}
                             >
@@ -139,7 +139,7 @@ export function Nodes({ me }: { me?: Me }) {
                                 key={gf}
                                 href={href}
                                 target="_blank"
-                                rel="noreferrer"
+                                rel="noopener noreferrer"
                                 underline="hover"
                                 sx={{ fontFamily: mono, fontSize: 12 }}
                               >
@@ -157,7 +157,7 @@ export function Nodes({ me }: { me?: Me }) {
                   </TableCell>
                   <TableCell>
                     {uiHref ? (
-                      <MuiLink href={uiHref} target="_blank" rel="noreferrer" underline="hover">
+                      <MuiLink href={uiHref} target="_blank" rel="noopener noreferrer" underline="hover">
                         Open Grain UI
                       </MuiLink>
                     ) : hasNodeUI ? (

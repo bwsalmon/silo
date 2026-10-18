@@ -203,9 +203,9 @@ func matrix() []row {
 		{route: pub("GET /v1/claims/keys"), method: "GET", path: "/v1/claims/keys", want: everyone(200)},
 		{route: pub("/"), method: "GET", path: "/tasks/x", want: everyone(200)},
 
-		// Grainfiles: webhook ingestion (HMAC when configured), node content
-		// proxy (node token + subscription check), and human inspection.
-		{route: pub("POST " + grainfiles.GitHubWebhookPath), method: "POST", path: grainfiles.GitHubWebhookPath, body: body(map[string]string{"repo": "acme/app"}), want: everyone(200)},
+		// Grainfiles: webhook ingestion (HMAC required, so unsigned callers get 401),
+		// node content proxy (node token + subscription check), and human inspection.
+		{route: pub("POST " + grainfiles.GitHubWebhookPath), method: "POST", path: grainfiles.GitHubWebhookPath, body: body(map[string]string{"repo": "acme/app"}), want: everyone(http.StatusUnauthorized)},
 		{route: pub("GET " + grainfiles.ContentPath), method: "GET", path: grainfiles.ContentPath + "?grainfile_url=https://github.com/acme/app/blob/main/tasks/fix.task.md", want: grainfileContent},
 		{route: pub("GET " + grainfiles.GrainfilesPath), method: "GET", path: grainfiles.GrainfilesPath, want: human(200, 200, 200, 200)},
 

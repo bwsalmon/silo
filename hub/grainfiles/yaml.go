@@ -8,7 +8,9 @@ import (
 	"unicode"
 )
 
-var forbiddenYAMLRe = regexp.MustCompile(`(?m)(^|[\s\[{,:])[&*][A-Za-z0-9_-]+|<<\s*:|(^|\s)!`)
+const maxYAMLDepth = 32
+
+var forbiddenYAMLRe = regexp.MustCompile(`(?m)(^|[\s\[{,:])[&*][A-Za-z0-9_-]+|<<\s*:|(^|[\s\[{,:])!`)
 
 type yamlLine struct {
 	lineNum int
@@ -75,7 +77,7 @@ func parseYAMLFrontMatter(path, src string) (map[string]any, *Finding) {
 			f := newFinding(CodeMalformedFile, path, "YAML: unexpected content after top-level flow mapping")
 			return nil, &f
 		}
-		val, rest, fErr := parseFlowValue(first, path, lines[0].lineNum)
+		val, rest, fErr := parseFlowValue(first, path, lines[0].lineNum, 0)
 		if fErr != nil {
 			return nil, fErr
 		}
@@ -103,7 +105,7 @@ func parseYAMLFrontMatter(path, src string) (map[string]any, *Finding) {
 		return nil, &f
 	}
 
-	val, nextIdx, fErr := parseBlockMapping(lines, 0, lines[0].indent, rawLines, path)
+	val, nextIdx, fErr := parseBlockMapping(lines, 0, lines[0].indent, rawLines, path, 0)
 	if fErr != nil {
 		return nil, fErr
 	}
@@ -292,7 +294,11 @@ func flowBracketDepth(s string) int {
 	return depth
 }
 
-func parseBlockMapping(lines []yamlLine, startIdx, baseIndent int, rawLines []string, path string) (map[string]any, int, *Finding) {
+func parseBlockMapping(lines []yamlLine, startIdx, baseIndent int, rawLines []string, path string, depth int) (map[string]any, int, *Finding) {
+	if depth > maxYAMLDepth {
+		f := newFinding(CodeLimitExceeded, path, fmt.Sprintf("YAML: nesting depth exceeds maximum (%d)", maxYAMLDepth))
+		return nil, startIdx, &f
+	}
 	out := make(map[string]any)
 	i := startIdx
 	for i < len(lines) {
@@ -332,7 +338,7 @@ func parseBlockMapping(lines []yamlLine, startIdx, baseIndent int, rawLines []st
 		}
 
 		if rawVal != "" {
-			val, fErr := parseInlineValue(rawVal, path, ln.lineNum)
+			val, fErr := parseInlineValue(rawVal, path, ln.lineNum, depth+1)
 			if fErr != nil {
 				return nil, i, fErr
 			}
@@ -345,7 +351,7 @@ func parseBlockMapping(lines []yamlLine, startIdx, baseIndent int, rawLines []st
 		i++
 		if i >= len(lines) || lines[i].indent <= baseIndent {
 			if i < len(lines) && lines[i].indent == baseIndent && isSequenceItem(lines[i].content) {
-				seqVal, nextIdx, fErr := parseBlockSequence(lines, i, baseIndent, rawLines, path)
+				seqVal, nextIdx, fErr := parseBlockSequence(lines, i, baseIndent, rawLines, path, depth+1)
 				if fErr != nil {
 					return nil, i, fErr
 				}
@@ -359,14 +365,14 @@ func parseBlockMapping(lines []yamlLine, startIdx, baseIndent int, rawLines []st
 
 		childIndent := lines[i].indent
 		if isSequenceItem(lines[i].content) {
-			seqVal, nextIdx, fErr := parseBlockSequence(lines, i, childIndent, rawLines, path)
+			seqVal, nextIdx, fErr := parseBlockSequence(lines, i, childIndent, rawLines, path, depth+1)
 			if fErr != nil {
 				return nil, i, fErr
 			}
 			out[key] = seqVal
 			i = nextIdx
 		} else {
-			mapVal, nextIdx, fErr := parseBlockMapping(lines, i, childIndent, rawLines, path)
+			mapVal, nextIdx, fErr := parseBlockMapping(lines, i, childIndent, rawLines, path, depth+1)
 			if fErr != nil {
 				return nil, i, fErr
 			}
@@ -381,7 +387,11 @@ func isSequenceItem(content string) bool {
 	return content == "-" || strings.HasPrefix(content, "- ") || strings.HasPrefix(content, "-\t")
 }
 
-func parseBlockSequence(lines []yamlLine, startIdx, baseIndent int, rawLines []string, path string) ([]any, int, *Finding) {
+func parseBlockSequence(lines []yamlLine, startIdx, baseIndent int, rawLines []string, path string, depth int) ([]any, int, *Finding) {
+	if depth > maxYAMLDepth {
+		f := newFinding(CodeLimitExceeded, path, fmt.Sprintf("YAML: nesting depth exceeds maximum (%d)", maxYAMLDepth))
+		return nil, startIdx, &f
+	}
 	var out []any
 	i := startIdx
 	for i < len(lines) {
@@ -405,14 +415,14 @@ func parseBlockSequence(lines []yamlLine, startIdx, baseIndent int, rawLines []s
 			}
 			childIndent := lines[i].indent
 			if isSequenceItem(lines[i].content) {
-				nestedSeq, nextIdx, fErr := parseBlockSequence(lines, i, childIndent, rawLines, path)
+				nestedSeq, nextIdx, fErr := parseBlockSequence(lines, i, childIndent, rawLines, path, depth+1)
 				if fErr != nil {
 					return nil, i, fErr
 				}
 				out = append(out, nestedSeq)
 				i = nextIdx
 			} else {
-				nestedMap, nextIdx, fErr := parseBlockMapping(lines, i, childIndent, rawLines, path)
+				nestedMap, nextIdx, fErr := parseBlockMapping(lines, i, childIndent, rawLines, path, depth+1)
 				if fErr != nil {
 					return nil, i, fErr
 				}
@@ -435,7 +445,7 @@ func parseBlockSequence(lines []yamlLine, startIdx, baseIndent int, rawLines []s
 					raw:     ln.raw,
 				})
 				synthLines = append(synthLines, lines[i+1:]...)
-				nestedMap, consumed, fErr := parseBlockMapping(synthLines, 0, ln.indent+2, rawLines, path)
+				nestedMap, consumed, fErr := parseBlockMapping(synthLines, 0, ln.indent+2, rawLines, path, depth+1)
 				if fErr != nil {
 					return nil, i, fErr
 				}
@@ -445,7 +455,7 @@ func parseBlockSequence(lines []yamlLine, startIdx, baseIndent int, rawLines []s
 			}
 		}
 
-		val, fErr := parseInlineValue(itemText, path, ln.lineNum)
+		val, fErr := parseInlineValue(itemText, path, ln.lineNum, depth+1)
 		if fErr != nil {
 			return nil, i, fErr
 		}
@@ -609,11 +619,11 @@ func parseMappingKey(rawKey, path string, lineNum int) (string, *Finding) {
 	return s, nil
 }
 
-func parseInlineValue(rawVal, path string, lineNum int) (any, *Finding) {
+func parseInlineValue(rawVal, path string, lineNum, depth int) (any, *Finding) {
 	rawVal = strings.TrimSpace(rawVal)
 	if strings.HasPrefix(rawVal, "[") || strings.HasPrefix(rawVal, "{") ||
 		strings.HasPrefix(rawVal, `"`) || strings.HasPrefix(rawVal, `'`) {
-		v, rest, fErr := parseFlowValue(rawVal, path, lineNum)
+		v, rest, fErr := parseFlowValue(rawVal, path, lineNum, depth)
 		if fErr != nil {
 			return nil, fErr
 		}
@@ -631,7 +641,11 @@ func parseInlineValue(rawVal, path string, lineNum int) (any, *Finding) {
 	return parsePlainScalar(rawVal), nil
 }
 
-func parseFlowValue(s, path string, lineNum int) (any, string, *Finding) {
+func parseFlowValue(s, path string, lineNum, depth int) (any, string, *Finding) {
+	if depth > maxYAMLDepth {
+		f := newFinding(CodeLimitExceeded, path, fmt.Sprintf("YAML: line %d: nesting depth exceeds maximum (%d)", lineNum, maxYAMLDepth))
+		return nil, "", &f
+	}
 	s = strings.TrimLeftFunc(s, unicode.IsSpace)
 	if s == "" {
 		return nil, "", nil
@@ -642,9 +656,9 @@ func parseFlowValue(s, path string, lineNum int) (any, string, *Finding) {
 	case '\'':
 		return parseSingleQuoted(s, path, lineNum)
 	case '[':
-		return parseFlowSequence(s, path, lineNum)
+		return parseFlowSequence(s, path, lineNum, depth+1)
 	case '{':
-		return parseFlowMapping(s, path, lineNum)
+		return parseFlowMapping(s, path, lineNum, depth+1)
 	default:
 		end := 0
 		for end < len(s) {
@@ -667,14 +681,18 @@ func parseFlowValue(s, path string, lineNum int) (any, string, *Finding) {
 	}
 }
 
-func parseFlowSequence(s, path string, lineNum int) ([]any, string, *Finding) {
+func parseFlowSequence(s, path string, lineNum, depth int) ([]any, string, *Finding) {
+	if depth > maxYAMLDepth {
+		f := newFinding(CodeLimitExceeded, path, fmt.Sprintf("YAML: line %d: nesting depth exceeds maximum (%d)", lineNum, maxYAMLDepth))
+		return nil, "", &f
+	}
 	rest := strings.TrimLeftFunc(s[1:], unicode.IsSpace)
 	out := make([]any, 0)
 	if strings.HasPrefix(rest, "]") {
 		return out, rest[1:], nil
 	}
 	for {
-		val, after, fErr := parseFlowValue(rest, path, lineNum)
+		val, after, fErr := parseFlowValue(rest, path, lineNum, depth)
 		if fErr != nil {
 			return nil, "", fErr
 		}
@@ -695,7 +713,11 @@ func parseFlowSequence(s, path string, lineNum int) ([]any, string, *Finding) {
 	}
 }
 
-func parseFlowMapping(s, path string, lineNum int) (map[string]any, string, *Finding) {
+func parseFlowMapping(s, path string, lineNum, depth int) (map[string]any, string, *Finding) {
+	if depth > maxYAMLDepth {
+		f := newFinding(CodeLimitExceeded, path, fmt.Sprintf("YAML: line %d: nesting depth exceeds maximum (%d)", lineNum, maxYAMLDepth))
+		return nil, "", &f
+	}
 	rest := strings.TrimLeftFunc(s[1:], unicode.IsSpace)
 	out := make(map[string]any)
 	if strings.HasPrefix(rest, "}") {
@@ -750,7 +772,7 @@ func parseFlowMapping(s, path string, lineNum int) (map[string]any, string, *Fin
 		if strings.HasPrefix(rest, ",") || strings.HasPrefix(rest, "}") {
 			out[key] = nil
 		} else {
-			val, after, fErr := parseFlowValue(rest, path, lineNum)
+			val, after, fErr := parseFlowValue(rest, path, lineNum, depth)
 			if fErr != nil {
 				return nil, "", fErr
 			}

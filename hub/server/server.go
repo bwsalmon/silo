@@ -403,6 +403,48 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		}
 	}
 	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins, Logf: cfg.Logf}
+	h.Grainfiles.SameTeam = func(ctx context.Context, ownerA, ownerB string) bool {
+		if strings.EqualFold(ownerA, ownerB) {
+			return true
+		}
+		accA, errA := h.Directory.Access(ctx, identity.Principal{Email: ownerA}, false)
+		accB, errB := h.Directory.Access(ctx, identity.Principal{Email: ownerB}, false)
+		if errA != nil || errB != nil {
+			return false
+		}
+		for team := range accA.Teams {
+			if accB.Teams[team] != "" {
+				return true
+			}
+		}
+		return false
+	}
+	admitOwnerRepoURLs := func(ctx context.Context, owner string, urls []string) error {
+		var acc *directory.Access
+		for _, raw := range urls {
+			slug := urlRepoSlug(raw)
+			if slug == "" {
+				continue
+			}
+			team, err := h.Directory.RepoOwner(ctx, slug)
+			if err != nil {
+				return fmt.Errorf("%w: %w", rendezvous.ErrUnavailable, err)
+			}
+			if team == "" {
+				continue
+			}
+			if acc == nil {
+				acc, err = h.Directory.Access(ctx, identity.Principal{Email: owner}, false)
+				if err != nil {
+					return fmt.Errorf("%w: %w", rendezvous.ErrUnavailable, err)
+				}
+			}
+			if acc.Teams[team] == "" {
+				return fmt.Errorf("%w: %s may not claim or subscribe to %s (owned by team %s)", directory.ErrNotAdmitted, owner, slug, team)
+			}
+		}
+		return nil
+	}
 	h.Rendezvous = &rendezvous.Server{
 		Registry:     h.Registry,
 		Authenticate: h.Directory.Authenticate,
@@ -412,7 +454,20 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 				// The directory could not be read: not a refusal.
 				err = fmt.Errorf("%w: %w", rendezvous.ErrUnavailable, err)
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			var urls []string
+			urls = append(urls, n.Recipients...)
+			urls = append(urls, n.Folders...)
+			return admitOwnerRepoURLs(context.Background(), owner, urls)
+		},
+		AdmitSubscriptions: func(ctx context.Context, owner string, sub grainfiles.Subscriptions) error {
+			var urls []string
+			urls = append(urls, sub.Recipients...)
+			urls = append(urls, sub.Repos...)
+			urls = append(urls, sub.Folders...)
+			return admitOwnerRepoURLs(ctx, owner, urls)
 		},
 		Visible:   dirAPI.Visible,
 		Heartbeat: hb,
@@ -489,6 +544,21 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Fetcher:       fetcher,
 		WebhookSecret: cfg.WebhookSecret,
 		Directory:     h.Directory,
+		AuthorizeOwnerRepo: func(ctx context.Context, owner, repoURL string) bool {
+			slug := urlRepoSlug(repoURL)
+			if slug == "" {
+				return false
+			}
+			team, err := h.Directory.RepoOwner(ctx, slug)
+			if err != nil || team == "" {
+				return false
+			}
+			acc, err := h.Directory.Access(ctx, identity.Principal{Email: owner}, false)
+			if err != nil {
+				return false
+			}
+			return acc.Teams[team] != ""
+		},
 		Access: func(r *http.Request) (grainfiles.Viewer, error) {
 			acc, err := dirAPI.Access(r)
 			if err != nil {
@@ -815,4 +885,19 @@ func podAddr(a net.Addr) string {
 	}
 	host, _ := os.Hostname()
 	return net.JoinHostPort(cmp.Or(host, "localhost"), fmt.Sprint(ta.Port))
+}
+
+func urlRepoSlug(raw string) string {
+	ref, err := grainfiles.ParseRef(raw)
+	if err == nil && ref.Repo != "" {
+		u, err := url.Parse(ref.Repo)
+		if err == nil && u.Host != "" {
+			p := strings.Trim(u.Path, "/")
+			parts := strings.Split(p, "/")
+			if len(parts) >= 2 {
+				return strings.ToLower(parts[0] + "/" + parts[1])
+			}
+		}
+	}
+	return ""
 }

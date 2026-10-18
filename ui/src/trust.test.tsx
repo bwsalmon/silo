@@ -249,6 +249,86 @@ describe('the grainfiles and nodes pages’ storage boundary', () => {
     expect(sessionStorage.length).toBe(0);
     expect(document.cookie).toBe('');
   });
+
+  it('refuses javascript:, data:, vbscript:, and protocol-relative // hrefs on /grainfiles and /nodes', async () => {
+    const hostileOverview = {
+      grainfiles: [
+        {
+          repo: 'https://github.com/acme/app',
+          path: 'tasks/evil.task.md',
+          commit_sha: '1111111111111111111111111111111111111111',
+          ref: 'main',
+          url: 'javascript:alert(1)',
+          kind: 'task',
+          title: 'Hostile Grainfile Links',
+          recipient: '//evil.example.com/phish',
+          requestor: 'data:text/html,<script>alert(1)</script>',
+          draft: false,
+          references: ['javascript:alert(2)', '//evil.example.com/ref', 'https://github.com/acme/app/blob/main/docs/safe.md'],
+          authorized_references: ['vbscript:msgbox(1)'],
+          depends_on: ['/\\evil.example.com/dep'],
+          trigger_with: ['java\tscript:alert(3)'],
+          updated_at: '2026-10-18T10:05:00Z',
+        },
+      ],
+      subscriptions: [],
+      events: [],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === '/v1/me') return Response.json({ email: 'alice@example.com', hub_admin: false, teams: { infra: 'admin' } });
+        if (url.startsWith('/v1/grainfiles')) return Response.json(hostileOverview);
+        if (url === '/v1/nodes') {
+          return Response.json({
+            nodes: [
+              {
+                id: 'ws-evil',
+                repos: ['acme/app'],
+                slots: 2,
+                owner: 'alice@example.com',
+                status: 'online',
+                free: 2,
+                claimed: 0,
+                connected_at: '2026-10-18T10:00:00Z',
+                last_seen: '2026-10-18T10:05:00Z',
+                features: ['grainfiles', 'nodeui'],
+                recipients: ['javascript:alert(4)', '//evil.example.com/rec'],
+                folders: ['data:text/html,evil'],
+                grainfiles: ['/\\evil.example.com/gf'],
+                ui: { offered: true, url: '//evil.example.com/ui' },
+                ui_url: '//evil.example.com/ui',
+              },
+            ],
+          });
+        }
+        if (url === '/v1/node-tokens') return Response.json({ node_tokens: [] });
+        return new Response('no', { status: 404 });
+      }),
+    );
+
+    window.history.replaceState(null, '', '/grainfiles');
+    const { container } = render(<App />);
+    await screen.findAllByText('Hostile Grainfile Links');
+
+    const assertNoUnsafeAnchors = () => {
+      const anchors = Array.from(container.querySelectorAll('a'));
+      for (const a of anchors) {
+        const href = a.getAttribute('href') ?? '';
+        expect(href).not.toMatch(/^(javascript:|data:|vbscript:|\/\/|\/\\)/i);
+        if (href.startsWith('http://') || href.startsWith('https://')) {
+          expect(a.getAttribute('rel')).toContain('noopener');
+          expect(a.getAttribute('rel')).toContain('noreferrer');
+        }
+      }
+    };
+    assertNoUnsafeAnchors();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Nodes' }));
+    await screen.findByText('ws-evil');
+    assertNoUnsafeAnchors();
+  });
 });
 
 // The UI's own code, and the client SDK it builds in from source

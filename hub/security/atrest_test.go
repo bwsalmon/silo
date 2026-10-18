@@ -1,10 +1,14 @@
 package security_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/events"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/tasks"
 	"github.com/bwsalmon/silo/internal/pgtest"
@@ -38,24 +43,105 @@ func sentinel(kind string) string {
 	return "SILOONLY" + strings.ToUpper(kind) + hex.EncodeToString(b)
 }
 
+type memoryRepoFetcher map[string][]byte
+
+func (m memoryRepoFetcher) FetchFile(_ context.Context, repoURL, ref, filePath string) ([]byte, error) {
+	if b, ok := m[repoURL+"|"+filePath+"|"+ref]; ok {
+		return b, nil
+	}
+	if b, ok := m[repoURL+"|"+filePath]; ok {
+		return b, nil
+	}
+	return nil, fmt.Errorf("not found: %s %s @ %s", repoURL, filePath, ref)
+}
+
+func signWebhook(secret string, payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
 func noCodeAtRest(t *testing.T, database string) {
-	hb := startHub(t, options{database: database})
+	var (
+		diff          = sentinel("diff")
+		file          = sentinel("file")
+		toolArg       = sentinel("toolarg")
+		toolOut       = sentinel("toolout")
+		thinking      = sentinel("token")
+		smuggled      = sentinel("smuggled")
+		pathOnly      = sentinel("path")
+		msgText       = sentinel("message")
+		grainfileBody = sentinel("grainfilebody")
+		refContent    = sentinel("refcontent")
+	)
+	const gfCommit = "1111111111111111111111111111111111111111"
+	gfRaw := fmt.Sprintf("---\ntitle: Migrate App Database\nrecipient: https://github.com/acme/grain-a\nreferences:\n  - /docs/spec.md\n---\n%s\n", grainfileBody)
+	fetcher := memoryRepoFetcher{
+		"https://github.com/acme/app|.grain/tasks/migrate.task.md|" + gfCommit: []byte(gfRaw),
+		"https://github.com/acme/app|docs/spec.md|" + gfCommit:                 []byte(refContent),
+	}
+
+	hb := startHub(t, options{database: database, grainfileFetcher: fetcher})
 	hb.teams()
 	tok, _ := hb.mint(alice, "ws-a")
 	n := connectNode(t, hb, tok, "ws-a", repoA)
+	if _, err := hb.h.Grainfiles.SetSubscriptions(context.Background(), grainfiles.Subscriptions{
+		NodeID:     "ws-a",
+		Owner:      alice,
+		Recipients: []string{"https://github.com/acme/grain-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ingest a Grainfile via signed GitHub push webhook and fetch both the
+	// Grainfile and its referenced file through GET /v1/grainfiles/content.
+	whPayload, _ := json.Marshal(map[string]any{
+		"ref":   "refs/heads/main",
+		"after": gfCommit,
+		"repository": map[string]any{
+			"html_url": "https://github.com/acme/app",
+		},
+		"commits": []map[string]any{
+			{
+				"id":    gfCommit,
+				"added": []string{".grain/tasks/migrate.task.md"},
+			},
+		},
+	})
+	whReq, _ := http.NewRequest("POST", hb.url+grainfiles.GitHubWebhookPath, bytes.NewReader(whPayload))
+	whReq.Header.Set("Content-Type", "application/json")
+	whReq.Header.Set("X-GitHub-Event", "push")
+	whReq.Header.Set("X-Hub-Signature-256", signWebhook(webhookSecret, whPayload))
+	whResp, err := http.DefaultClient.Do(whReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whResp.Body.Close()
+	if whResp.StatusCode != http.StatusOK {
+		t.Fatalf("webhook ingestion: %d, want 200", whResp.StatusCode)
+	}
+
+	gfURL := "https://github.com/acme/app/blob/main/.grain/tasks/migrate.task.md"
+	gfCode, gfBytes, gfHdr := hb.do(bearer(tok), "GET", grainfiles.ContentPath+"?grainfile_url="+gfURL, nil)
+	if gfCode != http.StatusOK || !strings.Contains(string(gfBytes), grainfileBody) {
+		t.Fatalf("proxying grainfile body: %d %q", gfCode, gfBytes)
+	}
+	if cc := gfHdr.Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Errorf("grainfile content Cache-Control = %q, want no-store", cc)
+	}
+	if nosniff := gfHdr.Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Errorf("grainfile content X-Content-Type-Options = %q, want nosniff", nosniff)
+	}
+	refCode, refBytes, refHdr := hb.do(bearer(tok), "GET", grainfiles.ContentPath+"?grainfile_url="+gfURL+"&reference=/docs/spec.md", nil)
+	if refCode != http.StatusOK || !strings.Contains(string(refBytes), refContent) {
+		t.Fatalf("proxying reference file: %d %q", refCode, refBytes)
+	}
+	if cc := refHdr.Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Errorf("reference content Cache-Control = %q, want no-store", cc)
+	}
+
 	w := &world{hb: hb}
 	task := w.run(alice, repoA, n, true)
-
-	var (
-		diff     = sentinel("diff")
-		file     = sentinel("file")
-		toolArg  = sentinel("toolarg")
-		toolOut  = sentinel("toolout")
-		thinking = sentinel("token")
-		smuggled = sentinel("smuggled")
-		pathOnly = sentinel("path")
-		msgText  = sentinel("message")
-	)
 	n.mu.Lock()
 	n.artifact = "--- a/main.go\n+++ b/main.go\n+" + diff + "\n"
 	n.mu.Unlock()
@@ -125,10 +211,10 @@ func noCodeAtRest(t *testing.T, database string) {
 	for _, rows := range dumped {
 		whole.WriteString(strings.Join(rows, "\n"))
 	}
-	if !strings.Contains(whole.String(), "do the thing") || !strings.Contains(whole.String(), "diff-1") {
-		t.Fatal("the dump holds neither the task's prompt nor the diff's reference: it is not reading the hub's rows")
+	if !strings.Contains(whole.String(), "do the thing") || !strings.Contains(whole.String(), "diff-1") || !strings.Contains(whole.String(), "Migrate App Database") {
+		t.Fatal("the dump holds neither the task's prompt, the diff's reference, nor the grainfile's front-matter title: it is not reading the hub's rows")
 	}
-	all := []string{diff, file, toolArg, toolOut, thinking, smuggled, pathOnly, msgText}
+	all := []string{diff, file, toolArg, toolOut, thinking, smuggled, pathOnly, msgText, grainfileBody, refContent}
 	for table, rows := range dumped {
 		for _, row := range rows {
 			for _, s := range all {
@@ -159,7 +245,8 @@ func dump(t *testing.T, database string) map[string][]string {
 		tables string
 	)
 	if path, ok := strings.CutPrefix(database, "sqlite:"); ok {
-		db, err = sql.Open("sqlite", "file:"+path)
+		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+		db.SetMaxOpenConns(1)
 		tables = `SELECT name FROM sqlite_master WHERE type = 'table'`
 	} else {
 		db, err = sql.Open("pgx", database)

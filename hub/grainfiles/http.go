@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -77,7 +78,27 @@ type cachedInstToken struct {
 
 // FetchFile fetches filePath at ref from repoURL via the GitHub Contents API.
 func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath string) ([]byte, error) {
-	owner, repo, err := parseGitHubOwnerRepo(repoURL)
+	if hasEncodedPathHazard(filePath) {
+		return nil, fmt.Errorf("invalid file path %q", filePath)
+	}
+	if hasDot, hasDotDot := hasDotSegment(filepath.ToSlash(filePath)); hasDot || hasDotDot {
+		return nil, fmt.Errorf("invalid file path %q", filePath)
+	}
+	if ref != "" && (hasEncodedPathHazard(ref) || strings.Contains(ref, "..") || strings.ContainsAny(ref, " \t\r\n\\")) {
+		return nil, fmt.Errorf("invalid git ref %q", ref)
+	}
+	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
+	if err != nil {
+		return nil, err
+	}
+	repoU, err := url.Parse(canonRepo)
+	if err != nil {
+		return nil, err
+	}
+	if f.BaseURL == "" && !strings.EqualFold(repoU.Hostname(), "github.com") {
+		return nil, fmt.Errorf("github fetcher refuses non-github.com repository host %q", repoU.Hostname())
+	}
+	owner, repo, err := parseGitHubOwnerRepo(canonRepo)
 	if err != nil {
 		return nil, err
 	}
@@ -86,9 +107,9 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 		return nil, fmt.Errorf("invalid file path %q", filePath)
 	}
 
-	base := strings.TrimRight(f.BaseURL, "/")
-	if base == "" {
-		base = "https://api.github.com"
+	base, err := f.validatedBaseURL()
+	if err != nil {
+		return nil, err
 	}
 
 	escapedSegs := strings.Split(cleanPath, "/")
@@ -111,7 +132,7 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 
 	tok := f.Token
 	if f.TokenFunc != nil {
-		t, err := f.TokenFunc(ctx, repoURL)
+		t, err := f.TokenFunc(ctx, canonRepo)
 		if err != nil {
 			return nil, err
 		}
@@ -129,10 +150,7 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
-	client := f.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := f.httpClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -171,10 +189,58 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 			if err != nil {
 				return nil, fmt.Errorf("decoding base64 content for %q: %w", filePath, err)
 			}
+			if len(decoded) > MaxFileBytes {
+				return nil, fmt.Errorf("file %q exceeds %d bytes", filePath, MaxFileBytes)
+			}
 			return decoded, nil
 		}
 	}
 	return raw, nil
+}
+
+func (f *GitHubFetcher) validatedBaseURL() (string, error) {
+	base := strings.TrimRight(strings.TrimSpace(f.BaseURL), "/")
+	if base == "" {
+		return "https://api.github.com", nil
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid github BaseURL %q: %w", base, err)
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return "", fmt.Errorf("invalid github BaseURL scheme %q", u.Scheme)
+	}
+	if u.User != nil || strings.Contains(u.Host, "@") {
+		return "", fmt.Errorf("credentials not allowed in github BaseURL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("missing host in github BaseURL")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() ||
+			(ip.To4() != nil && ip.To4()[0] == 169 && ip.To4()[1] == 254) {
+			return "", fmt.Errorf("disallowed metadata/link-local IP %s in github BaseURL", host)
+		}
+	}
+	return base, nil
+}
+
+func (f *GitHubFetcher) httpClient() *http.Client {
+	noRedirect := func(*http.Request, []*http.Request) error {
+		return errors.New("github fetcher refuses HTTP redirects")
+	}
+	if f.HTTPClient == nil {
+		return &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: noRedirect,
+		}
+	}
+	cp := *f.HTTPClient
+	if cp.CheckRedirect == nil {
+		cp.CheckRedirect = noRedirect
+	}
+	return &cp
 }
 
 func parseGitHubOwnerRepo(repoURL string) (owner, repo string, err error) {
@@ -187,8 +253,8 @@ func parseGitHubOwnerRepo(repoURL string) (owner, repo string, err error) {
 		return "", "", err
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) < 2 {
-		return "", "", fmt.Errorf("cannot extract owner/repo from %q", repoURL)
+	if len(parts) != 2 || !validRepoSegment(parts[0]) || !validRepoSegment(parts[1]) {
+		return "", "", fmt.Errorf("cannot extract valid owner/repo from %q", repoURL)
 	}
 	return parts[0], parts[1], nil
 }
@@ -212,10 +278,7 @@ func (f *GitHubFetcher) installationToken(ctx context.Context, base, owner, repo
 		return "", err
 	}
 
-	client := f.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := f.httpClient()
 
 	instEndpoint := fmt.Sprintf("%s/repos/%s/%s/installation", base, url.PathEscape(owner), url.PathEscape(repo))
 	instReq, err := http.NewRequestWithContext(ctx, http.MethodGet, instEndpoint, nil)
@@ -236,7 +299,7 @@ func (f *GitHubFetcher) installationToken(ctx context.Context, base, owner, repo
 	var inst struct {
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(instResp.Body).Decode(&inst); err != nil || inst.ID <= 0 {
+	if err := json.NewDecoder(io.LimitReader(instResp.Body, 1<<20)).Decode(&inst); err != nil || inst.ID <= 0 {
 		return "", fmt.Errorf("decoding github app installation for %s/%s: %w", owner, repo, err)
 	}
 
@@ -260,7 +323,7 @@ func (f *GitHubFetcher) installationToken(ctx context.Context, base, owner, repo
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := json.NewDecoder(tokResp.Body).Decode(&minted); err != nil || minted.Token == "" {
+	if err := json.NewDecoder(io.LimitReader(tokResp.Body, 1<<20)).Decode(&minted); err != nil || minted.Token == "" {
 		return "", fmt.Errorf("decoding github app installation token: %w", err)
 	}
 	exp := minted.ExpiresAt
@@ -404,10 +467,10 @@ func SignGitHubWebhook(secret string, body []byte) string {
 }
 
 // VerifyGitHubSignature verifies the X-Hub-Signature-256 header against body
-// using secret in constant time.
+// using secret in constant time. An empty secret always fails closed.
 func VerifyGitHubSignature(secret, signatureHeader string, body []byte) bool {
 	if secret == "" {
-		return true
+		return false
 	}
 	sigHex, ok := strings.CutPrefix(strings.TrimSpace(signatureHeader), "sha256=")
 	if !ok || sigHex == "" {
@@ -437,11 +500,19 @@ type API struct {
 	Store         *Store
 	Fetcher       RepoFetcher
 	WebhookSecret string
+	// AllowUnsignedWebhooks, when true in isolated unit tests, permits
+	// POST /v1/webhooks/github when WebhookSecret is empty. Production
+	// deployments leave this false so unsigned webhooks fail closed (401).
+	AllowUnsignedWebhooks bool
 
 	// Authenticate, when set, verifies a bearer token and returns its node ID.
 	Authenticate func(ctx context.Context, token string) (nodeID string, err error)
 	// Directory, when set, verifies node tokens via VerifyNodeToken.
 	Directory NodeTokenVerifier
+	// AuthorizeOwnerRepo, when set, reports whether a node owner is in a team
+	// that owns repoURL when authorizing non-recipient repo/folder/grainfile
+	// subscriptions on GET /v1/grainfiles/content.
+	AuthorizeOwnerRepo func(ctx context.Context, owner, repoURL string) bool
 	// Access, when set, authenticates human callers for GET /v1/grainfiles
 	// and scopes results to their teams and nodes.
 	Access func(r *http.Request) (Viewer, error)
@@ -582,6 +653,9 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid webhook signature", http.StatusUnauthorized)
 			return
 		}
+	} else if !a.AllowUnsignedWebhooks {
+		http.Error(w, "webhook signature verification is not configured", http.StatusUnauthorized)
+		return
 	}
 
 	eventHeader := strings.TrimSpace(r.Header.Get("X-GitHub-Event"))
@@ -887,6 +961,69 @@ func (a *API) authenticateNode(r *http.Request) (string, error) {
 	return "", errors.New("unknown or revoked node token")
 }
 
+func hasRawQueryEncodingHazard(rawQuery string) bool {
+	lower := strings.ToLower(rawQuery)
+	return strings.Contains(lower, "%2e") ||
+		strings.Contains(lower, "%5c") ||
+		strings.Contains(lower, "%00") ||
+		strings.Contains(lower, "%252e") ||
+		strings.Contains(lower, "%252f") ||
+		strings.Contains(lower, "%255c")
+}
+
+func hasPathTraversalOrHazard(v string) bool {
+	if v == "" {
+		return false
+	}
+	if hasEncodedPathHazard(v) {
+		return true
+	}
+	rest := v
+	if idx := strings.IndexByte(rest, '#'); idx >= 0 {
+		rest = rest[:idx]
+	}
+	if strings.HasPrefix(rest, "https://") {
+		rest = rest[len("https://"):]
+	} else if strings.HasPrefix(rest, "file://") {
+		rest = strings.TrimLeft(rest[len("file://"):], "/")
+	}
+	if strings.Contains(rest, "//") || strings.Contains(rest, "@") {
+		return true
+	}
+	for _, seg := range strings.Split(rest, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, rec IndexRecord) bool {
+	if !sub.MatchesRecord(rec) {
+		return false
+	}
+	if a.AuthorizeOwnerRepo == nil {
+		return true
+	}
+	// If the Grainfile names an explicit recipient and the node is subscribed to
+	// that recipient, the Grainfile in rec.Repo is granting cross-deployment
+	// capability access to that recipient (docs/grainfiles-spec.md §11.1).
+	if rec.Recipient != "" {
+		for _, r := range sub.Recipients {
+			if strings.EqualFold(r, rec.Recipient) || IsSameRepo(r, rec.Recipient) {
+				return true
+			}
+		}
+	}
+	// Otherwise the node matched via Repos, Folders, or Grainfiles subscription,
+	// which requires the node's owner to have repository access to rec.Repo.
+	return a.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo)
+}
+
+func pinnedFetchRef(rec IndexRecord) string {
+	return firstNonEmpty(rec.CommitSHA, rec.Ref)
+}
+
 func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 	if a.Store == nil || a.Fetcher == nil {
 		http.Error(w, "content proxy not configured", http.StatusInternalServerError)
@@ -908,12 +1045,24 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if hasRawQueryEncodingHazard(r.URL.RawQuery) {
+		http.Error(w, "forbidden: encoded path traversal sequence in query", http.StatusForbidden)
+		return
+	}
+
 	q := r.URL.Query()
 	rawGrainfile := firstNonEmpty(q.Get("grainfile_url"), q.Get("grainfile"))
 	rawURL := q.Get("url")
 	rawRepo := q.Get("repo")
 	rawCommit := firstNonEmpty(q.Get("commit"), q.Get("commit_sha"), q.Get("ref"))
 	rawTarget := firstNonEmpty(q.Get("reference"), q.Get("path"), q.Get("target"))
+
+	for _, param := range []string{rawGrainfile, rawURL, rawRepo, rawCommit, rawTarget} {
+		if hasPathTraversalOrHazard(param) {
+			http.Error(w, "forbidden: invalid path traversal or separator in content request", http.StatusForbidden)
+			return
+		}
+	}
 
 	// If `url` was passed without `grainfile_url`:
 	// Check whether `url` is the Grainfile URL itself (or when `reference`/`path`
@@ -935,24 +1084,42 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 		rec, err := a.lookupGrainfileRecord(r.Context(), rawRepo, rawGrainfile, rawCommit)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
+				if a.grainfileExistsAtAnyRef(r.Context(), rawRepo, rawGrainfile) {
+					http.Error(w, "forbidden: requested ref or commit does not match indexed grainfile", http.StatusForbidden)
+					return
+				}
 				http.Error(w, "grainfile not found in index", http.StatusNotFound)
 				return
 			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if rawRepo != "" && !IsSameRepo(rawRepo, rec.Repo) {
+			http.Error(w, "forbidden: repo does not match authorizing grainfile repository", http.StatusForbidden)
+			return
+		}
+		if rawCommit != "" && !refMatchesIndexRecord(rawCommit, rec) {
+			http.Error(w, "forbidden: requested ref or commit does not match indexed grainfile", http.StatusForbidden)
+			return
+		}
 		if rec.Draft {
 			http.Error(w, "forbidden: draft grainfile cannot authorize content access", http.StatusForbidden)
 			return
 		}
-		if !sub.MatchesRecord(rec) {
+		if !a.isNodeAuthorizedForRecord(r.Context(), sub, rec) {
 			http.Error(w, "forbidden: node is not recipient or subscriber of grainfile", http.StatusForbidden)
 			return
 		}
 
 		// Subcase 1a: Fetching the .task.md or .process.md file itself.
 		if rawTarget == "" || isSameSelfTarget(rec, rawTarget) {
-			a.streamRepoFile(w, r, rec.Repo, firstNonEmpty(rawCommit, rec.CommitSHA, rec.Ref), rec.Path)
+			if strings.Contains(rawTarget, "://") {
+				if parsedTarget, pErr := ParseRef(rawTarget); pErr != nil || !refMatchesIndexRecord(parsedTarget.GitRef, rec) {
+					http.Error(w, "forbidden: target ref does not match indexed grainfile", http.StatusForbidden)
+					return
+				}
+			}
+			a.streamRepoFile(w, r, rec.Repo, pinnedFetchRef(rec), rec.Path)
 			return
 		}
 
@@ -966,8 +1133,7 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden: cross-origin reference not authorized by source repository", http.StatusForbidden)
 			return
 		}
-		fetchRef := firstNonEmpty(rawCommit, rec.CommitSHA, targetRef.GitRef, rec.Ref)
-		a.streamRepoFile(w, r, rec.Repo, fetchRef, targetRef.Path)
+		a.streamRepoFile(w, r, rec.Repo, pinnedFetchRef(rec), targetRef.Path)
 		return
 	}
 
@@ -981,24 +1147,38 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 
 	// Subcase 2a: The requested path is itself an indexed .task.md or .process.md in canonRepo.
 	if _, _, isGF, _ := ClassifyPath(targetPath); isGF {
-		rec, err := a.Store.GetIndex(r.Context(), canonRepo, targetPath, rawCommit)
+		rec, err := a.Store.GetIndex(r.Context(), canonRepo, targetPath, commit)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
+				if commit != "" {
+					if _, anyErr := a.Store.GetIndex(r.Context(), canonRepo, targetPath, ""); anyErr == nil {
+						http.Error(w, "forbidden: requested ref or commit does not match indexed grainfile", http.StatusForbidden)
+						return
+					}
+				}
 				http.Error(w, "grainfile not found in index", http.StatusNotFound)
 				return
 			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if rawCommit != "" && !refMatchesIndexRecord(rawCommit, rec) {
+			http.Error(w, "forbidden: requested ref or commit does not match indexed grainfile", http.StatusForbidden)
+			return
+		}
+		if targetGitRef != "" && !refMatchesIndexRecord(targetGitRef, rec) {
+			http.Error(w, "forbidden: target ref does not match indexed grainfile", http.StatusForbidden)
+			return
+		}
 		if rec.Draft {
 			http.Error(w, "forbidden: draft grainfile cannot authorize content access", http.StatusForbidden)
 			return
 		}
-		if !sub.MatchesRecord(rec) {
+		if !a.isNodeAuthorizedForRecord(r.Context(), sub, rec) {
 			http.Error(w, "forbidden: node is not recipient or subscriber of grainfile", http.StatusForbidden)
 			return
 		}
-		a.streamRepoFile(w, r, rec.Repo, firstNonEmpty(commit, rec.CommitSHA, rec.Ref), rec.Path)
+		a.streamRepoFile(w, r, rec.Repo, pinnedFetchRef(rec), rec.Path)
 		return
 	}
 
@@ -1016,17 +1196,38 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 		if rec.Draft || !IsSameRepo(rec.Repo, canonRepo) {
 			continue
 		}
-		if !sub.MatchesRecord(rec) {
+		if rawCommit != "" && !refMatchesIndexRecord(rawCommit, rec) {
+			continue
+		}
+		if targetGitRef != "" && !refMatchesIndexRecord(targetGitRef, rec) {
+			continue
+		}
+		if !a.isNodeAuthorizedForRecord(r.Context(), sub, rec) {
 			continue
 		}
 		if targetRef, err := rec.ToGrainfile().CheckReferenceAccess(rec.Repo, rootedTarget); err == nil {
-			fetchRef := firstNonEmpty(commit, rec.CommitSHA, targetRef.GitRef, rec.Ref)
-			a.streamRepoFile(w, r, rec.Repo, fetchRef, targetRef.Path)
+			a.streamRepoFile(w, r, rec.Repo, pinnedFetchRef(rec), targetRef.Path)
 			return
 		}
 	}
 
 	http.Error(w, "forbidden: path is not authorized by any grainfile in "+canonRepo, http.StatusForbidden)
+}
+
+func (a *API) grainfileExistsAtAnyRef(ctx context.Context, rawRepo, rawGrainfile string) bool {
+	if strings.Contains(rawGrainfile, "://") {
+		parsed, err := ParseRef(rawGrainfile)
+		if err != nil || parsed.Repo == "" || parsed.Path == "" {
+			return false
+		}
+		_, err = a.Store.GetIndex(ctx, parsed.Repo, parsed.Path, "")
+		return err == nil
+	}
+	if rawRepo == "" {
+		return false
+	}
+	_, err := a.Store.GetIndex(ctx, rawRepo, rawGrainfile, "")
+	return err == nil
 }
 
 func (a *API) lookupGrainfileRecord(ctx context.Context, rawRepo, rawGrainfile, commit string) (IndexRecord, error) {
@@ -1116,6 +1317,8 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox")
 	w.Header().Set("X-Grainfile-Repo", repoURL)
 	w.Header().Set("X-Grainfile-Path", filePath)
 	if ref != "" {

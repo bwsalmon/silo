@@ -56,6 +56,10 @@ type Store struct {
 	postgres bool
 	// Now, when set, is the clock used to stamp rows and evaluate not_before.
 	Now func() time.Time
+	// SameTeam, when set, reports whether two non-empty node owners share at
+	// least one team in the Hub directory (allowing nodes in the same team to
+	// subscribe to the same deployment recipient URL).
+	SameTeam func(ctx context.Context, ownerA, ownerB string) bool
 }
 
 // Open opens the Grainfile store at url: "postgres://..." (or
@@ -695,10 +699,11 @@ func (s *Store) GetIndex(ctx context.Context, repo, filePath, commitSHA string) 
 	cleanPath := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(filePath), "/"))
 	var row *sql.Row
 	if commitSHA != "" {
-		row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE repo = ? AND path = ? AND commit_sha = ? AND removed = 0`),
-			canonRepo, cleanPath, commitSHA)
+		normRef := normalizeURLRef(commitSHA, "")
+		row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND (commit_sha = ? OR ref = ? OR ref = ?) AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
+			canonRepo, cleanPath, commitSHA, commitSHA, normRef)
 	} else {
-		row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE repo = ? AND path = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
+		row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
 			canonRepo, cleanPath)
 	}
 	rec, err := scanIndexRecord(row)
@@ -706,6 +711,19 @@ func (s *Store) GetIndex(ctx context.Context, repo, filePath, commitSHA string) 
 		return IndexRecord{}, ErrNotFound
 	}
 	return rec, err
+}
+
+func refMatchesIndexRecord(refOrSHA string, rec IndexRecord) bool {
+	refOrSHA = strings.TrimSpace(refOrSHA)
+	if refOrSHA == "" {
+		return true
+	}
+	if rec.CommitSHA != "" && refOrSHA == rec.CommitSHA {
+		return true
+	}
+	normReq := normalizeURLRef(refOrSHA, "")
+	normRec := normalizeURLRef(rec.Ref, "")
+	return normReq != "" && normReq == normRec
 }
 
 // GetIndexByURL looks up an indexed Grainfile by its canonical URL (or by the
@@ -716,23 +734,31 @@ func (s *Store) GetIndexByURL(ctx context.Context, rawURL, commitSHA string) (In
 		canonURL := parsed.CanonicalURL()
 		var row *sql.Row
 		if commitSHA != "" {
-			row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND commit_sha = ? AND removed = 0`),
-				canonURL, commitSHA)
+			normRef := normalizeURLRef(commitSHA, "")
+			row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND (commit_sha = ? OR ref = ? OR ref = ?) AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
+				canonURL, commitSHA, commitSHA, normRef)
 		} else {
 			row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
 				canonURL)
 		}
 		if rec, scanErr := scanIndexRecord(row); scanErr == nil {
-			return rec, nil
+			if refMatchesIndexRecord(parsed.GitRef, rec) && refMatchesIndexRecord(commitSHA, rec) {
+				return rec, nil
+			}
 		}
 		if parsed.Repo != "" && parsed.Path != "" {
-			commit := commitSHA
-			if commit == "" && parsed.GitRef != "" {
-				if rec, getErr := s.GetIndex(ctx, parsed.Repo, parsed.Path, parsed.GitRef); getErr == nil {
-					return rec, nil
-				}
+			lookupRef := commitSHA
+			if lookupRef == "" {
+				lookupRef = parsed.GitRef
 			}
-			return s.GetIndex(ctx, parsed.Repo, parsed.Path, commit)
+			rec, getErr := s.GetIndex(ctx, parsed.Repo, parsed.Path, lookupRef)
+			if getErr != nil {
+				return IndexRecord{}, getErr
+			}
+			if !refMatchesIndexRecord(parsed.GitRef, rec) || !refMatchesIndexRecord(commitSHA, rec) {
+				return IndexRecord{}, ErrNotFound
+			}
+			return rec, nil
 		}
 	}
 	return IndexRecord{}, ErrNotFound
@@ -785,7 +811,7 @@ func (s *Store) loadLatestIndexQ(q rowQueryer, ctx context.Context, canonRepo st
 	query := `SELECT ` + selectIndexCols + ` FROM grainfile_index`
 	var args []any
 	if canonRepo != "" {
-		query += ` WHERE repo = ?`
+		query += ` WHERE LOWER(repo) = LOWER(?)`
 		args = append(args, canonRepo)
 	}
 	query += ` ORDER BY updated_at DESC, repo ASC, path ASC, commit_sha DESC`
@@ -1061,8 +1087,17 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 	if completedURL == "" {
 		return nil, fmt.Errorf("%w: empty completed grainfile URL", ErrInvalid)
 	}
+	state = strings.TrimSpace(state)
 	if state == "" {
 		state = "done"
+	}
+	switch state {
+	case "done", "completed", "success", "failed", "cancelled":
+	default:
+		return nil, fmt.Errorf("%w: invalid completion state %q", ErrInvalid, state)
+	}
+	if len(reason) > 1024 {
+		return nil, fmt.Errorf("%w: completion reason exceeds 1024 bytes", ErrInvalid)
 	}
 	now := s.now().Truncate(time.Millisecond)
 
@@ -1080,6 +1115,12 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 				completedRec = &allRecords[i]
 				break
 			}
+		}
+		if completedRec == nil {
+			return fmt.Errorf("%w: completed grainfile %q is not indexed", ErrNotFound, completedURL)
+		}
+		if completedRec.Draft {
+			return fmt.Errorf("%w: draft grainfile %q cannot be completed", ErrInvalid, completedURL)
 		}
 
 		canonCompleted := completedURL
@@ -1397,12 +1438,44 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 		UpdatedAt:  now,
 	}
 
+	sameTeamOwners := map[string]bool{}
+	if len(out.Recipients) > 0 && out.Owner != "" && s.SameTeam != nil {
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT DISTINCT owner FROM grainfile_subscriptions WHERE node_id <> ? AND owner <> ''`), nodeID)
+		if err != nil {
+			return Subscriptions{}, err
+		}
+		var otherOwners []string
+		for rows.Next() {
+			var oOwner string
+			if err := rows.Scan(&oOwner); err != nil {
+				rows.Close()
+				return Subscriptions{}, err
+			}
+			if !strings.EqualFold(oOwner, out.Owner) {
+				otherOwners = append(otherOwners, oOwner)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return Subscriptions{}, err
+		}
+		rows.Close()
+		for _, oOwner := range otherOwners {
+			if s.SameTeam(ctx, out.Owner, oOwner) {
+				sameTeamOwners[strings.ToLower(oOwner)] = true
+			}
+		}
+	}
+
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var prevCursor, prevRev int64
 		var prevOwner string
 		err := tx.QueryRowContext(ctx, s.q(`SELECT owner, cursor, revision FROM grainfile_subscriptions WHERE node_id = ?`), nodeID).
 			Scan(&prevOwner, &prevCursor, &prevRev)
 		if err == nil {
+			if prevOwner != "" && out.Owner != "" && !strings.EqualFold(prevOwner, out.Owner) {
+				return fmt.Errorf("%w: node %q is already registered to another owner", ErrUnauthorized, nodeID)
+			}
 			out.Revision = prevRev + 1
 			if out.Cursor == 0 && prevCursor > 0 {
 				out.Cursor = prevCursor
@@ -1412,6 +1485,50 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+
+		if len(out.Recipients) > 0 && out.Owner != "" {
+			rows, err := tx.QueryContext(ctx, s.q(`SELECT owner, recipients FROM grainfile_subscriptions WHERE node_id <> ?`), nodeID)
+			if err != nil {
+				return err
+			}
+			type existingClaim struct {
+				owner      string
+				recipients []string
+			}
+			var claims []existingClaim
+			for rows.Next() {
+				var oOwner, oRecJSON string
+				if err := rows.Scan(&oOwner, &oRecJSON); err != nil {
+					rows.Close()
+					return err
+				}
+				if oOwner == "" || strings.EqualFold(oOwner, out.Owner) {
+					continue
+				}
+				var oRecs []string
+				_ = json.Unmarshal([]byte(oRecJSON), &oRecs)
+				if len(oRecs) > 0 {
+					claims = append(claims, existingClaim{owner: oOwner, recipients: oRecs})
+				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
+
+			for _, cl := range claims {
+				for _, wanted := range out.Recipients {
+					for _, claimed := range cl.recipients {
+						if strings.EqualFold(wanted, claimed) || IsSameRepo(wanted, claimed) {
+							if !sameTeamOwners[strings.ToLower(cl.owner)] {
+								return fmt.Errorf("%w: recipient %q is already claimed by another owner", ErrUnauthorized, wanted)
+							}
+						}
+					}
+				}
+			}
 		}
 
 		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO grainfile_subscriptions (
