@@ -1,6 +1,7 @@
 package faulttest
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
@@ -371,4 +373,363 @@ func TestViewThroughDisconnect(t *testing.T) {
 		t.Errorf("a view with the Grain back: %d, %d bytes, %v; want 200 and 256 KiB", code, n, err)
 	}
 	c.Settle(time.Minute)
+}
+
+// TestGrainfileFault_DBOutageMidWebhookAndCatchup takes PostgreSQL down
+// mid-webhook ingestion and mid-subscription catch-up while nodes hold
+// active recipient subscriptions, then restores PostgreSQL and verifies
+// that nodes catch up seamlessly from their cursors with zero lost or
+// duplicated grainfile_events.
+func TestGrainfileFault_DBOutageMidWebhookAndCatchup(t *testing.T) {
+	c := NewCluster(t, Options{Teams: 1, Pods: 2, Heartbeat: heartbeat})
+	const recipientA = "https://github.com/org/agent-a"
+
+	g1 := &Grain{ID: "gf-db-1", Repos: []string{Repo(0)}, Recipients: []string{recipientA}, Slots: 2}
+	g2 := &Grain{ID: "gf-db-2", Repos: []string{Repo(0)}, Recipients: []string{recipientA}, Slots: 2}
+	c.AddGrain(g1)
+	c.AddGrain(g2)
+	c.Eventually("both Grainfile nodes online", 30*time.Second, func() bool { return c.AllOnline() == nil })
+
+	// 1. Ingest initial webhook before DB outage -> both nodes receive task_ready.
+	commit1 := "1111111111111111111111111111111111111111"
+	c.SetForgeFile(Repo(0), "tasks/01-pre.task.md", commit1,
+		"---\ntitle: Pre-outage task\nrecipient: "+recipientA+"\n---\nRun pre-outage check.\n")
+	if code, body, err := c.SendWebhook(c.Pods[0].URL, Repo(0), "refs/heads/main", commit1, []string{"tasks/01-pre.task.md"}, nil, nil); err != nil || code != http.StatusOK {
+		t.Fatalf("SendWebhook(commit1): code=%d err=%v body=%s", code, err, body)
+	}
+	c.Eventually("g1 and g2 receive commit1 task_ready", 15*time.Second, func() bool {
+		return len(g1.GrainfileEvents()) >= 1 && len(g2.GrainfileEvents()) >= 1
+	})
+
+	// 2. Take PostgreSQL down -> webhook ingestion during outage must fail with 5xx (never silently 200 OK).
+	commit2 := "2222222222222222222222222222222222222222"
+	c.SetForgeFile(Repo(0), "tasks/02-during.task.md", commit2,
+		"---\ntitle: During-outage task\nrecipient: "+recipientA+"\n---\nRun during-outage check.\n")
+
+	c.PGProxy.Down()
+	if code, _, err := c.SendWebhook(c.Pods[1].URL, Repo(0), "refs/heads/main", commit2, []string{"tasks/02-during.task.md"}, nil, nil); err == nil && code < 500 {
+		t.Fatalf("SendWebhook while DB is down returned %d, want 5xx or connection error", code)
+	}
+	// Disconnect g2 while DB is down so it must reconnect and catch up as DB recovers.
+	g2.Reconnect(c.Pods[1].URL)
+	time.Sleep(pick(2*time.Second, 8*time.Second))
+
+	// 3. Bring PostgreSQL back up and redeliver commit2 + commit3 across pods.
+	c.PGProxy.Up()
+	c.Eventually("cluster healthy after DB recovery", 30*time.Second, func() bool { return c.AllOnline() == nil })
+
+	var code2 int
+	c.Eventually("SendWebhook(commit2) succeeds after DB recovery", 15*time.Second, func() bool {
+		var err error
+		code2, _, err = c.SendWebhook(c.Pods[1].URL, Repo(0), "refs/heads/main", commit2, []string{"tasks/02-during.task.md"}, nil, nil)
+		return err == nil && code2 == http.StatusOK
+	})
+
+	commit3 := "3333333333333333333333333333333333333333"
+	c.SetForgeFile(Repo(0), "processes/03-post.process.md", commit3,
+		"---\ntitle: Post-outage process\nrecipient: "+recipientA+"\non:\n  push:\n    branches: [main]\n---\nRun post-outage process.\n")
+	if code, body, err := c.SendWebhook(c.Pods[0].URL, Repo(0), "refs/heads/main", commit3, []string{"processes/03-post.process.md"}, nil, nil); err != nil || code != http.StatusOK {
+		t.Fatalf("SendWebhook(commit3): code=%d err=%v body=%s", code, err, body)
+	}
+
+	// Both g1 and g2 must receive all 4 events (task_ready 1, task_ready 2, process_updated 3, process_triggered 3)
+	// in monotonic seq order with zero duplicates.
+	c.Eventually("g1 and g2 catch up all 4 grainfile_events", 20*time.Second, func() bool {
+		return len(g1.GrainfileEvents()) == 4 && len(g2.GrainfileEvents()) == 4
+	})
+	for _, g := range []*Grain{g1, g2} {
+		if dups := g.DuplicateGrainfileEvents(); dups != 0 {
+			t.Errorf("node %s received %d duplicate grainfile_events", g.ID, dups)
+		}
+		evs := g.GrainfileEvents()
+		for i := 1; i < len(evs); i++ {
+			if evs[i].Seq <= evs[i-1].Seq {
+				t.Errorf("node %s events out of order at %d: %+v", g.ID, i, evs)
+			}
+		}
+	}
+}
+
+// TestGrainfileFault_MultiPodRollingRestartAndPodKill performs rolling
+// restarts (SIGTERM) and hard pod crashes (SIGKILL) across a 3-pod Hub
+// cluster while 6 nodes hold active recipient subscriptions and webhooks
+// are continuously ingested, verifying seamless reconnect and cursor
+// catch-up with zero lost or duplicated events.
+func TestGrainfileFault_MultiPodRollingRestartAndPodKill(t *testing.T) {
+	c := NewCluster(t, Options{Teams: 2, Pods: 3, Heartbeat: heartbeat})
+	const (
+		recipient0 = "https://github.com/org/agent-team0"
+		recipient1 = "https://github.com/org/agent-team1"
+	)
+
+	var nodes0, nodes1 []*Grain
+	for i := range 3 {
+		g0 := &Grain{ID: fmt.Sprintf("gf-rr-0-%d", i), Repos: []string{Repo(0)}, Recipients: []string{recipient0}, Slots: 2}
+		g1 := &Grain{ID: fmt.Sprintf("gf-rr-1-%d", i), Repos: []string{Repo(1)}, Recipients: []string{recipient1}, Slots: 2}
+		c.AddGrain(g0)
+		c.AddGrain(g1)
+		nodes0 = append(nodes0, g0)
+		nodes1 = append(nodes1, g1)
+	}
+	c.Eventually("all 6 Grainfile nodes online across 3 pods", 30*time.Second, func() bool { return c.AllOnline() == nil })
+
+	totalBatches := pick(12, 30)
+	for i := range totalBatches {
+		teamIdx := i % 2
+		recipient := recipient0
+		if teamIdx == 1 {
+			recipient = recipient1
+		}
+		commit := fmt.Sprintf("%040d", i+1)
+		path := fmt.Sprintf("tasks/batch-%02d.task.md", i)
+		c.SetForgeFile(Repo(teamIdx), path, commit,
+			fmt.Sprintf("---\ntitle: Rolling batch %d\nrecipient: %s\n---\nTask body %d.\n", i, recipient, i))
+
+		// Fault a pod mid-stream on selected iterations: alternate SIGTERM rolling restart and SIGKILL crash.
+		switch {
+		case i == totalBatches/4:
+			if err := c.Pods[0].Stop(); err != nil {
+				t.Fatalf("Pods[0].Stop: %v", err)
+			}
+			c.Pods[0].Start(t)
+		case i == totalBatches/2:
+			if err := c.Pods[1].Kill(); err != nil {
+				t.Fatalf("Pods[1].Kill: %v", err)
+			}
+			c.Pods[1].Start(t)
+		case i == (3*totalBatches)/4:
+			// Rolling restart of all 3 pods in sequence.
+			for pIdx, pod := range c.Pods {
+				if err := pod.Stop(); err != nil {
+					t.Fatalf("Pods[%d].Stop: %v", pIdx, err)
+				}
+				pod.Start(t)
+			}
+		}
+
+		// Deliver webhook to whichever pod is currently serving (round-robin with retry).
+		delivered := false
+		for attempt := range 20 {
+			pod := c.Pods[(i+attempt)%len(c.Pods)]
+			code, _, err := c.SendWebhook(pod.URL, Repo(teamIdx), "refs/heads/main", commit, []string{path}, nil, nil)
+			if err == nil && code == http.StatusOK {
+				delivered = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !delivered {
+			t.Fatalf("failed to deliver webhook batch %d to any pod", i)
+		}
+	}
+
+	want0 := (totalBatches + 1) / 2
+	want1 := totalBatches / 2
+	c.Eventually("all nodes catch up every event after pod kills and rolling restarts", 30*time.Second, func() bool {
+		for _, g := range nodes0 {
+			if len(g.GrainfileEvents()) < want0 {
+				return false
+			}
+		}
+		for _, g := range nodes1 {
+			if len(g.GrainfileEvents()) < want1 {
+				return false
+			}
+		}
+		return c.AllOnline() == nil
+	})
+
+	for _, g := range append(nodes0, nodes1...) {
+		if dups := g.DuplicateGrainfileEvents(); dups != 0 {
+			t.Errorf("node %s received %d duplicate grainfile_events across pod kills/restarts", g.ID, dups)
+		}
+	}
+	for _, g := range nodes0 {
+		if got := len(g.GrainfileEvents()); got != want0 {
+			t.Errorf("node %s (team 0) received %d events, want %d", g.ID, got, want0)
+		}
+	}
+	for _, g := range nodes1 {
+		if got := len(g.GrainfileEvents()); got != want1 {
+			t.Errorf("node %s (team 1) received %d events, want %d", g.ID, got, want1)
+		}
+	}
+}
+
+// TestGrainfileFault_CrossDeploymentDependsOnAndTriggerWithAcrossPods
+// verifies cross-deployment `depends_on` and `trigger_with` event
+// delivery across pod boundaries and node reconnects when nodes belong
+// to different teams/deployments and their holding pods are killed.
+func TestGrainfileFault_CrossDeploymentDependsOnAndTriggerWithAcrossPods(t *testing.T) {
+	c := NewCluster(t, Options{Teams: 3, Pods: 3, Heartbeat: heartbeat})
+	const (
+		alice      = "alice@example.com"
+		bob        = "bob@example.com"
+		carol      = "carol@example.com"
+		recipientA = "https://github.com/org/deploy-a"
+		recipientB = "https://github.com/org/deploy-b"
+		recipientC = "https://github.com/org/deploy-c"
+	)
+
+	// Set up three distinct team owners for the three deployments.
+	c.Call("PUT", "/v1/teams/"+Team(0)+"/members/user:"+alice, Admin, map[string]string{"role": "admin"}, &struct{}{})
+	c.Call("PUT", "/v1/teams/"+Team(1)+"/members/user:"+bob, Admin, map[string]string{"role": "admin"}, &struct{}{})
+	c.Call("PUT", "/v1/teams/"+Team(2)+"/members/user:"+carol, Admin, map[string]string{"role": "admin"}, &struct{}{})
+
+	upstreamURL := "https://github.com/" + Repo(0) + "/blob/main/processes/upstream.process.md"
+	downstreamURL := "https://github.com/" + Repo(1) + "/blob/main/processes/downstream.process.md"
+
+	nodeA := &Grain{
+		ID:         "node-deploy-a",
+		Owner:      alice,
+		Hub:        c.Pods[0].URL,
+		Hubs:       []string{c.Pods[0].URL, c.Pods[1].URL, c.Pods[2].URL},
+		Repos:      []string{Repo(0)},
+		Recipients: []string{recipientA},
+		Slots:      2,
+	}
+	nodeB := &Grain{
+		ID:         "node-deploy-b",
+		Owner:      bob,
+		Hub:        c.Pods[1].URL,
+		Hubs:       []string{c.Pods[1].URL, c.Pods[2].URL, c.Pods[0].URL},
+		Repos:      []string{Repo(1)},
+		Recipients: []string{recipientB},
+		Grainfiles: []string{upstreamURL},
+		Slots:      2,
+	}
+	nodeC := &Grain{
+		ID:         "node-deploy-c",
+		Owner:      carol,
+		Hub:        c.Pods[2].URL,
+		Hubs:       []string{c.Pods[2].URL, c.Pods[0].URL, c.Pods[1].URL},
+		Repos:      []string{Repo(2)},
+		Recipients: []string{recipientC},
+		Grainfiles: []string{upstreamURL, downstreamURL},
+		Slots:      2,
+	}
+	c.AddGrain(nodeA)
+	c.AddGrain(nodeB)
+	c.AddGrain(nodeC)
+	c.Eventually("nodeA, nodeB, nodeC online across 3 pods", 30*time.Second, func() bool { return c.AllOnline() == nil })
+
+	// 1. Index upstream.process.md in Repo(0) (Team 0, targeting recipientA).
+	shaA1 := "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
+	c.SetForgeFile(Repo(0), "processes/upstream.process.md", shaA1, fmt.Sprintf(`---
+title: Upstream qualification process
+recipient: %s
+on:
+  push:
+    branches: ["main"]
+    paths: ["src/**"]
+---
+Run upstream qualification.
+`, recipientA))
+	if code, body, err := c.SendWebhook(c.Pods[0].URL, Repo(0), "refs/heads/main", shaA1, []string{"processes/upstream.process.md"}, nil, nil); err != nil || code != http.StatusOK {
+		t.Fatalf("SendWebhook(upstream): %d %v %s", code, err, body)
+	}
+
+	// 2. Index downstream.process.md in Repo(1) (Team 1, targeting recipientB) with trigger_with and depends_on -> upstreamURL.
+	shaB1 := "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111"
+	c.SetForgeFile(Repo(1), "processes/downstream.process.md", shaB1, fmt.Sprintf(`---
+title: Downstream verification process
+recipient: %s
+trigger_with:
+  - %s
+depends_on:
+  - %s
+---
+Run downstream verification after upstream completes.
+`, recipientB, upstreamURL, upstreamURL))
+	if code, body, err := c.SendWebhook(c.Pods[1].URL, Repo(1), "refs/heads/main", shaB1, []string{"processes/downstream.process.md"}, nil, nil); err != nil || code != http.StatusOK {
+		t.Fatalf("SendWebhook(downstream): %d %v %s", code, err, body)
+	}
+
+	// 3. Index companion.task.md in Repo(2) (Team 2, targeting recipientC) with depends_on -> upstreamURL.
+	shaC1 := "cccc1111cccc1111cccc1111cccc1111cccc1111"
+	c.SetForgeFile(Repo(2), "tasks/companion.task.md", shaC1, fmt.Sprintf(`---
+title: Companion deployment task
+recipient: %s
+depends_on:
+  - %s
+---
+Run companion deployment once upstream is done.
+`, recipientC, upstreamURL))
+	if code, body, err := c.SendWebhook(c.Pods[2].URL, Repo(2), "refs/heads/main", shaC1, []string{"tasks/companion.task.md"}, nil, nil); err != nil || code != http.StatusOK {
+		t.Fatalf("SendWebhook(companion): %d %v %s", code, err, body)
+	}
+
+	// 4. Kill Pod 1 and Pod 2 while nodes hold subscriptions, forcing nodeB and nodeC to reconnect across pods,
+	// then restart Pod 1 and Pod 2.
+	_ = c.Pods[1].Kill()
+	_ = c.Pods[2].Kill()
+	c.Pods[1].Start(t)
+	c.Pods[2].Start(t)
+	c.Eventually("all nodes reconnected after Pod 1 & 2 crash", 30*time.Second, func() bool { return c.AllOnline() == nil })
+
+	// 5. Push a code change to Repo(0) ("src/app.go") on Pod 0 -> triggers upstream.process.md (recipientA)
+	// AND co-triggers downstream.process.md (recipientB via trigger_with) across pods!
+	shaA2 := "aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222"
+	c.SetForgeFile(Repo(0), "processes/upstream.process.md", shaA2, fmt.Sprintf(`---
+title: Upstream qualification process
+recipient: %s
+on:
+  push:
+    branches: ["main"]
+    paths: ["src/**"]
+---
+Run upstream qualification.
+`, recipientA))
+	if code, body, err := c.SendWebhook(c.Pods[0].URL, Repo(0), "refs/heads/main", shaA2, nil, []string{"src/app.go"}, nil); err != nil || code != http.StatusOK {
+		t.Fatalf("SendWebhook(src/app.go trigger): %d %v %s", code, err, body)
+	}
+
+	c.Eventually("nodeA receives primary process_triggered and nodeB receives trigger_with process_triggered", 20*time.Second, func() bool {
+		hasPrimary := false
+		for _, ev := range nodeA.GrainfileEvents() {
+			if ev.Type == grainfiles.EventProcessTriggered && ev.GrainfileURL == upstreamURL && ev.TriggerSource == grainfiles.TriggerPush {
+				hasPrimary = true
+			}
+		}
+		hasCoTrigger := false
+		for _, ev := range nodeB.GrainfileEvents() {
+			if ev.Type == grainfiles.EventProcessTriggered && ev.GrainfileURL == downstreamURL && ev.TriggerSource == grainfiles.TriggerWith && ev.TriggeredBy == upstreamURL {
+				hasCoTrigger = true
+			}
+		}
+		return hasPrimary && hasCoTrigger
+	})
+
+	// 6. Kill Pod 0, let nodeA reconnect, and have nodeA report completion of upstream.process.md ->
+	// must fan out dependency_completed across pods to both nodeB (recipientB) and nodeC (recipientC)!
+	_ = c.Pods[0].Kill()
+	c.Pods[0].Start(t)
+	c.Eventually("nodeA reconnected after Pod 0 kill", 30*time.Second, func() bool { return nodeA.Online() && c.AllOnline() == nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := nodeA.CompleteGrainfile(ctx, upstreamURL, shaA2, "done", "upstream passed"); err != nil {
+		t.Fatalf("nodeA.CompleteGrainfile: %v", err)
+	}
+
+	c.Eventually("nodeB and nodeC receive cross-deployment dependency_completed", 20*time.Second, func() bool {
+		bSaw, cSaw := false, false
+		for _, ev := range nodeB.GrainfileEvents() {
+			if ev.Type == grainfiles.EventDependencyCompleted && ev.DependencyURL == upstreamURL && ev.DependencyState == "done" {
+				bSaw = true
+			}
+		}
+		for _, ev := range nodeC.GrainfileEvents() {
+			if ev.Type == grainfiles.EventDependencyCompleted && ev.DependencyURL == upstreamURL && ev.DependencyState == "done" {
+				cSaw = true
+			}
+		}
+		return bSaw && cSaw
+	})
+
+	for _, g := range []*Grain{nodeA, nodeB, nodeC} {
+		if dups := g.DuplicateGrainfileEvents(); dups != 0 {
+			t.Errorf("node %s received %d duplicate grainfile_events", g.ID, dups)
+		}
+	}
 }

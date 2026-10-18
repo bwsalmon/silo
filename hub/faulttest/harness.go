@@ -4,13 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +30,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
@@ -33,6 +39,14 @@ import (
 
 // UserHeader is the dev sign-on header the harness's hub trusts.
 const UserHeader = "X-Test-User"
+
+// WebhookSecret and GitHubToken are the shared credentials the harness's
+// hub and fake GitHub API use for Grainfile webhook ingestion and content
+// proxying.
+const (
+	WebhookSecret = "faulttest-webhook-secret"
+	GitHubToken   = "ghp_faulttest_forge_token"
+)
 
 // The harness's humans: Admin is a hub admin, and Ops is a member of
 // every team, owns every Grain and submits every task.
@@ -83,7 +97,7 @@ type HubProc struct {
 
 // StartHub starts `silo hub serve` on a free port of 127.0.0.1 against
 // database, its nodes heartbeating every heartbeat.
-func StartHub(t testing.TB, database string, heartbeat time.Duration) *HubProc {
+func StartHub(t testing.TB, database string, heartbeat time.Duration, extraArgs ...string) *HubProc {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -91,12 +105,14 @@ func StartHub(t testing.TB, database string, heartbeat time.Duration) *HubProc {
 	}
 	addr := l.Addr().String()
 	l.Close()
+	args := []string{"hub", "serve", "-addr", addr, "-database", database, "-dev-user-header", UserHeader,
+		"-admins", Admin, "-heartbeat", heartbeat.String(), "-dispatch-retry", "1s", "-shutdown-grace", "10s"}
+	args = append(args, extraArgs...)
 	h := &HubProc{
 		Addr: addr,
 		URL:  "http://" + addr,
 		log:  filepath.Join(t.TempDir(), "hub.log"),
-		args: []string{"hub", "serve", "-addr", addr, "-database", database, "-dev-user-header", UserHeader,
-			"-admins", Admin, "-heartbeat", heartbeat.String(), "-dispatch-retry", "1s", "-shutdown-grace", "10s"},
+		args: args,
 	}
 	h.Start(t)
 	t.Cleanup(func() { h.Kill() })
@@ -234,6 +250,8 @@ type Options struct {
 	Teams         int // teams, each owning one repository
 	GrainsPerTeam int
 	Slots         int
+	// Pods is how many `silo hub serve` processes to start (defaults to 1).
+	Pods int
 	// Heartbeat is the hub's heartbeat; StaleAfter is three of it.
 	Heartbeat time.Duration
 	// Proxied puts a Proxy in front of each Grain's connection to the
@@ -263,9 +281,14 @@ type Cluster struct {
 	// DB is the hub's database, reached directly, for checking.
 	DB      *sql.DB
 	Hub     *HubProc
+	Pods    []*HubProc
+	Forge   *httptest.Server
 	Ledger  *Ledger
 	Grains  []*Grain
 	Proxies map[string]*Proxy // by Grain ID, when Proxied
+
+	forgeMu    sync.RWMutex
+	forgeFiles map[string]string
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -290,7 +313,20 @@ func NewCluster(t testing.TB, o Options) *Cluster {
 	if o.Slots <= 0 {
 		o.Slots = 2
 	}
-	c := &Cluster{t: t, Opts: o, Ledger: NewLedger(), Proxies: map[string]*Proxy{}, cancels: map[string]context.CancelFunc{}}
+	if o.Pods <= 0 {
+		o.Pods = 1
+	}
+	c := &Cluster{
+		t:          t,
+		Opts:       o,
+		Ledger:     NewLedger(),
+		Proxies:    map[string]*Proxy{},
+		cancels:    map[string]context.CancelFunc{},
+		forgeFiles: map[string]string{},
+	}
+	c.Forge = httptest.NewServer(http.HandlerFunc(c.serveForge))
+	t.Cleanup(func() { c.Forge.Close() })
+
 	c.PG = pgtest.Start(t)
 	var err error
 	if c.PGProxy, err = NewProxy(fmt.Sprintf("127.0.0.1:%d", c.PG.Port)); err != nil {
@@ -302,7 +338,32 @@ func NewCluster(t testing.TB, o Options) *Cluster {
 	}
 	c.DB.SetMaxOpenConns(4)
 	t.Cleanup(func() { c.DB.Close() })
-	c.Hub = StartHub(t, fmt.Sprintf("postgres://postgres@%s/postgres?sslmode=disable", c.PGProxy.Addr()), o.Heartbeat)
+
+	dbURL := fmt.Sprintf("postgres://postgres@%s/postgres?sslmode=disable", c.PGProxy.Addr())
+	keyFile := filepath.Join(t.TempDir(), "internal.key")
+	if err := os.WriteFile(keyFile, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range o.Pods {
+		il, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		internalAddr := il.Addr().String()
+		il.Close()
+		podName := fmt.Sprintf("pod-%d", i)
+		p := StartHub(t, dbURL, o.Heartbeat,
+			"-pod", podName,
+			"-pod-addr", internalAddr,
+			"-internal-addr", internalAddr,
+			"-internal-key-file", keyFile,
+			"-webhook-secret", WebhookSecret,
+			"-github-token", GitHubToken,
+			"-github-api-url", c.Forge.URL,
+		)
+		c.Pods = append(c.Pods, p)
+	}
+	c.Hub = c.Pods[0]
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		c.cancel()
@@ -325,15 +386,128 @@ func NewCluster(t testing.TB, o Options) *Cluster {
 	return c
 }
 
+func (c *Cluster) serveForge(w http.ResponseWriter, r *http.Request) {
+	if got := r.Header.Get("Authorization"); got != "Bearer "+GitHubToken {
+		http.Error(w, "unauthorized forge token", http.StatusUnauthorized)
+		return
+	}
+	ref := r.URL.Query().Get("ref")
+	c.forgeMu.RLock()
+	content, ok := c.forgeFiles[r.URL.Path+"@"+ref]
+	if !ok {
+		content, ok = c.forgeFiles[r.URL.Path]
+	}
+	c.forgeMu.RUnlock()
+	if !ok {
+		http.Error(w, "not found: "+r.URL.Path+"@"+ref, http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":     "file",
+		"encoding": "base64",
+		"size":     len(content),
+		"sha":      "blobsha",
+		"content":  base64.StdEncoding.EncodeToString([]byte(content)),
+	})
+}
+
+// SetForgeFile registers file content on the cluster's fake GitHub API for repo ("owner/name"),
+// filePath ("tasks/01.task.md"), and commit/ref.
+func (c *Cluster) SetForgeFile(repo, filePath, ref, content string) {
+	cleanPath := strings.TrimPrefix(filePath, "/")
+	apiPath := "/repos/" + strings.TrimPrefix(strings.TrimPrefix(repo, "https://github.com/"), "/") + "/contents/" + cleanPath
+	c.forgeMu.Lock()
+	if ref != "" {
+		c.forgeFiles[apiPath+"@"+ref] = content
+	}
+	c.forgeFiles[apiPath] = content
+	c.forgeMu.Unlock()
+}
+
+// SignWebhook computes X-Hub-Signature-256 for body using WebhookSecret.
+func SignWebhook(body []byte) string {
+	mac := hmac.New(sha256.New, []byte(WebhookSecret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// SendWebhook posts a signed GitHub push webhook to targetHubURL (or c.Hub.URL if empty).
+func (c *Cluster) SendWebhook(targetHubURL, repo, ref, commitSHA string, added, modified, removed []string) (int, []byte, error) {
+	if targetHubURL == "" {
+		targetHubURL = c.Hub.URL
+	}
+	slug := strings.TrimPrefix(strings.TrimPrefix(repo, "https://github.com/"), "/")
+	if ref == "" {
+		ref = "refs/heads/main"
+	}
+	payload, err := json.Marshal(map[string]any{
+		"ref":   ref,
+		"after": commitSHA,
+		"repository": map[string]any{
+			"full_name": slug,
+			"html_url":  "https://github.com/" + slug,
+		},
+		"commits": []map[string]any{
+			{
+				"id":       commitSHA,
+				"added":    added,
+				"modified": modified,
+				"removed":  removed,
+			},
+		},
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequest("POST", targetHubURL+grainfiles.GitHubWebhookPath, bytes.NewReader(payload))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", SignWebhook(payload))
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, err
+}
+
 // AddGrain mints g's token, puts a proxy in front of it if the cluster
 // is Proxied, and runs it.
 func (c *Cluster) AddGrain(g *Grain) {
+	owner := g.Owner
+	if owner == "" {
+		owner = Ops
+	}
 	var minted struct {
 		Token string `json:"token"`
 	}
-	c.Call("POST", "/v1/node-tokens", Ops, map[string]string{"node": g.ID}, &minted)
+	// Mint against any reachable pod in the cluster.
+	mintedOK := false
+	for _, pod := range c.Pods {
+		code, b, err := call("POST", pod.URL+"/v1/node-tokens", owner, map[string]string{"node": g.ID})
+		if err == nil && code < 300 {
+			_ = json.Unmarshal(b, &minted)
+			mintedOK = true
+			break
+		}
+	}
+	if !mintedOK {
+		c.Call("POST", "/v1/node-tokens", owner, map[string]string{"node": g.ID}, &minted)
+	}
 	g.Token, g.Ledger = minted.Token, c.Ledger
-	g.Hub = c.Hub.URL
+	if g.Hub == "" {
+		g.Hub = c.Hub.URL
+	}
+	if len(g.Hubs) == 0 && len(c.Pods) > 1 && !c.Opts.Proxied {
+		for _, pod := range c.Pods {
+			g.Hubs = append(g.Hubs, pod.URL)
+		}
+	}
 	if c.Opts.Proxied {
 		p, err := NewProxy(c.Hub.Addr)
 		if err != nil {
@@ -494,7 +668,17 @@ func (c *Cluster) State(id string) tasks.State {
 
 // Nodes is the hub's node directory, as Ops sees it.
 func (c *Cluster) Nodes() ([]registry.Entry, error) {
-	code, b, err := call("GET", c.Hub.URL+rendezvous.DirectoryPath, Ops, nil)
+	var (
+		code int
+		b    []byte
+		err  error
+	)
+	for _, pod := range c.Pods {
+		code, b, err = call("GET", pod.URL+rendezvous.DirectoryPath, Ops, nil)
+		if err == nil && code == http.StatusOK {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

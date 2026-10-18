@@ -74,3 +74,82 @@ jobs:
           ulimit -n 65536 || ulimit -n "$(ulimit -Hn)"
           go test -count=1 -timeout 25m -v -run TestLoad ./hub/faulttest
           cat /tmp/hub-load.txt
+
+  security:
+    name: security
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 30
+    steps:
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+
+      - name: Full security suite against PostgreSQL
+        env:
+          SILO_REQUIRE_POSTGRES: "1"
+          SILO_SECURITY_POSTGRES: "1"
+        run: go test -race -count=1 -timeout 25m -v ./hub/security
+
+  e2e-postgres:
+    name: e2e postgres
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 30
+    artifacts:
+      - name: playwright-postgres-test-results
+        path: ui/test-results
+    steps:
+      - name: Install PostgreSQL
+        infrastructure: true
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            if [ ! -e /usr/sbin/policy-rc.d ]; then
+              printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+              sudo chmod +x /usr/sbin/policy-rc.d
+            fi
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql >/dev/null
+          fi
+
+      - name: Install UI dependencies
+        run: cd ui && npm ci --no-audit --no-fund
+
+      - name: Download Chromium
+        infrastructure: true
+        run: cd ui && NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt npx playwright install --with-deps chromium
+
+      - name: Build UI bundle
+        run: cd ui && npm run build && npm run e2e:typecheck
+
+      - name: Git + GitHub simulator E2E suite against PostgreSQL
+        env:
+          SILO_REQUIRE_POSTGRES: "1"
+        run: go test -race -count=1 -timeout 15m -v ./hub/grainfiles/simtest
+
+      - name: Playwright browser E2E suite against PostgreSQL
+        env:
+          CI: "1"
+        run: |
+          PGBIN="$(dirname "$(ls /usr/lib/postgresql/*/bin/initdb | tail -n 1)")"
+          PGDATA="$(mktemp -d /tmp/silo-e2e-pg.XXXXXX)"
+          "$PGBIN/initdb" -D "$PGDATA/data" -A trust -U postgres --no-locale -E UTF8 >/dev/null
+          "$PGBIN/postgres" -D "$PGDATA/data" -k "" -h 127.0.0.1 -p 55432 -F -c full_page_writes=off -c synchronous_commit=off -c max_connections=200 >"$PGDATA/postgres.log" 2>&1 &
+          PGPID=$!
+          trap 'kill -INT "$PGPID" 2>/dev/null || true; wait "$PGPID" 2>/dev/null || true; rm -rf "$PGDATA"' EXIT
+          for i in $(seq 60); do
+            "$PGBIN/pg_isready" -q -h 127.0.0.1 -p 55432 && break
+            sleep 0.2
+          done
+          "$PGBIN/pg_isready" -q -h 127.0.0.1 -p 55432
+          cd ui && SILO_E2E_DATABASE="postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable" npm run e2e

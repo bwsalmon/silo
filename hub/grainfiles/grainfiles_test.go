@@ -2,8 +2,10 @@ package grainfiles
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -269,6 +271,114 @@ func TestBrokenFixturesParityWithLinter(t *testing.T) {
 
 		if !reflect.DeepEqual(gotCodes, wantCodes) {
 			t.Errorf("%s: got codes %v, want %v (findings: %v)", entry.Name(), gotCodes, wantCodes, findings)
+		}
+	}
+}
+
+func TestPythonGrainlintCrossCheckParity(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		if os.Getenv("SILO_REQUIRE_GRAINLINT") != "" {
+			t.Fatalf("python3 required by SILO_REQUIRE_GRAINLINT: %v", err)
+		}
+		t.Skip("python3 not installed")
+	}
+	if err := exec.Command("python3", "-c", "import yaml, jsonschema").Run(); err != nil {
+		if os.Getenv("SILO_REQUIRE_GRAINLINT") != "" {
+			t.Fatalf("python3 yaml/jsonschema required by SILO_REQUIRE_GRAINLINT: %v", err)
+		}
+		t.Skipf("python3 yaml/jsonschema not installed: %v", err)
+	}
+
+	root := repoRoot(t)
+	script := filepath.Join(root, "tools", "grainfiles", "grainlint.py")
+	examplesDir := filepath.Join(root, "examples", "grainfiles")
+	badDir := filepath.Join(root, "tools", "grainfiles", "testdata", "bad")
+
+	// 1. Both Python grainlint.py and Go LintTree must accept examples/grainfiles with 0 errors and 0 warnings.
+	pyOut, err := exec.Command("python3", script, examplesDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("grainlint.py(examples/grainfiles) failed: %v\n%s", err, pyOut)
+	}
+	if !strings.Contains(string(pyOut), "0 error(s), 0 warning(s)") {
+		t.Fatalf("grainlint.py(examples/grainfiles) unexpected output:\n%s", pyOut)
+	}
+	goFindings, err := LintTree(examplesDir)
+	if err != nil {
+		t.Fatalf("LintTree(examples/grainfiles): %v", err)
+	}
+	if len(goFindings) != 0 {
+		t.Fatalf("LintTree(examples/grainfiles) findings = %v, want none", goFindings)
+	}
+
+	// Verify every individual valid .task.md and .process.md file in examples/grainfiles parses cleanly in Go.
+	var validCount int
+	err = filepath.WalkDir(examplesDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		if strings.HasSuffix(path, ".task.md") || strings.HasSuffix(path, ".process.md") {
+			validCount++
+			gf, pErr := ParseFile(path)
+			if pErr != nil {
+				t.Errorf("ParseFile(%s) failed on valid example: %v", path, pErr)
+			} else if len(gf.Warnings) > 0 {
+				t.Errorf("ParseFile(%s) produced unexpected warnings: %v", path, gf.Warnings)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir(examples/grainfiles): %v", err)
+	}
+	if validCount == 0 {
+		t.Fatal("expected at least one valid grainfile in examples/grainfiles")
+	}
+
+	// 2. Every broken fixture in tools/grainfiles/testdata/bad must produce the exact same
+	// (Code, Severity) pairs in both Python grainlint.py and Go LintTree.
+	lineRe := regexp.MustCompile(`^(GF\d{3})\s+(error|warning)\s+`)
+	entries, err := os.ReadDir(badDir)
+	if err != nil {
+		t.Fatalf("ReadDir(testdata/bad): %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		caseName := entry.Name()
+		caseDir := filepath.Join(badDir, caseName)
+
+		pyOut, _ := exec.Command("python3", script, caseDir).CombinedOutput()
+		var pyCodeSev []string
+		for _, line := range strings.Split(string(pyOut), "\n") {
+			if m := lineRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+				pyCodeSev = append(pyCodeSev, m[1]+":"+m[2])
+			}
+		}
+		sort.Strings(pyCodeSev)
+		pyCodeSev = slices.Compact(pyCodeSev)
+
+		findings, err := LintTree(caseDir)
+		if err != nil {
+			t.Fatalf("LintTree(%s): %v", caseName, err)
+		}
+		var goCodeSev []string
+		for _, f := range findings {
+			sev := string(f.Severity)
+			if sev == "" {
+				sev = string(SeverityError)
+			}
+			goCodeSev = append(goCodeSev, f.Code+":"+sev)
+		}
+		sort.Strings(goCodeSev)
+		goCodeSev = slices.Compact(goCodeSev)
+
+		if len(pyCodeSev) == 0 {
+			t.Errorf("%s: Python grainlint.py emitted no findings (output: %s)", caseName, pyOut)
+		}
+		if !reflect.DeepEqual(goCodeSev, pyCodeSev) {
+			t.Errorf("%s parity mismatch: Go LintTree = %v, Python grainlint.py = %v\nPython output:\n%s",
+				caseName, goCodeSev, pyCodeSev, pyOut)
 		}
 	}
 }

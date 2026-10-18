@@ -555,3 +555,125 @@ func TestSubscriptionValidationAndReconnectCursor(t *testing.T) {
 		}
 	})
 }
+
+func TestStoreSchemaMigrationColumnUpgrade(t *testing.T) {
+	runUpgrade := func(t *testing.T, dbURL string) {
+		ctx := context.Background()
+		var (
+			db  *sql.DB
+			err error
+		)
+		if path, ok := strings.CutPrefix(dbURL, "sqlite:"); ok {
+			db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+		} else {
+			db, err = sql.Open("pgx", dbURL)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+
+		// Create legacy minimal tables missing the newer columns added by dbaccess.AddColumns.
+		legacyDDL := []string{
+			`CREATE TABLE grainfile_index (
+				repo            TEXT    NOT NULL,
+				path            TEXT    NOT NULL,
+				commit_sha      TEXT    NOT NULL,
+				ref             TEXT    NOT NULL DEFAULT '',
+				url             TEXT    NOT NULL DEFAULT '',
+				kind            TEXT    NOT NULL,
+				title           TEXT    NOT NULL,
+				recipient       TEXT    NOT NULL,
+				requestor       TEXT    NOT NULL DEFAULT '',
+				draft           INTEGER NOT NULL DEFAULT 0,
+				"references"    TEXT    NOT NULL DEFAULT '[]',
+				updated_at      BIGINT  NOT NULL,
+				PRIMARY KEY (repo, path, commit_sha)
+			)`,
+			`CREATE TABLE grainfile_subscriptions (
+				node_id         TEXT    PRIMARY KEY,
+				owner           TEXT    NOT NULL DEFAULT '',
+				recipients      TEXT    NOT NULL DEFAULT '[]',
+				repos           TEXT    NOT NULL DEFAULT '[]',
+				folders         TEXT    NOT NULL DEFAULT '[]',
+				grainfiles      TEXT    NOT NULL DEFAULT '[]',
+				cursor          BIGINT  NOT NULL DEFAULT 0,
+				revision        BIGINT  NOT NULL DEFAULT 1,
+				updated_at      BIGINT  NOT NULL
+			)`,
+			`CREATE TABLE grainfile_events (
+				seq             BIGINT  PRIMARY KEY,
+				type            TEXT    NOT NULL,
+				repo            TEXT    NOT NULL,
+				path            TEXT    NOT NULL DEFAULT '',
+				commit_sha      TEXT    NOT NULL DEFAULT '',
+				ref             TEXT    NOT NULL DEFAULT '',
+				grainfile_url   TEXT    NOT NULL DEFAULT '',
+				kind            TEXT    NOT NULL DEFAULT '',
+				title           TEXT    NOT NULL DEFAULT '',
+				recipient       TEXT    NOT NULL DEFAULT '',
+				payload         TEXT    NOT NULL DEFAULT '{}',
+				created_at      BIGINT  NOT NULL
+			)`,
+		}
+		for _, stmt := range legacyDDL {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				t.Fatalf("legacy DDL: %v", err)
+			}
+		}
+
+		// OpenExisting on legacy schema missing added columns must fail.
+		if _, err := OpenExisting(ctx, dbURL); err == nil {
+			t.Fatal("OpenExisting on legacy schema missing added columns succeeded, want error")
+		}
+
+		// Opening the store must migrate all missing columns cleanly and idempotently.
+		s, err := Open(ctx, dbURL)
+		if err != nil {
+			t.Fatalf("Open on legacy schema: %v", err)
+		}
+		defer s.Close()
+
+		s2, err := Open(ctx, dbURL)
+		if err != nil {
+			t.Fatalf("second Open on migrated schema: %v", err)
+		}
+		s2.Close()
+
+		// Verify queries and writes involving migrated columns (not_before, ready_emitted,
+		// completed_*, validation_json, removed, dependency_url, triggered_by) succeed.
+		gf, err := Parse("tasks/01-mig.task.md", []byte("---\ntitle: Migrated task test\nrecipient: https://github.com/acme/agent\nnot_before: \"2026-01-01T00:00:00Z\"\n---\nBody.\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = gf.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/migrated",
+			Ref:     "refs/heads/main",
+			Commit:  "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+			Path:    "tasks/01-mig.task.md",
+		})
+		rec, err := s.IndexGrainfile(ctx, gf)
+		if err != nil {
+			t.Fatalf("IndexGrainfile after migration: %v", err)
+		}
+		if rec.URL == "" {
+			t.Fatal("expected non-empty indexed record URL after schema migration")
+		}
+		promoted, err := s.PromoteDeferred(ctx, time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC))
+		if err != nil {
+			t.Fatalf("PromoteDeferred after migration: %v", err)
+		}
+		_ = promoted
+		if _, err := s.RecordDependencyCompleted(ctx, rec.URL, "aaaa1111bbbb2222cccc3333dddd4444eeee5555", "done", "migrated completion"); err != nil {
+			t.Fatalf("RecordDependencyCompleted after migration: %v", err)
+		}
+	}
+
+	t.Run("sqlite", func(t *testing.T) {
+		runUpgrade(t, "sqlite:"+filepath.Join(t.TempDir(), "legacy.db"))
+	})
+	t.Run("postgres", func(t *testing.T) {
+		pg := pgtest.Start(t)
+		runUpgrade(t, pg.URL)
+	})
+}

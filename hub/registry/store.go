@@ -114,6 +114,7 @@ func openStore(ctx context.Context, url string, create bool) (*Store, error) {
 // registers again.
 var added = []dbaccess.Column{
 	{Table: "hub_nodes", Name: "features", Add: `ALTER TABLE hub_nodes ADD COLUMN features TEXT NOT NULL DEFAULT '[]'`},
+	{Table: "hub_nodes", Name: "recipients", Add: `ALTER TABLE hub_nodes ADD COLUMN recipients TEXT NOT NULL DEFAULT '[]'`},
 	{Table: "hub_nodes", Name: "ui", Add: `ALTER TABLE hub_nodes ADD COLUMN ui TEXT NOT NULL DEFAULT ''`},
 }
 
@@ -178,6 +179,10 @@ func (s *Store) register(ctx context.Context, e Entry, pod, conn string) error {
 	if err != nil {
 		return err
 	}
+	recipients, err := json.Marshal(append([]string{}, e.Recipients...))
+	if err != nil {
+		return err
+	}
 	var uiJSON string
 	if e.UI != nil {
 		b, err := json.Marshal(e.UI)
@@ -186,13 +191,13 @@ func (s *Store) register(ctx context.Context, e Entry, pod, conn string) error {
 		}
 		uiJSON = string(b)
 	}
-	n, err := s.exec(ctx, `INSERT INTO hub_nodes (id, owner, pod, conn, repos, slots, version, labels, features, ui, free, settled, connected_at, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+	n, err := s.exec(ctx, `INSERT INTO hub_nodes (id, owner, pod, conn, repos, slots, version, labels, features, recipients, ui, free, settled, connected_at, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET pod = excluded.pod, conn = excluded.conn, repos = excluded.repos,
-			slots = excluded.slots, version = excluded.version, labels = excluded.labels, features = excluded.features, ui = excluded.ui, free = excluded.free,
+			slots = excluded.slots, version = excluded.version, labels = excluded.labels, features = excluded.features, recipients = excluded.recipients, ui = excluded.ui, free = excluded.free,
 			settled = hub_nodes.settled + 1, connected_at = excluded.connected_at, last_seen = excluded.last_seen
 		WHERE hub_nodes.owner = excluded.owner`,
-		e.ID, e.Owner, pod, conn, repos, e.Slots, e.Version, labels, string(features), uiJSON, e.Free, e.ConnectedAt.UnixMilli(), e.LastSeen.UnixMilli())
+		e.ID, e.Owner, pod, conn, repos, e.Slots, e.Version, labels, string(features), string(recipients), uiJSON, e.Free, e.ConnectedAt.UnixMilli(), e.LastSeen.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("registry: registering %s: %w", e.ID, err)
 	}
@@ -262,7 +267,7 @@ func (s *Store) unbind(ctx context.Context, id string) error {
 
 // load reads every node, with its pod's lease.
 func (s *Store) load(ctx context.Context) ([]row, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner, n.pod, n.conn, n.repos, n.slots, n.version, n.labels, n.features, n.ui,
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner, n.pod, n.conn, n.repos, n.slots, n.version, n.labels, n.features, n.recipients, n.ui,
 		n.free, n.settled, n.connected_at, n.last_seen, p.lease_until
 		FROM hub_nodes n LEFT JOIN hub_pods p ON p.pod = n.pod`)
 	if err != nil {
@@ -274,11 +279,12 @@ func (s *Store) load(ctx context.Context) ([]row, error) {
 		var (
 			r                   row
 			repos, labels       string
-			features, uiJSON    string
+			features            string
+			recipients, uiJSON  string
 			connected, lastSeen int64
 			until               sql.NullInt64
 		)
-		if err := rows.Scan(&r.ID, &r.Owner, &r.pod, &r.conn, &repos, &r.Slots, &r.Version, &labels, &features, &uiJSON,
+		if err := rows.Scan(&r.ID, &r.Owner, &r.pod, &r.conn, &repos, &r.Slots, &r.Version, &labels, &features, &recipients, &uiJSON,
 			&r.Free, &r.settled, &connected, &lastSeen, &until); err != nil {
 			return nil, err
 		}
@@ -290,6 +296,9 @@ func (s *Store) load(ctx context.Context) ([]row, error) {
 		}
 		if err := json.Unmarshal([]byte(features), &r.Features); err != nil {
 			return nil, fmt.Errorf("registry: node %s: features: %w", r.ID, err)
+		}
+		if err := json.Unmarshal([]byte(recipients), &r.Recipients); err != nil {
+			return nil, fmt.Errorf("registry: node %s: recipients: %w", r.ID, err)
 		}
 		if uiJSON != "" {
 			var ui NodeUI

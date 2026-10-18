@@ -797,6 +797,9 @@ func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Messag
 		return
 	}
 	completedRec, err := s.Grainfiles.GetIndexByURL(ctx, msg.GrainfileURL, msg.CommitSHA)
+	if errors.Is(err, grainfiles.ErrNotFound) && msg.CommitSHA != "" {
+		completedRec, err = s.Grainfiles.GetIndexByURL(ctx, msg.GrainfileURL, "")
+	}
 	if err != nil {
 		if msg.RequestID != "" {
 			_ = nc.ctl.write(Message{
@@ -864,10 +867,17 @@ func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Messag
 }
 
 func (s *Server) pumpGrainfileEvents(ctx context.Context, nc *nodeConn) {
+	retry := time.NewTicker(200 * time.Millisecond)
+	defer retry.Stop()
+	needRetry := false
 	for {
 		select {
 		case <-nc.wakeCh:
-			s.deliverNodeGrainfileEvents(ctx, nc)
+			needRetry = !s.deliverNodeGrainfileEvents(ctx, nc)
+		case <-retry.C:
+			if needRetry {
+				needRetry = !s.deliverNodeGrainfileEvents(ctx, nc)
+			}
 		case <-nc.m.Done():
 			return
 		case <-ctx.Done():
@@ -876,37 +886,43 @@ func (s *Server) pumpGrainfileEvents(ctx context.Context, nc *nodeConn) {
 	}
 }
 
-func (s *Server) deliverNodeGrainfileEvents(ctx context.Context, nc *nodeConn) {
+func (s *Server) deliverNodeGrainfileEvents(ctx context.Context, nc *nodeConn) bool {
 	if s.Grainfiles == nil {
-		return
+		return true
 	}
 	sub, err := s.Grainfiles.GetSubscriptions(ctx, nc.id)
 	if err != nil {
-		return
+		return errors.Is(err, grainfiles.ErrNotFound)
 	}
 	if len(sub.Recipients) == 0 && len(sub.Repos) == 0 && len(sub.Folders) == 0 && len(sub.Grainfiles) == 0 {
-		return
+		return true
 	}
 	evs, err := s.Grainfiles.EventsForNode(ctx, nc.id, sub.Cursor)
-	if err != nil || len(evs) == 0 {
-		return
+	if err != nil {
+		return false
+	}
+	if len(evs) == 0 {
+		return true
 	}
 	for _, ev := range evs {
 		select {
 		case <-nc.m.Done():
-			return
+			return false
 		default:
 		}
 		evCopy := ev
-		_ = s.Grainfiles.AdvanceCursor(context.WithoutCancel(ctx), nc.id, ev.Seq)
 		if err := nc.ctl.write(Message{
 			Type:           TypeGrainfileEvent,
 			GrainfileEvent: &evCopy,
 			Cursor:         ev.Seq,
 		}); err != nil {
-			return
+			return false
+		}
+		if err := s.Grainfiles.AdvanceCursor(context.WithoutCancel(ctx), nc.id, ev.Seq); err != nil {
+			return false
 		}
 	}
+	return true
 }
 
 // NotifyGrainfiles wakes all locally connected nodes to deliver any new
