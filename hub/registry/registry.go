@@ -80,6 +80,7 @@ type NodeUI struct {
 	URL     string `json:"url,omitempty"`
 	Team    string `json:"team,omitempty"`
 	Access  string `json:"access,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // FeatureInteractive is a node that runs interactive tasks: sessions
@@ -301,12 +302,21 @@ func (r *Registry) staleAfter() time.Duration {
 }
 
 var (
-	idPattern   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
-	repoPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9._-]+$`)
+	idPattern      = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+	uiLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	repoPattern    = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9._-]+$`)
 	// A feature name is one a node does not know is simply never asked
 	// of it, so any short name is accepted.
 	featurePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 )
+
+// ValidNodeUILabel reports whether id qualifies as a safe DNS label for
+// serving a node's tunneled UI host (<id>.<node-ui-domain>): 1-63
+// lower-case ASCII letters, digits or hyphens, neither starting nor
+// ending with a hyphen, and not a punycode ("xn--") label.
+func ValidNodeUILabel(id string) bool {
+	return uiLabelPattern.MatchString(id) && !strings.HasPrefix(id, "xn--")
+}
 
 // Validate checks a node's registration, and returns it with its
 // repositories lower-cased, sorted and deduplicated.
@@ -345,6 +355,27 @@ func Validate(n Node) (Node, error) {
 	}
 	sort.Strings(features)
 	n.Features = features
+	wantsUI := (n.UI != nil && n.UI.Offered) || slices.Contains(n.Features, FeatureNodeUI)
+	if wantsUI {
+		if !ValidNodeUILabel(n.ID) {
+			reason := "node ID is not a valid lowercase DNS label"
+			if strings.HasPrefix(strings.ToLower(n.ID), "xn--") {
+				reason = "punycode node IDs (xn--) may not serve a UI"
+			}
+			n.UI = &NodeUI{Offered: false, Reason: reason}
+			n.Features = slices.DeleteFunc(n.Features, func(f string) bool { return f == FeatureNodeUI })
+		} else if n.UI != nil {
+			uiCopy := *n.UI
+			uiCopy.Offered = true
+			uiCopy.Team = strings.TrimSpace(uiCopy.Team)
+			uiCopy.Access = strings.TrimSpace(uiCopy.Access)
+			uiCopy.URL = ""
+			if uiCopy.Access != "" && uiCopy.Access != "read-only" && uiCopy.Access != "read-write" {
+				return n, fmt.Errorf("%w: ui.access %q: want \"read-only\" or \"read-write\"", ErrInvalid, uiCopy.Access)
+			}
+			n.UI = &uiCopy
+		}
+	}
 	return n, nil
 }
 

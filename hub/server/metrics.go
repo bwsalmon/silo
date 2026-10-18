@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/registry"
@@ -47,6 +49,9 @@ type metrics struct {
 	subscribers                     prometheus.Gauge
 	views                           *prometheus.CounterVec
 	viewLatency                     prometheus.Histogram
+	webhooks                        *prometheus.CounterVec
+	grainfileEvents                 *prometheus.CounterVec
+	contentRequests                 *prometheus.CounterVec
 	requests                        *prometheus.CounterVec
 	storeErrors                     *prometheus.CounterVec
 	leader                          prometheus.Gauge
@@ -88,6 +93,18 @@ func newMetrics(h *Hub) *metrics {
 		Help:    "From a view-through request to the hub answering it: the node's first answer, or the error.",
 		Buckets: prometheus.DefBuckets,
 	})
+	m.webhooks = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "silo_hub_webhooks_total",
+		Help: "GitHub webhook deliveries to /v1/webhooks/github, by event and result: accepted, unauthorized, bad_request, error.",
+	}, []string{"event", "result"})
+	m.grainfileEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "silo_hub_grainfile_events_total",
+		Help: "Emitted grainfile_events, by type: task_ready, process_updated, process_triggered, dependency_completed, task_removed, process_removed.",
+	}, []string{"type"})
+	m.contentRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "silo_hub_content_requests_total",
+		Help: "Grainfile content requests (/v1/grainfiles/content and mux fetch_*), by status code.",
+	}, []string{"code"})
 	m.requests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "silo_hub_http_requests_total", Help: "HTTP requests answered, by route pattern and status code.",
 	}, []string{"route", "code"})
@@ -102,7 +119,8 @@ func newMetrics(h *Hub) *metrics {
 		Name: "silo_hub_dispatcher_terms_total", Help: "Terms of the dispatcher's lease this pod has taken: each one recovers the backlog.",
 	})
 	m.own = []prometheus.Collector{m.connects, m.disconnects, m.refusals, m.dispatch, m.dispatchLatency,
-		m.ingested, m.subscribers, m.views, m.viewLatency, m.requests, m.storeErrors, m.leader, m.terms,
+		m.ingested, m.subscribers, m.views, m.viewLatency, m.webhooks, m.grainfileEvents, m.contentRequests,
+		m.requests, m.storeErrors, m.leader, m.terms,
 		&stateCollector{h: h, m: m}}
 	m.reg.MustRegister(m.own...)
 	m.reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
@@ -113,6 +131,16 @@ func newMetrics(h *Hub) *metrics {
 	for _, ev := range []tasks.Event{tasks.EventAccepted, tasks.EventResumed, tasks.EventRefused, tasks.EventTimeout,
 		tasks.EventUnreachable, tasks.EventLost, tasks.EventLostRequeued} {
 		m.dispatch.WithLabelValues(string(ev))
+	}
+	for _, typ := range []string{
+		grainfiles.EventTaskReady,
+		grainfiles.EventProcessUpdated,
+		grainfiles.EventProcessTriggered,
+		grainfiles.EventDependencyCompleted,
+		"task_removed",
+		"process_removed",
+	} {
+		m.grainfileEvents.WithLabelValues(typ)
 	}
 	return m
 }
@@ -210,6 +238,46 @@ func (m *metrics) viewThrough(next http.Handler) http.Handler {
 	})
 }
 
+func (m *metrics) observeGrainfileEvents(evs []grainfiles.Event) {
+	for _, ev := range evs {
+		if ev.Type != "" {
+			m.grainfileEvents.WithLabelValues(ev.Type).Inc()
+		}
+	}
+}
+
+func (m *metrics) wrapWebhooks(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ev := strings.ToLower(strings.TrimSpace(r.Header.Get("X-GitHub-Event")))
+		if ev == "" {
+			ev = "push"
+		}
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		code := sw.status()
+		var res string
+		switch {
+		case code < 300:
+			res = "accepted"
+		case code == http.StatusUnauthorized:
+			res = "unauthorized"
+		case code >= 400 && code < 500:
+			res = "bad_request"
+		default:
+			res = "error"
+		}
+		m.webhooks.WithLabelValues(ev, res).Inc()
+	})
+}
+
+func (m *metrics) wrapContentRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		m.contentRequests.WithLabelValues(strconv.Itoa(sw.status())).Inc()
+	})
+}
+
 // statusWriter records the status a handler answered with. It passes
 // Flush and Hijack through: the event streams flush, and the node and
 // WebSocket connections hijack.
@@ -291,15 +359,22 @@ var (
 		"Events the event store holds.", nil, nil)
 	descEventBytes = prometheus.NewDesc("silo_hub_event_store_bytes",
 		"Bytes of event bodies the event store holds.", nil, nil)
+	descGrainfilesIndexed = prometheus.NewDesc("silo_hub_grainfiles_indexed",
+		"Active non-removed indexed Grainfiles, by kind: task, process, draft.", []string{"kind"}, nil)
+	descGrainfileSubscriptions = prometheus.NewDesc("silo_hub_grainfile_subscriptions",
+		"Nodes with registered Grainfile subscriptions.", nil, nil)
 	descDBOpen = prometheus.NewDesc("silo_hub_db_open_connections",
 		"Open database connections, by store.", []string{"store"}, nil)
+	descDBInUse = prometheus.NewDesc("silo_hub_db_in_use_connections",
+		"In-use database connections, by store.", []string{"store"}, nil)
 	descDBWait = prometheus.NewDesc("silo_hub_db_wait_count_total",
 		"Waits for a database connection, by store.", []string{"store"}, nil)
 )
 
 func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descReady, descDatabaseUp, descNodes, descTeamNodes, descTeamFree,
-		descBacklog, descOldestQueued, descEventRows, descEventBytes, descDBOpen, descDBWait} {
+		descBacklog, descOldestQueued, descEventRows, descEventBytes,
+		descGrainfilesIndexed, descGrainfileSubscriptions, descDBOpen, descDBInUse, descDBWait} {
 		ch <- d
 	}
 }
@@ -353,6 +428,7 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 		{"grainfiles", h.Grainfiles.Stats()},
 	} {
 		gauge(ch, descDBOpen, float64(s.stats.OpenConnections), s.name)
+		gauge(ch, descDBInUse, float64(s.stats.InUse), s.name)
 		ch <- prometheus.MustNewConstMetric(descDBWait, prometheus.CounterValue, float64(s.stats.WaitCount), s.name)
 	}
 
@@ -399,5 +475,27 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	if rows, bytes, err := h.Events.Size(ctx); !failed(err) {
 		gauge(ch, descEventRows, float64(rows))
 		gauge(ch, descEventBytes, float64(bytes))
+	}
+	if records, err := h.Grainfiles.ListIndexByRepo(ctx, ""); !failed(err) {
+		byKind := map[string]int{"task": 0, "process": 0, "draft": 0}
+		for _, rec := range records {
+			if rec.Draft {
+				byKind["draft"]++
+			} else if rec.Kind != "" {
+				byKind[string(rec.Kind)]++
+			}
+		}
+		for _, k := range []string{"task", "process", "draft"} {
+			gauge(ch, descGrainfilesIndexed, float64(byKind[k]), k)
+		}
+	}
+	if subs, err := h.Grainfiles.ListSubscriptions(ctx); !failed(err) {
+		n := 0
+		for _, sub := range subs {
+			if len(sub.Recipients) > 0 || len(sub.Repos) > 0 || len(sub.Folders) > 0 || len(sub.Grainfiles) > 0 {
+				n++
+			}
+		}
+		gauge(ch, descGrainfileSubscriptions, float64(n))
 	}
 }

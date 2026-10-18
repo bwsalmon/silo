@@ -223,3 +223,63 @@ func TestCrossTeamIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeUITeamAdminIsolation(t *testing.T) {
+	w := newWorld(t)
+	hb := w.hb
+	ctx := context.Background()
+
+	// Register a node owned by dave (member of teamA) offering UI to teamA.
+	node := registry.Node{
+		ID:    "ws-dave",
+		Repos: []string{repoA},
+		Slots: 1,
+		UI:    &registry.NodeUI{Offered: true, Team: teamA, Access: "read-only"},
+	}
+	if err := hb.h.Directory.ValidateNodeUI(ctx, dave, &node); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := hb.h.Registry.Register(node, dave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+
+	// Owner (dave) and teamA admin (alice) pass authorization (reaching Open, which returns 503 because ws-dave has no live tunnel conn).
+	for _, allowed := range []string{dave, alice} {
+		code, _ := try(t, hb.user(allowed), "GET", hb.url+"/", "ws-dave."+nodeDomain, nil, false)
+		if code == http.StatusNotFound || code == http.StatusUnauthorized {
+			t.Errorf("allowed viewer %s on ws-dave got %d", allowed, code)
+		}
+	}
+
+	// Hub admin (root, not in teamA), teamB admin (bob), teamB member (carol), and outsider (nina) all receive 404.
+	for _, denied := range []string{root, bob, carol, nina} {
+		code, _ := try(t, hb.user(denied), "GET", hb.url+"/", "ws-dave."+nodeDomain, nil, false)
+		if code != http.StatusNotFound {
+			t.Errorf("denied viewer %s on ws-dave got %d, want 404", denied, code)
+		}
+	}
+
+	// If dave claims ui.team = teamB (which dave is not in), ValidateNodeUI drops ui.team and bob gets 404.
+	badNode := registry.Node{
+		ID:    "ws-dave-bad",
+		Repos: []string{repoA},
+		Slots: 1,
+		UI:    &registry.NodeUI{Offered: true, Team: teamB},
+	}
+	if err := hb.h.Directory.ValidateNodeUI(ctx, dave, &badNode); err != nil {
+		t.Fatal(err)
+	}
+	if badNode.UI.Team != "" || badNode.UI.Reason == "" {
+		t.Fatalf("badNode UI = %+v; want Team=\"\" and Reason set", badNode.UI)
+	}
+	leaseBad, err := hb.h.Registry.Register(badNode, dave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leaseBad.Close()
+	if code, _ := try(t, hb.user(bob), "GET", hb.url+"/", "ws-dave-bad."+nodeDomain, nil, false); code != http.StatusNotFound {
+		t.Errorf("bob on ws-dave-bad got %d, want 404", code)
+	}
+}

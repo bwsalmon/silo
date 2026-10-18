@@ -188,4 +188,61 @@ func TestBuildServeConfigGrainfilesFlagsAndEnv(t *testing.T) {
 			t.Errorf("GitHubAppPrivateKey = %q, want file-app-pem", string(cfg.GitHubAppPrivateKey))
 		}
 	})
+
+	t.Run("node UI IAP audience flag and env", func(t *testing.T) {
+		t.Setenv("SILO_HUB_NODE_UI_IAP_AUDIENCE", "/projects/1/global/backendServices/2")
+		_, cfg, err := buildServeConfig([]string{"-database", "sqlite::memory:", "-dev"})
+		if err != nil {
+			t.Fatalf("buildServeConfig: %v", err)
+		}
+		if cfg.NodeUIIAPAudience != "/projects/1/global/backendServices/2" {
+			t.Errorf("NodeUIIAPAudience = %q", cfg.NodeUIIAPAudience)
+		}
+		_, cfg, err = buildServeConfig([]string{"-database", "sqlite::memory:", "-dev", "-node-ui-iap-audience", "/projects/1/global/backendServices/3"})
+		if err != nil {
+			t.Fatalf("buildServeConfig: %v", err)
+		}
+		if cfg.NodeUIIAPAudience != "/projects/1/global/backendServices/3" {
+			t.Errorf("NodeUIIAPAudience = %q", cfg.NodeUIIAPAudience)
+		}
+	})
+}
+
+func TestServeRefusesMissingWebhookSecretOnKubernetes(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	err = serve([]string{"-addr", addr, "-database", "postgres://silo@127.0.0.1:5432/silo", "-iap-audience", "/projects/1/global/backendServices/2"})
+	if err == nil || !strings.Contains(err.Error(), "webhook secret") {
+		t.Fatalf("serve without webhook secret on Kubernetes = %v, want webhook secret error", err)
+	}
+	// Nothing listened.
+	l2, lerr := net.Listen("tcp", addr)
+	if lerr != nil {
+		t.Fatalf("%s taken after refusal: %v", addr, lerr)
+	}
+	l2.Close()
+
+	// With a webhook secret file, CheckWebhookSecret succeeds.
+	dir := t.TempDir()
+	whFile := filepath.Join(dir, "webhook-secret")
+	if err := os.WriteFile(whFile, []byte("prod-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, cfg, err := buildServeConfig([]string{
+		"-database", "postgres://silo@127.0.0.1:5432/silo",
+		"-iap-audience", "/projects/1/global/backendServices/2",
+		"-webhook-secret-file", whFile,
+	})
+	if err != nil {
+		t.Fatalf("buildServeConfig with webhook-secret-file on Kubernetes: %v", err)
+	}
+	if cfg.WebhookSecret != "prod-secret" {
+		t.Errorf("WebhookSecret = %q, want prod-secret", cfg.WebhookSecret)
+	}
 }

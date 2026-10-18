@@ -1,8 +1,8 @@
 # Opening a Grain's own UI from the hub UI
 
-Part of the [hub design](hub.md). Status: **a design for the owner to
-review.** No code is written for it, and no implementation task is filed
-until the owner has read it.
+Part of the [hub design](hub.md). Status: **implemented** in
+`hub/registry`, `hub/directory`, `hub/rendezvous`, `hub/nodeui`,
+`hub/identity`, and `hub/server`.
 
 A team admin looking at a Grain in the hub UI ([ui.md](ui.md), option
 (a)) sometimes needs that Grain's own UI: its PRs, CI, merge queue and

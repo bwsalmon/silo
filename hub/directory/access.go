@@ -143,6 +143,82 @@ func (a *Admission) Admit(owner string, n registry.Node) error {
 	return nil
 }
 
+// ValidateNodeUI validates n.UI.Team when n offers a UI with a team
+// name (docs/grain-ui-proxy.md §3): it keeps ui.team only if owner is a
+// member or admin of ui.team and ui.team owns every repository n lists.
+// When that check fails, it drops ui.team (falling back to owner-only
+// access) and records ui.reason without refusing the node registration.
+func (s *Store) ValidateNodeUI(ctx context.Context, owner string, n *registry.Node) error {
+	if n == nil || n.UI == nil || !n.UI.Offered || strings.TrimSpace(n.UI.Team) == "" {
+		return nil
+	}
+	if s == nil {
+		uiCopy := *n.UI
+		uiCopy.Team = ""
+		uiCopy.Reason = "directory is unavailable"
+		n.UI = &uiCopy
+		return nil
+	}
+	a, err := s.Admission(ctx, []string{owner}, n.Repos)
+	if err != nil {
+		return err
+	}
+	return a.ValidateNodeUI(owner, n)
+}
+
+// ValidateNodeUI is Store.ValidateNodeUI answered from an Admission
+// snapshot.
+func (a *Admission) ValidateNodeUI(owner string, n *registry.Node) error {
+	if n == nil || n.UI == nil || !n.UI.Offered {
+		return nil
+	}
+	team := strings.TrimSpace(n.UI.Team)
+	if team == "" {
+		return nil
+	}
+	uiCopy := *n.UI
+	u, err := userPrincipal(owner)
+	if err != nil {
+		uiCopy.Team = ""
+		uiCopy.Reason = fmt.Sprintf("invalid owner %q", owner)
+		n.UI = &uiCopy
+		return nil
+	}
+	o := strings.TrimPrefix(u, UserPrefix)
+	teams, ok := a.teams[u]
+	if !ok {
+		return fmt.Errorf("%w: owner %s", ErrNotRead, o)
+	}
+	if teams[team] == "" {
+		uiCopy.Team = ""
+		uiCopy.Reason = fmt.Sprintf("owner %s is not a member of team %s", o, team)
+		n.UI = &uiCopy
+		return nil
+	}
+	for _, repo := range n.Repos {
+		r, err := normRepo(repo)
+		if err != nil {
+			uiCopy.Team = ""
+			uiCopy.Reason = fmt.Sprintf("invalid repository %q", repo)
+			n.UI = &uiCopy
+			return nil
+		}
+		repoTeam, ok := a.repos[r]
+		if !ok {
+			return fmt.Errorf("%w: repository %s", ErrNotRead, r)
+		}
+		if repoTeam != team {
+			uiCopy.Team = ""
+			uiCopy.Reason = fmt.Sprintf("repository %s is not owned by team %s", r, team)
+			n.UI = &uiCopy
+			return nil
+		}
+	}
+	uiCopy.Team = team
+	n.UI = &uiCopy
+	return nil
+}
+
 // Access is what one signed-in human may see and change: the
 // visibility rules of docs/hub.md §5.3.
 type Access struct {

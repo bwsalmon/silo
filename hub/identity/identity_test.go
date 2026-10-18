@@ -163,6 +163,45 @@ func TestAlgorithmMustMatchKey(t *testing.T) {
 	}
 }
 
+func TestIAPNodeUIAudience(t *testing.T) {
+	ec, _ := newSigners(t)
+	keys := jwks(t, ec)
+	const nodeAud = "/projects/123/global/backendServices/789"
+	a := &IAP{
+		Audience:       aud,
+		NodeUIAudience: nodeAud,
+		NodeUIDomain:   "nodes.hub.test",
+		Keys:           &KeySet{URL: keys.URL},
+	}
+	hubTok := ec.sign(t, iapClaims(nil))
+	nodeTok := ec.sign(t, iapClaims(func(c map[string]any) { c["aud"] = nodeAud }))
+
+	req := func(host, tok string) *http.Request {
+		r := iapRequest(tok)
+		r.Host = host
+		return r
+	}
+
+	if _, err := a.Principal(req("hub.test", hubTok)); err != nil {
+		t.Fatalf("hub host with hub audience: %v", err)
+	}
+	if _, err := a.Principal(req("ws-1.nodes.hub.test:443", nodeTok)); err != nil {
+		t.Fatalf("node UI host with node UI audience: %v", err)
+	}
+	if _, err := a.Principal(req("ws-1.nodes.hub.test", hubTok)); err == nil {
+		t.Fatal("node UI host accepted hub audience when NodeUIAudience is set")
+	}
+	if _, err := a.Principal(req("hub.test", nodeTok)); err == nil {
+		t.Fatal("hub host accepted node UI audience")
+	}
+
+	// Fallback to Audience when NodeUIAudience is unset.
+	fallback := &IAP{Audience: aud, NodeUIDomain: "nodes.hub.test", Keys: &KeySet{URL: keys.URL}}
+	if _, err := fallback.Principal(req("ws-1.nodes.hub.test", hubTok)); err != nil {
+		t.Fatalf("fallback to Audience on node UI host: %v", err)
+	}
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)

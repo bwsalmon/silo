@@ -472,11 +472,16 @@ data-source credentials and an Alertmanager.
 | `silo_hub_event_store_events`, `_bytes` | gauges | the event store's size |
 | `silo_hub_subscribers` | gauge | live event subscriptions open |
 | `silo_hub_view_requests_total{code}`, `silo_hub_view_latency_seconds` | counter, histogram | artifact view-throughs by answer, and the time to the node's answer |
+| `silo_hub_webhooks_total{event,result}` | counter | `/v1/webhooks/github` deliveries by GitHub event (`push`, `pull_request`, ...) and result (`accepted`, `unauthorized`, `bad_request`, `error`) |
+| `silo_hub_grainfiles_indexed{kind}` | gauge | active non-removed indexed Grainfiles by kind: `task`, `process`, `draft` |
+| `silo_hub_grainfile_subscriptions` | gauge | nodes with registered Grainfile subscriptions |
+| `silo_hub_grainfile_events_total{type}` | counter | emitted `grainfile_events` by type: `task_ready`, `process_updated`, `process_triggered`, `dependency_completed`, `task_removed`, `process_removed` |
+| `silo_hub_content_requests_total{code}` | counter | `/v1/grainfiles/content` requests by HTTP status code |
 | `silo_hub_http_requests_total{route,code}` | counter | every request, by its route pattern (`POST /v1/tasks`, `unmatched`; `node-ui` for every request to a node's own UI, hub.md §11) |
 | `silo_hub_dispatcher_leader` | gauge | 1 on the pod holding the dispatcher's lease and running the dispatcher (hub.md §2.2.1) |
 | `silo_hub_dispatcher_terms_total` | counter | terms of the lease this pod has taken; each recovers the backlog |
 | `silo_hub_store_errors_total{store}` | counter | database errors: `backlog` (the dispatcher), `events` (keeping events), `database` (pings and the scrape's reads) |
-| `silo_hub_db_open_connections{store}`, `silo_hub_db_wait_count_total{store}` | gauge, counter | each store's connection pool |
+| `silo_hub_db_open_connections{store}`, `silo_hub_db_in_use_connections{store}`, `silo_hub_db_wait_count_total{store}` | gauges, counter | each store's connection pool (`directory`, `backlog`, `events`, `grainfiles`) |
 
 Plus the Go runtime's and the process's (`go_*`, `process_*`), and the
 scrape's own `up`.

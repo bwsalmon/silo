@@ -103,10 +103,19 @@ for o in "${overlays[@]}"; do
 	grep -q 'secretName: silo-hub-claims$' "$f" && grep -A1 'name: SILO_HUB_CLAIMS_KEY_FILE$' <<<"$dep" | grep -q 'value: /var/run/secrets/silo-hub-claims/key$' ||
 		{ echo "$o: the hub must read its claims key from the silo-hub-claims Secret"; exit 1; }
 	grep -q 'SILO_HUB_CLAIMS_ISSUER: https://' "$f" || { echo "$o: the hub must sign claims as an https:// issuer"; exit 1; }
+	# GitHub webhooks and App credentials come from the silo-hub-github Secret.
+	grep -q 'secretName: silo-hub-github$' "$f" &&
+		grep -A1 'name: SILO_HUB_WEBHOOK_SECRET_FILE$' <<<"$dep" | grep -q 'value: /var/run/secrets/silo-hub-github/webhook-secret$' &&
+		grep -A1 'name: SILO_HUB_GITHUB_APP_KEY_FILE$' <<<"$dep" | grep -q 'value: /var/run/secrets/silo-hub-github/app-key$' ||
+		{ echo "$o: the hub must read its webhook secret and GitHub App key from the silo-hub-github Secret"; exit 1; }
 	route="$(awk 'BEGIN { RS = "\n---\n" } /kind: HTTPRoute/ && /\n  name: silo-hub\n/' "$f")"
 	# kustomize writes a rule's backendRefs before its matches.
 	grep -B1 'value: /v1/claims/keys$' <<<"$route" | grep -q 'type: Exact$' && grep -B6 'value: /v1/claims/keys$' <<<"$route" | grep -q 'name: silo-hub-nodes$' ||
 		{ echo "$o: the claims keys must reach the nodes' backend, as an exact path"; exit 1; }
+	grep -B1 'value: /v1/webhooks/github$' <<<"$route" | grep -q 'type: Exact$' && grep -B6 'value: /v1/webhooks/github$' <<<"$route" | grep -q 'name: silo-hub-nodes$' ||
+		{ echo "$o: /v1/webhooks/github must reach the nodes' backend, as an exact path"; exit 1; }
+	grep -B1 'value: /v1/grainfiles/content$' <<<"$route" | grep -q 'type: Exact$' && grep -B6 'value: /v1/grainfiles/content$' <<<"$route" | grep -q 'name: silo-hub-nodes$' ||
+		{ echo "$o: /v1/grainfiles/content must reach the nodes' backend, as an exact path"; exit 1; }
 	# Ingress is denied by default, and allowed to the hub's port only
 	# from Google's load balancer and health-check ranges, and to its
 	# metrics only from the Prometheus collectors (SA1-L5), and to its

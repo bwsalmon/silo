@@ -50,16 +50,30 @@ const (
 	TypeError = "error"
 )
 
+// Viewer roles on an http stream.
+const (
+	RoleOwner     = "owner"
+	RoleTeamAdmin = "team-admin"
+)
+
 // Message is a line on an http stream.
 type Message struct {
 	Type string `json:"type"`
 	// Node is the node's ID, in http.
 	Node string `json:"node,omitempty"`
 	// Viewer is whom the hub signed the request's sender in as, in
-	// http. It is the hub's claim: a node that verifies the viewer
-	// itself reads the request's X-Goog-IAP-JWT-Assertion, which the
-	// hub passes on as IAP sent it.
+	// http.
 	Viewer string `json:"viewer,omitempty"`
+	// Role is why the hub admitted Viewer ("owner" or "team-admin"), in
+	// http.
+	Role string `json:"role,omitempty"`
+	// Team is the node's validated ui.team when configured, in http.
+	Team string `json:"team,omitempty"`
+	// Access is the access level ("read-only" or "read-write") the node
+	// granted the viewer, in ok.
+	Access string `json:"access,omitempty"`
+	// RequestID traces the proxied request, in http.
+	RequestID string `json:"request_id,omitempty"`
 	// Error is the reason, in error.
 	Error string `json:"error,omitempty"`
 }
@@ -103,7 +117,8 @@ func (s *Server) logf(format string, args ...any) {
 // Node is the node a request's Host names, if it is one of Domain's
 // node hosts: "ws-1.nodes.example.com" is ws-1, for Domain
 // "nodes.example.com". A node ID that is not a DNS label (with
-// capitals, '.' or '_' in it) has no host.
+// capitals, '.' or '_' in it) or is a punycode ("xn--") label has no
+// host.
 func (s *Server) Node(host string) (string, bool) {
 	if s.Domain == "" {
 		return "", false
@@ -113,7 +128,7 @@ func (s *Server) Node(host string) (string, bool) {
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	id, ok := strings.CutSuffix(host, "."+strings.ToLower(s.Domain))
-	if !ok || !label.MatchString(id) {
+	if !ok || !label.MatchString(id) || strings.HasPrefix(id, "xn--") {
 		return "", false
 	}
 	return id, true
@@ -137,7 +152,8 @@ type ctxKey struct{}
 // target is what Rewrite hands the transport's dial: which node, and
 // for whom.
 type target struct {
-	node, viewer string
+	node, viewer, role, team string
+	https, legacy            bool
 }
 
 // refusal is the node's answer error: it does not serve its UI here.
@@ -146,10 +162,11 @@ type refusal struct{ why string }
 func (r *refusal) Error() string { return r.why }
 
 // ServeHTTP serves one request to a node's UI host. The caller must be
-// signed in, and the node must be theirs: a node they do not own, or
-// that the hub does not know, is answered 404 whether or not it exists.
-// An offline node is answered 503, one that does not serve its UI
-// through the hub 403.
+// signed in, and must be either the node's owner or an authenticated
+// team admin of the node's validated ui.team: a node they may not open,
+// or that the hub does not know, is answered 404 whether or not it
+// exists. An offline node is answered 503, one that does not serve its
+// UI through the hub 403.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.Node(r.Host)
 	if !ok {
@@ -162,7 +179,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, ok := s.Registry.Get(id)
-	if !ok || !strings.EqualFold(e.Owner, acc.Email) {
+	if !ok || !registry.ValidNodeUILabel(e.ID) || (e.UI != nil && !e.UI.Offered) {
+		http.Error(w, "no such node", http.StatusNotFound)
+		return
+	}
+	uiTeam := ""
+	if e.UI != nil && e.UI.Offered && e.UI.Team != "" {
+		if s.Directory != nil && s.Directory.Store != nil {
+			_ = s.Directory.Store.ValidateNodeUI(r.Context(), e.Owner, &e.Node)
+		}
+		if e.UI != nil {
+			uiTeam = e.UI.Team
+		}
+	}
+	var role string
+	switch {
+	case e.Owner != "" && strings.EqualFold(e.Owner, acc.Email):
+		role = RoleOwner
+	case uiTeam != "" && acc.Teams[uiTeam] == directory.Admin:
+		role = RoleTeamAdmin
+	default:
 		http.Error(w, "no such node", http.StatusNotFound)
 		return
 	}
@@ -176,8 +212,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	isHTTPS := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	s.once.Do(s.init)
-	s.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, target{node: id, viewer: acc.Email})))
+	s.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, target{
+		node:   id,
+		viewer: acc.Email,
+		role:   role,
+		team:   uiTeam,
+		https:  isHTTPS,
+		legacy: e.UI == nil && role == RoleOwner,
+	})))
 }
 
 func (s *Server) init() {
@@ -191,12 +235,13 @@ func (s *Server) init() {
 }
 
 // clientHeaders are request headers the hub does not pass on: the
-// hub's own credentials (Authorization is how a non-browser signs in to
-// the hub, and is not the node's to see), and the plaintext identity
-// headers grain's relay strips too, which nothing in front of the hub
-// sets and so only a client could have written.
+// hub's and IAP's own credentials, and the plaintext identity headers
+// grain's relay strips too.
 var clientHeaders = []string{
 	"Authorization",
+	"X-Goog-IAP-JWT-Assertion",
+	"X-Goog-Authenticated-User-Email",
+	"X-Goog-Authenticated-User-ID",
 	"X-Forwarded-User",
 	"X-User-LDAP",
 	"X-Grain-User",
@@ -207,19 +252,38 @@ var clientHeaders = []string{
 // is not given.
 var hubCookies = map[string]bool{identity.SessionCookie: true, identity.FlowCookie: true}
 
+func isReservedCookie(name string) bool {
+	if hubCookies[name] {
+		return true
+	}
+	lower := strings.ToLower(name)
+	if lower == "__host-"+strings.ToLower(identity.SessionCookie) || lower == "__host-"+strings.ToLower(identity.FlowCookie) {
+		return true
+	}
+	upper := strings.ToUpper(name)
+	return strings.HasPrefix(upper, "GCP_IAP_") || strings.HasPrefix(upper, "__HOST-GCP_IAP_")
+}
+
 func rewrite(pr *httputil.ProxyRequest) {
+	t, _ := pr.In.Context().Value(ctxKey{}).(target)
 	pr.Out.URL.Scheme = "http"
 	pr.Out.URL.Host = "node"
 	pr.Out.Host = pr.In.Host
 	pr.SetXForwarded()
+	if t.https {
+		pr.Out.Header.Set("X-Forwarded-Proto", "https")
+	}
 	for _, h := range clientHeaders {
+		if strings.EqualFold(h, identity.IAPHeader) && t.legacy {
+			continue
+		}
 		pr.Out.Header.Del(h)
 	}
 	if cs := pr.In.Cookies(); len(cs) > 0 {
 		pr.Out.Header.Del("Cookie")
 		var keep []string
 		for _, c := range cs {
-			if !hubCookies[c.Name] {
+			if !isReservedCookie(c.Name) {
 				keep = append(keep, c.String())
 			}
 		}
@@ -229,10 +293,23 @@ func rewrite(pr *httputil.ProxyRequest) {
 	}
 }
 
-// modifyResponse drops a cookie the node sets for a wider domain than
-// its own host: one node's UI may not set cookies on its siblings', nor
-// on the hub's.
+// modifyResponse hardens Set-Cookie headers and sets security headers
+// on proxied node responses (docs/grain-ui-proxy.md §5).
 func modifyResponse(resp *http.Response) error {
+	if resp.Header.Get("Referrer-Policy") == "" {
+		resp.Header.Set("Referrer-Policy", "no-referrer")
+	}
+	if resp.Header.Get("Cross-Origin-Opener-Policy") == "" {
+		resp.Header.Set("Cross-Origin-Opener-Policy", "same-origin")
+	}
+	var isHTTPS bool
+	if resp.Request != nil {
+		if t, ok := resp.Request.Context().Value(ctxKey{}).(target); ok && t.https {
+			isHTTPS = true
+		} else if resp.Request.TLS != nil || strings.EqualFold(resp.Request.Header.Get("X-Forwarded-Proto"), "https") {
+			isHTTPS = true
+		}
+	}
 	sc := resp.Header.Values("Set-Cookie")
 	if len(sc) == 0 {
 		return nil
@@ -243,7 +320,16 @@ func modifyResponse(resp *http.Response) error {
 		if err != nil || c.Domain != "" {
 			continue
 		}
-		resp.Header.Add("Set-Cookie", v)
+		if isReservedCookie(c.Name) || strings.HasPrefix(strings.ToLower(c.Name), "__host-") {
+			continue
+		}
+		if isHTTPS && !c.Secure {
+			continue
+		}
+		if c.SameSite == 0 || c.SameSite == http.SameSiteDefaultMode {
+			c.SameSite = http.SameSiteLaxMode
+		}
+		resp.Header.Add("Set-Cookie", c.String())
 	}
 	return nil
 }
@@ -278,7 +364,7 @@ func (s *Server) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(Message{Type: TypeHTTP, Node: t.node, Viewer: t.viewer})
+	b, _ := json.Marshal(Message{Type: TypeHTTP, Node: t.node, Viewer: t.viewer, Role: t.role, Team: t.team})
 	c.SetDeadline(time.Now().Add(openTimeout))
 	if _, err := c.Write(append(b, '\n')); err != nil {
 		c.Close()

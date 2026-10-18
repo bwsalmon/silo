@@ -18,6 +18,8 @@ configMapGenerator:
       - SILO_HUB_ADMINS=user:bsalmon@google.com
       # SET: https:// and terraform's domain, as the HTTPRoute's host
       - SILO_HUB_CLAIMS_ISSUER=https://silo-hub.example.com
+      # SET: the GitHub App ID whose private key is in silo-hub-github
+      - SILO_HUB_GITHUB_APP_ID=
       # Empty: no node UIs. To serve them, terraform output -raw
       # node_ui_domain (nodes.<domain>), with the HTTPRoute below.
       - SILO_HUB_NODE_UI_DOMAIN=

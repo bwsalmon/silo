@@ -30,6 +30,9 @@ configMapGenerator:
       # The issuer of the task claims the hub signs, which nodes'
       # policies name as silo_issuer: the hub's URL, https://<domain>.
       - SILO_HUB_CLAIMS_ISSUER=https://hub.example.com
+      # The GitHub App ID used with SILO_HUB_GITHUB_APP_KEY_FILE to
+      # fetch grainfiles from repositories (docs/deploy.md).
+      - SILO_HUB_GITHUB_APP_ID=
       # Hub admins, comma-separated emails or groups.
       - SILO_HUB_ADMINS=
       # The Cloud SQL instance, PROJECT:REGION:INSTANCE.
