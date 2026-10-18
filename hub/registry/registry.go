@@ -159,7 +159,9 @@ type Registry struct {
 	Bus *notify.Bus
 
 	// wmu serialises Register, so that the database and the memory
-	// agree on which of two connections for a node came last.
+	// agree on which of two connections for a node came last, and
+	// keeps Run's sweep of stale rows from seeing a row Register has
+	// written but not yet holds.
 	wmu   sync.Mutex
 	mu    sync.Mutex
 	nodes map[string]*node

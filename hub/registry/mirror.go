@@ -54,6 +54,11 @@ func (r *Registry) renew(ctx context.Context) error {
 	if err := r.Store.renewPod(ctx, r.Pod, r.PodAddr, r.now().Add(r.podLease())); err != nil {
 		return err
 	}
+	// Register writes a node's row before it holds the node in memory:
+	// without wmu, a sweep between the two would take the node it is
+	// registering offline, and its first heartbeat would end it.
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
 	held := map[string]string{}
 	r.mu.Lock()
 	for id, n := range r.nodes {

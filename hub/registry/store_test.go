@@ -303,3 +303,26 @@ func TestSharedUnbind(t *testing.T) {
 	}
 	register(t, b, "ws-1", "bob@example.com", 1)
 }
+
+// TestSharedRenewDuringRegister: a sweep of the pod's stale rows that
+// runs while a node registers does not take the node offline, though
+// Register writes the row before it holds the node.
+func TestSharedRenewDuringRegister(t *testing.T) {
+	r := pod(t, "sqlite:"+filepath.Join(t.TempDir(), "hub.db"), "hub")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ctx.Err() == nil {
+			r.renew(ctx)
+		}
+	}()
+	for i := range 100 {
+		l := register(t, r, "ws-1", "alice@example.com", 1)
+		if !l.Heartbeat(1) {
+			t.Fatalf("registration %d: the node no longer holds its row", i)
+		}
+	}
+	cancel()
+	<-done
+}
