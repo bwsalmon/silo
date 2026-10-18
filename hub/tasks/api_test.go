@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
+	"github.com/bwsalmon/silo/hub/registry"
 )
 
 // headerAuth is a test sign-on: X-User is the email.
@@ -375,5 +380,153 @@ func TestAPIDependsOn(t *testing.T) {
 		if code, b := h.do(t, "dave@example.com", "POST", TasksPath, map[string]any{"repo": "bwsalmon/silo", "prompt": "x", "depends_on": deps}); code != http.StatusBadRequest {
 			t.Errorf("%s dependency: %d %s, want 400", name, code, b)
 		}
+	}
+}
+
+func TestNodeOriginatedAndGrainfileRuns(t *testing.T) {
+	ctx := context.Background()
+	h := newAPIHub(t)
+
+	reg := registry.New()
+	lease, err := reg.Register(registry.Node{ID: "ws-1", Repos: []string{"bwsalmon/silo"}, Slots: 2}, "alice@example.com")
+	check(t, err)
+	t.Cleanup(func() { lease.Close() })
+
+	streamMsgs := make(chan Message, 16)
+	disp := &Dispatcher{
+		Store:     h.store,
+		Registry:  reg,
+		Directory: h.dir,
+		Open: func(ctx context.Context, nodeID string) (net.Conn, error) {
+			c1, c2 := net.Pipe()
+			go func() {
+				defer c2.Close()
+				st := NewStream(c2)
+				for {
+					m, err := st.Read()
+					if err != nil {
+						return
+					}
+					streamMsgs <- m
+				}
+			}()
+			return c1, nil
+		},
+	}
+	h.api.Dispatcher = disp
+	reqMap := requests{}
+	h.api.Requests = reqMap
+
+	var terminals []Task
+	h.store.OnTerminal = func(ctx context.Context, t Task) {
+		terminals = append(terminals, t)
+	}
+
+	filer := &Filer{
+		Store:      h.store,
+		Directory:  h.dir,
+		Registry:   reg,
+		Dispatcher: disp,
+	}
+
+	// 1. Unauthorized owner (bob is in web, not infra) cannot register a run for bwsalmon/silo.
+	_, err = filer.RegisterRun(ctx, "ws-1", "bob@example.com", RunRegistration{
+		ID:           "t-unauth",
+		NodeTask:     "local-unauth",
+		Repo:         "bwsalmon/silo",
+		GrainfileURL: "https://github.com/bwsalmon/silo/blob/main/.grain/build.task.grain.md",
+	})
+	if !errors.Is(err, directory.ErrNotAdmitted) {
+		t.Fatalf("expected ErrNotAdmitted for bob on bwsalmon/silo, got %v", err)
+	}
+
+	// 2. Register a Grainfile-triggered process run directly in Running state (without Dispatcher offer/accept).
+	procRun, err := filer.RegisterRun(ctx, "ws-1", "alice@example.com", RunRegistration{
+		ID:            "t-proc-1",
+		NodeTask:      "local-proc-42",
+		Repo:          "bwsalmon/silo",
+		Title:         "Nightly benchmark",
+		Kind:          KindProcess,
+		GrainfileURL:  "https://github.com/bwsalmon/silo/blob/main/.grain/bench.process.grain.md",
+		CommitSHA:     "deadbeef1234",
+		TriggerSource: "push",
+	})
+	check(t, err)
+	if procRun.State != Running || procRun.Node != "ws-1" || procRun.NodeOwner != "alice@example.com" || procRun.NodeTask != "local-proc-42" {
+		t.Fatalf("unexpected registered run state/node: %+v", procRun)
+	}
+	if procRun.Kind != KindProcess || procRun.GrainfileURL != "https://github.com/bwsalmon/silo/blob/main/.grain/bench.process.grain.md" || procRun.CommitSHA != "deadbeef1234" || procRun.TriggerSource != "push" {
+		t.Fatalf("unexpected provenance fields: %+v", procRun)
+	}
+
+	// 3. Recover leaves node-originated runs (Attempts == 0) in Running state.
+	check(t, h.store.Recover(ctx, "hub restarted"))
+	gotAfterRecover, err := h.store.Get(ctx, "t-proc-1")
+	check(t, err)
+	if gotAfterRecover.State != Running {
+		t.Fatalf("Recover changed node-originated run state to %s, want running", gotAfterRecover.State)
+	}
+
+	// 4. Multi-tenant visibility in GET /v1/tasks: infra members (alice, dave) see it; web member (bob) does not.
+	if ts := h.list(t, "dave@example.com", ""); len(ts) != 1 || ts[0].ID != "t-proc-1" || ts[0].GrainfileURL != procRun.GrainfileURL {
+		t.Fatalf("dave list: %+v", ts)
+	}
+	if ts := h.list(t, "bob@example.com", ""); len(ts) != 0 {
+		t.Fatalf("bob should not see infra's run, got %+v", ts)
+	}
+
+	// 5. Interactive actions: approve, message, and cancel routed over reverse tunnel with node_task.
+	reqMap["t-proc-1"] = map[string]events.ApprovalRequest{
+		"req-deploy": {ID: "req-deploy", Tool: "deploy", Message: "Deploy to staging?"},
+	}
+	code, b := h.do(t, "dave@example.com", "POST", TasksPath+"/t-proc-1/approvals/req-deploy", map[string]string{
+		"decision": "allow",
+		"reason":   "looks good",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("POST approval: %d %s", code, b)
+	}
+	select {
+	case m := <-streamMsgs:
+		if m.Type != TypeApprove || m.Task == nil || m.Task.ID != "t-proc-1" || m.NodeTask != "local-proc-42" || m.Request != "req-deploy" || m.Decision != Allow {
+			t.Fatalf("unexpected approve stream message: %+v", m)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approve message on node stream")
+	}
+
+	code, b = h.do(t, "dave@example.com", "POST", TasksPath+"/t-proc-1/messages", map[string]any{
+		"id":   "msg-1",
+		"text": "Also check memory allocations",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("POST message: %d %s", code, b)
+	}
+	select {
+	case m := <-streamMsgs:
+		if m.Type != TypeMessage || m.Task == nil || m.Task.ID != "t-proc-1" || m.NodeTask != "local-proc-42" || m.Message == nil || m.Message.Text != "Also check memory allocations" {
+			t.Fatalf("unexpected message stream message: %+v", m)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for user message on node stream")
+	}
+
+	code, b = h.do(t, "alice@example.com", "POST", TasksPath+"/t-proc-1/cancel", map[string]string{
+		"reason": "stopping benchmark",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("POST cancel: %d %s", code, b)
+	}
+	select {
+	case m := <-streamMsgs:
+		if m.Type != TypeCancel || m.Task == nil || m.Task.ID != "t-proc-1" || m.NodeTask != "local-proc-42" || !strings.Contains(m.Reason, "stopping benchmark") {
+			t.Fatalf("unexpected cancel stream message: %+v", m)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for cancel message on node stream")
+	}
+
+	if len(terminals) != 1 || terminals[0].ID != "t-proc-1" || terminals[0].State != Cancelled {
+		t.Fatalf("expected OnTerminal to fire once for cancelled run, got %+v", terminals)
 	}
 }

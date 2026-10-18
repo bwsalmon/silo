@@ -113,9 +113,10 @@ type Dispatcher struct {
 	offers chan struct{} // a slot for each offer being written
 	wg     sync.WaitGroup
 
-	mu   sync.Mutex
-	live map[string]*live // tasks with a stream open, by ID
-	hold map[[2]string]time.Time
+	mu      sync.Mutex
+	running bool
+	live    map[string]*live // tasks with a stream open, by ID
+	hold    map[[2]string]time.Time
 }
 
 // Event is something the dispatcher did or saw, for Observe.
@@ -243,6 +244,14 @@ func (d *Dispatcher) wakeLocal() {
 // requeued, and a running one is lost until its node resumes it.
 func (d *Dispatcher) Run(ctx context.Context) error {
 	d.init()
+	d.mu.Lock()
+	d.running = true
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		d.running = false
+		d.mu.Unlock()
+	}()
 	if err := d.Store.Recover(ctx, "the dispatcher restarted: the hub restarted, or its lease changed hands"); err != nil {
 		return fmt.Errorf("tasks: recovering the backlog: %w", err)
 	}
@@ -299,11 +308,15 @@ func (d *Dispatcher) Cancel(ctx context.Context, id, reason string) (Task, error
 	d.finished(t)
 	d.mu.Lock()
 	l := d.live[id]
+	running := d.running
 	d.mu.Unlock()
 	if l != nil {
 		l.signal()
 	} else if t.CancelPending {
 		d.wakeLocal()
+		if !running && d.Open != nil {
+			d.deliverDirect(ctx, id)
+		}
 	}
 	if d.Bus != nil {
 		// The dispatcher with the task's stream may be another pod's.
@@ -320,14 +333,20 @@ func (d *Dispatcher) Cancel(ctx context.Context, id, reason string) (Task, error
 // approval requests, already kept in the store (Store.Answer): down the
 // task's stream, by whichever pod's dispatcher has it open. A node
 // without a stream for the task now is sent it when it next accepts the
-// task.
+// task, or on an action stream for a node-originated run.
 func (d *Dispatcher) Answered(ctx context.Context, task string) {
 	d.init()
 	d.mu.Lock()
 	l := d.live[task]
+	running := d.running
 	d.mu.Unlock()
 	if l != nil {
 		l.answered()
+	} else {
+		d.wakeLocal()
+		if !running && d.Open != nil {
+			d.deliverDirect(ctx, task)
+		}
 	}
 	if d.Bus != nil {
 		nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
@@ -342,14 +361,20 @@ func (d *Dispatcher) Answered(ctx context.Context, task string) {
 // already kept in the store (Store.Post): down the task's stream, by
 // whichever pod's dispatcher has it open. A node without a stream for
 // the task now, or a task not yet accepted, is sent it when the node
-// next accepts the task.
+// next accepts the task, or on an action stream for a node-originated run.
 func (d *Dispatcher) Posted(ctx context.Context, task string) {
 	d.init()
 	d.mu.Lock()
 	l := d.live[task]
+	running := d.running
 	d.mu.Unlock()
 	if l != nil {
 		l.posted()
+	} else {
+		d.wakeLocal()
+		if !running && d.Open != nil {
+			d.deliverDirect(ctx, task)
+		}
 	}
 	if d.Bus != nil {
 		nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
@@ -388,6 +413,8 @@ func (d *Dispatcher) Notice(m notify.Message) {
 		d.mu.Unlock()
 		if l != nil {
 			l.answered()
+		} else {
+			d.wakeLocal()
 		}
 	case m.Message != "":
 		d.init()
@@ -396,6 +423,8 @@ func (d *Dispatcher) Notice(m notify.Message) {
 		d.mu.Unlock()
 		if l != nil {
 			l.posted()
+		} else {
+			d.wakeLocal()
 		}
 	}
 }
@@ -437,6 +466,8 @@ func (d *Dispatcher) pass(ctx context.Context) error {
 			}
 		case t.State == Cancelled && d.reachable(t.ID, t.Node) && d.bound(t):
 			d.start(ctx, t, nil, TypeCancel, "")
+		case t.State == Running && d.reachable(t.ID, t.Node) && d.bound(t):
+			d.start(ctx, t, nil, TypeApprove, "")
 		}
 	}
 	d.notifyWatchers(ctx)
@@ -881,6 +912,10 @@ func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind,
 			d.deliverCancel(ctx, t)
 			return
 		}
+		if kind == TypeApprove || kind == TypeMessage {
+			d.deliverActions(ctx, t)
+			return
+		}
 		if kind == TypeOffer {
 			ot, ok := d.offer(ctx, t, c, owner)
 			if !ok {
@@ -892,7 +927,8 @@ func (d *Dispatcher) start(ctx context.Context, t Task, c *registry.Claim, kind,
 	}()
 }
 
-// deliverCancel tells the node of a task cancelled while it was away.
+// deliverCancel tells the node of a task cancelled while it was away, or a
+// node-originated run that has no persistent offer stream.
 func (d *Dispatcher) deliverCancel(ctx context.Context, t Task) {
 	conn, err := d.Open(ctx, t.Node)
 	if err != nil {
@@ -901,12 +937,62 @@ func (d *Dispatcher) deliverCancel(ctx context.Context, t Task) {
 	}
 	st := NewStream(conn)
 	defer st.Close()
-	if err := st.Write(Message{Type: TypeCancel, Task: &Spec{ID: t.ID}, Reason: t.Reason}); err != nil {
+	if err := st.Write(Message{Type: TypeCancel, Task: &Spec{ID: t.ID}, NodeTask: t.NodeTask, Reason: t.Reason}); err != nil {
 		d.holdNode(t.ID, t.Node)
 		return
 	}
 	d.record(ctx, t.ID, func() (Task, error) { return Task{}, d.Store.CancelDelivered(ctx, t.ID) })
 	d.logf("tasks: told node %s that %s is cancelled", t.Node, t.ID)
+}
+
+// deliverActions opens a task stream to t's node to deliver pending
+// approval answers and messages for a running task that has no open
+// offer stream (such as a node-originated or Grainfile-triggered run).
+func (d *Dispatcher) deliverActions(ctx context.Context, t Task) {
+	conn, err := d.Open(ctx, t.Node)
+	if err != nil {
+		d.holdNode(t.ID, t.Node)
+		return
+	}
+	st := NewStream(conn)
+	defer st.Close()
+	d.deliverAnswers(ctx, st, t)
+	d.deliverMessages(ctx, st, t)
+}
+
+// deliverDirect delivers a pending cancel, approval answer, or message to a
+// task's node when Dispatcher.Run is not active.
+func (d *Dispatcher) deliverDirect(ctx context.Context, id string) {
+	if d.Open == nil || d.Store == nil {
+		return
+	}
+	t, err := d.Store.Get(ctx, id)
+	if err != nil || t.Node == "" {
+		return
+	}
+	if d.Registry != nil && (!d.reachable(t.ID, t.Node) || !d.bound(t)) {
+		return
+	}
+	d.mu.Lock()
+	if d.live[t.ID] != nil {
+		d.mu.Unlock()
+		return
+	}
+	d.live[t.ID] = newLive()
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		delete(d.live, t.ID)
+		d.mu.Unlock()
+	}()
+	switch t.State {
+	case Cancelled:
+		if t.CancelPending {
+			d.deliverCancel(ctx, t)
+		}
+	case Running:
+		d.deliverActions(ctx, t)
+	}
 }
 
 type received struct {
@@ -1002,7 +1088,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 			if !answered {
 				release()
 			}
-			if err := st.Write(Message{Type: TypeCancel, Task: &Spec{ID: t.ID}}); err != nil {
+			if err := st.Write(Message{Type: TypeCancel, Task: &Spec{ID: t.ID}, NodeTask: t.NodeTask}); err != nil {
 				return // still pending: told when the node is back
 			}
 			d.record(ctx, t.ID, func() (Task, error) { return Task{}, d.Store.CancelDelivered(ctx, t.ID) })
@@ -1054,6 +1140,7 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					d.observe(EventResumed, t)
 				}
 				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Accept(ctx, t.ID, r.m.NodeTask) })
+				t.NodeTask = r.m.NodeTask
 				d.deliverAnswers(ctx, st, t)
 				d.deliverMessages(ctx, st, t)
 			case TypeRefuse:
@@ -1102,7 +1189,9 @@ func (d *Dispatcher) deliverAnswers(ctx context.Context, st *Stream, t Task) {
 		return
 	}
 	for _, a := range as {
-		if err := st.Write(approveMessage(a)); err != nil {
+		msg := approveMessage(a)
+		msg.NodeTask = t.NodeTask
+		if err := st.Write(msg); err != nil {
 			return
 		}
 		d.logf("tasks: sent node %s %s's answer to %s: %s", t.Node, t.ID, logsafe.Quote(a.Request), a.Decision)
@@ -1116,7 +1205,7 @@ func (d *Dispatcher) deliverAnswers(ctx context.Context, st *Stream, t Task) {
 // that its node has not yet been sent, oldest first. One that cannot be
 // written is left for the node's next accept of the task.
 func (d *Dispatcher) deliverMessages(ctx context.Context, st *Stream, t Task) {
-	if t.Kind != KindInteractive {
+	if !takesMessages(t) {
 		return
 	}
 	ms, err := d.Store.Messages(ctx, t.ID, true)
@@ -1126,7 +1215,9 @@ func (d *Dispatcher) deliverMessages(ctx context.Context, st *Stream, t Task) {
 		return
 	}
 	for _, m := range ms {
-		if err := st.Write(messageMessage(m)); err != nil {
+		msg := messageMessage(m)
+		msg.NodeTask = t.NodeTask
+		if err := st.Write(msg); err != nil {
 			return
 		}
 		d.logf("tasks: sent node %s %s's message %s", t.Node, t.ID, logsafe.Quote(m.ID))

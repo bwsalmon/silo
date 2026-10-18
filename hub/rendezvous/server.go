@@ -63,6 +63,10 @@ type Server struct {
 	// says, and the answer is the task filed, as JSON, or why none was:
 	// tasks.Filer.File. Nil refuses every filing.
 	FileTask func(ctx context.Context, nodeID, owner string, filing json.RawMessage) (json.RawMessage, error)
+	// RegisterRun, when set, registers a node-originated or Grainfile-triggered
+	// run announced on the control stream (TypeRunStarted / TypeRegisterRun)
+	// directly in the backlog's Running state: tasks.Filer.RegisterRunRaw.
+	RegisterRun func(ctx context.Context, nodeID, owner string, run json.RawMessage) (json.RawMessage, error)
 	// Heartbeat is the interval the hub asks nodes to heartbeat at;
 	// DefaultHeartbeat when zero. Set Registry.StaleAfter to a few of
 	// them.
@@ -102,6 +106,9 @@ type Server struct {
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
 	closing string // why Shutdown is ending every connection, once called
+
+	completedMu sync.Mutex
+	completed   map[[3]string][]grainfiles.Event
 
 	clientOnce sync.Once
 	client     *http.Client // Get's, to the other pods' internal listeners
@@ -462,6 +469,8 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 			}
 		case TypeFileTask:
 			s.fileTask(ctx, node.ID, owner, l, msg, &filing)
+		case TypeRunStarted, TypeRegisterRun:
+			s.registerRun(ctx, node.ID, owner, l, msg)
 		case TypeSubscribe:
 			s.subscribeNode(ctx, nc, owner, msg)
 		case TypeCatchup:
@@ -824,7 +833,7 @@ func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Messag
 	if state == "" {
 		state = "done"
 	}
-	evs, err := s.Grainfiles.RecordDependencyCompleted(ctx, msg.GrainfileURL, msg.CommitSHA, state, msg.Reason)
+	evs, err := s.CompleteGrainfileRun(ctx, msg.GrainfileURL, msg.CommitSHA, state, msg.Reason)
 	if err != nil {
 		if msg.RequestID != "" {
 			_ = nc.ctl.write(Message{
@@ -846,9 +855,161 @@ func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Messag
 			GrainfileEvents: evs,
 		})
 	}
+}
+
+func (s *Server) registerRun(ctx context.Context, nodeID, owner string, l *lines, msg Message) {
+	reply := func(run json.RawMessage, err error) {
+		if msg.RequestID == "" {
+			return
+		}
+		m := Message{Type: TypeRunRegistered, RequestID: msg.RequestID, Run: run, Task: run}
+		if err != nil {
+			m.Run, m.Task, m.Error = nil, nil, err.Error()
+		}
+		_ = l.write(m)
+	}
+	if len(msg.RequestID) > maxRequestID {
+		reply(nil, fmt.Errorf("rendezvous: request_id exceeds %d bytes", maxRequestID))
+		return
+	}
+	if s.RegisterRun == nil {
+		reply(nil, errors.New("rendezvous: this hub does not register node runs"))
+		return
+	}
+	raw := msg.Run
+	if len(raw) == 0 {
+		raw = msg.Task
+	}
+	if len(raw) == 0 {
+		b, _ := json.Marshal(struct {
+			ID            string `json:"id,omitempty"`
+			NodeTask      string `json:"node_task,omitempty"`
+			Repo          string `json:"repo,omitempty"`
+			Kind          string `json:"kind,omitempty"`
+			Title         string `json:"title,omitempty"`
+			Prompt        string `json:"prompt,omitempty"`
+			GrainfileURL  string `json:"grainfile_url,omitempty"`
+			CommitSHA     string `json:"commit_sha,omitempty"`
+			TriggerSource string `json:"trigger_source,omitempty"`
+		}{
+			ID:            msg.ID,
+			NodeTask:      msg.NodeTask,
+			Repo:          msg.Repo,
+			Kind:          msg.Kind,
+			Title:         msg.Title,
+			Prompt:        msg.Prompt,
+			GrainfileURL:  msg.GrainfileURL,
+			CommitSHA:     msg.CommitSHA,
+			TriggerSource: msg.TriggerSource,
+		})
+		raw = b
+	}
+	var meta struct {
+		GrainfileURL string `json:"grainfile_url"`
+		Grainfile    string `json:"grainfile"`
+	}
+	_ = json.Unmarshal(raw, &meta)
+	if gfURL := strings.TrimSpace(meta.GrainfileURL); gfURL != "" {
+		s.ResetGrainfileCompletion(gfURL)
+	} else if gfURL := strings.TrimSpace(meta.Grainfile); gfURL != "" {
+		s.ResetGrainfileCompletion(gfURL)
+	}
+	fctx, cancel := context.WithTimeout(ctx, fileTimeout)
+	defer cancel()
+	runJSON, err := s.RegisterRun(fctx, nodeID, owner, raw)
+	if err != nil {
+		s.logf("rendezvous: node %q of %s: run registration refused: %s", nodeID, owner, logsafe.Quote(err.Error()))
+	}
+	reply(runJSON, err)
+}
+
+// ResetGrainfileCompletion clears any cached completion deduplication state for
+// grainfileURL when a new run of that Grainfile starts.
+func (s *Server) ResetGrainfileCompletion(grainfileURL string) {
+	grainfileURL = strings.TrimSpace(grainfileURL)
+	if grainfileURL == "" {
+		return
+	}
+	s.completedMu.Lock()
+	defer s.completedMu.Unlock()
+	for k := range s.completed {
+		if k[0] == grainfileURL {
+			delete(s.completed, k)
+		}
+	}
+}
+
+func normalizeCompletionState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "", "done", "completed":
+		return "done"
+	case "cancelled", "canceled":
+		return "cancelled"
+	default:
+		return "failed"
+	}
+}
+
+// CompleteGrainfileRun records dependency completion in s.Grainfiles and
+// notifies subscribed nodes via s.NotifyGrainfiles, deduplicating repeated
+// completion reports (for example, when a run both streams a terminal result
+// event to hub/live and sends grainfile_completed on the control stream).
+func (s *Server) CompleteGrainfileRun(ctx context.Context, grainfileURL, commitSHA, state, reason string) ([]grainfiles.Event, error) {
+	if s.Grainfiles == nil {
+		return nil, nil
+	}
+	grainfileURL = strings.TrimSpace(grainfileURL)
+	commitSHA = strings.TrimSpace(commitSHA)
+	if grainfileURL == "" {
+		return nil, nil
+	}
+	if state == "" {
+		state = "done"
+	}
+	canonicalURL := grainfileURL
+	resolvedSHA := commitSHA
+	if rec, err := s.Grainfiles.GetIndexByURL(ctx, grainfileURL, commitSHA); err == nil {
+		canonicalURL = rec.URL
+		if resolvedSHA == "" {
+			resolvedSHA = rec.CommitSHA
+		}
+	}
+	normState := normalizeCompletionState(state)
+	keyExact := [3]string{canonicalURL, resolvedSHA, normState}
+	keyWildcard := [3]string{canonicalURL, "", normState}
+
+	s.completedMu.Lock()
+	if s.completed == nil {
+		s.completed = make(map[[3]string][]grainfiles.Event)
+	}
+	if evs, ok := s.completed[keyExact]; ok {
+		s.completedMu.Unlock()
+		return evs, nil
+	}
+	if resolvedSHA == "" {
+		if evs, ok := s.completed[keyWildcard]; ok {
+			s.completedMu.Unlock()
+			return evs, nil
+		}
+	}
+	s.completedMu.Unlock()
+
+	evs, err := s.Grainfiles.RecordDependencyCompleted(ctx, grainfileURL, commitSHA, state, reason)
+	if err != nil {
+		return nil, err
+	}
+	if evs == nil {
+		evs = []grainfiles.Event{}
+	}
+	s.completedMu.Lock()
+	s.completed[keyExact] = evs
+	s.completed[keyWildcard] = evs
+	s.completedMu.Unlock()
+
 	if len(evs) > 0 {
 		s.NotifyGrainfiles(evs...)
 	}
+	return evs, nil
 }
 
 func (s *Server) pumpGrainfileEvents(ctx context.Context, nc *nodeConn) {

@@ -189,6 +189,39 @@ func (c *Conn) CompleteGrainfile(ctx context.Context, grainfileURL, commitSHA, s
 	return m.GrainfileEvents, nil
 }
 
+// RunStarted announces a node-originated or Grainfile-triggered run on the
+// control stream (TypeRunStarted) and returns the registered task as JSON.
+func (c *Conn) RunStarted(ctx context.Context, run any) (json.RawMessage, error) {
+	return c.registerRunWithType(ctx, TypeRunStarted, run)
+}
+
+// RegisterRun announces a node-originated or Grainfile-triggered run on the
+// control stream (TypeRegisterRun) and returns the registered task as JSON.
+func (c *Conn) RegisterRun(ctx context.Context, run any) (json.RawMessage, error) {
+	return c.registerRunWithType(ctx, TypeRegisterRun, run)
+}
+
+func (c *Conn) registerRunWithType(ctx context.Context, msgType string, run any) (json.RawMessage, error) {
+	raw, err := json.Marshal(run)
+	if err != nil {
+		return nil, err
+	}
+	m, err := c.request(ctx, Message{
+		Type: msgType,
+		Run:  raw,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if m.Error != "" {
+		return nil, fmt.Errorf("%w: %s", ErrRefused, m.Error)
+	}
+	if len(m.Run) > 0 {
+		return m.Run, nil
+	}
+	return m.Task, nil
+}
+
 // GrainfileEvents returns a channel receiving live and catch-up
 // grainfile_event notifications delivered by the hub on this connection.
 // The channel is closed when the connection ends.
@@ -322,7 +355,7 @@ func (cl *Client) Connect(ctx context.Context) (*Conn, error) {
 				return
 			}
 			switch msg.Type {
-			case TypeFiled, TypeSubscribed, TypeCatchupResult, TypeGrainfileCompletedAck:
+			case TypeFiled, TypeRunRegistered, TypeSubscribed, TypeCatchupResult, TypeGrainfileCompletedAck:
 				c.filed(msg)
 				continue
 			case TypeGrainfileEvent:

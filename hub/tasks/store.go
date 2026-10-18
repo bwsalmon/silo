@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,6 +33,9 @@ type Store struct {
 	postgres bool
 	// Now, when set, is the clock tasks are stamped with.
 	Now func() time.Time
+	// OnTerminal, when set, is called when a task transitions to a terminal
+	// state (Done, Failed, or Cancelled).
+	OnTerminal func(ctx context.Context, t Task)
 }
 
 // Open opens the backlog at url: "postgres://..." (or "postgresql://...")
@@ -165,6 +169,9 @@ var added = []dbaccess.Column{
 	{Table: "tasks", Name: "filed_by", Add: `ALTER TABLE tasks ADD COLUMN filed_by TEXT NOT NULL DEFAULT ''`},
 	{Table: "tasks", Name: "filed_by_owner", Add: `ALTER TABLE tasks ADD COLUMN filed_by_owner TEXT NOT NULL DEFAULT ''`},
 	{Table: "tasks", Name: "origin_task", Add: `ALTER TABLE tasks ADD COLUMN origin_task TEXT NOT NULL DEFAULT ''`},
+	{Table: "tasks", Name: "grainfile_url", Add: `ALTER TABLE tasks ADD COLUMN grainfile_url TEXT NOT NULL DEFAULT ''`},
+	{Table: "tasks", Name: "commit_sha", Add: `ALTER TABLE tasks ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''`},
+	{Table: "tasks", Name: "trigger_source", Add: `ALTER TABLE tasks ADD COLUMN trigger_source TEXT NOT NULL DEFAULT ''`},
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -205,7 +212,7 @@ func (s *Store) q(query string) string {
 	return b.String()
 }
 
-const columns = `id, team, repo, kind, title, prompt, submitter, approved_by, approved_at, depends_on, filed_by, filed_by_owner, origin_task, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
+const columns = `id, team, repo, kind, title, prompt, submitter, approved_by, approved_at, depends_on, filed_by, filed_by_owner, origin_task, grainfile_url, commit_sha, trigger_source, constraints, state, node, node_owner, node_task, reason, excluded, attempts, cancel_pending, created_at, updated_at, version`
 
 type scanner interface{ Scan(...any) error }
 
@@ -218,7 +225,7 @@ func scanTask(r scanner) (Task, error) {
 		approved         int64
 		state            string
 	)
-	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Kind, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &approved, &deps, &t.FiledBy, &t.FiledByOwner, &t.OriginTask, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
+	if err := r.Scan(&t.ID, &t.Team, &t.Repo, &t.Kind, &t.Title, &t.Prompt, &t.Submitter, &t.ApprovedBy, &approved, &deps, &t.FiledBy, &t.FiledByOwner, &t.OriginTask, &t.GrainfileURL, &t.CommitSHA, &t.TriggerSource, &cons, &state, &t.Node, &t.NodeOwner, &t.NodeTask,
 		&t.Reason, &excl, &t.Attempts, &pending, &created, &updated, &t.version); err != nil {
 		return Task{}, err
 	}
@@ -295,8 +302,8 @@ func (s *Store) create(ctx context.Context, spec Spec, state State) (Task, error
 	if len(t.DependsOn) > 0 {
 		deps, _ = json.Marshal(t.DependsOn)
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(deps), t.FiledBy, t.FiledByOwner, t.OriginTask, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(deps), t.FiledBy, t.FiledByOwner, t.OriginTask, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
 		now.UnixMilli(), now.UnixMilli(), t.version)
 	if err != nil {
 		return Task{}, err
@@ -334,11 +341,12 @@ func (s *Store) List(ctx context.Context, f Filter) ([]Task, error) {
 
 // Dispatchable returns, oldest first, the tasks the dispatcher has
 // something to do for: the queued ones, to place; the lost ones, to
-// resume when their node is back; and the cancelled ones whose node has
-// not been told.
+// resume when their node is back; the running ones with undelivered
+// approvals or messages; and the cancelled ones whose node has not
+// been told.
 func (s *Store) Dispatchable(ctx context.Context) ([]Task, error) {
-	return s.query(ctx, `SELECT `+columns+` FROM tasks WHERE state IN (?, ?) OR cancel_pending = 1 ORDER BY created_at, id`,
-		[]any{string(Queued), string(Lost)})
+	return s.query(ctx, `SELECT `+columns+` FROM tasks WHERE state IN (?, ?) OR cancel_pending = 1 OR (state = ? AND (EXISTS (SELECT 1 FROM task_approvals a WHERE a.task = tasks.id AND a.decision != '' AND a.delivered = 0) OR EXISTS (SELECT 1 FROM task_messages m WHERE m.task = tasks.id AND m.delivered = 0))) ORDER BY created_at, id`,
+		[]any{string(Queued), string(Lost), string(Running)})
 }
 
 func inList(where []string, args []any, col string, vals []string) ([]string, []any) {
@@ -444,6 +452,7 @@ func (s *Store) updateVersion(ctx context.Context, id string, version int64, f f
 // back if the task is still at that version. ok is false, with no
 // error, when another update got there first.
 func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ Task, ok bool, _ error) {
+	prevState := t.State
 	f(&t)
 	if !t.State.valid() {
 		return Task{}, true, fmt.Errorf("%w state %q", ErrInvalid, t.State)
@@ -457,9 +466,9 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 	if t.ApprovedAt != nil {
 		approved = t.ApprovedAt.UnixMilli()
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET state = ?, approved_by = ?, approved_at = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
+	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET kind = ?, title = ?, prompt = ?, grainfile_url = ?, commit_sha = ?, trigger_source = ?, state = ?, approved_by = ?, approved_at = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
 		attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
-		string(t.State), t.ApprovedBy, approved, t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
+		t.Kind, t.Title, t.Prompt, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(t.State), t.ApprovedBy, approved, t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
 		t.Updated.UnixMilli(), t.version+1, id, t.version)
 	if err != nil {
 		return Task{}, true, err
@@ -468,6 +477,9 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 		return Task{}, false, nil
 	}
 	t.version++
+	if !prevState.Terminal() && (t.State == Done || t.State == Failed || t.State == Cancelled) && s.OnTerminal != nil {
+		s.OnTerminal(ctx, t)
+	}
 	return t, true, nil
 }
 
@@ -667,8 +679,10 @@ func (s *Store) CancelDelivered(ctx context.Context, id string) error {
 
 // Recover is the dispatcher starting, with no task stream open: a task
 // that was offered goes back to the queue, since no node can accept it
-// on a stream that has gone, and one that was running is lost until its
-// node comes back and resumes it.
+// on a stream that has gone, and one that was running via an imperative
+// offer (Attempts > 0) is lost until its node comes back and resumes it.
+// Node-originated runs registered directly in Running state (Attempts == 0)
+// remain running.
 func (s *Store) Recover(ctx context.Context, reason string) error {
 	ts, err := s.list(ctx, Filter{States: []State{Offered, Running}}, true)
 	if err != nil {
@@ -677,7 +691,7 @@ func (s *Store) Recover(ctx context.Context, reason string) error {
 	for _, t := range ts {
 		if t.State == Offered {
 			_, err = s.Requeue(ctx, t.ID, reason, "")
-		} else {
+		} else if t.Attempts > 0 {
 			_, err = s.Lose(ctx, t.ID, reason)
 		}
 		if err != nil && !errors.Is(err, ErrState) {
@@ -685,4 +699,274 @@ func (s *Store) Recover(ctx context.Context, reason string) error {
 		}
 	}
 	return nil
+}
+
+// CompleteRun records a terminal run result (Done, Failed, or Cancelled)
+// reported by a node (e.g. via a NodeStream result event). If the task is
+// already in a terminal state, CompleteRun returns it unchanged.
+func (s *Store) CompleteRun(ctx context.Context, id string, state State, reason string) (Task, error) {
+	if state != Done && state != Failed && state != Cancelled {
+		return Task{}, fmt.Errorf("%w result %q: want done, failed, or cancelled", ErrInvalid, state)
+	}
+	reason = truncate(strings.TrimSpace(reason), maxReason)
+	for {
+		t, err := s.Get(ctx, id)
+		if err != nil {
+			return Task{}, err
+		}
+		if t.State.Terminal() {
+			return t, nil
+		}
+		if updated, ok, err := s.write(ctx, id, t, func(t *Task) {
+			t.State = state
+			if reason != "" {
+				t.Reason = reason
+			}
+			t.CancelPending = false
+		}); ok {
+			return updated, err
+		}
+	}
+}
+
+// RunRegistration describes a node-originated or Grainfile-triggered run
+// announced by a connected node.
+type RunRegistration struct {
+	ID            string      `json:"id,omitempty"`
+	Task          string      `json:"task,omitempty"`
+	NodeTask      string      `json:"node_task,omitempty"`
+	Team          string      `json:"team,omitempty"`
+	Repo          string      `json:"repo,omitempty"`
+	Kind          string      `json:"kind,omitempty"`
+	Title         string      `json:"title,omitempty"`
+	Prompt        string      `json:"prompt,omitempty"`
+	Submitter     string      `json:"submitter,omitempty"`
+	Node          string      `json:"node,omitempty"`
+	NodeOwner     string      `json:"node_owner,omitempty"`
+	GrainfileURL  string      `json:"grainfile_url,omitempty"`
+	Grainfile     string      `json:"grainfile,omitempty"`
+	CommitSHA     string      `json:"commit_sha,omitempty"`
+	Commit        string      `json:"commit,omitempty"`
+	TriggerSource string      `json:"trigger_source,omitempty"`
+	Constraints   Constraints `json:"constraints,omitempty"`
+}
+
+// NormalizeRunRepo normalizes a repository identifier ("owner/name" or URL)
+// and falls back to extracting "owner/name" from grainfileURL when repo is empty.
+func NormalizeRunRepo(repo, grainfileURL string) string {
+	r := strings.ToLower(strings.TrimSpace(repo))
+	if strings.HasPrefix(r, "https://") || strings.HasPrefix(r, "http://") {
+		if parsed := repoFromURL(r); parsed != "" {
+			r = parsed
+		}
+	}
+	r = strings.TrimSuffix(r, ".git")
+	if r == "" && grainfileURL != "" {
+		r = repoFromURL(grainfileURL)
+	}
+	return r
+}
+
+func repoFromURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	owner := strings.ToLower(parts[0])
+	name := strings.ToLower(strings.TrimSuffix(parts[1], ".git"))
+	candidate := owner + "/" + name
+	if repoName.MatchString(candidate) {
+		return candidate
+	}
+	return ""
+}
+
+func titleFromGrainfileURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Path == "" {
+		return strings.TrimSpace(raw)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 0 {
+		return strings.TrimSpace(raw)
+	}
+	return parts[len(parts)-1]
+}
+
+// RegisterRun registers a node-originated or Grainfile-triggered run directly
+// in the Running state bound to (r.Node, r.NodeOwner), bypassing imperative
+// Dispatcher offer/accept. If a task with r.ID already exists on the same
+// node and owner, RegisterRun idempotently updates its metadata and returns it.
+func (s *Store) RegisterRun(ctx context.Context, r RunRegistration) (Task, error) {
+	id := strings.TrimSpace(r.ID)
+	if id == "" {
+		id = strings.TrimSpace(r.Task)
+	}
+	if id == "" {
+		id = newID()
+	}
+	if len(id) > 128 || strings.ContainsAny(id, "/ \t\r\n\x00") {
+		return Task{}, fmt.Errorf("%w run id %q", ErrInvalid, id)
+	}
+	node := strings.TrimSpace(r.Node)
+	if !nodeID.MatchString(node) {
+		return Task{}, fmt.Errorf("%w node %q", ErrInvalid, node)
+	}
+	owner := strings.TrimSpace(r.NodeOwner)
+	if owner == "" {
+		return Task{}, fmt.Errorf("%w: no node owner", ErrInvalid)
+	}
+	team := strings.ToLower(strings.TrimSpace(r.Team))
+	if !teamID.MatchString(team) {
+		return Task{}, fmt.Errorf("%w team %q", ErrInvalid, team)
+	}
+	grainfileURL := strings.TrimSpace(r.GrainfileURL)
+	if grainfileURL == "" {
+		grainfileURL = strings.TrimSpace(r.Grainfile)
+	}
+	commitSHA := strings.TrimSpace(r.CommitSHA)
+	if commitSHA == "" {
+		commitSHA = strings.TrimSpace(r.Commit)
+	}
+	triggerSource := strings.TrimSpace(r.TriggerSource)
+	nodeTask := strings.TrimSpace(r.NodeTask)
+	repo := NormalizeRunRepo(r.Repo, grainfileURL)
+	if repo != "" && !repoName.MatchString(repo) {
+		return Task{}, fmt.Errorf("%w repository %q: want owner/name", ErrInvalid, repo)
+	}
+	kind := strings.ToLower(strings.TrimSpace(r.Kind))
+	if kind == "" {
+		lowerGF := strings.ToLower(grainfileURL)
+		if strings.HasSuffix(lowerGF, ".process.grain.md") || strings.HasSuffix(lowerGF, ".process.md") {
+			kind = KindProcess
+		} else {
+			kind = "task"
+		}
+	}
+	if kind != KindTask && kind != "task" && kind != KindProcess && kind != KindInteractive {
+		return Task{}, fmt.Errorf("%w kind %q", ErrInvalid, kind)
+	}
+	title := strings.TrimSpace(r.Title)
+	prompt := strings.TrimSpace(r.Prompt)
+	if title == "" && prompt != "" {
+		title, _, _ = strings.Cut(prompt, "\n")
+		title = strings.TrimSpace(title)
+	}
+	if title == "" && grainfileURL != "" {
+		title = titleFromGrainfileURL(grainfileURL)
+	}
+	if title == "" && nodeTask != "" {
+		title = nodeTask
+	}
+	if title == "" {
+		title = id
+	}
+	title = truncate(title, maxTitle)
+	if prompt == "" {
+		if grainfileURL != "" {
+			prompt = grainfileURL
+		} else {
+			prompt = title
+		}
+	}
+	if len(prompt) > maxPrompt {
+		return Task{}, fmt.Errorf("%w: the prompt is over %d bytes", ErrInvalid, maxPrompt)
+	}
+	submitter := strings.ToLower(strings.TrimSpace(r.Submitter))
+	if submitter == "" {
+		submitter = strings.ToLower(strings.TrimPrefix(owner, "user:"))
+	}
+	if submitter == "" {
+		submitter = team
+	}
+
+	for {
+		existing, err := s.Get(ctx, id)
+		if err == nil {
+			if existing.Node != "" && existing.Node != node {
+				return Task{}, fmt.Errorf("%w: task %s is already bound to node %s", ErrInvalid, id, existing.Node)
+			}
+			if existing.NodeOwner != "" && existing.NodeOwner != owner {
+				return Task{}, fmt.Errorf("%w: task %s is already bound to another owner", ErrInvalid, id)
+			}
+			updated, ok, err := s.write(ctx, id, existing, func(t *Task) {
+				if t.Node == "" {
+					t.Node = node
+				}
+				if t.NodeOwner == "" {
+					t.NodeOwner = owner
+				}
+				if nodeTask != "" {
+					t.NodeTask = nodeTask
+				}
+				if grainfileURL != "" {
+					t.GrainfileURL = grainfileURL
+				}
+				if commitSHA != "" {
+					t.CommitSHA = commitSHA
+				}
+				if triggerSource != "" {
+					t.TriggerSource = triggerSource
+				}
+				if r.Kind != "" || t.Kind == "" {
+					t.Kind = kind
+				}
+				if r.Title != "" {
+					t.Title = title
+				}
+				if r.Prompt != "" {
+					t.Prompt = prompt
+				}
+			})
+			if ok {
+				return updated, err
+			}
+			continue
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return Task{}, err
+		}
+
+		now := s.now().UTC().Truncate(time.Millisecond)
+		t := Task{
+			Spec: Spec{
+				ID:            id,
+				Team:          team,
+				Repo:          repo,
+				Kind:          kind,
+				Title:         title,
+				Prompt:        prompt,
+				Submitter:     submitter,
+				GrainfileURL:  grainfileURL,
+				CommitSHA:     commitSHA,
+				TriggerSource: triggerSource,
+				Constraints:   r.Constraints,
+				Created:       now,
+			},
+			State:     Running,
+			Node:      node,
+			NodeOwner: owner,
+			NodeTask:  nodeTask,
+			Excluded:  []string{},
+			Attempts:  0,
+			Updated:   now,
+			version:   1,
+		}
+		cons, _ := json.Marshal(t.Constraints)
+		_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, "", 0, "[]", t.FiledBy, t.FiledByOwner, t.OriginTask, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(cons), string(t.State), t.Node, t.NodeOwner, t.NodeTask, "", "[]", 0, 0,
+			now.UnixMilli(), now.UnixMilli(), t.version)
+		if err != nil {
+			// If a concurrent call inserted the same ID first, retry and update.
+			if _, gerr := s.Get(ctx, id); gerr == nil {
+				continue
+			}
+			return Task{}, err
+		}
+		return t, nil
+	}
 }

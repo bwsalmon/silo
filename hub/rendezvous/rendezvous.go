@@ -94,6 +94,15 @@ const (
 	// TypeGrainfileCompletedAck answers a TypeGrainfileCompleted message
 	// with any emitted dependency_completed events (or Error).
 	TypeGrainfileCompletedAck = "grainfile_completed_ack" // hub → node
+
+	// TypeRunStarted and TypeRegisterRun announce a node-originated or
+	// Grainfile-triggered run on the control stream so the hub registers it
+	// in Running state without imperative offer/accept.
+	TypeRunStarted  = "run_started"  // node → hub
+	TypeRegisterRun = "register_run" // node → hub
+	// TypeRunRegistered answers a TypeRunStarted or TypeRegisterRun message
+	// that carried a RequestID.
+	TypeRunRegistered = "run_registered" // hub → node
 )
 
 // Message is one line on the control stream.
@@ -142,6 +151,19 @@ type Message struct {
 	CommitSHA    string `json:"commit_sha,omitempty"`
 	State        string `json:"state,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+
+	// Run carries the run registration payload in TypeRunStarted or
+	// TypeRegisterRun, and the registered task in TypeRunRegistered.
+	Run json.RawMessage `json:"run,omitempty"`
+	// Optional top-level run fields if a node sends TypeRunStarted or
+	// TypeRegisterRun flat instead of nested under Run.
+	ID            string `json:"id,omitempty"`
+	NodeTask      string `json:"node_task,omitempty"`
+	Repo          string `json:"repo,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	Title         string `json:"title,omitempty"`
+	Prompt        string `json:"prompt,omitempty"`
+	TriggerSource string `json:"trigger_source,omitempty"`
 }
 
 // maxLine bounds one control message.
