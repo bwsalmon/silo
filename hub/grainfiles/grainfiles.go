@@ -807,8 +807,10 @@ func validateDependsOnSlice(raw any, sourceKind Kind, where, sourcePath string) 
 			continue
 		}
 		if sourceKind == KindTask {
-			if r, err := ParseRef(s); err == nil && !isTaskTargetPath(r.Path) {
-				errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("depends_on: %q is not a task grainfile (a .task.grain.md may only depend on .task.grain.md files)", s)))
+			if r, err := ParseRef(s); err == nil {
+				if !isGrainfileTargetPath(r.Path) || strings.HasSuffix(r.Path, ".process.grain.md") || (strings.HasSuffix(sourcePath, ".task.grain.md") && !isTaskTargetPath(r.Path)) {
+					errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("depends_on: %q is not a task grainfile (a .task.grain.md may only depend on .task.grain.md files)", s)))
+				}
 			}
 		}
 	}

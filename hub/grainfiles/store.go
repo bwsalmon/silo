@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/silo/hub/dbaccess"
@@ -54,6 +55,7 @@ var Tables = []string{
 type Store struct {
 	db       *sql.DB
 	postgres bool
+	txMu     sync.Mutex
 	// Now, when set, is the clock used to stamp rows and evaluate not_before.
 	Now func() time.Time
 	// SameTeam, when set, reports whether two non-empty node owners share at
@@ -116,6 +118,9 @@ func openStore(ctx context.Context, url string, create bool) (*Store, error) {
 		err = s.migrate(ctx)
 	} else {
 		err = dbaccess.Check(ctx, db, "grainfiles", Tables...)
+		if err == nil {
+			err = dbaccess.CheckColumns(ctx, db, "grainfiles", added...)
+		}
 	}
 	if err != nil {
 		db.Close()
@@ -194,6 +199,23 @@ CREATE INDEX IF NOT EXISTS grainfile_events_recipient ON grainfile_events (recip
 CREATE INDEX IF NOT EXISTS grainfile_events_url ON grainfile_events (grainfile_url, seq)
 `
 
+var added = []dbaccess.Column{
+	{Table: "grainfile_index", Name: "not_before", Add: `ALTER TABLE grainfile_index ADD COLUMN not_before BIGINT NOT NULL DEFAULT 0`},
+	{Table: "grainfile_index", Name: "created_at", Add: `ALTER TABLE grainfile_index ADD COLUMN created_at BIGINT NOT NULL DEFAULT 0`},
+	{Table: "grainfile_index", Name: "authorized_references", Add: `ALTER TABLE grainfile_index ADD COLUMN authorized_references TEXT NOT NULL DEFAULT '[]'`},
+	{Table: "grainfile_index", Name: "depends_on", Add: `ALTER TABLE grainfile_index ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'`},
+	{Table: "grainfile_index", Name: "trigger_with", Add: `ALTER TABLE grainfile_index ADD COLUMN trigger_with TEXT NOT NULL DEFAULT '[]'`},
+	{Table: "grainfile_index", Name: "on_spec", Add: `ALTER TABLE grainfile_index ADD COLUMN on_spec TEXT NOT NULL DEFAULT '{}'`},
+	{Table: "grainfile_index", Name: "gate", Add: `ALTER TABLE grainfile_index ADD COLUMN gate INTEGER NOT NULL DEFAULT 0`},
+	{Table: "grainfile_index", Name: "ready_emitted", Add: `ALTER TABLE grainfile_index ADD COLUMN ready_emitted INTEGER NOT NULL DEFAULT 0`},
+	{Table: "grainfile_index", Name: "removed", Add: `ALTER TABLE grainfile_index ADD COLUMN removed INTEGER NOT NULL DEFAULT 0`},
+	{Table: "grainfile_events", Name: "trigger_source", Add: `ALTER TABLE grainfile_events ADD COLUMN trigger_source TEXT NOT NULL DEFAULT ''`},
+	{Table: "grainfile_events", Name: "triggered_by", Add: `ALTER TABLE grainfile_events ADD COLUMN triggered_by TEXT NOT NULL DEFAULT ''`},
+	{Table: "grainfile_events", Name: "dependency_url", Add: `ALTER TABLE grainfile_events ADD COLUMN dependency_url TEXT NOT NULL DEFAULT ''`},
+	{Table: "grainfile_events", Name: "dependency_state", Add: `ALTER TABLE grainfile_events ADD COLUMN dependency_state TEXT NOT NULL DEFAULT ''`},
+	{Table: "grainfile_events", Name: "gate", Add: `ALTER TABLE grainfile_events ADD COLUMN gate INTEGER NOT NULL DEFAULT 0`},
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	for _, stmt := range strings.Split(storeSchema, ";") {
 		if strings.TrimSpace(stmt) == "" {
@@ -203,7 +225,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("grainfiles: creating tables: %w", err)
 		}
 	}
-	return nil
+	return dbaccess.AddColumns(ctx, s.db, "grainfiles", added...)
 }
 
 func (s *Store) now() time.Time {
@@ -231,7 +253,39 @@ func (s *Store) q(query string) string {
 }
 
 func (s *Store) tx(ctx context.Context, f func(*sql.Tx) error) error {
-	return dbaccess.InTx(ctx, s.db, f)
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+	const maxAttempts = 64
+	var err error
+	for attempt := range maxAttempts {
+		err = dbaccess.InTx(ctx, s.db, f)
+		if err == nil || !isRetryableTxError(err) || ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt%8+1) * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func isRetryableTxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "23505") ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "40001") ||
+		strings.Contains(msg, "40P01") ||
+		strings.Contains(msg, "Aborted") ||
+		strings.Contains(msg, "serialization") ||
+		strings.Contains(msg, "deadlock") ||
+		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "database is locked")
 }
 
 // IndexRecord is a row in grainfile_index storing parsed and resolved Grainfile
@@ -319,15 +373,16 @@ func (r IndexRecord) ToGrainfile() *Grainfile {
 // specific .task.md / .process.md URLs a registered node subscribes to, along
 // with its monotonic delivery cursor and subscription revision.
 type Subscriptions struct {
-	NodeID     string    `json:"node_id"`
-	Owner      string    `json:"owner,omitempty"`
-	Recipients []string  `json:"recipients,omitempty"`
-	Repos      []string  `json:"repos,omitempty"`
-	Folders    []string  `json:"folders,omitempty"`
-	Grainfiles []string  `json:"grainfiles,omitempty"`
-	Cursor     int64     `json:"cursor"`
-	Revision   int64     `json:"revision"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	NodeID      string    `json:"node_id"`
+	Owner       string    `json:"owner,omitempty"`
+	Recipients  []string  `json:"recipients,omitempty"`
+	Repos       []string  `json:"repos,omitempty"`
+	Folders     []string  `json:"folders,omitempty"`
+	Grainfiles  []string  `json:"grainfiles,omitempty"`
+	Cursor      int64     `json:"cursor"`
+	ResetCursor bool      `json:"reset_cursor,omitempty"`
+	Revision    int64     `json:"revision"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Event is a discoverable Grainfile event stored in grainfile_events
@@ -758,6 +813,18 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 		at = s.now()
 	}
 	at = at.UTC()
+	var hasDue int
+	err := s.db.QueryRowContext(ctx, s.q(`
+		SELECT 1 FROM grainfile_index
+		WHERE removed = 0 AND draft = 0 AND ready_emitted = 0 AND not_before <= ?
+		LIMIT 1
+	`), at.UnixMilli()).Scan(&hasDue)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	precheck, err := s.loadLatestIndexQ(s.db, ctx, "")
 	if err != nil {
 		return nil, err
@@ -1767,6 +1834,9 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 	}
 
 	err = s.tx(ctx, func(tx *sql.Tx) error {
+		out.Owner = strings.TrimSpace(sub.Owner)
+		out.Cursor = sub.Cursor
+		out.Revision = 1
 		var prevCursor, prevRev int64
 		var prevOwner string
 		err := tx.QueryRowContext(ctx, s.q(`SELECT owner, cursor, revision FROM grainfile_subscriptions WHERE node_id = ?`), nodeID).
@@ -1776,7 +1846,7 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 				return fmt.Errorf("%w: node %q is already registered to another owner", ErrUnauthorized, nodeID)
 			}
 			out.Revision = prevRev + 1
-			if out.Cursor == 0 && prevCursor > 0 {
+			if !sub.ResetCursor && out.Cursor == 0 && prevCursor > 0 {
 				out.Cursor = prevCursor
 			}
 			if out.Owner == "" {

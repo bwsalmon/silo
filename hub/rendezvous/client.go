@@ -303,7 +303,7 @@ func (cl *Client) Connect(ctx context.Context) (*Conn, error) {
 		ctl:             l,
 		owner:           w.Owner,
 		subs:            w.Subscriptions,
-		grainfileEvents: make(chan grainfiles.Event, 64),
+		grainfileEvents: make(chan grainfiles.Event, 4096),
 	}
 	hb := time.Duration(w.HeartbeatSeconds) * time.Second
 	if hb <= 0 {

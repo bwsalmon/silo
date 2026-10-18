@@ -1514,6 +1514,20 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	visibleSubsAll := make([]Subscriptions, 0, len(subs))
+	for _, sub := range subs {
+		if canSeeSubscription(acc, sub) {
+			visibleSubsAll = append(visibleSubsAll, sub)
+		}
+	}
+	eventsByRepoPath := make(map[string][]Event, len(records))
+	for _, ev := range events {
+		if canSeeEvent(acc, ev) {
+			key := strings.ToLower(strings.TrimSuffix(ev.Repo, "/")) + "\x00" + ev.Path
+			eventsByRepoPath[key] = append(eventsByRepoPath[key], ev)
+		}
+	}
+
 	visibleRecords := make([]IndexRecord, 0, len(records))
 	for _, rec := range records {
 		if !includeDrafts && rec.Draft {
@@ -1544,21 +1558,16 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var subNodes []string
-		for _, sub := range subs {
-			if sub.MatchesRecord(rec) && canSeeSubscription(acc, sub) {
+		for _, sub := range visibleSubsAll {
+			if sub.MatchesRecord(rec) {
 				subNodes = append(subNodes, sub.NodeID)
 			}
 		}
 		slices.Sort(subNodes)
 		rec.SubscribedNodes = slices.Compact(subNodes)
 
-		var recEvents []Event
-		for _, ev := range events {
-			if IsSameRepo(ev.Repo, rec.Repo) && ev.Path == rec.Path && canSeeEvent(acc, ev) {
-				recEvents = append(recEvents, ev)
-			}
-		}
-		rec.RecentEvents = recEvents
+		key := strings.ToLower(strings.TrimSuffix(rec.Repo, "/")) + "\x00" + rec.Path
+		rec.RecentEvents = eventsByRepoPath[key]
 
 		visibleRecords = append(visibleRecords, rec)
 	}

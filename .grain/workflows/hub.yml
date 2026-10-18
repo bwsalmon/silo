@@ -117,4 +117,4 @@ jobs:
       - name: Test
         env:
           SILO_TEST_SPANNER: "127.0.0.1:5433"
-        run: go test -count=1 -timeout 10m ./hub/directory ./hub/tasks ./hub/registry ./hub/lease
+        run: go test -count=1 -timeout 10m ./hub/directory ./hub/tasks ./hub/registry ./hub/lease ./hub/grainfiles
