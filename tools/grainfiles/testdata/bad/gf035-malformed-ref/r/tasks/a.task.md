@@ -1,7 +1,7 @@
 ---
 title: T
-submitter: "@alice"
-created_at: "2026-10-16T09:00:00Z"
-capabilities: ["https://github.com/acme/lib.git//caps/k.capability.md"]
+requestor: "Bruce Salmon <bsalmon@google.com>"
+recipient: "git::https://github.com/acme/grain-eu.git"
+references: ["https://github.com/acme/widgets.git//docs/d.md"]
 ---
-Do it.
+Run the task.

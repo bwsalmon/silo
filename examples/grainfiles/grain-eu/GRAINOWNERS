@@ -1,5 +1,0 @@
-*                         @acme/grain-admins
-/records/                 @acme-grain-eu
-/records/**/comments/     @acme-grain-eu *(create)
-/templates/               @acme/grain-admins @acme/release
-/triggers/                @acme/release
