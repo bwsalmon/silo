@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/events"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/server"
@@ -191,6 +192,8 @@ func matrix() []row {
 	proposedByPat := func(w *world) string { return w.queued(pat) }
 	connect := everyone(http.StatusUnauthorized)
 	connect[cNodeOwn], connect[cNodeOther] = http.StatusSwitchingProtocols, http.StatusSwitchingProtocols
+	grainfileContent := everyone(http.StatusUnauthorized)
+	grainfileContent[cNodeOwn], grainfileContent[cNodeOther] = http.StatusForbidden, http.StatusForbidden
 	nodeUI := human(http.StatusNotFound, http.StatusNotFound, http.StatusOK, http.StatusNotFound)
 	return []row{
 		// Probes, public keys and the web UI's page sign no one in and
@@ -199,6 +202,12 @@ func matrix() []row {
 		{route: pub("GET /readyz"), method: "GET", path: "/readyz", want: everyone(200)},
 		{route: pub("GET /v1/claims/keys"), method: "GET", path: "/v1/claims/keys", want: everyone(200)},
 		{route: pub("/"), method: "GET", path: "/tasks/x", want: everyone(200)},
+
+		// Grainfiles: webhook ingestion (HMAC when configured), node content
+		// proxy (node token + subscription check), and human inspection.
+		{route: pub("POST " + grainfiles.GitHubWebhookPath), method: "POST", path: grainfiles.GitHubWebhookPath, body: body(map[string]string{"repo": "acme/app"}), want: everyone(200)},
+		{route: pub("GET " + grainfiles.ContentPath), method: "GET", path: grainfiles.ContentPath + "?grainfile_url=https://github.com/acme/app/blob/main/tasks/fix.task.md", want: grainfileContent},
+		{route: pub("GET " + grainfiles.GrainfilesPath), method: "GET", path: grainfiles.GrainfilesPath, want: human(200, 200, 200, 200)},
 
 		// Nodes: a node token, never a human's sign-on.
 		{route: pub("GET " + rendezvous.ConnectPath), method: "GET", path: rendezvous.ConnectPath, upgrade: true, want: connect},

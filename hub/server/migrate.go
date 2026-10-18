@@ -9,6 +9,7 @@ import (
 
 	"github.com/bwsalmon/silo/hub/dbaccess"
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/registry"
@@ -53,6 +54,11 @@ func Migrate(ctx context.Context, url, runtimeRole string) error {
 		return fmt.Errorf("server: migrating the shared registry: %w", err)
 	}
 	n.Close()
+	g, err := grainfiles.Open(ctx, url)
+	if err != nil {
+		return fmt.Errorf("server: migrating the grainfiles store: %w", err)
+	}
+	g.Close()
 	if runtimeRole == "" {
 		return nil
 	}

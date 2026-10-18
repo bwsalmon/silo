@@ -350,6 +350,7 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 		{"directory", h.Directory.Stats()},
 		{"backlog", h.Backlog.Stats()},
 		{"events", h.Events.Stats()},
+		{"grainfiles", h.Grainfiles.Stats()},
 	} {
 		gauge(ch, descDBOpen, float64(s.stats.OpenConnections), s.name)
 		ch <- prometheus.MustNewConstMetric(descDBWait, prometheus.CounterValue, float64(s.stats.WaitCount), s.name)
