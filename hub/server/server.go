@@ -48,6 +48,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -646,6 +647,10 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		},
 		Logf: cfg.Logf,
 	}
+	h.Rendezvous.GrainfilesAPI = h.GrainfilesAPI
+	h.Rendezvous.ObserveContentRequest = func(code int) {
+		h.metrics.contentRequests.WithLabelValues(strconv.Itoa(code)).Inc()
+	}
 
 	m := route.NewMux()
 	h.routes = m
@@ -894,6 +899,7 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 			Holder: h.cfg.Holder,
 			Retry:  h.cfg.LeaseRetry,
 			Run: func(ctx context.Context, _ lease.Term) error {
+				go h.promoteDeferredLoop(ctx)
 				return h.Dispatcher.Run(ctx)
 			},
 			OnTerm: h.metrics.observeTerm,
@@ -947,6 +953,50 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	}
 	h.cfg.logf("hub: stopped")
 	return nil
+}
+
+// promoteDeferredLoop periodically promotes indexed non-draft Grainfiles whose
+// not_before timestamp has been reached and wakes subscribed nodes across all
+// pods via Rendezvous.NotifyGrainfiles while this pod holds the dispatcher
+// leader lease.
+func (h *Hub) promoteDeferredLoop(ctx context.Context) {
+	if h.Grainfiles == nil {
+		return
+	}
+	interval := h.cfg.DispatchRetry
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	promote := func() {
+		now := time.Now().UTC()
+		if h.Grainfiles.Now != nil {
+			now = h.Grainfiles.Now().UTC()
+		}
+		evs, err := h.Grainfiles.PromoteDeferred(ctx, now)
+		if err != nil {
+			if ctx.Err() == nil {
+				h.metrics.storeErrors.WithLabelValues("database").Inc()
+			}
+			return
+		}
+		if len(evs) > 0 && h.Rendezvous != nil {
+			h.Rendezvous.NotifyGrainfiles(evs...)
+		}
+	}
+	promote()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			promote()
+		}
+	}
 }
 
 // podAddr is the address the other pods reach the internal listener at

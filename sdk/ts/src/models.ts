@@ -162,7 +162,7 @@ export interface Grainfile {
   url: string;
   kind: GrainfileKind;
   title: string;
-  recipient: string;
+  recipient?: string;
   requestor?: string;
   draft?: boolean;
   not_before?: string;
@@ -170,7 +170,6 @@ export interface Grainfile {
   references?: string[];
   authorized_references?: string[];
   depends_on?: string[];
-  trigger_with?: string[];
   when?: GrainfileTriggers;
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
@@ -195,15 +194,19 @@ export interface GrainfileSubscriptions {
 
 export type GrainfileEventType =
   | 'task_ready'
+  | 'task_removed'
   | 'process_updated'
   | 'process_triggered'
+  | 'process_removed'
   | 'dependency_completed'
   | (string & {});
 
 export const GRAINFILE_EVENT_TYPES: GrainfileEventType[] = [
   'task_ready',
+  'task_removed',
   'process_updated',
   'process_triggered',
+  'process_removed',
   'dependency_completed',
 ];
 
@@ -212,6 +215,7 @@ export interface GrainfileEvent {
   seq?: number;
   id?: string;
   type: GrainfileEventType;
+  action?: string;
   grainfile?: string;
   spec_summary_path?: string;
   spec_path?: string;
@@ -228,7 +232,6 @@ export interface GrainfileEvent {
   references?: string[];
   authorized_references?: string[];
   depends_on?: string[];
-  trigger_with?: string[];
   when?: GrainfileTriggers;
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;

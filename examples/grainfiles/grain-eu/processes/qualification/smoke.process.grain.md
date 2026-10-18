@@ -1,8 +1,6 @@
 ---
 grainfile: v1
 title: "Nightly release qualification: smoke tests"
-requestor: https://github.com/acme/grain-eu
-recipient: https://github.com/acme/grain-eu
 when:
   schedule:
     cron: "0 2 * * *"

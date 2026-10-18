@@ -1,8 +1,11 @@
 ---
 grainfile: v1
 title: "Nightly release qualification: summary report"
-trigger_with:
-  - ./smoke.process.grain.md
+when:
+  schedule:
+    cron: "0 2 * * *"
+    timezone: "Europe/Berlin"
+  manual: {}
 depends_on:
   - ./smoke.process.grain.md
 references:

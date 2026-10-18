@@ -218,6 +218,10 @@ func (f *metricsRepoFetcher) FetchFile(_ context.Context, _, _, path string) ([]
 	return nil, grainfiles.ErrNotFound
 }
 
+func (f *metricsRepoFetcher) ListGrainfiles(_ context.Context, _, ref string) ([]string, string, error) {
+	return nil, ref, nil
+}
+
 func TestGrainfileAndNodeUIMetrics(t *testing.T) {
 	ctx := context.Background()
 	h, err := New(ctx, Config{

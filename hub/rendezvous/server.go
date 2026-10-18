@@ -1,12 +1,16 @@
 package rendezvous
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -92,6 +96,15 @@ type Server struct {
 	// discoverable events for live notifications, reconnect catch-up, and
 	// dependency completion reporting.
 	Grainfiles *grainfiles.Store
+	// GrainfilesAPI, when set, serves on-demand mux stream content fetches
+	// (fetch_grainfile and fetch_reference) for connected nodes.
+	GrainfilesAPI *grainfiles.API
+	// GrainfileFetcher, when set without GrainfilesAPI, is combined with
+	// Grainfiles to serve mux stream content fetches.
+	GrainfileFetcher grainfiles.RepoFetcher
+	// ObserveContentRequest, when set, is called with the HTTP status code
+	// equivalent ("200", "403", "404", "502") of each mux stream content fetch.
+	ObserveContentRequest func(status int)
 	// AdmitSubscriptions, when set, checks whether owner may claim the
 	// recipient identities and repository subscriptions in sub.
 	AdmitSubscriptions func(ctx context.Context, owner string, sub grainfiles.Subscriptions) error
@@ -549,12 +562,135 @@ func (s *Server) acceptNodeStreams(nodeID string, m *mux.Mux) {
 		if err != nil {
 			return
 		}
-		if s.NodeStream == nil {
-			st.Reset()
-			continue
-		}
-		go s.NodeStream(nodeID, st)
+		go s.handleNodeStream(nodeID, st)
 	}
+}
+
+type muxFetchRequest struct {
+	Type         string `json:"type"`
+	GrainfileURL string `json:"grainfile_url"`
+	Commit       string `json:"commit,omitempty"`
+	CommitSHA    string `json:"commit_sha,omitempty"`
+	Reference    string `json:"reference,omitempty"`
+	Path         string `json:"path,omitempty"`
+	Format       string `json:"format,omitempty"`
+}
+
+// MuxFetchHeader is the first JSON line written back by the Hub on a
+// fetch_grainfile or fetch_reference mux stream before the raw content bytes.
+type MuxFetchHeader struct {
+	Type   string `json:"type"`
+	Kind   string `json:"kind,omitempty"`
+	Commit string `json:"commit,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type prefixedStream struct {
+	*mux.Stream
+	r io.Reader
+}
+
+func (p *prefixedStream) Read(b []byte) (int, error) {
+	return p.r.Read(b)
+}
+
+func (s *Server) handleNodeStream(nodeID string, st *mux.Stream) {
+	br := bufio.NewReader(st)
+	firstLine, err := br.ReadBytes('\n')
+	if err != nil && len(firstLine) == 0 {
+		st.Reset()
+		return
+	}
+	var peek muxFetchRequest
+	if json.Unmarshal(bytes.TrimSpace(firstLine), &peek) == nil &&
+		(peek.Type == "fetch_grainfile" || peek.Type == "fetch_reference") {
+		s.serveMuxFetch(nodeID, st, peek)
+		return
+	}
+	if s.NodeStream == nil {
+		st.Reset()
+		return
+	}
+	s.NodeStream(nodeID, &prefixedStream{
+		Stream: st,
+		r:      io.MultiReader(bytes.NewReader(firstLine), br),
+	})
+}
+
+func (s *Server) serveMuxFetch(nodeID string, st *mux.Stream, req muxFetchRequest) {
+	defer st.Close()
+	writeHeader := func(hdr MuxFetchHeader) error {
+		b, err := json.Marshal(hdr)
+		if err != nil {
+			return err
+		}
+		b = append(b, '\n')
+		_, err = st.Write(b)
+		return err
+	}
+	observe := func(code int) {
+		if s.ObserveContentRequest != nil {
+			s.ObserveContentRequest(code)
+		}
+	}
+
+	api := s.GrainfilesAPI
+	if api == nil && s.Grainfiles != nil && s.GrainfileFetcher != nil {
+		api = &grainfiles.API{
+			Store:   s.Grainfiles,
+			Fetcher: s.GrainfileFetcher,
+		}
+	}
+	if api == nil {
+		observe(http.StatusInternalServerError)
+		_ = writeHeader(MuxFetchHeader{Type: "error", Error: "content proxy not configured"})
+		return
+	}
+
+	commit := strings.TrimSpace(req.Commit)
+	if commit == "" {
+		commit = strings.TrimSpace(req.CommitSHA)
+	}
+	var reference string
+	if req.Type == "fetch_reference" {
+		reference = strings.TrimSpace(req.Reference)
+		if reference == "" {
+			reference = strings.TrimSpace(req.Path)
+		}
+		if reference == "" {
+			observe(http.StatusBadRequest)
+			_ = writeHeader(MuxFetchHeader{Type: "error", Error: "fetch_reference requires a non-empty reference"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	kind, resolvedCommit, data, err := api.FetchAuthorizedContent(ctx, nodeID, req.GrainfileURL, commit, reference, req.Format)
+	if err != nil {
+		switch {
+		case errors.Is(err, grainfiles.ErrUnauthorized):
+			observe(http.StatusForbidden)
+		case errors.Is(err, grainfiles.ErrNotFound) || errors.Is(err, os.ErrNotExist):
+			observe(http.StatusNotFound)
+		default:
+			observe(http.StatusBadGateway)
+		}
+		_ = writeHeader(MuxFetchHeader{Type: "error", Error: err.Error()})
+		return
+	}
+
+	observe(http.StatusOK)
+	if err := writeHeader(MuxFetchHeader{
+		Type:   "ok",
+		Kind:   kind,
+		Commit: resolvedCommit,
+		Size:   int64(len(data)),
+	}); err != nil {
+		return
+	}
+	_, _ = st.Write(data)
 }
 
 // acceptTimeout accepts m's first stream, or gives up after d.

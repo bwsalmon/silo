@@ -125,7 +125,7 @@ function SafeExternalLink({ url, label, sx }: { url: string; label?: string; sx?
 }
 
 function matchesSubscription(sub: GrainfileSubscriptions, g: Grainfile): boolean {
-  if (sub.recipients?.includes(g.recipient)) return true;
+  if (g.recipient && sub.recipients?.includes(g.recipient)) return true;
   const gRepo = shortRepo(g.repo).toLowerCase();
   if (sub.repos?.some((r) => shortRepo(r).toLowerCase() === gRepo)) return true;
   if (sub.grainfiles?.includes(g.url) || sub.grainfiles?.includes(g.path)) return true;
@@ -271,7 +271,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
               <TableCell>Source file</TableCell>
               <TableCell>Recipient &amp; Requestor</TableCell>
               <TableCell>Triggers &amp; Gate</TableCell>
-              <TableCell>Dependencies &amp; Co-triggers</TableCell>
+              <TableCell>Dependencies</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -322,7 +322,13 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                   </TableCell>
                   <TableCell>
                     <Stack spacing={0.25}>
-                      <SafeExternalLink url={g.recipient} sx={{ fontFamily: mono, fontSize: 12 }} />
+                      {g.recipient ? (
+                        <SafeExternalLink url={g.recipient} sx={{ fontFamily: mono, fontSize: 12 }} />
+                      ) : (
+                        <Typography variant="caption" color="text.secondary">
+                          —
+                        </Typography>
+                      )}
                       {g.requestor && (
                         <Typography variant="caption" color="text.secondary">
                           Requestor: {g.requestor}
@@ -357,24 +363,11 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                           />
                         </Box>
                       ))}
-                      {g.trigger_with?.map((tw) => (
-                        <Box key={`tw-${tw}`}>
-                          <Typography variant="caption" color="text.secondary">
-                            trigger_with:{' '}
-                          </Typography>
-                          <SafeExternalLink
-                            url={tw}
-                            label={shortTargetLabel(tw)}
-                            sx={{ fontFamily: mono, fontSize: 12 }}
-                          />
-                        </Box>
-                      ))}
-                      {(!g.depends_on || g.depends_on.length === 0) &&
-                        (!g.trigger_with || g.trigger_with.length === 0) && (
-                          <Typography variant="caption" color="text.secondary">
-                            —
-                          </Typography>
-                        )}
+                      {(!g.depends_on || g.depends_on.length === 0) && (
+                        <Typography variant="caption" color="text.secondary">
+                          —
+                        </Typography>
+                      )}
                     </Stack>
                   </TableCell>
                 </TableRow>
@@ -432,10 +425,12 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                     ) : null}
                   </Typography>
                 )}
-                <Typography variant="body2">
-                  <strong>Recipient:</strong>{' '}
-                  <SafeExternalLink url={selected.recipient} sx={{ fontFamily: mono }} />
-                </Typography>
+                {selected.recipient && (
+                  <Typography variant="body2">
+                    <strong>Recipient:</strong>{' '}
+                    <SafeExternalLink url={selected.recipient} sx={{ fontFamily: mono }} />
+                  </Typography>
+                )}
                 {selected.requestor && (
                   <Typography variant="body2">
                     <strong>Requestor:</strong> {selected.requestor}
@@ -536,18 +531,6 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                     <Stack spacing={0.25}>
                       {selected.depends_on.map((dep) => (
                         <SafeExternalLink key={dep} url={dep} sx={{ fontFamily: mono, fontSize: 12 }} />
-                      ))}
-                    </Stack>
-                  </Box>
-                )}
-                {selected.trigger_with && selected.trigger_with.length > 0 && (
-                  <Box>
-                    <Typography variant="caption" color="text.secondary">
-                      trigger_with
-                    </Typography>
-                    <Stack spacing={0.25}>
-                      {selected.trigger_with.map((tw) => (
-                        <SafeExternalLink key={tw} url={tw} sx={{ fontFamily: mono, fontSize: 12 }} />
                       ))}
                     </Stack>
                   </Box>

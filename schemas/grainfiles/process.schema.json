@@ -11,13 +11,6 @@
       "type": "string",
       "minLength": 1
     },
-    "requestor": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/requestor"
-    },
-    "recipient": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deployment",
-      "default": "/"
-    },
     "draft": {
       "type": "boolean",
       "default": false
@@ -27,9 +20,6 @@
     },
     "depends_on": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
-    },
-    "trigger_with": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/triggerWith"
     },
     "references": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
@@ -43,19 +33,8 @@
     }
   },
   "required": [
-    "title"
-  ],
-  "anyOf": [
-    {
-      "required": [
-        "when"
-      ]
-    },
-    {
-      "required": [
-        "trigger_with"
-      ]
-    }
+    "title",
+    "when"
   ],
   "patternProperties": {
     "^x_": {}

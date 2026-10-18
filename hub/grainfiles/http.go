@@ -1,6 +1,8 @@
 package grainfiles
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/hmac"
@@ -21,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,10 +41,37 @@ const (
 
 const maxWebhookBodyBytes = 10 * 1024 * 1024 // 10 MiB
 
-// RepoFetcher fetches a file's raw bytes from a source git repository at a
-// given ref or commit SHA on demand without storing repository contents at rest.
+// TreeEntry describes a single regular file inside a fetched repository directory tree.
+type TreeEntry struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+	SHA  string `json:"sha,omitempty"`
+	Data []byte `json:"data,omitempty"`
+}
+
+// TreeListing is the JSON directory listing returned by GET /v1/grainfiles/content
+// (and mux fetch_reference) when an authorized reference resolves to a folder/tree.
+type TreeListing struct {
+	Kind    string      `json:"kind"`
+	Repo    string      `json:"repo"`
+	Commit  string      `json:"commit,omitempty"`
+	Path    string      `json:"path"`
+	Entries []TreeEntry `json:"entries"`
+}
+
+// RepoFetcher fetches a file's raw bytes or lists Grainfile paths from a source
+// git repository at a given ref or commit SHA on demand without storing
+// repository contents at rest.
 type RepoFetcher interface {
 	FetchFile(ctx context.Context, repoURL, ref, filePath string) ([]byte, error)
+	ListGrainfiles(ctx context.Context, repoURL, ref string) (paths []string, commitSHA string, err error)
+}
+
+// TreeFetcher is an optional extension of RepoFetcher that fetches a directory
+// tree inside a repository at a given ref or commit SHA, rejecting symlinks
+// and git submodules.
+type TreeFetcher interface {
+	FetchTree(ctx context.Context, repoURL, ref, dirPath string) (entries []TreeEntry, commitSHA string, err error)
 }
 
 // NodeTokenVerifier verifies a bearer node token and returns its owner and node ID.
@@ -213,6 +243,329 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 		}
 	}
 	return raw, nil
+}
+
+type githubTreeResponse struct {
+	SHA  string `json:"sha"`
+	Tree []struct {
+		Path string `json:"path"`
+		Mode string `json:"mode"`
+		Type string `json:"type"`
+		Size int64  `json:"size"`
+		SHA  string `json:"sha"`
+	} `json:"tree"`
+}
+
+func (f *GitHubFetcher) fetchGitTree(ctx context.Context, repoURL, ref string) (*githubTreeResponse, string, string, string, string, error) {
+	if ref != "" && (hasEncodedPathHazard(ref) || strings.Contains(ref, "..") || strings.ContainsAny(ref, " \t\r\n\\")) {
+		return nil, "", "", "", "", fmt.Errorf("invalid git ref %q", ref)
+	}
+	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+	repoU, err := url.Parse(canonRepo)
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+	if f.BaseURL == "" && !strings.EqualFold(repoU.Hostname(), "github.com") {
+		return nil, "", "", "", "", fmt.Errorf("github fetcher refuses non-github.com repository host %q", repoU.Hostname())
+	}
+	owner, repo, err := parseGitHubOwnerRepo(canonRepo)
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+	base, err := f.validatedBaseURL()
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+
+	tok := f.Token
+	if f.TokenFunc != nil {
+		t, err := f.TokenFunc(ctx, canonRepo)
+		if err != nil {
+			return nil, "", "", "", "", err
+		}
+		if t != "" {
+			tok = t
+		}
+	} else if tok == "" && f.AppID > 0 && len(f.AppPrivateKey) > 0 {
+		t, err := f.installationToken(ctx, base, owner, repo)
+		if err != nil {
+			return nil, "", "", "", "", err
+		}
+		tok = t
+	}
+
+	cleanRef := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+	if cleanRef == "" {
+		cleanRef = "main"
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/git/trees/%s?recursive=1",
+		base, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(cleanRef))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+
+	resp, err := f.httpClient().Do(req)
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, canonRepo, base, owner, repo, os.ErrNotExist
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, canonRepo, base, owner, repo, fmt.Errorf("github git trees API %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed githubTreeResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 10*1024*1024)).Decode(&parsed); err != nil {
+		return nil, canonRepo, base, owner, repo, fmt.Errorf("decoding github git tree response: %w", err)
+	}
+	return &parsed, canonRepo, base, owner, repo, nil
+}
+
+// ListGrainfiles discovers all Grainfile paths (`**/*.task.grain.md` and
+// `**/*.process.grain.md`) in repoURL at ref via the GitHub Git Trees API
+// (`GET {BaseURL}/repos/{owner}/{repo}/git/trees/{ref}?recursive=1`).
+func (f *GitHubFetcher) ListGrainfiles(ctx context.Context, repoURL, ref string) ([]string, string, error) {
+	treeResp, _, _, _, _, err := f.fetchGitTree(ctx, repoURL, ref)
+	if err != nil {
+		return nil, "", err
+	}
+	cleanRef := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+	commitSHA := firstNonEmpty(treeResp.SHA, cleanRef, "main")
+
+	var paths []string
+	seen := map[string]bool{}
+	for _, entry := range treeResp.Tree {
+		if entry.Mode == "120000" || entry.Mode == "160000" || entry.Type == "symlink" || entry.Type == "commit" || entry.Type == "submodule" || entry.Type == "tree" {
+			continue
+		}
+		if entry.Type != "" && entry.Type != "blob" && entry.Type != "file" {
+			continue
+		}
+		p := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(entry.Path), "/"))
+		if p == "" || seen[p] {
+			continue
+		}
+		if _, _, isGF, _ := ClassifyPath(p); isGF {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	return paths, commitSHA, nil
+}
+
+// FetchTree fetches all regular files under dirPath in repoURL at ref,
+// rejecting symlinks (mode 120000 / type "symlink") and git submodules
+// (mode 160000 / type "commit" or "submodule").
+func (f *GitHubFetcher) FetchTree(ctx context.Context, repoURL, ref, dirPath string) ([]TreeEntry, string, error) {
+	if hasEncodedPathHazard(dirPath) {
+		return nil, "", fmt.Errorf("invalid directory path %q", dirPath)
+	}
+	if hasDot, hasDotDot := hasDotSegment(filepath.ToSlash(dirPath)); hasDot || hasDotDot {
+		return nil, "", fmt.Errorf("invalid directory path %q", dirPath)
+	}
+	cleanDir := cleanPosixPath(strings.Trim(filepath.ToSlash(dirPath), "/"))
+	if cleanDir == "." {
+		cleanDir = ""
+	}
+	if cleanDir == ".." || strings.HasPrefix(cleanDir, "../") {
+		return nil, "", fmt.Errorf("invalid directory path %q", dirPath)
+	}
+
+	treeResp, canonRepo, _, _, _, err := f.fetchGitTree(ctx, repoURL, ref)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return f.fetchTreeViaContentsAPI(ctx, repoURL, ref, cleanDir)
+		}
+		return nil, "", err
+	}
+	cleanRef := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+	commitSHA := firstNonEmpty(treeResp.SHA, cleanRef, "main")
+
+	var matched []TreeEntry
+	sawDir := cleanDir == ""
+	for _, entry := range treeResp.Tree {
+		p := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(entry.Path), "/"))
+		if p == cleanDir {
+			if entry.Mode == "120000" || entry.Type == "symlink" {
+				return nil, "", fmt.Errorf("directory reference %q is a symlink git object", dirPath)
+			}
+			if entry.Mode == "160000" || entry.Type == "commit" || entry.Type == "submodule" {
+				return nil, "", fmt.Errorf("directory reference %q is a submodule git object", dirPath)
+			}
+			sawDir = true
+			continue
+		}
+		if cleanDir != "" && !strings.HasPrefix(p, cleanDir+"/") {
+			continue
+		}
+		sawDir = true
+		if entry.Mode == "120000" || entry.Type == "symlink" {
+			return nil, "", fmt.Errorf("directory reference %q contains symlink git object %q", dirPath, p)
+		}
+		if entry.Mode == "160000" || entry.Type == "commit" || entry.Type == "submodule" {
+			return nil, "", fmt.Errorf("directory reference %q contains submodule git object %q", dirPath, p)
+		}
+		if entry.Type == "tree" || entry.Type == "dir" {
+			continue
+		}
+		if entry.Type != "" && entry.Type != "blob" && entry.Type != "file" {
+			return nil, "", fmt.Errorf("directory reference %q contains unsupported git object %q (%s)", dirPath, p, entry.Type)
+		}
+		data, fErr := f.FetchFile(ctx, canonRepo, firstNonEmpty(ref, commitSHA), p)
+		if fErr != nil {
+			return nil, "", fErr
+		}
+		matched = append(matched, TreeEntry{
+			Path: p,
+			Size: int64(len(data)),
+			SHA:  entry.SHA,
+			Data: data,
+		})
+	}
+	if !sawDir || len(matched) == 0 {
+		return nil, "", os.ErrNotExist
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].Path < matched[j].Path
+	})
+	return matched, commitSHA, nil
+}
+
+func (f *GitHubFetcher) fetchTreeViaContentsAPI(ctx context.Context, repoURL, ref, cleanDir string) ([]TreeEntry, string, error) {
+	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
+	if err != nil {
+		return nil, "", err
+	}
+	owner, repo, err := parseGitHubOwnerRepo(canonRepo)
+	if err != nil {
+		return nil, "", err
+	}
+	base, err := f.validatedBaseURL()
+	if err != nil {
+		return nil, "", err
+	}
+	tok := f.Token
+	if f.TokenFunc != nil {
+		t, err := f.TokenFunc(ctx, canonRepo)
+		if err != nil {
+			return nil, "", err
+		}
+		if t != "" {
+			tok = t
+		}
+	} else if tok == "" && f.AppID > 0 && len(f.AppPrivateKey) > 0 {
+		t, err := f.installationToken(ctx, base, owner, repo)
+		if err != nil {
+			return nil, "", err
+		}
+		tok = t
+	}
+
+	var entries []TreeEntry
+	var walk func(subDir string) error
+	walk = func(subDir string) error {
+		var endpoint string
+		if subDir == "" {
+			endpoint = fmt.Sprintf("%s/repos/%s/%s/contents", base, url.PathEscape(owner), url.PathEscape(repo))
+		} else {
+			segs := strings.Split(subDir, "/")
+			for i, seg := range segs {
+				segs[i] = url.PathEscape(seg)
+			}
+			endpoint = fmt.Sprintf("%s/repos/%s/%s/contents/%s", base, url.PathEscape(owner), url.PathEscape(repo), strings.Join(segs, "/"))
+		}
+		if ref != "" {
+			q := url.Values{}
+			q.Set("ref", strings.TrimPrefix(ref, "refs/heads/"))
+			endpoint += "?" + q.Encode()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := f.httpClient().Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return os.ErrNotExist
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			return fmt.Errorf("github contents API %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		var items []struct {
+			Type            string `json:"type"`
+			Path            string `json:"path"`
+			Name            string `json:"name"`
+			Mode            string `json:"mode"`
+			SHA             string `json:"sha"`
+			Size            int64  `json:"size"`
+			Target          string `json:"target"`
+			SubmoduleGitURL string `json:"submodule_git_url"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 10*1024*1024)).Decode(&items); err != nil {
+			return os.ErrNotExist
+		}
+		for _, item := range items {
+			p := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(firstNonEmpty(item.Path, subDir+"/"+item.Name)), "/"))
+			if item.Type == "symlink" || item.Mode == "120000" || item.Target != "" {
+				return fmt.Errorf("directory reference %q contains symlink git object %q", cleanDir, p)
+			}
+			if item.Type == "submodule" || item.Type == "commit" || item.Mode == "160000" || item.SubmoduleGitURL != "" {
+				return fmt.Errorf("directory reference %q contains submodule git object %q", cleanDir, p)
+			}
+			if item.Type == "dir" || item.Type == "tree" {
+				if err := walk(p); err != nil {
+					return err
+				}
+				continue
+			}
+			if item.Type != "" && item.Type != "file" && item.Type != "blob" {
+				return fmt.Errorf("directory reference %q contains unsupported git object %q (%s)", cleanDir, p, item.Type)
+			}
+			data, err := f.FetchFile(ctx, canonRepo, ref, p)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, TreeEntry{
+				Path: p,
+				Size: int64(len(data)),
+				SHA:  item.SHA,
+				Data: data,
+			})
+		}
+		return nil
+	}
+	if err := walk(cleanDir); err != nil {
+		return nil, "", err
+	}
+	if len(entries) == 0 {
+		return nil, "", os.ErrNotExist
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Path < entries[j].Path
+	})
+	return entries, strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/"), nil
 }
 
 func (f *GitHubFetcher) validatedBaseURL() (string, error) {
@@ -398,6 +751,7 @@ func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 type MemoryFetcher struct {
 	mu    sync.RWMutex
 	files map[fileKey][]byte
+	modes map[fileKey]string
 }
 
 type fileKey struct {
@@ -410,6 +764,7 @@ type fileKey struct {
 func NewMemoryFetcher() *MemoryFetcher {
 	return &MemoryFetcher{
 		files: make(map[fileKey][]byte),
+		modes: make(map[fileKey]string),
 	}
 }
 
@@ -429,16 +784,62 @@ func (m *MemoryFetcher) SetFile(repoURL, ref, filePath string, data []byte) {
 	if m.files == nil {
 		m.files = make(map[fileKey][]byte)
 	}
+	if m.modes == nil {
+		m.modes = make(map[fileKey]string)
+	}
 	cp := append([]byte(nil), data...)
-	m.files[fileKey{repo: canonRepo, ref: normRef, path: cleanPath}] = cp
+	k1 := fileKey{repo: canonRepo, ref: normRef, path: cleanPath}
+	m.files[k1] = cp
+	delete(m.modes, k1)
 	if ref != normRef && ref != "" {
-		m.files[fileKey{repo: canonRepo, ref: strings.TrimSpace(ref), path: cleanPath}] = cp
+		k2 := fileKey{repo: canonRepo, ref: strings.TrimSpace(ref), path: cleanPath}
+		m.files[k2] = cp
+		delete(m.modes, k2)
 	}
 }
 
 // SetString registers UTF-8 string content at (repoURL, ref, filePath).
 func (m *MemoryFetcher) SetString(repoURL, ref, filePath, content string) {
 	m.SetFile(repoURL, ref, filePath, []byte(content))
+}
+
+// SetSymlink registers a git symlink (mode 120000) at (repoURL, ref, filePath)
+// for testing symlink rejection in FetchFile and FetchTree.
+func (m *MemoryFetcher) SetSymlink(repoURL, ref, filePath, target string) {
+	m.setSpecialMode(repoURL, ref, filePath, "120000", []byte(target))
+}
+
+// SetSubmodule registers a git submodule (mode 160000) at (repoURL, ref, filePath)
+// for testing submodule rejection in FetchFile and FetchTree.
+func (m *MemoryFetcher) SetSubmodule(repoURL, ref, filePath, subURL string) {
+	m.setSpecialMode(repoURL, ref, filePath, "160000", []byte(subURL))
+}
+
+func (m *MemoryFetcher) setSpecialMode(repoURL, ref, filePath, mode string, data []byte) {
+	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
+	if err != nil {
+		canonRepo = strings.TrimSpace(repoURL)
+	}
+	cleanPath := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(filePath), "/"))
+	normRef := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.files == nil {
+		m.files = make(map[fileKey][]byte)
+	}
+	if m.modes == nil {
+		m.modes = make(map[fileKey]string)
+	}
+	cp := append([]byte(nil), data...)
+	k1 := fileKey{repo: canonRepo, ref: normRef, path: cleanPath}
+	m.files[k1] = cp
+	m.modes[k1] = mode
+	if ref != normRef && ref != "" {
+		k2 := fileKey{repo: canonRepo, ref: strings.TrimSpace(ref), path: cleanPath}
+		m.files[k2] = cp
+		m.modes[k2] = mode
+	}
 }
 
 // DeleteFile removes (repoURL, ref, filePath) from the in-memory store.
@@ -452,8 +853,12 @@ func (m *MemoryFetcher) DeleteFile(repoURL, ref, filePath string) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.files, fileKey{repo: canonRepo, ref: normRef, path: cleanPath})
-	delete(m.files, fileKey{repo: canonRepo, ref: strings.TrimSpace(ref), path: cleanPath})
+	k1 := fileKey{repo: canonRepo, ref: normRef, path: cleanPath}
+	k2 := fileKey{repo: canonRepo, ref: strings.TrimSpace(ref), path: cleanPath}
+	delete(m.files, k1)
+	delete(m.files, k2)
+	delete(m.modes, k1)
+	delete(m.modes, k2)
 }
 
 // FetchFile implements RepoFetcher.
@@ -468,11 +873,137 @@ func (m *MemoryFetcher) FetchFile(_ context.Context, repoURL, ref, filePath stri
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, candidateRef := range []string{normRef, strings.TrimSpace(ref), "main", ""} {
-		if data, ok := m.files[fileKey{repo: canonRepo, ref: candidateRef, path: cleanPath}]; ok {
+		k := fileKey{repo: canonRepo, ref: candidateRef, path: cleanPath}
+		if mode := m.modes[k]; mode == "120000" {
+			return nil, fmt.Errorf("file %q is a symlink git object (mode 120000), not a regular file", filePath)
+		} else if mode == "160000" {
+			return nil, fmt.Errorf("file %q is a submodule git object (mode 160000), not a regular file", filePath)
+		}
+		if data, ok := m.files[k]; ok {
 			return append([]byte(nil), data...), nil
 		}
 	}
 	return nil, os.ErrNotExist
+}
+
+// ListGrainfiles implements RepoFetcher.
+func (m *MemoryFetcher) ListGrainfiles(_ context.Context, repoURL, ref string) ([]string, string, error) {
+	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
+	if err != nil {
+		canonRepo = strings.TrimSpace(repoURL)
+	}
+	normRef := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	seen := map[string]bool{}
+	var paths []string
+	resolvedRef := normRef
+	for _, candidateRef := range []string{normRef, strings.TrimSpace(ref), "main", ""} {
+		for k := range m.files {
+			if !strings.EqualFold(k.repo, canonRepo) || k.ref != candidateRef {
+				continue
+			}
+			if m.modes[k] != "" {
+				continue
+			}
+			if _, _, isGF, _ := ClassifyPath(k.path); isGF && !seen[k.path] {
+				seen[k.path] = true
+				paths = append(paths, k.path)
+				if resolvedRef == "" && k.ref != "" {
+					resolvedRef = k.ref
+				}
+			}
+		}
+		if len(paths) > 0 && candidateRef != "" {
+			resolvedRef = candidateRef
+			break
+		}
+	}
+	sort.Strings(paths)
+	if resolvedRef == "" {
+		resolvedRef = "main"
+	}
+	return paths, resolvedRef, nil
+}
+
+// FetchTree implements TreeFetcher.
+func (m *MemoryFetcher) FetchTree(_ context.Context, repoURL, ref, dirPath string) ([]TreeEntry, string, error) {
+	if hasEncodedPathHazard(dirPath) {
+		return nil, "", fmt.Errorf("invalid directory path %q", dirPath)
+	}
+	if hasDot, hasDotDot := hasDotSegment(filepath.ToSlash(dirPath)); hasDot || hasDotDot {
+		return nil, "", fmt.Errorf("invalid directory path %q", dirPath)
+	}
+	cleanDir := cleanPosixPath(strings.Trim(filepath.ToSlash(dirPath), "/"))
+	if cleanDir == "." {
+		cleanDir = ""
+	}
+	if cleanDir == ".." || strings.HasPrefix(cleanDir, "../") {
+		return nil, "", fmt.Errorf("invalid directory path %q", dirPath)
+	}
+	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
+	if err != nil {
+		canonRepo = strings.TrimSpace(repoURL)
+	}
+	normRef := strings.TrimPrefix(strings.TrimSpace(ref), "refs/heads/")
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	byPath := map[string]TreeEntry{}
+	resolvedRef := normRef
+	for _, candidateRef := range []string{normRef, strings.TrimSpace(ref), "main", ""} {
+		for k, data := range m.files {
+			if !strings.EqualFold(k.repo, canonRepo) || k.ref != candidateRef {
+				continue
+			}
+			if k.path == cleanDir {
+				if m.modes[k] == "120000" {
+					return nil, "", fmt.Errorf("directory reference %q is a symlink git object", dirPath)
+				}
+				if m.modes[k] == "160000" {
+					return nil, "", fmt.Errorf("directory reference %q is a submodule git object", dirPath)
+				}
+				continue
+			}
+			if cleanDir != "" && !strings.HasPrefix(k.path, cleanDir+"/") {
+				continue
+			}
+			if m.modes[k] == "120000" {
+				return nil, "", fmt.Errorf("directory reference %q contains symlink git object %q", dirPath, k.path)
+			}
+			if m.modes[k] == "160000" {
+				return nil, "", fmt.Errorf("directory reference %q contains submodule git object %q", dirPath, k.path)
+			}
+			if _, exists := byPath[k.path]; !exists {
+				cp := append([]byte(nil), data...)
+				byPath[k.path] = TreeEntry{
+					Path: k.path,
+					Size: int64(len(cp)),
+					Data: cp,
+				}
+				if resolvedRef == "" && k.ref != "" {
+					resolvedRef = k.ref
+				}
+			}
+		}
+	}
+	if len(byPath) == 0 {
+		return nil, "", os.ErrNotExist
+	}
+	entries := make([]TreeEntry, 0, len(byPath))
+	for _, e := range byPath {
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Path < entries[j].Path
+	})
+	if resolvedRef == "" {
+		resolvedRef = "main"
+	}
+	return entries, resolvedRef, nil
 }
 
 // SignGitHubWebhook computes the X-Hub-Signature-256 header value
@@ -593,6 +1124,14 @@ type WebhookResponse struct {
 	Events  []Event       `json:"events,omitempty"`
 }
 
+type githubRepoEntry struct {
+	HTMLURL       string `json:"html_url"`
+	CloneURL      string `json:"clone_url"`
+	URL           string `json:"url"`
+	FullName      string `json:"full_name"`
+	DefaultBranch string `json:"default_branch"`
+}
+
 type githubWebhookPayload struct {
 	Event  string `json:"event"`
 	Source string `json:"source"`
@@ -605,13 +1144,13 @@ type githubWebhookPayload struct {
 	Repo   string `json:"repo"`
 	Merged bool   `json:"merged"`
 
-	Repository struct {
-		HTMLURL       string `json:"html_url"`
-		CloneURL      string `json:"clone_url"`
-		URL           string `json:"url"`
-		FullName      string `json:"full_name"`
-		DefaultBranch string `json:"default_branch"`
-	} `json:"repository"`
+	Repository githubRepoEntry `json:"repository"`
+
+	Installation *struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+	Repositories      []githubRepoEntry `json:"repositories"`
+	RepositoriesAdded []githubRepoEntry `json:"repositories_added"`
 
 	HeadCommit *githubCommitPayload  `json:"head_commit"`
 	Commits    []githubCommitPayload `json:"commits"`
@@ -654,6 +1193,84 @@ type githubFileEntry struct {
 	Status   string `json:"status"`
 }
 
+// SyncRepository performs an initial tree scan of repoURL at ref (defaulting to
+// refs/heads/main), discovering all existing **/*.grain.md files via
+// Fetcher.ListGrainfiles, fetching and parsing each file, and indexing them in
+// Store without waiting for a future commit to touch each file.
+func (a *API) SyncRepository(ctx context.Context, repoURL, ref string) (*WebhookResponse, error) {
+	if a.Store == nil {
+		return nil, errors.New("grainfiles store not configured")
+	}
+	if a.Fetcher == nil {
+		return nil, errors.New("repo fetcher not configured")
+	}
+	canonRepo, err := normalizeSubRepoURL(repoURL)
+	if err != nil {
+		return nil, err
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "refs/heads/main"
+	} else if !strings.HasPrefix(ref, "refs/") && len(ref) != 40 {
+		ref = "refs/heads/" + ref
+	}
+
+	prevSeq, _ := a.Store.MaxEventSeq(ctx)
+	paths, treeSHA, err := a.Fetcher.ListGrainfiles(ctx, canonRepo, ref)
+	if err != nil {
+		return nil, err
+	}
+	commitSHA := firstNonEmpty(treeSHA, normalizeURLRef(ref, ""), "main")
+	syncNow := a.Store.now()
+
+	var indexed []IndexRecord
+	for _, p := range paths {
+		_, _, isGF, _ := ClassifyPath(p)
+		if !isGF {
+			continue
+		}
+		fetchRef := firstNonEmpty(treeSHA, ref, "main")
+		rawBytes, err := a.Fetcher.FetchFile(ctx, canonRepo, fetchRef, p)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("fetching %s: %w", p, err)
+		}
+		gf, err := Parse(p, rawBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", p, err)
+		}
+		if err := gf.ResolveSource(Source{
+			RepoURL: canonRepo,
+			Ref:     ref,
+			Commit:  commitSHA,
+			Path:    p,
+		}); err != nil {
+			return nil, fmt.Errorf("resolving %s: %w", p, err)
+		}
+		rec, err := a.Store.indexGrainfileAt(ctx, gf, syncNow)
+		if err != nil {
+			return nil, fmt.Errorf("indexing %s: %w", p, err)
+		}
+		indexed = append(indexed, rec)
+	}
+
+	_, _ = a.Store.PromoteDeferred(ctx, a.Store.now())
+	emittedEvents, _ := a.Store.EventsSince(ctx, prevSeq)
+	if len(emittedEvents) > 0 && a.OnEvents != nil {
+		a.OnEvents(emittedEvents)
+	}
+	return &WebhookResponse{
+		Source:  "installation",
+		Repo:    canonRepo,
+		Ref:     ref,
+		Commit:  commitSHA,
+		Indexed: indexed,
+		Events:  emittedEvents,
+	}, nil
+}
+
 func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if a.Store == nil {
 		http.Error(w, "grainfiles store not configured", http.StatusInternalServerError)
@@ -691,6 +1308,10 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	source := resolveWebhookSource(eventHeader, pl)
+	if source == "installation" || source == "installation_repositories" {
+		a.serveInstallationWebhook(w, r, source, pl)
+		return
+	}
 	if source != TriggerPush && source != TriggerPullRequest && source != TriggerMerge {
 		http.Error(w, fmt.Sprintf("unsupported webhook event %q", source), http.StatusBadRequest)
 		return
@@ -812,6 +1433,79 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		Commit:  commitSHA,
 		Indexed: indexed,
 		Events:  emittedEvents,
+	})
+}
+
+func (a *API) serveInstallationWebhook(w http.ResponseWriter, r *http.Request, source string, pl githubWebhookPayload) {
+	action := strings.ToLower(strings.TrimSpace(pl.Action))
+	if source == "installation" && action != "" && action != "created" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Source: source})
+		return
+	}
+	if source == "installation_repositories" && action != "" && action != "added" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Source: source})
+		return
+	}
+
+	var repos []githubRepoEntry
+	repos = append(repos, pl.RepositoriesAdded...)
+	repos = append(repos, pl.Repositories...)
+	if len(repos) == 0 {
+		rawSingle := firstNonEmpty(pl.Repo, pl.Repository.HTMLURL, pl.Repository.CloneURL, pl.Repository.URL, pl.Repository.FullName)
+		if rawSingle != "" {
+			repos = append(repos, githubRepoEntry{
+				HTMLURL:       firstNonEmpty(pl.Repo, pl.Repository.HTMLURL),
+				CloneURL:      pl.Repository.CloneURL,
+				URL:           pl.Repository.URL,
+				FullName:      pl.Repository.FullName,
+				DefaultBranch: pl.Repository.DefaultBranch,
+			})
+		}
+	}
+
+	var (
+		allIndexed []IndexRecord
+		allEvents  []Event
+		firstRepo  string
+		firstRef   string
+		firstSHA   string
+	)
+	for _, repo := range repos {
+		rawRepo := firstNonEmpty(repo.HTMLURL, repo.CloneURL, repo.URL)
+		if rawRepo == "" && repo.FullName != "" {
+			rawRepo = "https://github.com/" + strings.Trim(repo.FullName, "/")
+		}
+		if rawRepo == "" {
+			continue
+		}
+		ref := firstNonEmpty(pl.Ref, pl.Branch, repo.DefaultBranch, pl.Repository.DefaultBranch, "refs/heads/main")
+		res, err := a.SyncRepository(r.Context(), rawRepo, ref)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("syncing repository %s: %v", rawRepo, err), http.StatusBadGateway)
+			return
+		}
+		if firstRepo == "" {
+			firstRepo = res.Repo
+			firstRef = res.Ref
+			firstSHA = res.Commit
+		}
+		allIndexed = append(allIndexed, res.Indexed...)
+		allEvents = append(allEvents, res.Events...)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(WebhookResponse{
+		Source:  source,
+		Repo:    firstRepo,
+		Ref:     firstRef,
+		Commit:  firstSHA,
+		Indexed: allIndexed,
+		Events:  allEvents,
 	})
 }
 
@@ -1043,7 +1737,7 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 	if authorize == nil && a.Store != nil {
 		authorize = a.Store.AuthorizeOwnerRepo
 	}
-	if authorize == nil {
+	if authorize == nil || sub.Owner == "" {
 		return true
 	}
 	// If the Grainfile names a recipient and the node is subscribed to that
@@ -1053,9 +1747,6 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 	if rec.Recipient != "" {
 		for _, r := range sub.Recipients {
 			if strings.EqualFold(r, rec.Recipient) || IsSameRepo(r, rec.Recipient) {
-				if sub.Owner == "" {
-					return true
-				}
 				recRepo, err := canonicalRepoFromAnyRef(rec.Recipient)
 				if err != nil {
 					return false
@@ -1076,6 +1767,29 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 			}
 		}
 	}
+	// A .process.grain.md is a 1-to-many reusable/standing process that any
+	// number of Grain deployments may subscribe to (by repo, enclosing folder, or
+	// explicit .process.grain.md URL). When subscribed by explicit Grainfile URL
+	// (or when rec.Repo has no exclusive team owner in Directory), allow access.
+	if rec.Kind == KindProcess {
+		for _, gf := range sub.Grainfiles {
+			if matchesGrainfileRef(rec, gf) {
+				return true
+			}
+		}
+		if dir, ok := a.Directory.(repoOwnerDirectory); ok {
+			owner, repoName, pErr := parseGitHubOwnerRepo(rec.Repo)
+			if pErr == nil {
+				team, tErr := dir.RepoOwner(ctx, owner+"/"+repoName)
+				if tErr != nil {
+					return false
+				}
+				if team == "" {
+					return true
+				}
+			}
+		}
+	}
 	// Otherwise the node matched via Repos, Folders, or Grainfiles subscription,
 	// which requires the node's owner to have repository access to rec.Repo.
 	return authorize(ctx, sub.Owner, rec.Repo)
@@ -1083,6 +1797,14 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 
 func pinnedFetchRef(rec IndexRecord) string {
 	return firstNonEmpty(rec.CommitSHA, rec.Ref)
+}
+
+func wantsTarFormat(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "tar") {
+		return true
+	}
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	return strings.Contains(accept, "application/x-tar") || strings.Contains(accept, "application/tar")
 }
 
 func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
@@ -1184,7 +1906,7 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Subcase 1b: Fetching a referenced file authorized by rec.
+		// Subcase 1b: Fetching a referenced file or directory tree authorized by rec.
 		targetRef, err := checkRepoOrRelativeRef(rec.ToGrainfile(), rec.Repo, rawTarget)
 		if err != nil {
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
@@ -1194,7 +1916,7 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden: cross-origin reference not authorized by source repository", http.StatusForbidden)
 			return
 		}
-		a.streamRepoFile(w, r, rec.Repo, pinnedFetchRef(rec), targetRef.Path)
+		a.streamRepoReference(w, r, rec.Repo, pinnedFetchRef(rec), targetRef, rawTarget)
 		return
 	}
 
@@ -1243,7 +1965,7 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Subcase 2b: The requested path is a non-Grainfile file in canonRepo.
+	// Subcase 2b: The requested path is a non-Grainfile file or directory tree in canonRepo.
 	// Enforce the same-origin authority rule ("a repository can only grant access
 	// to itself"): only a non-draft Grainfile indexed in canonRepo that the calling
 	// node is authorized to receive can grant access to targetPath in canonRepo.
@@ -1253,6 +1975,11 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rootedTarget := "/" + strings.TrimPrefix(targetPath, "/")
+	if strings.HasSuffix(strings.TrimSpace(rawTarget), "/") || (strings.Contains(rawTarget, "://") && strings.Contains(rawTarget, "/tree/")) {
+		if !strings.HasSuffix(rootedTarget, "/") {
+			rootedTarget += "/"
+		}
+	}
 	for _, rec := range records {
 		if rec.Draft || !IsSameRepo(rec.Repo, canonRepo) {
 			continue
@@ -1267,7 +1994,7 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if targetRef, err := rec.ToGrainfile().CheckReferenceAccess(rec.Repo, rootedTarget); err == nil {
-			a.streamRepoFile(w, r, rec.Repo, pinnedFetchRef(rec), targetRef.Path)
+			a.streamRepoReference(w, r, rec.Repo, pinnedFetchRef(rec), targetRef, rawTarget)
 			return
 		}
 	}
@@ -1380,6 +2107,7 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("X-Grainfile-Kind", "file")
 	w.Header().Set("X-Grainfile-Repo", repoURL)
 	w.Header().Set("X-Grainfile-Path", filePath)
 	if ref != "" {
@@ -1387,6 +2115,235 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+func (a *API) streamRepoReference(w http.ResponseWriter, r *http.Request, repoURL, ref string, targetRef Ref, rawTarget string) {
+	isExplicitTree := targetRef.Mode == "tree" || targetRef.TrailingSlash || strings.HasSuffix(strings.TrimSpace(rawTarget), "/")
+	if !isExplicitTree {
+		data, err := a.Fetcher.FetchFile(r.Context(), repoURL, ref, targetRef.Path)
+		if err == nil {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Content-Security-Policy", "sandbox")
+			w.Header().Set("X-Grainfile-Kind", "file")
+			w.Header().Set("X-Grainfile-Repo", repoURL)
+			w.Header().Set("X-Grainfile-Path", targetRef.Path)
+			if ref != "" {
+				w.Header().Set("X-Grainfile-Commit", ref)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data)
+			return
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "fetching file from repository: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+
+	entries, treeCommit, err := a.fetchRepoTree(r.Context(), repoURL, ref, targetRef.Path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "file or directory not found in repository", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "fetching directory from repository: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	commitHdr := firstNonEmpty(treeCommit, ref)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("X-Grainfile-Kind", "tree")
+	w.Header().Set("X-Grainfile-Repo", repoURL)
+	w.Header().Set("X-Grainfile-Path", targetRef.Path)
+	if commitHdr != "" {
+		w.Header().Set("X-Grainfile-Commit", commitHdr)
+	}
+
+	if wantsTarFormat(r) {
+		tarBytes, err := encodeTreeTar(targetRef.Path, entries)
+		if err != nil {
+			http.Error(w, "encoding tar stream: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(tarBytes)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(TreeListing{
+		Kind:    "tree",
+		Repo:    repoURL,
+		Commit:  commitHdr,
+		Path:    targetRef.Path,
+		Entries: entries,
+	})
+}
+
+func (a *API) fetchRepoTree(ctx context.Context, repoURL, ref, dirPath string) ([]TreeEntry, string, error) {
+	if tf, ok := a.Fetcher.(TreeFetcher); ok {
+		return tf.FetchTree(ctx, repoURL, ref, dirPath)
+	}
+	paths, commitSHA, err := a.Fetcher.ListGrainfiles(ctx, repoURL, ref)
+	if err != nil {
+		return nil, "", err
+	}
+	cleanDir := cleanPosixPath(strings.Trim(filepath.ToSlash(dirPath), "/"))
+	if cleanDir == "." {
+		cleanDir = ""
+	}
+	var entries []TreeEntry
+	for _, p := range paths {
+		if cleanDir != "" && p != cleanDir && !strings.HasPrefix(p, cleanDir+"/") {
+			continue
+		}
+		data, err := a.Fetcher.FetchFile(ctx, repoURL, firstNonEmpty(commitSHA, ref), p)
+		if err != nil {
+			return nil, "", err
+		}
+		entries = append(entries, TreeEntry{
+			Path: p,
+			Size: int64(len(data)),
+			Data: data,
+		})
+	}
+	if len(entries) == 0 {
+		return nil, "", os.ErrNotExist
+	}
+	return entries, firstNonEmpty(commitSHA, ref), nil
+}
+
+func encodeTreeTar(baseDir string, entries []TreeEntry) ([]byte, error) {
+	cleanBase := cleanPosixPath(strings.Trim(filepath.ToSlash(baseDir), "/"))
+	if cleanBase == "." {
+		cleanBase = ""
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		name := e.Path
+		if cleanBase != "" && strings.HasPrefix(name, cleanBase+"/") {
+			name = strings.TrimPrefix(name, cleanBase+"/")
+		}
+		hdr := &tar.Header{
+			Name:     name,
+			Mode:     0o644,
+			Size:     int64(len(e.Data)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(e.Data); err != nil {
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// FetchAuthorizedContent verifies that nodeID is subscribed and authorized to
+// access grainfileURL at commitSHA (and optional reference), then fetches the
+// content on demand without storing it at rest. It returns kind ("file" or
+// "tree"), the resolved commit SHA, and the payload bytes (for a tree, a JSON
+// TreeListing or a tar archive when format == "tar").
+func (a *API) FetchAuthorizedContent(ctx context.Context, nodeID, grainfileURL, commitSHA, reference, format string) (kind, resolvedCommit string, data []byte, err error) {
+	if a.Store == nil || a.Fetcher == nil {
+		return "", "", nil, errors.New("content proxy not configured")
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return "", "", nil, fmt.Errorf("%w: empty node_id", ErrUnauthorized)
+	}
+	for _, param := range []string{grainfileURL, commitSHA, reference} {
+		if hasPathTraversalOrHazard(param) {
+			return "", "", nil, fmt.Errorf("%w: invalid path traversal or separator in content request", ErrUnauthorized)
+		}
+	}
+	sub, err := a.Store.GetSubscriptions(ctx, nodeID)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("%w: node has no registered subscriptions", ErrUnauthorized)
+	}
+	rec, err := a.lookupGrainfileRecord(ctx, "", grainfileURL, commitSHA)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) && a.grainfileExistsAtAnyRef(ctx, "", grainfileURL) {
+			return "", "", nil, fmt.Errorf("%w: requested ref or commit does not match indexed grainfile", ErrUnauthorized)
+		}
+		return "", "", nil, err
+	}
+	if commitSHA != "" && !refMatchesIndexRecord(commitSHA, rec) {
+		return "", "", nil, fmt.Errorf("%w: requested ref or commit does not match indexed grainfile", ErrUnauthorized)
+	}
+	if rec.Draft {
+		return "", "", nil, fmt.Errorf("%w: draft grainfile cannot authorize content access", ErrUnauthorized)
+	}
+	if !a.isNodeAuthorizedForRecord(ctx, sub, rec) {
+		return "", "", nil, fmt.Errorf("%w: node is not recipient or subscriber of grainfile", ErrUnauthorized)
+	}
+
+	pinnedRef := pinnedFetchRef(rec)
+	if reference == "" || isSameSelfTarget(rec, reference) {
+		if strings.Contains(reference, "://") {
+			if parsedTarget, pErr := ParseRef(reference); pErr != nil || !refMatchesIndexRecord(parsedTarget.GitRef, rec) {
+				return "", "", nil, fmt.Errorf("%w: target ref does not match indexed grainfile", ErrUnauthorized)
+			}
+		}
+		raw, err := a.Fetcher.FetchFile(ctx, rec.Repo, pinnedRef, rec.Path)
+		if err != nil {
+			return "", "", nil, err
+		}
+		return "file", pinnedRef, raw, nil
+	}
+
+	targetRef, err := checkRepoOrRelativeRef(rec.ToGrainfile(), rec.Repo, reference)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
+	}
+	if !IsSameRepo(targetRef.Repo, rec.Repo) {
+		return "", "", nil, fmt.Errorf("%w: cross-origin reference not authorized by source repository", ErrUnauthorized)
+	}
+
+	isExplicitTree := targetRef.Mode == "tree" || targetRef.TrailingSlash || strings.HasSuffix(strings.TrimSpace(reference), "/")
+	if !isExplicitTree {
+		raw, fErr := a.Fetcher.FetchFile(ctx, rec.Repo, pinnedRef, targetRef.Path)
+		if fErr == nil {
+			return "file", pinnedRef, raw, nil
+		}
+		if !errors.Is(fErr, os.ErrNotExist) {
+			return "", "", nil, fErr
+		}
+	}
+
+	entries, treeCommit, tErr := a.fetchRepoTree(ctx, rec.Repo, pinnedRef, targetRef.Path)
+	if tErr != nil {
+		return "", "", nil, tErr
+	}
+	commitOut := firstNonEmpty(treeCommit, pinnedRef)
+	if strings.EqualFold(strings.TrimSpace(format), "tar") {
+		tarBytes, err := encodeTreeTar(targetRef.Path, entries)
+		if err != nil {
+			return "", "", nil, err
+		}
+		return "tree", commitOut, tarBytes, nil
+	}
+	listingBytes, err := json.Marshal(TreeListing{
+		Kind:    "tree",
+		Repo:    rec.Repo,
+		Commit:  commitOut,
+		Path:    targetRef.Path,
+		Entries: entries,
+	})
+	if err != nil {
+		return "", "", nil, err
+	}
+	return "tree", commitOut, listingBytes, nil
 }
 
 func firstNonEmpty(vals ...string) string {

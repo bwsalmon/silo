@@ -28,8 +28,6 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
       '---',
       'grainfile: v1',
       `title: Lint documentation ${world.n}`,
-      `recipient: ${recipientBeta}`,
-      `requestor: Bob <${world.member}>`,
       'draft: false',
       'gate: false',
       'when:',
@@ -78,17 +76,12 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
       '---',
       'grainfile: v1',
       `title: Continuous verification gate ${world.n}`,
-      `recipient: ${recipientAlpha}`,
-      `requestor: Alice <${world.admin}>`,
       'draft: false',
       'gate: true',
       'references:',
       '  - /docs/spec.md',
       '  - https://github.com/external/other/blob/main/runbook.md',
       'depends_on:',
-      `  - https://github.com/${repo2}/blob/main/processes/lint.process.grain.md`,
-      'trigger_with:',
-      '  - /tasks/01-migrate.task.grain.md',
       `  - https://github.com/${repo2}/blob/main/processes/lint.process.grain.md`,
       'when:',
       '  schedule:',
@@ -111,9 +104,13 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
     ].join('\n'),
   });
 
-  // Push a commit touching src/** so the process is triggered with a process_triggered event.
+  // Push a commit touching src/** so the process is triggered with a process_triggered event,
+  // and push a commit to repo2 so lint.process.grain.md co-triggers gate.process.grain.md via depends_on.
   await hub.pushGitHub(world.repo, 'main', {
     'src/service.go': 'package src\n',
+  });
+  await hub.pushGitHub(repo2, 'main', {
+    'docs/guide.md': '# Guide\n',
   });
 
   const page = await pageAs(world.admin);
@@ -174,16 +171,16 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   await expect(table.getByText(migrateTitle)).toBeVisible();
   await expect(table.getByText(draftTitle)).toBeVisible();
 
-  // 3. Search & filtering: Recipient deployment URL
+  // 3. Search & filtering: Recipient deployment URL (tasks only; processes have no recipient)
   await page.getByLabel('Recipient deployment').fill(recipientBeta);
-  await expect(table.getByText(lintTitle)).toBeVisible();
   await expect(table.getByText(migrateTitle)).toHaveCount(0);
   await expect(table.getByText(gateTitle)).toHaveCount(0);
+  await expect(table.getByText(lintTitle)).toHaveCount(0);
 
   await page.getByLabel('Recipient deployment').fill(recipientAlpha);
   await expect(table.getByText(migrateTitle)).toBeVisible();
   await expect(table.getByText(draftTitle)).toBeVisible();
-  await expect(table.getByText(gateTitle)).toBeVisible();
+  await expect(table.getByText(gateTitle)).toHaveCount(0);
   await expect(table.getByText(lintTitle)).toHaveCount(0);
 
   await page.getByLabel('Recipient deployment').fill('');
@@ -240,8 +237,6 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   await expect(detail.getByRole('heading', { name: gateTitle })).toBeVisible();
   await expect(detail.locator('.MuiChip-label', { hasText: /^process$/ })).toBeVisible();
   await expect(detail.locator('.MuiChip-label', { hasText: /^Gate$/i })).toBeVisible();
-  await expect(detail.getByRole('link', { name: recipientAlpha })).toHaveAttribute('href', recipientAlpha);
-  await expect(detail.getByText(`Alice <${world.admin}>`)).toBeVisible();
 
   // Verify all 6 `on` trigger summaries in the detail view
   await expect(detail.getByText('schedule: 0 * * * * (UTC)')).toBeVisible();
@@ -251,7 +246,7 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   await expect(detail.locator('.MuiChip-label', { hasText: /^manual$/ })).toBeVisible();
   await expect(detail.getByText('scenario: Verify staging canary')).toBeVisible();
 
-  // Verify Authorized (same-repo) vs External references, depends_on, trigger_with, subscribed node, and trigger events
+  // Verify Authorized (same-repo) vs External references, depends_on, subscribed node, and trigger events
   const externalRunbook = 'https://github.com/external/other/blob/main/runbook.md';
   await expect(detail.getByRole('link', { name: sameRepoRef }).first()).toHaveAttribute('href', sameRepoRef);
   await expect(detail.getByRole('link', { name: externalRunbook })).toHaveAttribute('href', externalRunbook);
@@ -262,7 +257,7 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   await expect(detail.getByText('process_updated').first()).toBeVisible();
   await expect(detail.getByText('process_triggered').first()).toBeVisible();
   await expect(detail.getByText('trigger: push')).toBeVisible();
-  await expect(detail.getByText('trigger: trigger_with')).toBeVisible();
+  await expect(detail.getByText('trigger: depends_on')).toBeVisible();
 
   // Browsing and inspecting Grainfiles leaves nothing in browser storage.
   const s = await storage(page);

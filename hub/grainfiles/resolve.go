@@ -511,18 +511,22 @@ func (g *Grainfile) ResolveSource(src Source) error {
 
 	urlRef := normalizeURLRef(src.Ref, src.Commit)
 
-	if g.Recipient == "" {
+	var resolvedRecipient string
+	if g.Kind == KindTask && g.Recipient == "" {
 		g.Recipient = "/"
 	}
-	// Resolve recipient (always a repository or folder deployment identity).
-	resolvedRecipient, _, err := ResolveRefWithSource(Source{
-		RepoURL: canonRepo,
-		Ref:     urlRef,
-		Commit:  src.Commit,
-		Path:    cleanFile,
-	}, g.Recipient, "tree")
-	if err != nil {
-		return wrapFieldError("recipient", cleanFile, err)
+	if g.Recipient != "" {
+		// Resolve recipient (always a repository or folder deployment identity).
+		var err error
+		resolvedRecipient, _, err = ResolveRefWithSource(Source{
+			RepoURL: canonRepo,
+			Ref:     urlRef,
+			Commit:  src.Commit,
+			Path:    cleanFile,
+		}, g.Recipient, "tree")
+		if err != nil {
+			return wrapFieldError("recipient", cleanFile, err)
+		}
 	}
 
 	// Resolve requestor when it is a deployment / URL identity.
@@ -576,24 +580,6 @@ func (g *Grainfile) ResolveSource(src Source) error {
 		}
 	}
 
-	// Resolve trigger_with (always grainfiles -> "blob").
-	var resolvedTW []string
-	if len(g.TriggerWith) > 0 {
-		resolvedTW = make([]string, len(g.TriggerWith))
-		for i, raw := range g.TriggerWith {
-			u, _, err := ResolveRefWithSource(Source{
-				RepoURL: canonRepo,
-				Ref:     urlRef,
-				Commit:  src.Commit,
-				Path:    cleanFile,
-			}, raw, "blob")
-			if err != nil {
-				return wrapFieldError("trigger_with", cleanFile, err)
-			}
-			resolvedTW[i] = u
-		}
-	}
-
 	g.Repo = canonRepo
 	if src.Ref != "" {
 		g.Ref = src.Ref
@@ -620,7 +606,6 @@ func (g *Grainfile) ResolveSource(src Source) error {
 	g.Requestor = resolvedRequestor
 	g.References = resolvedRefs
 	g.DependsOn = resolvedDeps
-	g.TriggerWith = resolvedTW
 	return nil
 }
 
@@ -943,10 +928,18 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 		}
 		// Repository root grant covers everything in canonSource.
 		if allowedPath == "" && allowed.Mode != "blob" {
+			if targetPath == "" {
+				target.Mode = "tree"
+				target.TrailingSlash = true
+			}
 			return target, nil
 		}
 		// Exact file or folder match (ignoring #anchor).
 		if allowedPath == targetPath {
+			if allowed.Mode == "tree" || allowed.TrailingSlash {
+				target.Mode = "tree"
+				target.TrailingSlash = true
+			}
 			return target, nil
 		}
 		// Folder (/tree/) grant covers any path beneath that folder.
@@ -1350,11 +1343,6 @@ func LintTree(top string) ([]Finding, error) {
 		for _, s := range gf.References {
 			refs = append(refs, fieldRef{"references", s, false})
 		}
-		if it.kind == KindProcess {
-			for _, s := range gf.TriggerWith {
-				refs = append(refs, fieldRef{"trigger_with", s, true})
-			}
-		}
 
 		for _, fr := range refs {
 			tKind, tItem, fErr := resolveInTree(it, fr.ref, fr.field)
@@ -1398,56 +1386,8 @@ func LintTree(top string) ([]Finding, error) {
 		}
 	}
 
-	// Process depends_on target kind rule (§8.3): a .process.grain.md may depend
-	// on another .process.grain.md only when they belong to the same trigger_with group.
-	twAdj := map[*lintItem][]*lintItem{}
-	for _, k := range itemKeys {
-		it := items[k]
-		if !it.ok || it.kind != KindProcess {
-			continue
-		}
-		for _, m := range it.targets["trigger_with"] {
-			twAdj[it] = append(twAdj[it], m)
-			twAdj[m] = append(twAdj[m], it)
-		}
-	}
-	sameTriggerWithGroup := func(a, b *lintItem) bool {
-		if a == b {
-			return true
-		}
-		seen := map[*lintItem]bool{a: true}
-		q := []*lintItem{a}
-		for len(q) > 0 {
-			curr := q[0]
-			q = q[1:]
-			for _, nxt := range twAdj[curr] {
-				if nxt == b {
-					return true
-				}
-				if !seen[nxt] {
-					seen[nxt] = true
-					q = append(q, nxt)
-				}
-			}
-		}
-		return false
-	}
-	for _, k := range itemKeys {
-		it := items[k]
-		if !it.ok || it.kind != KindProcess {
-			continue
-		}
-		where := showPath(it.repo, it.rel)
-		for _, depItem := range it.targets["depends_on"] {
-			if depItem.kind == KindProcess && !sameTriggerWithGroup(it, depItem) {
-				findings = append(findings, newFinding(CodeWrongTargetKind, where,
-					fmt.Sprintf("depends_on: process %q cannot depend on process %q outside its trigger_with group", it.rel, depItem.rel)))
-			}
-		}
-	}
-
-	// Cycle detection in depends_on and trigger_with (§8.4).
-	for _, field := range []string{"depends_on", "trigger_with"} {
+	// Cycle detection in depends_on (§8.4).
+	for _, field := range []string{"depends_on"} {
 		state := map[*lintItem]int{}
 		var stack []*lintItem
 		var visit func(n *lintItem)
@@ -1505,6 +1445,18 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 			g.Extensions[k] = fm[k]
 			continue
 		}
+		if k == "trigger_with" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with is not allowed in Grainfile v1 (use depends_on and when instead)"))
+			continue
+		}
+		if g.Kind == KindTask && (k == "when" || k == "on" || k == "gate") {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .process.grain.md files", k)))
+			continue
+		}
+		if g.Kind == KindProcess && (k == "recipient" || k == "requestor") {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .task.grain.md files", k)))
+			continue
+		}
 		if !known[k] {
 			g.Warnings = append(g.Warnings, newFinding(CodeUnknownField, where, fmt.Sprintf("unknown field %q", k)))
 		}
@@ -1534,23 +1486,25 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 		g.Title = title
 	}
 
-	if rawRec, ok := fm["recipient"]; !ok {
-		g.Recipient = "/"
-	} else if rec, ok := rawRec.(string); !ok || rec == "" {
-		errs = append(errs, newFinding(CodeSchemaInvalid, where, "recipient: must be a non-empty string"))
-	} else if strings.ContainsAny(rec, "<>@\\ \t\r\n") {
-		errs = append(errs, newFinding(CodeSchemaInvalid, where, "recipient: invalid deployment identity"))
-	} else {
-		g.Recipient = rec
-	}
-
-	if rawReq, ok := fm["requestor"]; ok {
-		if req, ok := rawReq.(string); !ok || req == "" {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "requestor: must be a non-empty string"))
+	if g.Kind == KindTask {
+		if rawRec, ok := fm["recipient"]; !ok {
+			g.Recipient = "/"
+		} else if rec, ok := rawRec.(string); !ok || rec == "" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "recipient: must be a non-empty string"))
+		} else if strings.ContainsAny(rec, "<>@\\ \t\r\n") {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "recipient: invalid deployment identity"))
 		} else {
-			g.Requestor = req
-			if !IsUserIdentity(req) && strings.ContainsAny(req, "<>@\\ \t\r\n") {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("requestor: invalid identity %q", req)))
+			g.Recipient = rec
+		}
+
+		if rawReq, ok := fm["requestor"]; ok {
+			if req, ok := rawReq.(string); !ok || req == "" {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "requestor: must be a non-empty string"))
+			} else {
+				g.Requestor = req
+				if !IsUserIdentity(req) && strings.ContainsAny(req, "<>@\\ \t\r\n") {
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("requestor: invalid identity %q", req)))
+				}
 			}
 		}
 	}
@@ -1600,26 +1554,6 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 	}
 
 	if g.Kind == KindProcess {
-		_, hasTriggerWith := fm["trigger_with"]
-		if hasTriggerWith {
-			switch v := fm["trigger_with"].(type) {
-			case string:
-				if v == "" || strings.ContainsAny(v, " \t\r\n\\") {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be a valid reference"))
-				} else {
-					g.TriggerWith = []string{v}
-				}
-			case []any:
-				if len(v) == 0 {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be non-empty"))
-				} else {
-					g.TriggerWith = extractRefStrings(v, "trigger_with")
-				}
-			default:
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be a string or non-empty list"))
-			}
-		}
-
 		if rawGate, ok := fm["gate"]; ok {
 			if b, ok := rawGate.(bool); !ok {
 				errs = append(errs, newFinding(CodeSchemaInvalid, where, "gate: must be a boolean"))
@@ -1628,10 +1562,9 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 			}
 		}
 		_, hasWhen := fm["when"]
-		if !hasWhen && !hasTriggerWith {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "process must specify at least one of when or trigger_with"))
-		}
-		if hasWhen {
+		if !hasWhen {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "when: required field missing on .process.grain.md"))
+		} else {
 			triggers, whenErrs := validateOnTriggers(fm["when"], where)
 			errs = append(errs, whenErrs...)
 			g.When = triggers

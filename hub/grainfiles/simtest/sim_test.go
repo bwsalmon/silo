@@ -344,7 +344,7 @@ title: Release Gate Process
 recipient: https://github.com/acme/grain-alpha
 requestor: https://github.com/acme/grain-orchestrator
 gate: true
-trigger_with:
+depends_on:
   - /processes/notify.process.md
 on:
   push:
@@ -568,7 +568,7 @@ Bootstrap beta service cluster.
 				t.Fatalf("expected 1 result for release.process.md, got %d", len(byPath.Grainfiles))
 			}
 			rel := byPath.Grainfiles[0]
-			if !rel.Gate || len(rel.TriggerWith) != 1 || !strings.HasSuffix(rel.TriggerWith[0], "/processes/notify.process.md") {
+			if !rel.Gate || len(rel.DependsOn) != 1 || !strings.HasSuffix(rel.DependsOn[0], "/processes/notify.process.md") {
 				t.Fatalf("unexpected release.process.md detail: %+v", rel)
 			}
 			if rel.On.Push == nil || rel.On.PullRequest == nil {
@@ -794,18 +794,20 @@ Run on matching push.
 				"processes/lint.process.md": `---
 title: Companion Lint Process
 recipient: https://github.com/acme/grain-a
-trigger_with:
+depends_on:
   - /processes/entry.process.md
+on:
+  manual: {}
 ---
 Run lint when entry triggers.
 `,
 				"processes/smoke.process.md": `---
 title: Companion Smoke Process
 recipient: https://github.com/acme/grain-b
-trigger_with:
-  - /processes/entry.process.md
 depends_on:
   - /processes/lint.process.md
+on:
+  manual: {}
 ---
 Run smoke suite after lint when entry triggers.
 `,
@@ -885,10 +887,10 @@ Deploy merged PR to staging.
 			if evTrigA1.Path != "processes/entry.process.md" || evTrigA1.TriggerSource != grainfiles.TriggerPush {
 				t.Fatalf("unexpected Node A primary triggered event: %+v", evTrigA1)
 			}
-			if evTrigA2.Path != "processes/lint.process.md" || evTrigA2.TriggerSource != grainfiles.TriggerWith {
+			if evTrigA2.Path != "processes/lint.process.md" || evTrigA2.TriggerSource != grainfiles.TriggerDependsOn {
 				t.Fatalf("unexpected Node A co-triggered event: %+v", evTrigA2)
 			}
-			if evTrigB1.Path != "processes/smoke.process.md" || evTrigB1.TriggerSource != grainfiles.TriggerWith {
+			if evTrigB1.Path != "processes/smoke.process.md" || evTrigB1.TriggerSource != grainfiles.TriggerDependsOn {
 				t.Fatalf("unexpected Node B co-triggered event: %+v", evTrigB1)
 			}
 
@@ -1000,10 +1002,10 @@ func TestEndToEndCrossRepoContentProxyAndGitHubAppAuth(t *testing.T) {
 			tokA := env.setupTeamAndMintNodeToken("team-a", "alice@example.com", []string{"acme/repo-a"}, "node-a")
 			tokB := env.setupTeamAndMintNodeToken("team-b", "bob@example.com", []string{"beta/repo-b"}, "node-b")
 
-			env.connectNode("node-a", tokA, []string{"acme/repo-a"}, &grainfiles.Subscriptions{
+			connA := env.connectNode("node-a", tokA, []string{"acme/repo-a"}, &grainfiles.Subscriptions{
 				Recipients: []string{recA},
 			})
-			env.connectNode("node-b", tokB, []string{"beta/repo-b"}, &grainfiles.Subscriptions{
+			connB := env.connectNode("node-b", tokB, []string{"beta/repo-b"}, &grainfiles.Subscriptions{
 				Recipients: []string{recB},
 			})
 
@@ -1132,7 +1134,25 @@ Audit the specification and schema.
 				t.Fatalf("expected 403 Forbidden for non-recipient Node A fetching /docs/spec.md, got %d", code)
 			}
 
-			// 7. Verify GitHub App installation token exchange was used by the Hub's GitHubFetcher.
+			// 7. Verify on-demand mux stream fetch_grainfile and fetch_reference over WebSocket!
+			ctxMux, cancelMux := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelMux()
+			hdrGF, muxGFBytes, err := connB.FetchGrainfile(ctxMux, grainfileURL, shaA)
+			if err != nil || hdrGF.Kind != "file" || string(muxGFBytes) != grainfileBody {
+				t.Fatalf("connB.FetchGrainfile: err=%v hdr=%+v body=%q", err, hdrGF, string(muxGFBytes))
+			}
+			hdrRef, muxRefBytes, err := connB.FetchReference(ctxMux, grainfileURL, shaA, "/docs/spec.md", "")
+			if err != nil || hdrRef.Kind != "file" || string(muxRefBytes) != specBody {
+				t.Fatalf("connB.FetchReference(spec.md): err=%v hdr=%+v body=%q", err, hdrRef, string(muxRefBytes))
+			}
+			if _, _, err := connA.FetchGrainfile(ctxMux, grainfileURL, shaA); err == nil {
+				t.Fatalf("expected non-recipient Node A mux FetchGrainfile to fail")
+			}
+			if _, _, err := connB.FetchReference(ctxMux, grainfileURL, shaA, "/secret.env", ""); err == nil {
+				t.Fatalf("expected unreferenced /secret.env mux FetchReference to fail")
+			}
+
+			// 8. Verify GitHub App installation token exchange was used by the Hub's GitHubFetcher.
 			if env.sim.MintedInstallationTokens() < 1 {
 				t.Fatalf("expected GitHub App installation token to be minted, got %d", env.sim.MintedInstallationTokens())
 			}

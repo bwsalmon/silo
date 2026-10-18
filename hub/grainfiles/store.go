@@ -26,8 +26,10 @@ const maxConns = 8
 // (docs/hub.md §6.4, §6.5).
 const (
 	EventTaskReady           = "task_ready"
+	EventTaskRemoved         = "task_removed"
 	EventProcessUpdated      = "process_updated"
 	EventProcessTriggered    = "process_triggered"
+	EventProcessRemoved      = "process_removed"
 	EventDependencyCompleted = "dependency_completed"
 )
 
@@ -310,7 +312,6 @@ type IndexRecord struct {
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
-	TriggerWith          []string  `json:"trigger_with,omitempty"`
 	When                 Triggers  `json:"when,omitempty,omitzero"`
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
@@ -362,7 +363,6 @@ func (r IndexRecord) ToGrainfile() *Grainfile {
 		CreatedAt:       r.CreatedAt,
 		References:      slices.Clone(r.References),
 		DependsOn:       slices.Clone(r.DependsOn),
-		TriggerWith:     slices.Clone(r.TriggerWith),
 		When:            triggers,
 		On:              triggers,
 		Gate:            r.Gate,
@@ -386,10 +386,11 @@ type Subscriptions struct {
 }
 
 // Event is a discoverable Grainfile event stored in grainfile_events
-// (task_ready, process_updated, process_triggered, dependency_completed).
+// (task_ready, task_removed, process_updated, process_triggered, process_removed, dependency_completed).
 type Event struct {
 	Seq                  int64     `json:"seq"`
 	Type                 string    `json:"type"`
+	Action               string    `json:"action,omitempty"`
 	Grainfile            string    `json:"grainfile,omitempty"`
 	SpecSummaryPath      string    `json:"spec_summary_path,omitempty"`
 	SpecPath             string    `json:"spec_path,omitempty"`
@@ -406,7 +407,6 @@ type Event struct {
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
-	TriggerWith          []string  `json:"trigger_with,omitempty"`
 	When                 Triggers  `json:"when,omitempty,omitzero"`
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
@@ -421,13 +421,13 @@ type Event struct {
 }
 
 type eventPayload struct {
+	Action               string   `json:"action,omitempty"`
 	Grainfile            string   `json:"grainfile,omitempty"`
 	Requestor            string   `json:"requestor,omitempty"`
 	NotBeforeMillis      int64    `json:"not_before_ms,omitempty"`
 	References           []string `json:"references,omitempty"`
 	AuthorizedReferences []string `json:"authorized_references,omitempty"`
 	DependsOn            []string `json:"depends_on,omitempty"`
-	TriggerWith          []string `json:"trigger_with,omitempty"`
 	OnSpec               Triggers `json:"on_spec,omitempty"`
 	ChangedPaths         []string `json:"changed_paths,omitempty"`
 	Reason               string   `json:"reason,omitempty"`
@@ -455,7 +455,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 
 	cp := *g
 	cp.Body = ""
-	if cp.URL == "" || !strings.Contains(cp.Recipient, "://") {
+	if cp.URL == "" || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) {
 		if err := cp.ResolveSource(Source{
 			RepoURL: cp.Repo,
 			Ref:     cp.Ref,
@@ -492,10 +492,6 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	deps := cp.DependsOn
 	if deps == nil {
 		deps = []string{}
-	}
-	tw := cp.TriggerWith
-	if tw == nil {
-		tw = []string{}
 	}
 
 	if at.IsZero() {
@@ -545,7 +541,6 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		References:           refs,
 		AuthorizedReferences: authRefs,
 		DependsOn:            deps,
-		TriggerWith:          tw,
 		When:                 triggers,
 		On:                   triggers,
 		OnSpec:               triggers,
@@ -567,10 +562,6 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	if err != nil {
 		return IndexRecord{}, err
 	}
-	twJSON, err := json.Marshal(rec.TriggerWith)
-	if err != nil {
-		return IndexRecord{}, err
-	}
 	onJSON, err := json.Marshal(rec.OnSpec)
 	if err != nil {
 		return IndexRecord{}, err
@@ -585,6 +576,22 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	}
 
 	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var prevLatestCommit, prevLatestRecipient string
+		var prevLatestDraft, prevLatestReady int
+		var prevLatestUpdatedMS int64
+		hasPrevLatest := false
+		if err := tx.QueryRowContext(ctx, s.q(`SELECT commit_sha, draft, ready_emitted, recipient, updated_at FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
+			rec.Repo, rec.Path).Scan(&prevLatestCommit, &prevLatestDraft, &prevLatestReady, &prevLatestRecipient, &prevLatestUpdatedMS); err == nil {
+			hasPrevLatest = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if hasPrevLatest && prevLatestCommit != rec.CommitSHA {
+			if minNext := time.UnixMilli(prevLatestUpdatedMS + 1).UTC(); !rec.UpdatedAt.After(time.UnixMilli(prevLatestUpdatedMS).UTC()) {
+				rec.UpdatedAt = minNext
+			}
+		}
+
 		var prevReady int
 		var prevTitle, prevRecipient string
 		var prevNotBeforeMS int64
@@ -606,11 +613,13 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		// Task idempotency rule (§9): once a .task.grain.md has completed (done),
 		// subsequent pushes, merges, or edits to that (repo_url, file_path) do not
 		// re-trigger or re-queue it.
+		var taskDone bool
 		if rec.Kind == KindTask {
 			done, err := s.isTaskCompletedTx(tx, ctx, rec.Repo, rec.Path)
 			if err != nil {
 				return err
 			}
+			taskDone = done
 			if done {
 				emitNow = false
 				readyFlag = 1
@@ -622,7 +631,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			repo, path, commit_sha, ref, url, kind, title, recipient, requestor,
 			draft, not_before, created_at, "references", authorized_references,
 			depends_on, trigger_with, on_spec, gate, ready_emitted, removed, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 0, ?)
 		ON CONFLICT (repo, path, commit_sha) DO UPDATE SET
 			ref = EXCLUDED.ref,
 			url = EXCLUDED.url,
@@ -645,10 +654,71 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			rec.Repo, rec.Path, rec.CommitSHA, rec.Ref, rec.URL, string(rec.Kind),
 			rec.Title, rec.Recipient, rec.Requestor, boolToInt(rec.Draft),
 			notBeforeMS, createdAtMS, string(refsJSON), string(authRefsJSON),
-			string(depsJSON), string(twJSON), string(onJSON), boolToInt(rec.Gate),
+			string(depsJSON), string(onJSON), boolToInt(rec.Gate),
 			readyFlag, rec.UpdatedAt.UnixMilli())
 		if err != nil {
 			return err
+		}
+
+		if hasPrevLatest && prevLatestDraft == 0 && rec.Draft {
+			if rec.Kind == KindProcess {
+				_, err = s.insertEventTx(tx, ctx, Event{
+					Type:                 EventProcessRemoved,
+					Action:               "removed",
+					Grainfile:            rec.Grainfile,
+					SpecSummaryPath:      rec.SpecSummaryPath,
+					SpecPath:             rec.SpecPath,
+					Repo:                 rec.Repo,
+					Path:                 rec.Path,
+					CommitSHA:            rec.CommitSHA,
+					Ref:                  rec.Ref,
+					GrainfileURL:         rec.URL,
+					Kind:                 rec.Kind,
+					Title:                rec.Title,
+					NotBefore:            rec.NotBefore,
+					References:           rec.References,
+					AuthorizedReferences: rec.AuthorizedReferences,
+					DependsOn:            rec.DependsOn,
+					When:                 rec.When,
+					OnSpec:               rec.OnSpec,
+					Gate:                 rec.Gate,
+					Reason:               "process grainfile marked draft",
+					CreatedAt:            now,
+				})
+				return err
+			}
+			if rec.Kind == KindTask && !taskDone {
+				cancelled, cErr := s.isTaskCancelledTx(tx, ctx, rec.Repo, rec.Path)
+				if cErr != nil || cancelled {
+					return cErr
+				}
+				_, err = s.insertEventTx(tx, ctx, Event{
+					Type:                 EventTaskRemoved,
+					Action:               "removed",
+					Grainfile:            rec.Grainfile,
+					SpecSummaryPath:      rec.SpecSummaryPath,
+					SpecPath:             rec.SpecPath,
+					Repo:                 rec.Repo,
+					Path:                 rec.Path,
+					CommitSHA:            rec.CommitSHA,
+					Ref:                  rec.Ref,
+					GrainfileURL:         rec.URL,
+					Kind:                 rec.Kind,
+					Title:                rec.Title,
+					Recipient:            firstNonEmpty(rec.Recipient, prevLatestRecipient),
+					Requestor:            rec.Requestor,
+					NotBefore:            rec.NotBefore,
+					References:           rec.References,
+					AuthorizedReferences: rec.AuthorizedReferences,
+					DependsOn:            rec.DependsOn,
+					DependencyURL:        rec.URL,
+					DependencyState:      "cancelled",
+					Reason:               "task grainfile marked draft",
+					CreatedAt:            now,
+				})
+				return err
+			}
+			return nil
 		}
 
 		if emitNow {
@@ -674,7 +744,6 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
-				TriggerWith:          rec.TriggerWith,
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
@@ -716,7 +785,7 @@ func (s *Store) isTaskCompletedTx(tx *sql.Tx, ctx context.Context, canonRepo, cl
 }
 
 func (s *Store) isTaskCancelledTx(tx *sql.Tx, ctx context.Context, canonRepo, cleanPath string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, s.q(`SELECT repo, path, dependency_url, dependency_state FROM grainfile_events WHERE type = ?`), EventDependencyCompleted)
+	rows, err := tx.QueryContext(ctx, s.q(`SELECT repo, path, dependency_url, dependency_state FROM grainfile_events WHERE type IN (?, ?)`), EventDependencyCompleted, EventTaskRemoved)
 	if err != nil {
 		return false, err
 	}
@@ -748,8 +817,10 @@ func (s *Store) UpsertIndex(ctx context.Context, g *Grainfile) (IndexRecord, err
 // RemoveGrainfile marks all indexed versions of (repo, path) as removed so they
 // no longer fire triggers or authorize references.
 // Per §9:
-//   - Deleting a .task.grain.md while its task is still queued, deferred, or
-//     running cancels the task (emitting dependency_completed with state "cancelled").
+//   - Deleting an active .task.grain.md while its task is still queued, deferred,
+//     or running cancels the task (emitting task_removed with action "removed"
+//     and dependency_state "cancelled").
+//   - Deleting an active .process.grain.md emits process_removed with action "removed".
 //   - Deleting a .task.grain.md after its task has already completed (done) is
 //     a clean-up no-op on task completion state.
 func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) error {
@@ -768,7 +839,36 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 			now.UnixMilli(), canonRepo, cleanPath); err != nil {
 			return err
 		}
-		if scanErr != nil || latest.Kind != KindTask || latest.Draft {
+		if scanErr != nil || latest.Draft {
+			return nil
+		}
+		if latest.Kind == KindProcess {
+			_, err = s.insertEventTx(tx, ctx, Event{
+				Type:                 EventProcessRemoved,
+				Action:               "removed",
+				Grainfile:            latest.Grainfile,
+				SpecSummaryPath:      latest.SpecSummaryPath,
+				SpecPath:             latest.SpecPath,
+				Repo:                 latest.Repo,
+				Path:                 latest.Path,
+				CommitSHA:            latest.CommitSHA,
+				Ref:                  latest.Ref,
+				GrainfileURL:         latest.URL,
+				Kind:                 latest.Kind,
+				Title:                latest.Title,
+				NotBefore:            latest.NotBefore,
+				References:           latest.References,
+				AuthorizedReferences: latest.AuthorizedReferences,
+				DependsOn:            latest.DependsOn,
+				When:                 latest.When,
+				OnSpec:               latest.OnSpec,
+				Gate:                 latest.Gate,
+				Reason:               "process grainfile deleted",
+				CreatedAt:            now,
+			})
+			return err
+		}
+		if latest.Kind != KindTask {
 			return nil
 		}
 		done, err := s.isTaskCompletedTx(tx, ctx, canonRepo, cleanPath)
@@ -784,22 +884,28 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 			return err
 		}
 		_, err = s.insertEventTx(tx, ctx, Event{
-			Type:            EventDependencyCompleted,
-			Grainfile:       latest.Grainfile,
-			SpecSummaryPath: latest.SpecSummaryPath,
-			SpecPath:        latest.SpecPath,
-			Repo:            latest.Repo,
-			Path:            latest.Path,
-			CommitSHA:       latest.CommitSHA,
-			Ref:             latest.Ref,
-			GrainfileURL:    latest.URL,
-			Kind:            latest.Kind,
-			Title:           latest.Title,
-			Recipient:       latest.Recipient,
-			DependencyURL:   latest.URL,
-			DependencyState: "cancelled",
-			Reason:          "task grainfile deleted",
-			CreatedAt:       now,
+			Type:                 EventTaskRemoved,
+			Action:               "removed",
+			Grainfile:            latest.Grainfile,
+			SpecSummaryPath:      latest.SpecSummaryPath,
+			SpecPath:             latest.SpecPath,
+			Repo:                 latest.Repo,
+			Path:                 latest.Path,
+			CommitSHA:            latest.CommitSHA,
+			Ref:                  latest.Ref,
+			GrainfileURL:         latest.URL,
+			Kind:                 latest.Kind,
+			Title:                latest.Title,
+			Recipient:            latest.Recipient,
+			Requestor:            latest.Requestor,
+			NotBefore:            latest.NotBefore,
+			References:           latest.References,
+			AuthorizedReferences: latest.AuthorizedReferences,
+			DependsOn:            latest.DependsOn,
+			DependencyURL:        latest.URL,
+			DependencyState:      "cancelled",
+			Reason:               "task grainfile deleted",
+			CreatedAt:            now,
 		})
 		return err
 	})
@@ -894,7 +1000,6 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
-				TriggerWith:          rec.TriggerWith,
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
@@ -954,7 +1059,6 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	_ = json.Unmarshal([]byte(refsStr), &rec.References)
 	_ = json.Unmarshal([]byte(authRefsStr), &rec.AuthorizedReferences)
 	_ = json.Unmarshal([]byte(depsStr), &rec.DependsOn)
-	_ = json.Unmarshal([]byte(twStr), &rec.TriggerWith)
 	_ = json.Unmarshal([]byte(onStr), &rec.OnSpec)
 	rec.When = rec.OnSpec
 	rec.On = rec.OnSpec
@@ -1221,34 +1325,41 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 			curr := queue[0]
 			queue = queue[1:]
 
-			// Enforce bounded trigger_with depth (MaxTriggerWithDepth = 8) and
-			// fan-out (MaxTriggerWithFanOut = 32) per §8.4 and §11.4.
-			if curr.depth >= MaxTriggerWithDepth || coTriggeredCount >= MaxTriggerWithFanOut {
+			// Enforce bounded depends_on co-trigger depth (MaxDependsOnDepth = 8) and
+			// fan-out (MaxDependsOnFanOut = 32) per §8.3 and §11.4.
+			if curr.depth >= MaxDependsOnDepth || coTriggeredCount >= MaxDependsOnFanOut {
 				continue
 			}
 
-			// Evaluate trigger_with co-triggers referencing curr.rec.
+			// Evaluate depends_on co-triggers referencing curr.rec when a dependent
+			// .process.grain.md has manual/empty triggers or resides in another repository
+			// whose event matches ev.
 			for _, candidate := range allRecords {
-				if coTriggeredCount >= MaxTriggerWithFanOut {
+				if coTriggeredCount >= MaxDependsOnFanOut {
 					break
 				}
-				if candidate.removed || candidate.Draft || candidate.Kind != KindProcess || len(candidate.TriggerWith) == 0 {
+				if candidate.removed || candidate.Draft || candidate.Kind != KindProcess || len(candidate.DependsOn) == 0 {
 					continue
 				}
-				if !candidate.ToGrainfile().ActiveAt(at) {
+				candGF := candidate.ToGrainfile()
+				if !candGF.ActiveAt(at) {
+					continue
+				}
+				canCoTrigger := candidate.When.IsZero() || candidate.When.Manual != nil || (candidate.Repo != canonRepo && candGF.MatchesEvent(ev))
+				if !canCoTrigger {
 					continue
 				}
 				candKey := candidate.Repo + "\x00" + candidate.Path
 				if visited[candKey] {
 					continue
 				}
-				for _, twURL := range candidate.TriggerWith {
-					if matchesGrainfileRef(curr.rec, twURL) {
+				for _, depURL := range candidate.DependsOn {
+					if matchesGrainfileRef(curr.rec, depURL) {
 						visited[candKey] = true
 						coTriggeredCount++
 						item := trigItem{
 							rec:         candidate,
-							source:      TriggerWith,
+							source:      TriggerDependsOn,
 							triggeredBy: curr.rec.URL,
 							emit:        true,
 							depth:       curr.depth + 1,
@@ -1266,7 +1377,7 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 		}
 
 		// Topologically sort discovered items so any item listed in another
-		// item's depends_on or trigger_with fires first.
+		// item's depends_on fires first.
 		n := len(discovered)
 		inDegree := make([]int, n)
 		edges := make([][]int, n)
@@ -1275,20 +1386,12 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				if i == j {
 					continue
 				}
-				// Does j depend on or trigger_with i?
+				// Does j depend on i?
 				depends := false
 				for _, depURL := range discovered[j].rec.DependsOn {
 					if matchesGrainfileRef(discovered[i].rec, depURL) {
 						depends = true
 						break
-					}
-				}
-				if !depends {
-					for _, twURL := range discovered[j].rec.TriggerWith {
-						if matchesGrainfileRef(discovered[i].rec, twURL) {
-							depends = true
-							break
-						}
 					}
 				}
 				if depends {
@@ -1352,7 +1455,6 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				References:           curr.rec.References,
 				AuthorizedReferences: curr.rec.AuthorizedReferences,
 				DependsOn:            curr.rec.DependsOn,
-				TriggerWith:          curr.rec.TriggerWith,
 				When:                 curr.rec.When,
 				OnSpec:               curr.rec.OnSpec,
 				Gate:                 curr.rec.Gate,
@@ -1463,7 +1565,6 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 				References:           dep.References,
 				AuthorizedReferences: dep.AuthorizedReferences,
 				DependsOn:            dep.DependsOn,
-				TriggerWith:          dep.TriggerWith,
 				When:                 dep.When,
 				OnSpec:               dep.OnSpec,
 				Gate:                 dep.Gate,
@@ -1548,7 +1649,14 @@ func (s *Store) RecordDependencyCompletedByNode(ctx context.Context, nodeID, com
 			}
 		}
 	} else if sub.MatchesRecord(rec) {
-		if s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
+		matchedByGF := false
+		for _, gf := range sub.Grainfiles {
+			if matchesGrainfileRef(rec, gf) {
+				matchedByGF = true
+				break
+			}
+		}
+		if !matchedByGF && s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
 			return nil, fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, sub.Owner, rec.Repo)
 		}
 		authorized = true
@@ -1617,18 +1725,22 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 	ev.When = ev.OnSpec
 	ev.On = ev.OnSpec
 
+	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
+		ev.Action = "removed"
+	}
+
 	var nbMS int64
 	if !ev.NotBefore.IsZero() {
 		nbMS = ev.NotBefore.UnixMilli()
 	}
 	pl := eventPayload{
+		Action:               ev.Action,
 		Grainfile:            ev.Grainfile,
 		Requestor:            ev.Requestor,
 		NotBeforeMillis:      nbMS,
 		References:           ev.References,
 		AuthorizedReferences: ev.AuthorizedReferences,
 		DependsOn:            ev.DependsOn,
-		TriggerWith:          ev.TriggerWith,
 		OnSpec:               ev.OnSpec,
 		ChangedPaths:         ev.ChangedPaths,
 		Reason:               ev.Reason,
@@ -1679,6 +1791,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 
 	var pl eventPayload
 	if err := json.Unmarshal([]byte(payloadJS), &pl); err == nil {
+		ev.Action = pl.Action
 		ev.Grainfile = pl.Grainfile
 		ev.Requestor = pl.Requestor
 		if pl.NotBeforeMillis > 0 {
@@ -1687,12 +1800,14 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.References = pl.References
 		ev.AuthorizedReferences = pl.AuthorizedReferences
 		ev.DependsOn = pl.DependsOn
-		ev.TriggerWith = pl.TriggerWith
 		ev.OnSpec = pl.OnSpec
 		ev.When = pl.OnSpec
 		ev.On = pl.OnSpec
 		ev.ChangedPaths = pl.ChangedPaths
 		ev.Reason = pl.Reason
+	}
+	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
+		ev.Action = "removed"
 	}
 	if ev.Grainfile == "" {
 		ev.Grainfile = VersionV1
@@ -2063,7 +2178,7 @@ func (s *Store) CatchupNode(ctx context.Context, nodeID string, advance bool) ([
 // MatchesRecord reports whether sub subscribes to rec by recipient URL,
 // repository URL, folder prefix, or explicit Grainfile URL.
 func (sub Subscriptions) MatchesRecord(rec IndexRecord) bool {
-	if slices.Contains(sub.Recipients, rec.Recipient) {
+	if rec.Recipient != "" && slices.Contains(sub.Recipients, rec.Recipient) {
 		return true
 	}
 	for _, r := range sub.Repos {
