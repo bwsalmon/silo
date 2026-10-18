@@ -355,3 +355,141 @@ func TestAPISameOrigin(t *testing.T) {
 		t.Errorf("same-origin mint: %d, want 201", got)
 	}
 }
+
+// TestAdminModeHeader verifies can_hub_admin vs hub_admin when
+// X-Silo-Admin-Mode is set to off/on or omitted, and ensures a
+// non-admin cannot escalate privileges by sending X-Silo-Admin-Mode: on.
+func TestAdminModeHeader(t *testing.T) {
+	h := newTestHub(t)
+	const root, alice, bob = "root@example.com", "alice@example.com", "bob@example.com"
+	const admins = "hub-admins@example.com"
+
+	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"}, admins)
+	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "web", "name": "Web"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+root, map[string]string{"role": "member"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/user:"+bob, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", nil, admins)
+
+	// Mint node tokens for root and bob.
+	h.want(t, 201, root, "POST", NodeTokensPath, map[string]string{"node": "ws-root"}, admins)
+	h.want(t, 201, bob, "POST", NodeTokensPath, map[string]string{"node": "ws-bob"})
+
+	doMode := func(user, group, mode, method, path string, body any) (int, []byte) {
+		t.Helper()
+		var rd io.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			rd = bytes.NewReader(b)
+		}
+		req, _ := http.NewRequest(method, h.url+path, rd)
+		req.Header.Set("X-User", user)
+		if group != "" {
+			req.Header.Set("X-Groups", group)
+		}
+		if mode != "" {
+			req.Header.Set(AdminModeHeader, mode)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	type meResp struct {
+		Email       string          `json:"email"`
+		HubAdmin    bool            `json:"hub_admin"`
+		CanHubAdmin bool            `json:"can_hub_admin"`
+		Teams       map[string]Role `json:"teams"`
+	}
+
+	// 1. Hub admin with header omitted or "on": both can_hub_admin and hub_admin are true.
+	for _, mode := range []string{"", "on", "ON", "true", "1"} {
+		code, b := doMode(root, admins, mode, "GET", MePath, nil)
+		if code != 200 {
+			t.Fatalf("GET /v1/me mode=%q: %d %s", mode, code, b)
+		}
+		var me meResp
+		json.Unmarshal(b, &me)
+		if !me.CanHubAdmin || !me.HubAdmin || me.Teams["infra"] != Member {
+			t.Errorf("GET /v1/me mode=%q: got %+v, want CanHubAdmin=true HubAdmin=true", mode, me)
+		}
+		var teams struct{ Teams []Team }
+		_, tb := doMode(root, admins, mode, "GET", TeamsPath, nil)
+		json.Unmarshal(tb, &teams)
+		if len(teams.Teams) != 2 {
+			t.Errorf("GET /v1/teams mode=%q: got %d teams, want 2", mode, len(teams.Teams))
+		}
+	}
+
+	// 2. Hub admin with X-Silo-Admin-Mode: off/false/0: can_hub_admin is true, hub_admin is false.
+	for _, mode := range []string{"off", "OFF", "false", "0"} {
+		code, b := doMode(root, admins, mode, "GET", MePath, nil)
+		if code != 200 {
+			t.Fatalf("GET /v1/me mode=%q: %d %s", mode, code, b)
+		}
+		var me meResp
+		json.Unmarshal(b, &me)
+		if !me.CanHubAdmin || me.HubAdmin {
+			t.Errorf("GET /v1/me mode=%q: got %+v, want CanHubAdmin=true HubAdmin=false", mode, me)
+		}
+
+		// Sees only infra (member), not web.
+		var teams struct{ Teams []Team }
+		_, tb := doMode(root, admins, mode, "GET", TeamsPath, nil)
+		json.Unmarshal(tb, &teams)
+		if len(teams.Teams) != 1 || teams.Teams[0].ID != "infra" {
+			t.Errorf("GET /v1/teams mode=%q: got %+v, want only infra", mode, teams.Teams)
+		}
+		if c, _ := doMode(root, admins, mode, "GET", TeamsPath+"/web", nil); c != 404 {
+			t.Errorf("GET /v1/teams/web mode=%q: got %d, want 404", mode, c)
+		}
+
+		// Hub-admin-only writes are refused when admin mode is off.
+		if c, _ := doMode(root, admins, mode, "POST", TeamsPath, map[string]string{"id": "extra"}); c != 403 {
+			t.Errorf("POST /v1/teams mode=%q: got %d, want 403", mode, c)
+		}
+		if c, _ := doMode(root, admins, mode, "PUT", TeamsPath+"/infra/repos/bwsalmon/extra", nil); c != 403 {
+			t.Errorf("PUT repo mode=%q: got %d, want 403", mode, c)
+		}
+		if c, _ := doMode(root, admins, mode, "DELETE", TeamsPath+"/infra", nil); c != 403 {
+			t.Errorf("DELETE /v1/teams/infra mode=%q: got %d, want 403", mode, c)
+		}
+
+		// Node tokens list only root's own token, not bob's.
+		var toks struct {
+			NodeTokens []NodeToken `json:"node_tokens"`
+		}
+		_, tokB := doMode(root, admins, mode, "GET", NodeTokensPath, nil)
+		json.Unmarshal(tokB, &toks)
+		if len(toks.NodeTokens) != 1 || toks.NodeTokens[0].Node != "ws-root" {
+			t.Errorf("GET /v1/node-tokens mode=%q: got %+v, want only ws-root", mode, toks.NodeTokens)
+		}
+	}
+
+	// 3. Non-admin sending X-Silo-Admin-Mode: on gains nothing.
+	for _, mode := range []string{"", "on", "off"} {
+		code, b := doMode(alice, "", mode, "GET", MePath, nil)
+		if code != 200 {
+			t.Fatalf("alice GET /v1/me mode=%q: %d %s", mode, code, b)
+		}
+		var me meResp
+		json.Unmarshal(b, &me)
+		if me.CanHubAdmin || me.HubAdmin {
+			t.Errorf("alice GET /v1/me mode=%q: got %+v, want CanHubAdmin=false HubAdmin=false", mode, me)
+		}
+		if c, _ := doMode(alice, "", mode, "POST", TeamsPath, map[string]string{"id": "escalated"}); c != 403 {
+			t.Errorf("alice POST /v1/teams mode=%q: got %d, want 403", mode, c)
+		}
+		if c, _ := doMode(alice, "", mode, "GET", TeamsPath+"/web", nil); c != 404 {
+			t.Errorf("alice GET /v1/teams/web mode=%q: got %d, want 404", mode, c)
+		}
+	}
+}

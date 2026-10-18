@@ -64,6 +64,10 @@ export interface HubClientOptions {
   // transport is how follow() reads events: 'eventsource' by default
   // in a browser with no token or headers to send, 'fetch' otherwise.
   transport?: Transport;
+  // adminMode, when explicitly set (true or false), sends
+  // `X-Silo-Admin-Mode: on` or `off` on every request so a configured
+  // hub admin can toggle global hub admin privileges on and off.
+  adminMode?: boolean;
 }
 
 type Method = 'POST' | 'PUT' | 'DELETE';
@@ -172,9 +176,19 @@ function matchesGrainfileTarget(g: Grainfile, urlOrPath: string): boolean {
 
 export class HubClient {
   private readonly base: string;
+  private adminMode?: boolean;
 
   constructor(private readonly opts: HubClientOptions = {}) {
     this.base = (opts.baseURL ?? '').replace(/\/+$/, '');
+    this.adminMode = opts.adminMode;
+  }
+
+  setAdminMode(on: boolean): void {
+    this.adminMode = on;
+  }
+
+  getAdminMode(): boolean {
+    return Boolean(this.adminMode);
   }
 
   // request sends one request to path and answers the response, or
@@ -193,6 +207,9 @@ export class HubClient {
 
   private async headers(): Promise<Record<string, string>> {
     const h: Record<string, string> = { ...this.opts.headers };
+    if (this.adminMode !== undefined) {
+      h['X-Silo-Admin-Mode'] = this.adminMode ? 'on' : 'off';
+    }
     const t = this.opts.token;
     if (t !== undefined) h[this.opts.tokenHeader ?? 'Authorization'] = `Bearer ${typeof t === 'function' ? await t() : t}`;
     return h;

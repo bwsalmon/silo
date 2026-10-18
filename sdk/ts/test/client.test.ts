@@ -42,6 +42,31 @@ describe('HubClient with a token, as in Node', () => {
     expect(headers(f.mock.calls[0][1]).get('Proxy-Authorization')).toBe('Bearer t');
     expect(headers(f.mock.calls[0][1]).get('Authorization')).toBeNull();
   });
+
+  it('toggles X-Silo-Admin-Mode via adminMode option and setAdminMode', async () => {
+    const f = stub(200, JSON.stringify({ email: 'root@example.com', hub_admin: false, can_hub_admin: true, teams: { infra: 'admin' } }));
+    const h = new HubClient({ fetch: f });
+    expect(h.getAdminMode()).toBe(false);
+    await h.getMe();
+    expect(headers(f.mock.calls[0][1]).get('X-Silo-Admin-Mode')).toBeNull();
+
+    h.setAdminMode(false);
+    expect(h.getAdminMode()).toBe(false);
+    const meOff = await h.getMe();
+    expect(meOff.can_hub_admin).toBe(true);
+    expect(meOff.hub_admin).toBe(false);
+    expect(headers(f.mock.calls[1][1]).get('X-Silo-Admin-Mode')).toBe('off');
+
+    h.setAdminMode(true);
+    expect(h.getAdminMode()).toBe(true);
+    await h.listTeams();
+    expect(headers(f.mock.calls[2][1]).get('X-Silo-Admin-Mode')).toBe('on');
+
+    const hInitOn = new HubClient({ adminMode: true, fetch: f });
+    expect(hInitOn.getAdminMode()).toBe(true);
+    await hInitOn.getMe();
+    expect(headers(f.mock.calls[3][1]).get('X-Silo-Admin-Mode')).toBe('on');
+  });
 });
 
 describe('writes', () => {

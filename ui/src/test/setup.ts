@@ -43,6 +43,7 @@ vi.stubGlobal('EventSource', FakeEventSource);
 afterEach(() => {
   cleanup();
   FakeEventSource.instances = [];
+  localStorage.clear();
   vi.restoreAllMocks();
   window.history.replaceState(null, '', '/');
 });

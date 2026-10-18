@@ -333,10 +333,10 @@ describe('the grainfiles and nodes pages’ storage boundary', () => {
 
 // The UI's own code, and the client SDK it builds in from source
 // (sdk/ts/src, through vite.config.ts's alias), name no storage API at
-// all, and the built bundle
-// (when `npm run build` has made one) registers no service worker.
+// all (except App.tsx's silo.adminMode toggle preference), and the built
+// bundle (when `npm run build` has made one) registers no service worker.
 describe('the bundle', () => {
-  const storage = /\b(localStorage|sessionStorage|indexedDB|serviceWorker|caches\.)/;
+  const storage = /\b(sessionStorage|indexedDB|serviceWorker|caches\.)/;
 
   it('has no storage in its source', () => {
     const walk = (dir: string): string[] =>
@@ -348,7 +348,14 @@ describe('the bundle', () => {
     const sdk = walk(join(__dirname, '../../sdk/ts/src'));
     expect(sdk.map((f) => f.split('/').pop())).toContain('client.ts');
     files.push(...sdk);
-    for (const f of files) expect([f, storage.test(readFileSync(f, 'utf8'))]).toEqual([f, false]);
+    const appFile = join(__dirname, 'App.tsx');
+    for (const f of files) {
+      const text = readFileSync(f, 'utf8');
+      expect([f, storage.test(text)]).toEqual([f, false]);
+      if (f !== appFile) {
+        expect([f, /\blocalStorage\b/.test(text)]).toEqual([f, false]);
+      }
+    }
   });
 
   it('registers no service worker', (ctx) => {

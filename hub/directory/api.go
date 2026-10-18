@@ -71,13 +71,36 @@ func (a *API) audit(acc *Access, format string, args ...any) {
 	}
 }
 
+// AdminModeHeader is the optional request header ("on" or "off") a hub
+// admin's client sends to toggle hub-wide admin privileges on that
+// request. When omitted, a configured hub admin keeps HubAdmin true.
+const AdminModeHeader = "X-Silo-Admin-Mode"
+
 // Access authenticates r and loads what its caller may see.
 func (a *API) Access(r *http.Request) (*Access, error) {
 	p, err := a.Auth.Principal(r)
 	if err != nil {
 		return nil, err
 	}
-	return a.Store.Access(r.Context(), p, a.isHubAdmin(p))
+	canAdmin := a.isHubAdmin(p)
+	acc, err := a.Store.Access(r.Context(), p, canAdmin)
+	if err != nil {
+		return nil, err
+	}
+	acc.CanHubAdmin = canAdmin
+	if canAdmin && adminModeOff(r.Header.Get(AdminModeHeader)) {
+		acc.HubAdmin = false
+	}
+	return acc, nil
+}
+
+func adminModeOff(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "off", "false", "0":
+		return true
+	default:
+		return false
+	}
 }
 
 // isHubAdmin matches each HubAdmins entry only against its own claim:
@@ -201,9 +224,10 @@ func teamAdmin(r *http.Request, acc *Access) (string, error) {
 func (a *API) me(w http.ResponseWriter, r *http.Request, acc *Access) error {
 	return writeJSON(w, http.StatusOK, struct {
 		identity.Principal
-		HubAdmin bool            `json:"hub_admin"`
-		Teams    map[string]Role `json:"teams"`
-	}{acc.Principal, acc.HubAdmin, acc.Teams})
+		HubAdmin    bool            `json:"hub_admin"`
+		CanHubAdmin bool            `json:"can_hub_admin"`
+		Teams       map[string]Role `json:"teams"`
+	}{acc.Principal, acc.HubAdmin, acc.CanHubAdmin, acc.Teams})
 }
 
 func (a *API) listTeams(w http.ResponseWriter, r *http.Request, acc *Access) error {

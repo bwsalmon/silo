@@ -557,6 +557,28 @@ shared leaf components (`Markdown.tsx`, `DiffView.tsx`, `StateChip.tsx`,
 (`/grainfiles`) alongside **Backlog** (`/`), **Teams** (`/teams`),
 **Nodes** (`/nodes`), and **File a task** (`/file`).
 
+**Hub Admin mode toggle and visual marker (`ui/src/App.tsx`, `sdk/ts`, `hub/directory`).**
+Users configured in `SILO_HUB_ADMINS` (`directory.API.HubAdmins`) can
+toggle global Hub Admin privileges on and off in the UI rather than
+having global admin view permanently forced on:
+
+- `GET /v1/me` returns both `can_hub_admin` (configured as a Hub Admin)
+  and `hub_admin` (Admin mode active on the request), and `directory.API.Access`
+  honors the `X-Silo-Admin-Mode` request header (`on` / `off`). Non-admins
+  cannot escalate privileges via `X-Silo-Admin-Mode: on`.
+- `@silo/hub-sdk`'s `HubClient` supports `adminMode?: boolean`,
+  `setAdminMode(on: boolean)`, and `getAdminMode(): boolean`, sending
+  `X-Silo-Admin-Mode: on` or `X-Silo-Admin-Mode: off` on every request
+  when set.
+- The browser UI defaults Admin mode to **off** on startup (persisted in
+  `localStorage` under `silo.adminMode` when toggled, calling
+  `hub.setAdminMode(false)` before `/v1/me` so a Hub Admin starts in
+  normal team-member view). When `can_hub_admin` or `hub_admin` is true,
+  the top `AppBar` renders an **Admin mode** switch, and when Admin mode
+  is active it displays a compact warning/amber **Admin mode active**
+  pill badge (`data-testid="admin-mode-marker"`) and amber accent border
+  on the `AppBar`, immediately reloading `/v1/me` and the active page.
+
 **TypeScript SDK (`sdk/ts`, `@silo/hub-sdk`).** `HubClient` provides
 typed methods and models (`Grainfile`, `GrainfileKind`,
 `GrainfileTriggers`, `GrainfileSubscriptions`, `GrainfileEvent`,

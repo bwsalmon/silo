@@ -84,5 +84,5 @@ describe('the SDK’s routes', () => {
 // isPrivate is whether m is one of HubClient's own helpers, which
 // TypeScript's private does not hide from the prototype.
 function isPrivate(m: string): boolean {
-  return ['request', 'send', 'headers', 'getJSON', 'write', 'defaultTransport', 'connection'].includes(m);
+  return ['request', 'send', 'headers', 'getJSON', 'write', 'defaultTransport', 'connection', 'setAdminMode', 'getAdminMode'].includes(m);
 }
