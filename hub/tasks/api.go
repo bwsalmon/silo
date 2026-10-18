@@ -149,14 +149,16 @@ func sees(acc *directory.Access, t Task) bool {
 	return strings.EqualFold(t.Submitter, acc.Email) || acc.SeesTask(t.Team, t.Repo)
 }
 
-// member is whether the caller is in t's team, in any role: who may
-// approve or reject it, and answer its approval requests.
+// member is whether the caller has role member or admin in t's team:
+// who may approve or reject it, answer its approval requests, and send
+// messages to its interactive sessions without having submitted it.
 func member(acc *directory.Access, t Task) bool {
-	return acc.Teams[t.Team] != ""
+	r := acc.Teams[t.Team]
+	return r == directory.Member || r == directory.Admin
 }
 
 // posts is whether the caller may send t a message: its submitter, or a
-// member of its team in any role (directory.Access.Teams, which counts
+// member/admin of its team (directory.Access.Teams, which counts
 // user:<email> and group membership alike).
 func posts(acc *directory.Access, t Task) bool {
 	return strings.EqualFold(t.Submitter, acc.Email) || member(acc, t)
@@ -186,7 +188,6 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 		return err
 	}
 	spec.DependsOn = deps
-	propose := false
 	switch {
 	case (req.Repo == "") == (req.Team == ""):
 		return &httpError{http.StatusBadRequest, `want one target: "repo" or "team"`}
@@ -199,18 +200,35 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 		if team == "" {
 			return &httpError{http.StatusNotFound, "no team owns the repository: " + req.Repo}
 		}
-		// Not one of the caller's teams': a proposal, for the team that
-		// owns it to approve.
-		propose = !acc.SeesRepo(req.Repo)
 		spec.Team = team
 	default:
-		if !acc.SeesTeam(req.Team) {
-			return &httpError{http.StatusNotFound, "no such team"}
-		}
 		if _, err := a.Directory.Store.TeamRepos(r.Context(), req.Team); err != nil {
+			if !acc.SeesTeam(req.Team) && errors.Is(err, directory.ErrNotFound) {
+				return &httpError{http.StatusNotFound, "no such team"}
+			}
 			return err
 		}
 		spec.Team = req.Team
+	}
+	settings, err := a.Directory.Store.TeamSettings(r.Context(), spec.Team)
+	if err != nil {
+		return err
+	}
+	role := acc.Teams[spec.Team]
+	propose := false
+	switch {
+	case role == directory.Admin || role == directory.Member || acc.HubAdmin:
+		propose = settings.RequireApproval
+	case role == directory.Proposer:
+		propose = true
+	default:
+		if !settings.AnyoneMayPropose {
+			return &httpError{http.StatusForbidden, "team " + spec.Team + " does not accept task proposals from this user"}
+		}
+		if req.Repo == "" && !acc.SeesTeam(req.Team) {
+			return &httpError{http.StatusNotFound, "no such team"}
+		}
+		propose = true
 	}
 	if propose {
 		t, err := a.Store.Propose(r.Context(), spec)

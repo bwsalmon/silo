@@ -340,10 +340,13 @@ and nothing else:
 - *Teams* at `/teams`: the caller's teams, with a hub admin's
   create-team form (`POST /v1/teams`). *A team* at
   `/teams/{team}/members` (`GET /v1/teams/{team}`, added for it; hub.md
-  §5.3): its members and roles, its repositories and its settings. A
-  team admin changes roles, adds and removes members, releases
-  repositories and edits the settings; a hub admin also assigns a
-  repository, with or without its history, and deletes the team.
+  §5.3): its members and roles (`admin`, `member`, `proposer`, `viewer`),
+  its repositories and its settings (`lost_requeue_after_seconds`,
+  `anyone_may_propose` — *Anyone may propose*, and `require_approval` —
+  *Require two-person approval for member tasks*). A team admin changes
+  roles, adds and removes members, releases repositories and edits the
+  settings; a hub admin also assigns a repository, with or without its
+  history, and deletes the team.
 - *Node tokens* on `/nodes`: the caller's tokens (every owner's, for a
   hub admin), minted with `POST /v1/node-tokens` and revoked with
   `DELETE /v1/node-tokens/{id}`.
@@ -393,8 +396,9 @@ team's backlog links to *Proposals* at `/teams/{team}/proposals`
 (`GET /v1/tasks?team=&state=proposed`), where each proposal has
 *Approve* and *Reject* (with an optional reason, confirmed once):
 `POST /v1/tasks/{id}/approve` and `/reject`. The same buttons are on a
-proposed task's page. They are shown to a member of the task's team, in
-either role, who is not its submitter (`mayApprove`, `ui/src/may.ts`);
+proposed task's page. They are shown to a `member` or `admin` of the
+task's team (not a `viewer` or `proposer`) who is not its submitter
+(`mayApprove`, `ui/src/may.ts`);
 a hub admin outside the team is not shown them, as the API refuses
 them. A proposed or rejected task's page opens no event stream, since
 no node has run it. Its submitter withdraws it with *Cancel*.
@@ -404,7 +408,7 @@ under *Approved by*, the claims the offer carries to the node.
 
 **Approvals inside a run.** An `approval_request` event in a running
 task's timeline shows *Allow* and *Deny*, with an optional reason, to a
-member of the task's team (`memberOf`), sent as `POST
+`member` or `admin` of the task's team (`memberOf`), sent as `POST
 /v1/tasks/{id}/approvals/{request_id}`. Once answered, it shows who
 allowed or denied it, and whether the node has been sent the answer,
 from `GET /v1/tasks/{id}/approvals`, which the page reads while the
@@ -449,8 +453,9 @@ and a *waiting for you* chip by its title. A `resumed` event clears
 both. In the timeline, a wait is a warning row and a resume a quiet
 *resumed*.
 
-**Replying.** The task's submitter and the members of its team, in
-either role (`mayMessage`, `ui/src/may.ts`, mirroring the API), get a
+**Replying.** The task's submitter and the `member` or `admin` members
+of its team (not `viewer` or `proposer`; `mayMessage` / `mayPostMessage`,
+`ui/src/may.ts`, mirroring the API), get a
 reply box under the conversation while the task is not over; a hub
 admin outside the team watches but gets none. *Send* (or Ctrl+Enter)
 posts `{"id","text"}` to `POST /v1/tasks/{id}/messages`. Each draft

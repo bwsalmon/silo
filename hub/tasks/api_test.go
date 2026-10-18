@@ -530,3 +530,127 @@ func TestNodeOriginatedAndGrainfileRuns(t *testing.T) {
 		t.Fatalf("expected OnTerminal to fire once for cancelled run, got %+v", terminals)
 	}
 }
+
+func TestRolesAndTeamSubmissionPolicies(t *testing.T) {
+	ctx := context.Background()
+	h := newAPIHub(t)
+	const (
+		alice = "alice@example.com" // infra admin
+		dave  = "dave@example.com"  // infra member
+		pete  = "pete@example.com"  // infra proposer
+		vera  = "vera@example.com"  // infra viewer
+		bob   = "bob@example.com"   // web member (outside infra)
+	)
+	check(t, h.dir.SetMember(ctx, "infra", "user:"+pete, directory.Proposer))
+	check(t, h.dir.SetMember(ctx, "infra", "user:"+vera, directory.Viewer))
+
+	// 1. Default policy (anyone_may_propose=true, require_approval=false):
+	//    - member/admin submit -> queued
+	//    - proposer/viewer/outsider submit -> proposed
+	mTask := h.submit(t, dave, map[string]any{"repo": "bwsalmon/silo", "prompt": "member task"})
+	if mTask.State != Queued {
+		t.Fatalf("member task state = %s, want queued", mTask.State)
+	}
+	pTask := h.submit(t, pete, map[string]any{"repo": "bwsalmon/silo", "prompt": "proposer task"})
+	if pTask.State != Proposed {
+		t.Fatalf("proposer task state = %s, want proposed", pTask.State)
+	}
+	vTask := h.submit(t, vera, map[string]any{"repo": "bwsalmon/silo", "prompt": "viewer task"})
+	if vTask.State != Proposed {
+		t.Fatalf("viewer task state = %s, want proposed", vTask.State)
+	}
+	vTeamTask := h.submit(t, vera, map[string]any{"team": "infra", "prompt": "viewer team task"})
+	if vTeamTask.State != Proposed {
+		t.Fatalf("viewer team task state = %s, want proposed", vTeamTask.State)
+	}
+
+	// 2. Read visibility: viewer and proposer see infra's tasks.
+	for _, u := range []string{pete, vera} {
+		if ts := h.list(t, u, ""); len(ts) != 4 {
+			t.Errorf("%s list count = %d, want 4", u, len(ts))
+		}
+		if code, _ := h.do(t, u, "GET", TasksPath+"/"+mTask.ID, nil); code != http.StatusOK {
+			t.Errorf("%s GET %s: %d, want 200", u, mTask.ID, code)
+		}
+	}
+
+	// 3. Approval & interactive session restrictions for viewer and proposer:
+	//    - Neither viewer nor proposer can approve or reject proposals.
+	for _, u := range []string{pete, vera} {
+		if code, b := h.do(t, u, "POST", TasksPath+"/"+vTask.ID+"/approve", nil); code != http.StatusForbidden {
+			t.Errorf("%s approving proposal: %d %s, want 403", u, code, b)
+		}
+		if code, b := h.do(t, u, "POST", TasksPath+"/"+vTask.ID+"/reject", map[string]string{"reason": "no"}); code != http.StatusForbidden {
+			t.Errorf("%s rejecting proposal: %d %s, want 403", u, code, b)
+		}
+	}
+
+	//    - Neither viewer nor proposer can post to interactive sessions they did not submit.
+	sess := h.submit(t, alice, map[string]any{"repo": "bwsalmon/silo", "kind": "interactive", "prompt": "pair"})
+	for _, u := range []string{pete, vera} {
+		if code, b := h.do(t, u, "POST", TasksPath+"/"+sess.ID+"/messages", map[string]string{"text": "hi"}); code != http.StatusForbidden {
+			t.Errorf("%s posting to alice's session: %d %s, want 403", u, code, b)
+		}
+	}
+	//    - Submitter (proposer) CAN post to their own interactive session once approved.
+	peteSess := h.submit(t, pete, map[string]any{"repo": "bwsalmon/silo", "kind": "interactive", "prompt": "pete session"})
+	if code, b := h.do(t, dave, "POST", TasksPath+"/"+peteSess.ID+"/approve", nil); code != http.StatusOK {
+		t.Fatalf("dave approving pete's session: %d %s", code, b)
+	}
+	if code, b := h.do(t, pete, "POST", TasksPath+"/"+peteSess.ID+"/messages", map[string]string{"text": "my own session"}); code != http.StatusCreated {
+		t.Errorf("pete posting to own approved session: %d %s, want 201", code, b)
+	}
+
+	//    - Neither viewer nor proposer can answer in-run approval_requests.
+	h.api.Requests = requests{
+		mTask.ID: {
+			"req-1": {ID: "req-1", Tool: "bash", Message: "rm -rf?"},
+		},
+	}
+	for _, u := range []string{pete, vera} {
+		if code, b := h.do(t, u, "POST", TasksPath+"/"+mTask.ID+"/approvals/req-1", map[string]string{"decision": "allow"}); code != http.StatusForbidden {
+			t.Errorf("%s answering approval request: %d %s, want 403", u, code, b)
+		}
+	}
+
+	// 4. Per-team policy: anyone_may_propose = false
+	check(t, h.dir.SetTeamSettings(ctx, "infra", directory.Settings{AnyoneMayPropose: false, RequireApproval: false}))
+	for _, u := range []string{bob, vera} {
+		if code, b := h.do(t, u, "POST", TasksPath, map[string]any{"repo": "bwsalmon/silo", "prompt": "blocked"}); code != http.StatusForbidden {
+			t.Errorf("%s submitting to repo when anyone_may_propose=false: %d %s, want 403", u, code, b)
+		}
+		if code, b := h.do(t, u, "POST", TasksPath, map[string]any{"team": "infra", "prompt": "blocked"}); code != http.StatusForbidden {
+			t.Errorf("%s submitting to team when anyone_may_propose=false: %d %s, want 403", u, code, b)
+		}
+	}
+	// Proposer is still permitted to submit as proposed when anyone_may_propose=false.
+	pTask2 := h.submit(t, pete, map[string]any{"repo": "bwsalmon/silo", "prompt": "proposer allowed"})
+	if pTask2.State != Proposed {
+		t.Errorf("proposer task when anyone_may_propose=false: state = %s, want proposed", pTask2.State)
+	}
+	pTeamTask := h.submit(t, pete, map[string]any{"team": "infra", "prompt": "proposer team allowed"})
+	if pTeamTask.State != Proposed {
+		t.Errorf("proposer team task when anyone_may_propose=false: state = %s, want proposed", pTeamTask.State)
+	}
+
+	// 5. Per-team policy: require_approval = true (two-person review)
+	check(t, h.dir.SetTeamSettings(ctx, "infra", directory.Settings{AnyoneMayPropose: false, RequireApproval: true}))
+	adminTask := h.submit(t, alice, map[string]any{"repo": "bwsalmon/silo", "prompt": "needs two-person review"})
+	if adminTask.State != Proposed || adminTask.ApprovedBy != "" {
+		t.Fatalf("admin task when require_approval=true: %+v, want state=proposed and empty approved_by", adminTask)
+	}
+	// Alice cannot self-approve her own task.
+	if code, b := h.do(t, alice, "POST", TasksPath+"/"+adminTask.ID+"/approve", nil); code != http.StatusForbidden {
+		t.Errorf("alice self-approving: %d %s, want 403", code, b)
+	}
+	// Dave (another member of infra) can approve Alice's task, moving it to queued.
+	code, b := h.do(t, dave, "POST", TasksPath+"/"+adminTask.ID+"/approve", nil)
+	if code != http.StatusOK {
+		t.Fatalf("dave approving alice's task: %d %s, want 200", code, b)
+	}
+	var approved Task
+	check(t, json.Unmarshal(b, &approved))
+	if approved.State != Queued || approved.ApprovedBy != dave {
+		t.Errorf("approved task: %+v, want state=queued approved_by=%s", approved, dave)
+	}
+}

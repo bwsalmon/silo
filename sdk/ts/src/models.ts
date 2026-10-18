@@ -68,7 +68,7 @@ export interface TaskQuery {
   limit?: number;
 }
 
-export type Role = 'member' | 'admin' | string;
+export type Role = 'admin' | 'member' | 'proposer' | 'viewer' | (string & {});
 
 // Me is GET /v1/me: the caller, their teams and their role in each.
 export interface Me {
@@ -364,6 +364,8 @@ export interface Team {
 
 export interface TeamSettings {
   lost_requeue_after_seconds?: number;
+  anyone_may_propose?: boolean;
+  require_approval?: boolean;
 }
 
 // NodeToken is a node token's record; the hub keeps only a hash of the

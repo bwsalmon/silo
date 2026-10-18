@@ -493,3 +493,64 @@ func TestAdminModeHeader(t *testing.T) {
 		}
 	}
 }
+
+func TestAPIViewerProposerAndSettings(t *testing.T) {
+	h := newTestHub(t)
+	const root, alice, vera, pete = "root@example.com", "alice@example.com", "vera@example.com", "pete@example.com"
+	const admins = "hub-admins@example.com"
+
+	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil, admins)
+
+	// Team admin adds viewer and proposer.
+	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/user:"+vera, map[string]string{"role": "viewer"})
+	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/user:"+pete, map[string]string{"role": "proposer"})
+
+	// Both viewer and proposer can read GET /v1/teams/infra and GET /v1/teams/infra/settings,
+	// but neither can modify members or settings.
+	for _, user := range []string{vera, pete} {
+		h.want(t, 200, user, "GET", TeamsPath+"/infra", nil)
+		b := h.want(t, 200, user, "GET", TeamsPath+"/infra/settings", nil)
+		var set Settings
+		if err := json.Unmarshal(b, &set); err != nil {
+			t.Fatal(err)
+		}
+		if !set.AnyoneMayPropose || set.RequireApproval {
+			t.Errorf("%s default settings: %+v", user, set)
+		}
+		h.want(t, 403, user, "PUT", TeamsPath+"/infra/settings", map[string]any{"anyone_may_propose": false})
+		h.want(t, 403, user, "PUT", TeamsPath+"/infra/members/user:other@example.com", map[string]string{"role": "viewer"})
+	}
+
+	// Team admin updates anyone_may_propose and require_approval.
+	b := h.want(t, 200, alice, "PUT", TeamsPath+"/infra/settings", map[string]any{
+		"lost_requeue_after_seconds": 300,
+		"anyone_may_propose":         false,
+		"require_approval":           true,
+	})
+	var got Settings
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.LostRequeueAfter != 5*time.Minute || got.AnyoneMayPropose || !got.RequireApproval {
+		t.Errorf("PUT settings: %+v", got)
+	}
+
+	// Neither viewer nor proposer can register a node for infra's repo.
+	for _, user := range []string{vera, pete} {
+		var r struct{ Token string }
+		json.Unmarshal(h.want(t, 201, user, "POST", NodeTokensPath, map[string]string{"node": "ws-" + user[:4]}), &r)
+		cl := &rendezvous.Client{
+			Hub:   h.url,
+			Token: func(context.Context) (string, error) { return r.Token, nil },
+			Node:  registry.Node{ID: "ws-" + user[:4], Repos: []string{"bwsalmon/silo"}, Slots: 1},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := cl.Connect(ctx)
+		cancel()
+		if !errors.Is(err, rendezvous.ErrRefused) {
+			t.Errorf("%s connecting node for infra repo: %v, want ErrRefused", user, err)
+		}
+	}
+}

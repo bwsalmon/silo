@@ -564,3 +564,82 @@ func TestTeamRepos(t *testing.T) {
 		}
 	})
 }
+
+func TestViewerAndProposerRoles(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seed(t, s)
+		check(t, s.SetMember(ctx, "infra", "user:vera@example.com", Viewer))
+		check(t, s.SetMember(ctx, "infra", "user:pete@example.com", Proposer))
+
+		vera, err := s.Access(ctx, identity.Principal{Email: "vera@example.com"}, false)
+		check(t, err)
+		pete, err := s.Access(ctx, identity.Principal{Email: "pete@example.com"}, false)
+		check(t, err)
+		alice, err := s.Access(ctx, identity.Principal{Email: "alice@example.com"}, false)
+		check(t, err)
+
+		for name, acc := range map[string]*Access{"vera": vera, "pete": pete} {
+			if !acc.SeesTeam("infra") || !acc.SeesRepo("bwsalmon/silo") || !acc.SeesTask("infra", "bwsalmon/silo") {
+				t.Errorf("%s should have read visibility into infra: %+v", name, acc)
+			}
+			if acc.MemberOf("infra") || acc.AdminOf("infra") {
+				t.Errorf("%s should not be MemberOf or AdminOf infra: %+v", name, acc)
+			}
+		}
+		if !alice.MemberOf("infra") || !alice.AdminOf("infra") {
+			t.Errorf("alice should be MemberOf and AdminOf infra: %+v", alice)
+		}
+
+		// Role precedence across user + group principals: viewer < proposer < member < admin.
+		check(t, s.SetMember(ctx, "web", "group:viewers@example.com", Viewer))
+		check(t, s.SetMember(ctx, "web", "group:proposers@example.com", Proposer))
+		acc1, err := s.Access(ctx, identity.Principal{Email: "u1@example.com", Groups: []string{"viewers@example.com", "proposers@example.com"}}, false)
+		check(t, err)
+		if acc1.Teams["web"] != Proposer {
+			t.Errorf("viewer + proposer role precedence: got %q, want %q", acc1.Teams["web"], Proposer)
+		}
+		check(t, s.SetMember(ctx, "web", "user:u1@example.com", Viewer))
+		acc2, err := s.Access(ctx, identity.Principal{Email: "u1@example.com", Groups: []string{"proposers@example.com"}}, false)
+		check(t, err)
+		if acc2.Teams["web"] != Proposer {
+			t.Errorf("user viewer + group proposer precedence: got %q, want %q", acc2.Teams["web"], Proposer)
+		}
+		check(t, s.SetMember(ctx, "web", "group:members@example.com", Member))
+		acc3, err := s.Access(ctx, identity.Principal{Email: "u1@example.com", Groups: []string{"proposers@example.com", "members@example.com"}}, false)
+		check(t, err)
+		if acc3.Teams["web"] != Member {
+			t.Errorf("proposer + member role precedence: got %q, want %q", acc3.Teams["web"], Member)
+		}
+
+		// Node admission (Store.Admit, Admission.Admit, ValidateNodeUI, AuthorizeOwnerRepo)
+		// requires member or admin; viewer and proposer are rejected.
+		node, err := registry.Validate(registry.Node{ID: "ws-1", Repos: []string{"bwsalmon/silo"}, Slots: 1})
+		check(t, err)
+		for _, email := range []string{"vera@example.com", "pete@example.com"} {
+			if err := s.Admit(email, node); !errors.Is(err, ErrNotAdmitted) {
+				t.Errorf("Admit(%s): got %v, want ErrNotAdmitted", email, err)
+			}
+			if s.AuthorizeOwnerRepo(ctx, email, "bwsalmon/silo") {
+				t.Errorf("AuthorizeOwnerRepo(%s, bwsalmon/silo) = true, want false", email)
+			}
+			if s.AuthorizeOwnerRepo(ctx, email, "https://github.com/bwsalmon/silo.git") {
+				t.Errorf("AuthorizeOwnerRepo(%s, url) = true, want false", email)
+			}
+			nUI := registry.Node{
+				ID:    "ws-1",
+				Repos: []string{"bwsalmon/silo"},
+				Slots: 1,
+				UI:    &registry.NodeUI{Offered: true, Team: "infra", Access: "read-only"},
+			}
+			check(t, s.ValidateNodeUI(ctx, email, &nUI))
+			if nUI.UI.Team != "" || nUI.UI.Reason == "" {
+				t.Errorf("ValidateNodeUI(%s) kept ui.team: %+v", email, nUI.UI)
+			}
+		}
+		if !s.AuthorizeOwnerRepo(ctx, "alice@example.com", "bwsalmon/silo") ||
+			!s.AuthorizeOwnerRepo(ctx, "alice@example.com", "https://github.com/bwsalmon/silo/blob/main/.grain/x.task.md") {
+			t.Errorf("AuthorizeOwnerRepo(alice) = false, want true")
+		}
+	})
+}
