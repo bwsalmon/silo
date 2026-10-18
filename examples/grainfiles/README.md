@@ -12,7 +12,8 @@ See [`docs/grainfiles-spec.md`](../../docs/grainfiles-spec.md), Appendix A.
 
 - `docs/widget-schema.md` and `src/widget.go`: design documentation and Go source code referenced by tasks and processes.
 - `.grain/tasks/2026-10-16-widget-schema-v2.task.md`: a discrete task requested by a user (`Bruce Salmon <bsalmon@google.com>`) and addressed to the `grain-eu` deployment (`git::https://github.com/acme/grain-eu.git`), referencing the design doc heading `/docs/widget-schema.md#schema-version-header` and `/src/widget.go`.
-- `.grain/tasks/2026-10-16-widget-schema-v2-migration.task.md`: a follow-up task with `depends_on: ["./2026-10-16-widget-schema-v2.task.md"]`.
+- `.grain/tasks/2026-10-16-widget-schema-v2-migration.task.md`: a follow-up task with `depends_on: ["./2026-10-16-widget-schema-v2.task.md"]` and `not_before: "2026-10-25T09:00:00Z"`.
+- `.grain/tasks/2026-11-01-drop-widget-v1-support.task.md`: a work-in-progress draft task (`draft: true`, `not_before: "2026-11-01"`) depending on the migration task; validated by `grainlint.py` while ignored by recipient deployments until `draft` is `false` or removed.
 - `.grain/processes/schema-security-review.process.md`: a gating review process (`gate: true`) triggered on `pull_request` and `push` events touching `src/**`.
 - `.grain/processes/release-cut-check.process.md`: a process triggered on a `scenario` condition and `manual: {}`.
 

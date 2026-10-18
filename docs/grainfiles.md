@@ -87,8 +87,10 @@ Setting **`gate: true`** on a `.process.md` marks the process as a merge/commit 
 
 Deployments watch their attached repositories for `.task.md` and `.process.md` files whose `recipient` matches the deployment:
 
-1. **Direct task execution:** When a `.task.md` is added on a watched repository for that `recipient`, the deployment queues it directly as a task once its `depends_on` are satisfied. Its Markdown body is the prompt, its `references` are materialised or linked as context, and the source `.task.md` reference is recorded on the task.
-2. **Direct process registration:** When a `.process.md` is present for that `recipient`, the deployment registers its `on` and `trigger_with` triggers (and its `gate` flag). Each firing dispatches a run with the `.process.md` Markdown body as the prompt, ordered by `depends_on`.
+1. **Drafts (`draft: true`):** Authors can commit work-in-progress `.task.md` and `.process.md` files with `draft: true` (default `false`; spec §6.3). The linter still checks draft grainfiles for schema and reference errors so authors get full feedback while iterating, but recipient deployments ignore any grainfile with `draft: true` (neither queuing a task nor registering or firing a process trigger or merge gate) until `draft` is set to `false` or removed.
+2. **Deferred execution (`not_before`):** Both `.task.md` and `.process.md` accept an optional `not_before` field (spec §6.4) formatted as an RFC 3339 UTC timestamp (`2026-10-25T09:00:00Z`) or a UTC calendar date (`2026-10-25`, meaning `00:00:00Z` of that day). On a `.task.md`, the deployment holds the task as deferred and does not execute it before `not_before` (in addition to waiting for any `depends_on`). On a `.process.md`, the process does not fire before `not_before`.
+3. **Direct task execution:** When a non-draft `.task.md` is present on a watched repository for that `recipient`, the deployment queues and runs it directly once its `not_before` time (if any) is reached and its `depends_on` are satisfied. Its Markdown body is the prompt, its `references` are materialised or linked as context, and the source `.task.md` reference is recorded on the task.
+4. **Direct process registration:** When a non-draft `.process.md` is present for that `recipient`, the deployment registers its `on` and `trigger_with` triggers (and its `gate` flag), active once `not_before` (if set) is reached. Each firing dispatches a run with the `.process.md` Markdown body as the prompt, ordered by `depends_on`.
 
 ## 7. Prior art and design evolution
 

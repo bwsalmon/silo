@@ -70,6 +70,15 @@ case("gf020-bad-cron", ["GF020"], {
 case("gf020-push-without-filter", ["GF020"], {
     "r/processes/p.process.md": process(extra='"on":\n  push:\n    ignore: ["docs/**"]\n'),
 })
+case("gf020-bad-draft", ["GF020"], {
+    "r/tasks/a.task.md": task('draft: "yes"\n'),
+})
+case("gf020-bad-not-before", ["GF020"], {
+    "r/tasks/a.task.md": task('not_before: "2026-02-30"\n'),
+})
+case("gf020-bad-not-before-format", ["GF020"], {
+    "r/processes/p.process.md": process(extra='"on":\n  manual: {}\nnot_before: "2026-10-25T09:00:00+02:00"\n'),
+})
 case("gf022-unknown-field", ["GF022"], {
     "r/tasks/a.task.md": task("colour: blue\nx_note: allowed\n"),
 })

@@ -17,6 +17,13 @@
     "created_at": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
     },
+    "draft": {
+      "type": "boolean",
+      "default": false
+    },
+    "not_before": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/notBefore"
+    },
     "depends_on": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     },

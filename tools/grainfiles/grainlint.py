@@ -13,7 +13,7 @@ repository is external and is not resolved.
 
 Needs python3-yaml and python3-jsonschema.
 """
-import json, pathlib, posixpath, re, sys, urllib.parse
+import datetime, json, pathlib, posixpath, re, sys, urllib.parse
 import jsonschema, yaml
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -28,6 +28,25 @@ CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
 STEM = re.compile(r"^(\d{8}T\d{6}Z|[a-z0-9])[a-z0-9._-]*$")
 USER_IDENTITY = re.compile(r"^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$")
 ANCHOR_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def valid_time_or_date(s, allow_date=False):
+    if allow_date and DATE_RE.match(s):
+        try:
+            datetime.date.fromisoformat(s)
+            return True
+        except ValueError:
+            return False
+    m = TIME_RE.match(s)
+    if not m:
+        return False
+    try:
+        datetime.datetime.strptime(m.group(1) + "T" + m.group(2), "%Y-%m-%dT%H:%M:%S")
+        return True
+    except ValueError:
+        return False
 EXPECTS = {
     ("task", "depends_on"): ("task", "process"),
     ("task", "trigger_with"): ("task", "process"),
@@ -68,6 +87,8 @@ def _mapping(loader, node, deep=False):
 Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
 for _ch in "yYnN":  # §5.3: YAML 1.2 booleans only; a bare `on` key is the string "on"
     Loader.yaml_implicit_resolvers.pop(_ch, None)
+for _ch, _rs in list(Loader.yaml_implicit_resolvers.items()):
+    Loader.yaml_implicit_resolvers[_ch] = [r for r in _rs if r[0] != "tag:yaml.org,2002:timestamp"]
 Loader.yaml_implicit_resolvers["o"] = [r for r in Loader.yaml_implicit_resolvers.get("o", [])
                                        if r[0] != "tag:yaml.org,2002:bool"]
 Loader.yaml_implicit_resolvers["O"] = [r for r in Loader.yaml_implicit_resolvers.get("O", [])
@@ -417,6 +438,12 @@ class Linter:
         title = fm.get("title")
         if isinstance(title, str) and "\n" in title:
             self.add("GF020", where, "title must be a single line")
+        ca = fm.get("created_at")
+        if isinstance(ca, str) and TIME_RE.match(ca) and not valid_time_or_date(ca, allow_date=False):
+            self.add("GF020", where, "created_at: invalid calendar date or UTC time %r" % ca)
+        nb = fm.get("not_before")
+        if isinstance(nb, str) and (DATE_RE.match(nb) or TIME_RE.match(nb)) and not valid_time_or_date(nb, allow_date=True):
+            self.add("GF020", where, "not_before: invalid calendar date or UTC time %r" % nb)
         req = fm.get("requestor")
         if isinstance(req, str) and not USER_IDENTITY.match(req):
             if not any(ch in req for ch in "<>@\\ ") and req:
