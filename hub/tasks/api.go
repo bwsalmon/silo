@@ -490,7 +490,7 @@ func (a *API) post(w http.ResponseWriter, r *http.Request, acc *directory.Access
 		return err
 	}
 	switch {
-	case t.Kind != KindInteractive:
+	case !takesMessages(t):
 		return &httpError{http.StatusConflict, "task " + t.ID + " is not interactive: it takes no messages"}
 	case t.State.Terminal() || t.State == Proposed:
 		return &httpError{http.StatusConflict, "task " + t.ID + " is " + string(t.State) + ": it takes no messages"}

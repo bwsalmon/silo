@@ -526,8 +526,50 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		h.Bus.Handle(h.Rendezvous.Notice)
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
-	filer := &tasks.Filer{Store: h.Backlog, Directory: h.Directory, Dispatcher: h.Dispatcher, Burst: cfg.FileBurst, Every: cfg.FileEvery, Logf: cfg.Logf}
+	filer := &tasks.Filer{
+		Store:      h.Backlog,
+		Directory:  h.Directory,
+		Registry:   h.Registry,
+		Dispatcher: h.Dispatcher,
+		Burst:      cfg.FileBurst,
+		Every:      cfg.FileEvery,
+		Logf:       cfg.Logf,
+		LookupGrainfile: func(ctx context.Context, url string) (string, string, string, string, bool) {
+			rec, err := h.Grainfiles.GetIndexByURL(ctx, url, "")
+			if err != nil {
+				return "", "", "", "", false
+			}
+			return rec.Repo, string(rec.Kind), rec.Title, rec.CommitSHA, true
+		},
+	}
 	h.Rendezvous.FileTask = filer.File
+	h.Rendezvous.RegisterRun = filer.RegisterRunRaw
+	h.Live.RegisterRun = func(ctx context.Context, nodeID, owner string, meta live.RunMeta) (tasks.Task, error) {
+		if meta.GrainfileURL != "" {
+			h.Rendezvous.ResetGrainfileCompletion(meta.GrainfileURL)
+		}
+		return filer.RegisterRun(ctx, nodeID, owner, tasks.RunRegistration{
+			ID:            meta.Task,
+			NodeTask:      meta.NodeTask,
+			Repo:          meta.Repo,
+			Kind:          meta.Kind,
+			Title:         meta.Title,
+			Prompt:        meta.Prompt,
+			GrainfileURL:  meta.GrainfileURL,
+			CommitSHA:     meta.CommitSHA,
+			TriggerSource: meta.TriggerSource,
+		})
+	}
+	h.Live.OnResult = func(ctx context.Context, t tasks.Task, state, reason string) {
+		if t.GrainfileURL != "" {
+			_, _ = h.Rendezvous.CompleteGrainfileRun(ctx, t.GrainfileURL, t.CommitSHA, state, reason)
+		}
+	}
+	h.Backlog.OnTerminal = func(ctx context.Context, t tasks.Task) {
+		if t.GrainfileURL != "" {
+			_, _ = h.Rendezvous.CompleteGrainfileRun(ctx, t.GrainfileURL, t.CommitSHA, string(t.State), t.Reason)
+		}
+	}
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
 	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI, Requests: h.Events}
 	fetcher := cfg.GrainfileFetcher

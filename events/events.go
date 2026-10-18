@@ -260,6 +260,9 @@ type Exit struct {
 // Result is a session's outcome: the last event of every session.
 type Result struct {
 	Exit       Exit   `json:"exit"`
+	Status     string `json:"status,omitempty"`
+	State      string `json:"state,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 	FinalText  string `json:"final_text,omitempty"`
 	CLISession string `json:"cli_session,omitempty"`
 	// UsageTotals is the tokens spent, one entry per model.

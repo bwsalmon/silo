@@ -2,6 +2,7 @@ package live
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
@@ -586,6 +588,494 @@ func stillOpen(t *testing.T, sub <-chan received) {
 		}
 		t.Fatalf("unexpected message %v", m)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestGrainfileAndNodeOriginatedRunsEndToEnd verifies that a single-tenant node
+// executing a .task.grain.md or .process.grain.md run (without imperative
+// tasks.Dispatcher offer/accept) can register the run via control stream or
+// first-event auto-registration, stream lifecycle/conversation/artifact events
+// to hub/live, appear in GET /v1/tasks, serve artifact view-throughs, receive
+// approve/message/cancel UI actions over the reverse tunnel, and automatically
+// trigger dependency_completed on terminal result (deduplicating against
+// explicit grainfile_completed).
+func TestGrainfileAndNodeOriginatedRunsEndToEnd(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	dbURL := "sqlite:" + filepath.Join(t.TempDir(), "hub.db")
+	dir, err := directory.Open(ctx, dbURL)
+	check(t, err)
+	t.Cleanup(func() { dir.Close() })
+	check(t, dir.CreateTeam(ctx, "infra", ""))
+	check(t, dir.CreateTeam(ctx, "web", ""))
+	check(t, dir.SetMember(ctx, "infra", "user:alice@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "web", "user:bob@example.com", directory.Member))
+	check(t, dir.AssignRepo(ctx, "infra", "bwsalmon/silo"))
+
+	taskStore, err := tasks.Open(ctx, dbURL)
+	check(t, err)
+	t.Cleanup(func() { taskStore.Close() })
+
+	evStore, err := Open(ctx, dbURL)
+	check(t, err)
+	t.Cleanup(func() { evStore.Close() })
+
+	gfStore, err := grainfiles.Open(ctx, dbURL)
+	check(t, err)
+	t.Cleanup(func() { gfStore.Close() })
+
+	// Index two Grainfiles:
+	// 1. upstream .task.md executed by ws-1
+	// 2. downstream .task.md with depends_on pointing to upstream .task.md
+	gUp, err := grainfiles.Parse(".grain/tasks/upstream.task.md", []byte(`---
+title: Upstream schema migration
+recipient: https://github.com/bwsalmon/silo
+requestor: Alice <alice@example.com>
+created_at: "2026-10-18T10:00:00Z"
+---
+Run upstream migration.
+`))
+	check(t, err)
+	check(t, gUp.ResolveSource(grainfiles.Source{
+		RepoURL: "https://github.com/bwsalmon/silo",
+		Ref:     "refs/heads/main",
+		Commit:  "1111111",
+		Path:    ".grain/tasks/upstream.task.md",
+	}))
+	upRec, err := gfStore.IndexGrainfile(ctx, gUp)
+	check(t, err)
+
+	gDown, err := grainfiles.Parse(".grain/tasks/downstream.task.md", []byte(`---
+title: Downstream consumer update
+recipient: https://github.com/bwsalmon/silo
+requestor: Alice <alice@example.com>
+created_at: "2026-10-18T10:05:00Z"
+depends_on:
+  - ./upstream.task.md
+---
+Run downstream consumer update.
+`))
+	check(t, err)
+	check(t, gDown.ResolveSource(grainfiles.Source{
+		RepoURL: "https://github.com/bwsalmon/silo",
+		Ref:     "refs/heads/main",
+		Commit:  "1111111",
+		Path:    ".grain/tasks/downstream.task.md",
+	}))
+	downRec, err := gfStore.IndexGrainfile(ctx, gDown)
+	check(t, err)
+
+	reg := registry.New()
+	dirAPI := &directory.API{Store: dir, Auth: headerAuth{}}
+	logf := testlog.Logf(t)
+
+	var (
+		hub  *Hub
+		rv   *rendezvous.Server
+		disp *tasks.Dispatcher
+	)
+	filer := &tasks.Filer{
+		Store:     taskStore,
+		Directory: dir,
+		Registry:  reg,
+		Logf:      logf,
+		LookupGrainfile: func(ctx context.Context, url string) (string, string, string, string, bool) {
+			rec, err := gfStore.GetIndexByURL(ctx, url, "")
+			if err != nil {
+				return "", "", "", "", false
+			}
+			return rec.Repo, string(rec.Kind), rec.Title, rec.CommitSHA, true
+		},
+	}
+
+	hub = &Hub{
+		Log:       &recordingLog{Store: evStore},
+		Tasks:     taskStore,
+		Messages:  taskStore.MessageEvent,
+		Directory: dirAPI,
+		Logf:      logf,
+		NodeOwner: func(id string) (string, bool) {
+			e, ok := reg.Get(id)
+			return e.Owner, ok
+		},
+		RegisterRun: func(ctx context.Context, nodeID, owner string, meta RunMeta) (tasks.Task, error) {
+			if meta.GrainfileURL != "" {
+				rv.ResetGrainfileCompletion(meta.GrainfileURL)
+			}
+			return filer.RegisterRun(ctx, nodeID, owner, tasks.RunRegistration{
+				ID:            meta.Task,
+				NodeTask:      meta.NodeTask,
+				Repo:          meta.Repo,
+				Kind:          meta.Kind,
+				Title:         meta.Title,
+				Prompt:        meta.Prompt,
+				GrainfileURL:  meta.GrainfileURL,
+				CommitSHA:     meta.CommitSHA,
+				TriggerSource: meta.TriggerSource,
+			})
+		},
+		OnResult: func(ctx context.Context, tk tasks.Task, state, reason string) {
+			if tk.GrainfileURL != "" {
+				_, _ = rv.CompleteGrainfileRun(ctx, tk.GrainfileURL, tk.CommitSHA, state, reason)
+			}
+		},
+	}
+	taskStore.OnTerminal = func(ctx context.Context, tk tasks.Task) {
+		if tk.GrainfileURL != "" {
+			_, _ = rv.CompleteGrainfileRun(ctx, tk.GrainfileURL, tk.CommitSHA, string(tk.State), tk.Reason)
+		}
+	}
+
+	rv = &rendezvous.Server{
+		Registry: reg,
+		Authenticate: func(r *http.Request) (rendezvous.Identity, error) {
+			tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if tok == "" {
+				return rendezvous.Identity{}, errors.New("no token")
+			}
+			return rendezvous.Identity{Owner: tok}, nil
+		},
+		NodeStream:  hub.NodeStream,
+		Grainfiles:  gfStore,
+		RegisterRun: filer.RegisterRunRaw,
+		Heartbeat:   time.Second,
+		Logf:        logf,
+	}
+	hub.Open = rv.Open
+
+	disp = &tasks.Dispatcher{
+		Store:     taskStore,
+		Registry:  reg,
+		Directory: dir,
+		Open:      rv.Open,
+		Finished:  func(tk tasks.Task) { hub.Finished(tk.ID) },
+		Logf:      logf,
+	}
+	filer.Dispatcher = disp
+
+	tasksAPI := &tasks.API{
+		Store:      taskStore,
+		Dispatcher: disp,
+		Directory:  dirAPI,
+		Requests:   evStore,
+	}
+
+	rvs := httptest.NewServer(rv.Handler())
+	t.Cleanup(rvs.Close)
+
+	muxHTTP := http.NewServeMux()
+	muxHTTP.Handle("/v1/tasks", tasksAPI.Handler())
+	muxHTTP.Handle("/v1/tasks/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/events") || strings.HasSuffix(r.URL.Path, "/artifacts") {
+			hub.Handler().ServeHTTP(w, r)
+			return
+		}
+		tasksAPI.Handler().ServeHTTP(w, r)
+	}))
+	hs := httptest.NewServer(muxHTTP)
+	t.Cleanup(hs.Close)
+
+	// Connect node ws-1 as alice@example.com with grainfile subscription for bwsalmon/silo.
+	depNotif := make(chan grainfiles.Event, 8)
+	cl := &rendezvous.Client{
+		Hub:   rvs.URL,
+		Token: func(context.Context) (string, error) { return "alice@example.com", nil },
+		Node:  registry.Node{ID: "ws-1", Repos: []string{"bwsalmon/silo"}, Slots: 2},
+		Subscriptions: &grainfiles.Subscriptions{
+			Recipients: []string{"https://github.com/bwsalmon/silo"},
+			Repos:      []string{"https://github.com/bwsalmon/silo"},
+		},
+		OnGrainfileEvent: func(e grainfiles.Event) {
+			if e.Type == grainfiles.EventDependencyCompleted {
+				depNotif <- e
+			}
+		},
+	}
+	nodeConn, err := cl.Connect(ctx)
+	check(t, err)
+	t.Cleanup(func() { nodeConn.Close() })
+
+	// Accept reverse-tunnel streams on ws-1 (artifact view-throughs and approve/message/cancel actions).
+	type tunnelReq struct {
+		Type     string
+		TaskID   string
+		NodeTask string
+		Ref      string
+		Request  string
+		Decision string
+		Text     string
+		Reason   string
+	}
+	var (
+		mu         sync.Mutex
+		tunnelReqs []tunnelReq
+	)
+	go func() {
+		for {
+			st, err := nodeConn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				line, err := br.ReadBytes('\n')
+				if err != nil {
+					return
+				}
+				var probe struct {
+					Type     string `json:"type"`
+					Task     any    `json:"task"`
+					NodeTask string `json:"node_task"`
+					Ref      string `json:"ref"`
+					Request  string `json:"request_id"`
+					Decision string `json:"decision"`
+					Reason   string `json:"reason"`
+					Message  *struct {
+						Text string `json:"text"`
+					} `json:"message"`
+				}
+				if json.Unmarshal(line, &probe) != nil {
+					return
+				}
+				rec := tunnelReq{
+					Type:     probe.Type,
+					NodeTask: probe.NodeTask,
+					Ref:      probe.Ref,
+					Request:  probe.Request,
+					Decision: probe.Decision,
+					Reason:   probe.Reason,
+				}
+				if s, ok := probe.Task.(string); ok {
+					rec.TaskID = s
+				} else if m, ok := probe.Task.(map[string]any); ok {
+					if id, ok := m["id"].(string); ok {
+						rec.TaskID = id
+					}
+				}
+				if probe.Message != nil {
+					rec.Text = probe.Message.Text
+				}
+				mu.Lock()
+				tunnelReqs = append(tunnelReqs, rec)
+				mu.Unlock()
+
+				if probe.Type == TypeView {
+					_, _ = io.WriteString(c, `{"type":"ok"}`+"\ndiff --git\n\n")
+				}
+			}(st)
+		}
+	}()
+
+	// Verify that an unauthorized node owner (bob@example.com, in team web) cannot register a run for bwsalmon/silo.
+	bobCl := &rendezvous.Client{
+		Hub:   rvs.URL,
+		Token: func(context.Context) (string, error) { return "bob@example.com", nil },
+		Node:  registry.Node{ID: "ws-bob", Repos: []string{"bwsalmon/silo"}, Slots: 1},
+	}
+	bobConn, err := bobCl.Connect(ctx)
+	check(t, err)
+	t.Cleanup(func() { bobConn.Close() })
+	if _, err := bobConn.RunStarted(ctx, tasks.RunRegistration{
+		ID:           "t-unauth",
+		Repo:         "bwsalmon/silo",
+		GrainfileURL: upRec.URL,
+	}); err == nil {
+		t.Fatal("expected unauthorized node owner to be rejected on run_started")
+	}
+
+	// 1. Register upstream .task.grain.md run via control-stream run_started.
+	rawReg, err := nodeConn.RunStarted(ctx, tasks.RunRegistration{
+		ID:            "t-gf-up",
+		NodeTask:      "local-up-1",
+		GrainfileURL:  upRec.URL,
+		TriggerSource: "webhook:push",
+	})
+	check(t, err)
+	var regTask tasks.Task
+	check(t, json.Unmarshal(rawReg, &regTask))
+	if regTask.ID != "t-gf-up" || regTask.NodeTask != "local-up-1" || regTask.Title != "Upstream schema migration" || regTask.CommitSHA != "1111111" {
+		t.Fatalf("unexpected RunStarted task: %+v", regTask)
+	}
+
+	// 2. Auto-register a .process.grain.md run via first event on NodeStream (without prior run_started or offer).
+	procStream := upstream(t, nodeConn)
+	send(t, procStream,
+		`{"v":1,"seq":1,"task":"t-proc-auto","node_task":"local-proc-9","repo":"bwsalmon/silo","kind":"process","title":"Nightly audit process","grainfile_url":"https://github.com/bwsalmon/silo/blob/main/.grain/processes/audit.process.grain.md","commit_sha":"1111111","trigger_source":"cron:0 0 * * *","type":"status","status":{"phase":"running","state":"info","message":"auditing"}}`,
+	)
+
+	// Open upstream task event stream and send lifecycle, conversation, token, and artifact events.
+	upStream := upstream(t, nodeConn)
+	send(t, upStream,
+		`{"v":1,"seq":1,"task":"t-gf-up","type":"status","status":{"phase":"running","state":"info","message":"migrating"}}`,
+		`{"v":1,"seq":2,"task":"t-gf-up","type":"approval_request","approval_request":{"id":"req-1","tool":"deploy","message":"Approve production schema change?"}}`,
+		`{"v":1,"seq":3,"task":"t-gf-up","type":"artifact","artifact":{"ref":"art-diff-1","kind":"diff","size":12,"content":"`+secret+`"}}`,
+		`{"v":1,"seq":4,"task":"t-gf-up","type":"transcript","transcript":{"kind":"text","text":"applying schema migration"}}`,
+	)
+
+	// Wait for events to be ingested into hub/live.
+	hWait := &harness{hub: hub, url: hs.URL}
+	hWait.waitLast(t, "t-gf-up", 4)
+	hWait.waitLast(t, "t-proc-auto", 1)
+
+	// 3. Verify GET /v1/tasks includes both runs for alice@example.com and hides them from bob@example.com.
+	doJSON := func(user, method, path string, body any) (int, []byte) {
+		var rdr io.Reader
+		if body != nil {
+			b, err := json.Marshal(body)
+			check(t, err)
+			rdr = bytes.NewReader(b)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, hs.URL+path, rdr)
+		check(t, err)
+		req.Header.Set("X-User", user)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		check(t, err)
+		defer resp.Body.Close()
+		out, err := io.ReadAll(resp.Body)
+		check(t, err)
+		return resp.StatusCode, out
+	}
+
+	code, listBytes := doJSON("alice@example.com", http.MethodGet, "/v1/tasks", nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET /v1/tasks status = %d: %s", code, listBytes)
+	}
+	var listWrap struct {
+		Tasks []tasks.Task `json:"tasks"`
+	}
+	check(t, json.Unmarshal(listBytes, &listWrap))
+	listed := listWrap.Tasks
+	if len(listed) != 2 {
+		t.Fatalf("expected 2 tasks in GET /v1/tasks for alice, got %d: %+v", len(listed), listed)
+	}
+	byID := map[string]tasks.Task{}
+	for _, tk := range listed {
+		byID[tk.ID] = tk
+	}
+	if byID["t-gf-up"].Title != "Upstream schema migration" || byID["t-gf-up"].NodeTask != "local-up-1" || byID["t-gf-up"].CommitSHA != "1111111" {
+		t.Fatalf("unexpected t-gf-up task metadata: %+v", byID["t-gf-up"])
+	}
+	if byID["t-proc-auto"].Kind != tasks.KindProcess || byID["t-proc-auto"].NodeTask != "local-proc-9" || byID["t-proc-auto"].TriggerSource != "cron:0 0 * * *" {
+		t.Fatalf("unexpected t-proc-auto task metadata: %+v", byID["t-proc-auto"])
+	}
+
+	code, bobBytes := doJSON("bob@example.com", http.MethodGet, "/v1/tasks", nil)
+	if code != http.StatusOK {
+		t.Fatalf("bob GET /v1/tasks status = %d: %s", code, bobBytes)
+	}
+	var bobWrap struct {
+		Tasks []tasks.Task `json:"tasks"`
+	}
+	check(t, json.Unmarshal(bobBytes, &bobWrap))
+	if len(bobWrap.Tasks) != 0 {
+		t.Fatalf("expected 0 tasks for bob, got %d", len(bobWrap.Tasks))
+	}
+
+	// 4. Verify SSE stream GET /v1/tasks/t-gf-up/events replays status, approval_request, artifact, and transcript.
+	sub := hWait.subscribe(t, "alice@example.com", "t-gf-up", "", nil)
+	if got := ids(next(t, sub, 4)); got != "1:status 2:approval_request 3:artifact 4:transcript" {
+		t.Fatalf("unexpected SSE events: %s", got)
+	}
+
+	// 5. Verify artifact view-through GET /v1/tasks/t-gf-up/artifacts?ref=art-diff-1.
+	code, artBody := doJSON("alice@example.com", http.MethodGet, "/v1/tasks/t-gf-up/artifacts?ref=art-diff-1", nil)
+	if code != http.StatusOK || string(artBody) != "diff --git\n\n" {
+		t.Fatalf("unexpected artifact response: status=%d body=%q", code, string(artBody))
+	}
+
+	// 6. Verify interactive UI actions (approve, message, cancel) route over Server.Open to ws-1.
+	code, b := doJSON("alice@example.com", http.MethodPost, "/v1/tasks/t-gf-up/approvals/req-1", map[string]string{
+		"decision": "allow",
+		"reason":   "lgtm",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("approve status = %d: %s", code, b)
+	}
+
+	code, b = doJSON("alice@example.com", http.MethodPost, "/v1/tasks/t-proc-auto/messages", map[string]string{
+		"id":   "msg-auto-1",
+		"text": "Focus on auth tables",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("message status = %d: %s", code, b)
+	}
+
+	code, b = doJSON("alice@example.com", http.MethodPost, "/v1/tasks/t-proc-auto/cancel", map[string]string{
+		"reason": "aborting audit",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("cancel status = %d: %s", code, b)
+	}
+
+	// Wait briefly for all 4 tunnel streams (view, approve, message, cancel) to be received by ws-1.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(tunnelReqs)
+		mu.Unlock()
+		if n >= 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for 4 tunnel requests, got %d", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	gotReqs := append([]tunnelReq(nil), tunnelReqs...)
+	mu.Unlock()
+	if gotReqs[0].Type != TypeView || gotReqs[0].NodeTask != "local-up-1" || gotReqs[0].Ref != "art-diff-1" {
+		t.Fatalf("unexpected view request: %+v", gotReqs[0])
+	}
+	if gotReqs[1].Type != tasks.TypeApprove || gotReqs[1].NodeTask != "local-up-1" || gotReqs[1].Request != "req-1" || gotReqs[1].Decision != tasks.Allow {
+		t.Fatalf("unexpected approve request: %+v", gotReqs[1])
+	}
+	if gotReqs[2].Type != tasks.TypeMessage || gotReqs[2].NodeTask != "local-proc-9" || gotReqs[2].Text != "Focus on auth tables" {
+		t.Fatalf("unexpected message request: %+v", gotReqs[2])
+	}
+	if gotReqs[3].Type != tasks.TypeCancel || gotReqs[3].NodeTask != "local-proc-9" {
+		t.Fatalf("unexpected cancel request: %+v", gotReqs[3])
+	}
+
+	// 7. Send terminal result event on upStream and verify:
+	// - task state transitions to Done in tasks.Store
+	// - Grainfiles.RecordDependencyCompleted + Rendezvous.NotifyGrainfiles fires dependency_completed for downstream.task.md
+	// - subsequent explicit CompleteGrainfile on control stream is deduplicated
+	send(t, upStream, `{"v":1,"seq":5,"task":"t-gf-up","type":"result","result":{"status":"done","reason":"migration complete"}}`)
+
+	var firstSeq int64
+	select {
+	case n := <-depNotif:
+		if n.GrainfileURL != downRec.URL || n.DependencyURL != upRec.URL || n.Reason != "migration complete" {
+			t.Fatalf("unexpected dependency_completed notification: %+v", n)
+		}
+		firstSeq = n.Seq
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for automatic dependency_completed notification")
+	}
+
+	upTask, err := taskStore.Get(ctx, "t-gf-up")
+	check(t, err)
+	if upTask.State != tasks.Done || upTask.Reason != "migration complete" {
+		t.Fatalf("expected t-gf-up state=done reason='migration complete', got state=%s reason=%q", upTask.State, upTask.Reason)
+	}
+
+	// Sending grainfile_completed on the control stream for the same URL/status must be deduplicated
+	// (returning the same event seq without recording or pushing a second notification).
+	dupEvs, err := nodeConn.CompleteGrainfile(ctx, upRec.URL, "1111111", "done", "migration complete")
+	check(t, err)
+	if len(dupEvs) != 1 || dupEvs[0].Seq != firstSeq {
+		t.Fatalf("expected deduplicated event seq %d from CompleteGrainfile, got %+v", firstSeq, dupEvs)
+	}
+	select {
+	case n := <-depNotif:
+		t.Fatalf("unexpected duplicate dependency_completed notification: %+v", n)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

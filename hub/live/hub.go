@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,6 +97,15 @@ type Hub struct {
 	// holding its task's node ends when it stops holding it.
 	Holds   func(nodeID string) bool
 	Changes func() (<-chan struct{}, func())
+
+	// RegisterRun, when set, auto-registers a node-originated or
+	// Grainfile-triggered run on the first event of a NodeStream when its
+	// task ID is not yet in Tasks. When nil and Tasks is a *tasks.Store
+	// with Directory set, Hub falls back to registering via tasks.Filer.
+	RegisterRun func(ctx context.Context, nodeID, owner string, meta RunMeta) (tasks.Task, error)
+	// OnResult, when set, is invoked when a NodeStream ingests a terminal
+	// result event for a task.
+	OnResult func(ctx context.Context, task tasks.Task, state, reason string)
 
 	wmu     sync.Mutex
 	waiters map[string]map[chan struct{}]struct{} // stored subscriptions, by task
@@ -320,7 +330,10 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := bufio.NewReaderSize(c, 4096)
-	var t *topic
+	var (
+		t          *topic
+		streamTask tasks.Task
+	)
 	defer func() {
 		if t != nil {
 			h.upstreamClosed(t)
@@ -343,6 +356,19 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		}
 		if t == nil {
 			task, err := h.Tasks.Get(ctx, e.Task)
+			if errors.Is(err, tasks.ErrNotFound) {
+				task, err = h.autoRegister(ctx, nodeID, line, e)
+			} else if err == nil && task.Node == nodeID {
+				meta := ExtractRunMeta(line, e)
+				if (meta.NodeTask != "" && task.NodeTask == "") ||
+					(meta.GrainfileURL != "" && task.GrainfileURL == "") ||
+					(meta.CommitSHA != "" && task.CommitSHA == "") ||
+					(meta.TriggerSource != "" && task.TriggerSource == "") {
+					if updated, uerr := h.autoRegister(ctx, nodeID, line, e); uerr == nil {
+						task = updated
+					}
+				}
+			}
 			if err == nil && task.Node != nodeID {
 				err = fmt.Errorf("task %s is not on node %q", logsafe.Quote(e.Task), nodeID)
 			}
@@ -353,6 +379,7 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 				h.logf("live: refused node %q's event stream: %s", nodeID, logsafe.Quote(err.Error()))
 				return
 			}
+			streamTask = task
 			if t, err = h.acquire(ctx, e.Task); err != nil {
 				h.logf("live: task %s: %v", logsafe.Quote(e.Task), err)
 				return
@@ -398,7 +425,101 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		if fresh && class.Stored() {
 			h.announce(t.id, e.Seq)
 		}
+		if fresh && e.Type == events.TypeResult && e.Result != nil {
+			meta := ExtractRunMeta(line, e)
+			if streamTask.GrainfileURL == "" && meta.GrainfileURL != "" {
+				streamTask.GrainfileURL = meta.GrainfileURL
+			}
+			if streamTask.CommitSHA == "" && meta.CommitSHA != "" {
+				streamTask.CommitSHA = meta.CommitSHA
+			}
+			if streamTask.GrainfileURL == "" {
+				if latest, gerr := h.Tasks.Get(ctx, t.id); gerr == nil {
+					streamTask = latest
+				}
+			}
+			state, rawState, reason := resultStateReason(e.Result)
+			if completer, ok := h.Tasks.(interface {
+				CompleteRun(ctx context.Context, id string, state tasks.State, reason string) (tasks.Task, error)
+			}); ok {
+				if updated, cerr := completer.CompleteRun(ctx, t.id, state, reason); cerr == nil {
+					streamTask = updated
+				}
+			}
+			if h.OnResult != nil {
+				h.OnResult(ctx, streamTask, rawState, reason)
+			}
+		}
 	}
+}
+
+func (h *Hub) autoRegister(ctx context.Context, nodeID string, line []byte, e Event) (tasks.Task, error) {
+	if h.NodeOwner == nil {
+		return tasks.Task{}, fmt.Errorf("%w: %s", tasks.ErrNotFound, e.Task)
+	}
+	owner, ok := h.NodeOwner(nodeID)
+	if !ok || owner == "" {
+		return tasks.Task{}, fmt.Errorf("node %q is not registered", nodeID)
+	}
+	meta := ExtractRunMeta(line, e)
+	if h.RegisterRun != nil {
+		return h.RegisterRun(ctx, nodeID, owner, meta)
+	}
+	if store, ok := h.Tasks.(*tasks.Store); ok {
+		var dirStore *directory.Store
+		if h.Directory != nil {
+			dirStore = h.Directory.Store
+		}
+		filer := &tasks.Filer{
+			Store:     store,
+			Directory: dirStore,
+			Logf:      h.Logf,
+		}
+		return filer.RegisterRun(ctx, nodeID, owner, tasks.RunRegistration{
+			ID:            meta.Task,
+			NodeTask:      meta.NodeTask,
+			Repo:          meta.Repo,
+			Kind:          meta.Kind,
+			Title:         meta.Title,
+			Prompt:        meta.Prompt,
+			GrainfileURL:  meta.GrainfileURL,
+			CommitSHA:     meta.CommitSHA,
+			TriggerSource: meta.TriggerSource,
+		})
+	}
+	return tasks.Task{}, fmt.Errorf("%w: %s", tasks.ErrNotFound, e.Task)
+}
+
+func resultStateReason(r *events.Result) (state tasks.State, rawState, reason string) {
+	st := strings.ToLower(strings.TrimSpace(r.Status))
+	if st == "" {
+		st = strings.ToLower(strings.TrimSpace(r.State))
+	}
+	switch {
+	case st == "cancelled" || st == "canceled" || r.Exit.Reason == events.ReasonCancelled:
+		state, rawState = tasks.Cancelled, "cancelled"
+	case st == "completed":
+		state, rawState = tasks.Done, "completed"
+	case st == "done":
+		state, rawState = tasks.Done, "done"
+	case st == "failed" || st == "error":
+		state, rawState = tasks.Failed, "failed"
+	case r.Exit.Code == 0 && (r.Exit.Reason == "" || r.Exit.Reason == events.ReasonCompleted || r.Exit.Reason == "done"):
+		state, rawState = tasks.Done, "done"
+	default:
+		state, rawState = tasks.Failed, "failed"
+	}
+	switch {
+	case r.Reason != "":
+		reason = r.Reason
+	case r.Exit.Detail != "":
+		reason = r.Exit.Detail
+	case r.FinalText != "":
+		reason = r.FinalText
+	default:
+		reason = r.Exit.Reason
+	}
+	return state, rawState, reason
 }
 
 func (h *Hub) message(ctx context.Context, task, id string) (events.Message, bool, error) {

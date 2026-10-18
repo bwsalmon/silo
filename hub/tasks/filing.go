@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
+	"github.com/bwsalmon/silo/hub/registry"
 )
 
 // Filing is a task a node files at the hub (rendezvous TypeFileTask,
@@ -76,6 +77,10 @@ var ErrRateLimited = errors.New("tasks: filing too fast")
 type Filer struct {
 	Store     *Store
 	Directory *directory.Store
+	Registry  *registry.Registry
+	// LookupGrainfile, when set, returns known repository, kind, title, and
+	// commit SHA metadata for a registered Grainfile URL.
+	LookupGrainfile func(ctx context.Context, url string) (repo, kind, title, commitSHA string, ok bool)
 	// Dispatcher, when set, is woken for a task filed queued.
 	Dispatcher *Dispatcher
 	// Burst and Every are the rate limit on each node's filings: Burst
@@ -277,4 +282,121 @@ func dependencies(ctx context.Context, s *Store, acc *directory.Access, ids []st
 		}
 	}
 	return ids, nil
+}
+
+// RegisterRunRaw registers a node-originated or Grainfile-triggered run from a
+// JSON RunRegistration payload and returns the resulting Task as JSON.
+func (f *Filer) RegisterRunRaw(ctx context.Context, nodeID, owner string, raw json.RawMessage) (json.RawMessage, error) {
+	var req RunRegistration
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("%w run registration: %v", ErrInvalid, err)
+	}
+	t, err := f.RegisterRun(ctx, nodeID, owner, req)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(t)
+}
+
+// RegisterRun verifies directory admission for (nodeID, owner) and registers
+// req directly in the Running state in f.Store.
+func (f *Filer) RegisterRun(ctx context.Context, nodeID, owner string, req RunRegistration) (Task, error) {
+	if f.Store == nil {
+		return Task{}, fmt.Errorf("%w: no store", ErrInvalid)
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	owner = strings.TrimSpace(owner)
+	if nodeID == "" || owner == "" {
+		return Task{}, fmt.Errorf("%w: missing node or owner", ErrInvalid)
+	}
+	if req.Node != "" && req.Node != nodeID {
+		return Task{}, fmt.Errorf("%w run registration: it names node %q, but comes from %q", ErrInvalid, req.Node, nodeID)
+	}
+	if req.NodeTask != "" && (len(req.NodeTask) > maxNodeTask || strings.ContainsAny(req.NodeTask, "\r\n")) {
+		return Task{}, fmt.Errorf("%w node task %q", ErrInvalid, req.NodeTask)
+	}
+
+	grainfileURL := strings.TrimSpace(req.GrainfileURL)
+	if grainfileURL == "" {
+		grainfileURL = strings.TrimSpace(req.Grainfile)
+	}
+	if grainfileURL != "" && f.LookupGrainfile != nil {
+		if gfRepo, gfKind, gfTitle, gfCommit, ok := f.LookupGrainfile(ctx, grainfileURL); ok {
+			if strings.TrimSpace(req.Repo) == "" {
+				req.Repo = gfRepo
+			}
+			if strings.TrimSpace(req.Kind) == "" {
+				req.Kind = gfKind
+			}
+			if strings.TrimSpace(req.Title) == "" {
+				req.Title = gfTitle
+			}
+			if strings.TrimSpace(req.CommitSHA) == "" && strings.TrimSpace(req.Commit) == "" {
+				req.CommitSHA = gfCommit
+			}
+		}
+	}
+
+	repo := NormalizeRunRepo(req.Repo, grainfileURL)
+	var regNode *registry.Entry
+	if f.Registry != nil {
+		if entry, ok := f.Registry.Get(nodeID); ok {
+			regNode = &entry
+		}
+	}
+	if repo == "" && regNode != nil && len(regNode.Repos) > 0 {
+		repo = NormalizeRunRepo(regNode.Repos[0], "")
+	}
+
+	if f.Directory != nil {
+		ownerEmail := strings.ToLower(strings.TrimPrefix(owner, directory.UserPrefix))
+		ownerAcc, err := f.access(ctx, ownerEmail)
+		if err != nil {
+			return Task{}, err
+		}
+		switch {
+		case repo != "":
+			team, err := f.Directory.RepoOwner(ctx, repo)
+			if err != nil {
+				return Task{}, err
+			}
+			if team == "" {
+				return Task{}, fmt.Errorf("%w: no team owns the repository %s", directory.ErrNotAdmitted, repo)
+			}
+			if ownerAcc.Teams[team] == "" {
+				return Task{}, fmt.Errorf("%w: %s is not in team %s for repository %s", directory.ErrNotAdmitted, owner, team, repo)
+			}
+			req.Team = team
+			req.Repo = repo
+		case strings.TrimSpace(req.Team) != "":
+			team := strings.ToLower(strings.TrimSpace(req.Team))
+			if ownerAcc.Teams[team] == "" {
+				return Task{}, fmt.Errorf("%w: %s is not in team %s", directory.ErrNotAdmitted, owner, team)
+			}
+			req.Team = team
+		case len(ownerAcc.Teams) == 1:
+			for team := range ownerAcc.Teams {
+				req.Team = team
+			}
+			if repos, err := f.Directory.TeamRepos(ctx, req.Team); err == nil && len(repos) == 1 {
+				req.Repo = repos[0]
+			}
+		default:
+			return Task{}, fmt.Errorf("%w: run registration requires a repository or team", ErrInvalid)
+		}
+	} else {
+		req.Repo = repo
+	}
+
+	req.Node = nodeID
+	req.NodeOwner = owner
+	req.GrainfileURL = grainfileURL
+	t, err := f.Store.RegisterRun(ctx, req)
+	if err != nil {
+		return Task{}, err
+	}
+	if f.Logf != nil {
+		f.Logf("tasks: node %s of %s registered run %s (%s) for team %s repo %s", nodeID, owner, t.ID, t.Kind, t.Team, t.Repo)
+	}
+	return t, nil
 }

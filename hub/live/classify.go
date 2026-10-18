@@ -130,6 +130,9 @@ func Classify(line []byte) (Event, Class, error) {
 			}
 		}
 	}
+	if _, ok := raw["v"]; !ok {
+		e.V = events.Version
+	}
 	if e.Task == "" {
 		return Event{}, 0, rejected("no task")
 	}
@@ -142,7 +145,8 @@ func Classify(line []byte) (Event, Class, error) {
 	}
 	for k := range raw {
 		switch k {
-		case "v", "seq", "time", "session", "type", "task", e.Type:
+		case "v", "seq", "time", "session", "type", "task", e.Type,
+			"node_task", "grainfile_url", "grainfile", "repo", "title", "kind", "commit_sha", "commit", "trigger_source", "prompt", "run":
 		default:
 			return Event{}, 0, rejected("%s event: field %q is outside its schema", e.Type, k)
 		}
@@ -173,6 +177,29 @@ func Classify(line []byte) (Event, Class, error) {
 		// Paths on the node's disk: what is behind them is node-only.
 		r := e.Result
 		r.AuditPath, r.TranscriptPath, r.NormalizedTranscriptPath = "", "", ""
+		if r.Exit.Reason == "" {
+			st := r.Status
+			if st == "" {
+				st = r.State
+			}
+			switch st {
+			case "done", "completed":
+				r.Exit.Reason = events.ReasonCompleted
+			case "cancelled", "canceled":
+				r.Exit.Reason = events.ReasonCancelled
+				if r.Exit.Code == 0 {
+					r.Exit.Code = 1
+				}
+			case "failed", "error":
+				r.Exit.Reason = events.ReasonCLIError
+				if r.Exit.Code == 0 {
+					r.Exit.Code = 1
+				}
+			}
+			if r.Reason != "" && r.Exit.Detail == "" {
+				r.Exit.Detail = r.Reason
+			}
+		}
 	}
 	return e, class, nil
 }
@@ -313,4 +340,99 @@ func stamp(e *Event, now time.Time) {
 	if e.Time.IsZero() {
 		e.Time = now.UTC()
 	}
+}
+
+// RunMeta holds optional run-registration metadata extracted from the first
+// event on a NodeStream.
+type RunMeta struct {
+	Task          string `json:"task,omitempty"`
+	NodeTask      string `json:"node_task,omitempty"`
+	Repo          string `json:"repo,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	Title         string `json:"title,omitempty"`
+	Prompt        string `json:"prompt,omitempty"`
+	GrainfileURL  string `json:"grainfile_url,omitempty"`
+	CommitSHA     string `json:"commit_sha,omitempty"`
+	TriggerSource string `json:"trigger_source,omitempty"`
+}
+
+// ExtractRunMeta extracts optional run metadata from a raw event line.
+func ExtractRunMeta(line []byte, e Event) RunMeta {
+	var envelope struct {
+		Task          string `json:"task"`
+		NodeTask      string `json:"node_task"`
+		Repo          string `json:"repo"`
+		Kind          string `json:"kind"`
+		Title         string `json:"title"`
+		Prompt        string `json:"prompt"`
+		GrainfileURL  string `json:"grainfile_url"`
+		Grainfile     string `json:"grainfile"`
+		CommitSHA     string `json:"commit_sha"`
+		Commit        string `json:"commit"`
+		TriggerSource string `json:"trigger_source"`
+		Run           *struct {
+			ID            string `json:"id"`
+			NodeTask      string `json:"node_task"`
+			Repo          string `json:"repo"`
+			Kind          string `json:"kind"`
+			Title         string `json:"title"`
+			Prompt        string `json:"prompt"`
+			GrainfileURL  string `json:"grainfile_url"`
+			Grainfile     string `json:"grainfile"`
+			CommitSHA     string `json:"commit_sha"`
+			Commit        string `json:"commit"`
+			TriggerSource string `json:"trigger_source"`
+		} `json:"run"`
+	}
+	_ = json.Unmarshal(line, &envelope)
+	m := RunMeta{
+		Task:          e.Task,
+		NodeTask:      envelope.NodeTask,
+		Repo:          envelope.Repo,
+		Kind:          envelope.Kind,
+		Title:         envelope.Title,
+		Prompt:        envelope.Prompt,
+		GrainfileURL:  envelope.GrainfileURL,
+		CommitSHA:     envelope.CommitSHA,
+		TriggerSource: envelope.TriggerSource,
+	}
+	if m.GrainfileURL == "" {
+		m.GrainfileURL = envelope.Grainfile
+	}
+	if m.CommitSHA == "" {
+		m.CommitSHA = envelope.Commit
+	}
+	if r := envelope.Run; r != nil {
+		if m.NodeTask == "" {
+			m.NodeTask = r.NodeTask
+		}
+		if m.Repo == "" {
+			m.Repo = r.Repo
+		}
+		if m.Kind == "" {
+			m.Kind = r.Kind
+		}
+		if m.Title == "" {
+			m.Title = r.Title
+		}
+		if m.Prompt == "" {
+			m.Prompt = r.Prompt
+		}
+		if m.GrainfileURL == "" {
+			m.GrainfileURL = r.GrainfileURL
+			if m.GrainfileURL == "" {
+				m.GrainfileURL = r.Grainfile
+			}
+		}
+		if m.CommitSHA == "" {
+			m.CommitSHA = r.CommitSHA
+			if m.CommitSHA == "" {
+				m.CommitSHA = r.Commit
+			}
+		}
+		if m.TriggerSource == "" {
+			m.TriggerSource = r.TriggerSource
+		}
+	}
+	return m
 }

@@ -76,6 +76,8 @@ func (s State) valid() bool {
 const (
 	// KindTask, the default, is a task that runs to its result.
 	KindTask = ""
+	// KindProcess is a Grainfile process run (.process.grain.md / .process.md).
+	KindProcess = "process"
 	// KindInteractive is a session: a task that stays open across many
 	// turns, taking its humans' messages (Store.Post) and waiting for
 	// them (an awaiting_reply event), until it is cancelled or its node
@@ -135,9 +137,17 @@ type Spec struct {
 	FiledByOwner string `json:"filed_by_owner,omitempty"`
 	// OriginTask is the hub task whose run filed this one, if a node
 	// filed it from one: the task whose Submitter it carries.
-	OriginTask  string      `json:"origin_task,omitempty"`
-	Constraints Constraints `json:"constraints"`
-	Created     time.Time   `json:"created_at"`
+	OriginTask string `json:"origin_task,omitempty"`
+	// GrainfileURL is the canonical HTTPS URL of the .task.grain.md or
+	// .process.grain.md file that triggered this run, if any.
+	GrainfileURL string `json:"grainfile_url,omitempty"`
+	// CommitSHA is the repository commit SHA at which the run started.
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// TriggerSource describes what initiated the run (e.g. "push",
+	// "dependency_done", "local").
+	TriggerSource string      `json:"trigger_source,omitempty"`
+	Constraints   Constraints `json:"constraints"`
+	Created       time.Time   `json:"created_at"`
 }
 
 // Task is a task in the backlog.
@@ -212,9 +222,12 @@ func normalize(s Spec) (Spec, error) {
 	if s.Repo != "" && !repoName.MatchString(s.Repo) {
 		return s, fmt.Errorf("%w repository %q: want owner/name", ErrInvalid, s.Repo)
 	}
-	if s.Kind != KindTask && s.Kind != KindInteractive {
-		return s, fmt.Errorf("%w kind %q: want %q or none", ErrInvalid, s.Kind, KindInteractive)
+	if s.Kind != KindTask && s.Kind != "task" && s.Kind != KindProcess && s.Kind != KindInteractive {
+		return s, fmt.Errorf("%w kind %q: want %q, %q, or none", ErrInvalid, s.Kind, KindInteractive, KindProcess)
 	}
+	s.GrainfileURL = strings.TrimSpace(s.GrainfileURL)
+	s.CommitSHA = strings.TrimSpace(s.CommitSHA)
+	s.TriggerSource = strings.TrimSpace(s.TriggerSource)
 	if !teamID.MatchString(s.Team) {
 		return s, fmt.Errorf("%w team %q", ErrInvalid, s.Team)
 	}
@@ -280,4 +293,16 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string([]rune(s)[:n-1]) + "…"
+}
+
+// takesMessages reports whether t accepts human messages through the hub.
+// Interactive sessions and node-originated / Grainfile-triggered runs
+// accept messages; legacy queued/offered imperative tasks with empty Kind
+// do not.
+func takesMessages(t Task) bool {
+	return t.Kind == KindInteractive ||
+		t.Kind == "task" ||
+		t.Kind == KindProcess ||
+		t.GrainfileURL != "" ||
+		(t.Node != "" && t.Attempts == 0)
 }
