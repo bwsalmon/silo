@@ -13,7 +13,7 @@ The pieces:
 | --- | --- |
 | `Dockerfile` | The hub's image: a static `silo` binary on distroless. |
 | `deploy/terraform/hub` | The project's side: Cloud SQL (PostgreSQL) with its two database users (below), the hub's Google service account and its Workload Identity binding, IAP access, a static IP, Certificate Manager certificates (the hub's host and the nodes' UI hosts, `*.nodes.<domain>`) and their map, DNS records (optional), an Artifact Registry repository, and Cloud Monitoring alert policies and a dashboard over the hub's metrics (`monitoring.tf`). `bsalmon-gke-dev.tfvars` is the example for this project. |
-| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/` and the `bsalmon-gke-dev/` overlay. One hub pod with the Cloud SQL Auth Proxy beside it and a `migrate` init container, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), and the GKE policies (IAP, timeouts, health checks), and a `PodMonitoring` that scrapes the hub's metrics. `validate.sh` checks them on a kind cluster. |
+| `deploy/kubernetes/hub` | The cluster's side, with kustomize: `base/`, the `bsalmon-gke-dev/` production overlay, and the `kind/` local/CI overlay. Two hub replicas with the Cloud SQL Auth Proxy beside each pod (or in-cluster PostgreSQL in `kind/`) and a `migrate` init container, two Services, the Gateway and its HTTPRoutes (the hub's host, and the nodes' UI hosts), the GKE policies (IAP, timeouts, health checks), and a `PodMonitoring` that scrapes the hub's metrics. `validate.sh` validates the manifests and policy invariants on a kind cluster; `e2e-kind.sh` boots the live 2-replica `kind/` overlay and runs the end-to-end deployment test (§9). |
 
 Traffic, once deployed:
 
@@ -462,6 +462,74 @@ existing connection. It is off until the hub is told the domain.
   host's root, so grain's UI works there unchanged.
 - **Checking it.** `curl -sI https://<node>.<node_ui_domain>/` is a
   302 to Google sign-in; signed in as the node's owner, the node's UI.
+
+## 9. Local and CI 2-replica `kind` deployment test
+
+`deploy/kubernetes/hub/kind/` is a kustomize overlay that builds
+directly on `deploy/kubernetes/hub/base/` to run the full 2-replica
+Deployment on a throwaway `kind` cluster without GCP credentials. It
+replaces only the GCP-specific `cloud-sql-proxy` sidecar with an
+in-cluster PostgreSQL service (`deploy/kubernetes/hub/kind/postgres.yaml`)
+configured with the same two-role split (`silo_migrate` schema owner and
+`silo_runtime` least-privileged runtime role) and an in-cluster GitHub
+REST API mock (`github-mock`), while preserving:
+
+- the `migrate` init container (`silo hub migrate` with
+  `SILO_HUB_RUNTIME_ROLE=silo_runtime`);
+- the distroless `hub` container (`SILO_HUB_MIGRATE=false`,
+  `runAsNonRoot: true`, `runAsUser: 65532`,
+  `readOnlyRootFilesystem: true`);
+- downward-API pod identity (`SILO_HUB_POD`, `SILO_HUB_POD_IP`,
+  `SILO_HUB_POD_ADDR`) and the `:9092` internal listener authenticated
+  with `silo-hub-internal`;
+- the `silo-hub-claims` and `silo-hub-github` Secret mounts; and
+- `default-deny-ingress` network policies (`base/networkpolicy.yaml`).
+
+Run the end-to-end packaging and `kind` deployment test locally or in CI
+(`.grain/workflows/deploy.yml`):
+
+```sh
+deploy/kubernetes/hub/e2e-kind.sh
+```
+
+`e2e-kind.sh` and `deploy/kubernetes/hub/kind_e2e_test.go` verify:
+
+1. **Distroless image packaging and Kubernetes guardrails:** builds
+   `silo-hub:ci` (`gcr.io/distroless/static-debian12:nonroot`,
+   `65532:65532`), checks that all CLI subcommands (`hub serve`,
+   `hub migrate`, `hub team`, `hub token`, `conformance`) and the
+   embedded web UI at `/` work inside the distroless image, and verifies
+   that when `KUBERNETES_SERVICE_HOST` is set `silo hub serve` refuses
+   SQLite (`CheckDatabase`), refuses `-dev-user-header`
+   (`CheckDevSignOn`), and refuses an empty webhook secret
+   (`CheckWebhookSecret`).
+2. **2-replica startup, `migrate` init container, and least-privileged
+   DB role:** boots a throwaway `kind` cluster, applies
+   `deploy/kubernetes/hub/kind/`, waits for both `silo-hub` pods to pass
+   `/healthz` and `/readyz`, verifies that `silo_runtime` is denied DDL
+   (`CREATE TABLE`, `DROP TABLE`), and runs the documented bootstrap
+   commands (`kubectl exec deploy/silo-hub -c hub -- /silo hub team ...`
+   and `/silo hub token ...`).
+3. **Multi-pod rendezvous, `:9092` internal streams, and
+   `LISTEN/NOTIFY`:** connects a simulated Grain node over WebSocket
+   (`/v1/nodes/connect`) to pod 0, verifies the node is visible on both
+   pods (`GET /v1/nodes`), proxies the node's UI (`<node>.nodes...`)
+   and dispatches a task + live SSE stream through pod 1 across the
+   `:9092` internal listener to pod 0.
+4. **Signed webhooks, Grainfile indexing, and content proxy:** verifies
+   unsigned/invalid `POST /v1/webhooks/github` deliveries are rejected
+   with `401`, delivers a valid `X-Hub-Signature-256` `push` webhook to
+   pod 1, verifies `grainfile_event` (`task_ready`) delivery to the
+   node connected on pod 0, and checks `GET /v1/grainfiles/content`
+   for the Grainfile (`200`), an authorized same-repo reference (`200`),
+   and unauthorized paths (`403` / `401`).
+5. **Prometheus metrics and zero-downtime rolling update:** scrapes
+   `:9091/metrics` on both pods (`silo_hub_node_connects_total`,
+   `silo_hub_webhooks_total`, `silo_hub_grainfiles_indexed`,
+   `silo_hub_db_open_connections{store="grainfiles"}`), then runs
+   `kubectl rollout restart deployment/silo-hub`, verifying
+   `maxUnavailable: 0`, `goodbye` delivery when the old pod terminates,
+   and clean node reconnect + `catchup` on the replacement pod.
 
 ## Cloud Run, the alternative not taken
 

@@ -1,6 +1,7 @@
 # The hub's container image: `silo hub serve` (README.md, docs/deploy.md).
-# grain CI builds it (.grain/workflows/deploy.yml); publishing it is a
-# deployment's own step.
+# grain CI builds it and runs it as a 2-replica Deployment on kind
+# (.grain/workflows/deploy.yml, deploy/kubernetes/hub/e2e-kind.sh);
+# publishing it is a deployment's own step.
 #
 #   docker build -t silo-hub .
 #   docker run -p 8080:8080 silo-hub hub serve -database sqlite::memory: -dev-user-header X-User
