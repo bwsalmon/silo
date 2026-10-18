@@ -43,7 +43,7 @@ import { when } from './Backlog';
 function linkableHref(raw?: string): string | undefined {
   if (!raw) return undefined;
   const clean = safeUrl(raw.trim());
-  if (!clean || !/^(https?:|mailto:|\/)/i.test(clean)) return undefined;
+  if (!clean || clean.startsWith('//') || clean.startsWith('/\\') || !/^(https?:|mailto:|\/[^/\\])/i.test(clean)) return undefined;
   return clean;
 }
 
@@ -118,7 +118,7 @@ function SafeExternalLink({ url, label, sx }: { url: string; label?: string; sx?
     );
   }
   return (
-    <MuiLink href={href} target="_blank" rel="noreferrer" color="text.primary" underline="hover" sx={sx}>
+    <MuiLink href={href} target="_blank" rel="noopener noreferrer" color="text.primary" underline="hover" sx={sx}>
       {text}
     </MuiLink>
   );

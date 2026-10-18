@@ -69,10 +69,12 @@ admin and member against team A's: get, list and filter
 end, by `Last-Event-ID` and by WebSocket, fetch an artifact, list and
 answer approvals, read and send messages, cancel, requeue, approve and
 reject. They also try the other team itself, its settings, filing to
-it by name, its node in `/v1/nodes`, and its node's UI host. Every
+it by name, its node in `/v1/nodes`, its node's UI host, and its indexed
+Grainfiles, node subscriptions and Grainfile events on `GET
+/v1/grainfiles` (`?repo=`, `?node=`, `?include_drafts=true`). Every
 refusal must be a 404 whose body matches the one a nonexistent thing
-gets. Afterwards the other team's task is still running and its node
-was sent nothing.
+gets (or an empty filtered list on `/v1/grainfiles`). Afterwards the
+other team's task is still running and its node was sent nothing.
 
 **`nodetoken_test.go`**:
 
@@ -97,12 +99,16 @@ A fake node sends tool-call arguments and results, transcript tool
 items, a diff artifact with its patch inline, an unknown `file` event
 with contents, streamed assistant text, stored event types with
 content smuggled into extra fields, a forged message, and a result
-with node-disk paths. It also serves a diff through the view-through.
+with node-disk paths. It also serves a diff through the view-through,
+ingests a Grainfile via a signed `POST /v1/webhooks/github` push
+webhook, and proxies both the Grainfile Markdown body and its
+referenced file through `GET /v1/grainfiles/content`.
 Each payload carries its own random sentinel. The test then reads
 every row of every table, and every log line the hub wrote, and
 requires that no sentinel appears. As a positive control, the dump
-must contain the prompt and the diff's reference. The view-through
-response must be `no-store`.
+must contain the prompt, the diff's reference, and the Grainfile's
+front-matter title. The view-through and content-proxy responses must
+be `no-store`.
 
 **`claims_test.go`**:
 
@@ -130,6 +136,36 @@ response must be `no-store`.
   connections that never say hello leave the hub serving people, nodes
   and subscriptions. All of them are closed within 45s (the header
   timeout and the hello timeout are both 30s).
+
+**`grainfiles_test.go`**:
+
+- `TestGrainfileSameOriginContentProxy` (INV-24): a Grainfile in Repo A
+  grants read access on `GET /v1/grainfiles/content` only to that
+  Grainfile itself and to files inside Repo A explicitly listed in its
+  `references`, pinned to the indexed commit/ref, and only to its
+  designated `recipient` node (with `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff`, and `Content-Security-Policy:
+  sandbox`). Unlisted same-repo files, cross-repository references
+  listed in `references`, `draft: true` Grainfiles and their references,
+  path traversal (`..`, `%2e%2e`, `%2f`, `\`, `%00`, `//`), URL
+  authority confusion (`@`), ref/commit confusion (`?ref=`, `?commit=`,
+  or unindexed branch URLs), and non-recipient or unauthenticated
+  callers are all rejected.
+- `TestWebhookReceiverAndGitHubFetcherHardening` (INV-25):
+  `VerifyGitHubSignature` and `POST /v1/webhooks/github` fail closed
+  when `WebhookSecret` is empty or `X-Hub-Signature-256` is missing or
+  invalid; `GitHubFetcher` refuses to mint tokens or dial for non-GitHub
+  hosts when `BaseURL` is empty, refuses metadata/link-local `BaseURL`s
+  and embedded URL credentials, and refuses HTTP 302 redirects;
+  `grainfiles.Parse` rejects YAML anchors/aliases, merge keys, explicit
+  tags in block and flow collections, nesting > 32 levels, front matter
+  > 64 KiB, and files > 1 MiB.
+- `TestTenantRecipientIsolationAndControlStreamSpoofing` (INV-26,
+  INV-27): a node from Team B cannot claim a `recipient` or subscribe to
+  a `repo`/`folder` owned by Team A or already claimed by a Team A user
+  (either in `hello` or via `TypeSubscribe`), and cannot spoof
+  `grainfile_completed` / `dependency_completed` for a Grainfile it is
+  not the `recipient` of.
 
 ## 3. Accepted exposures, stated
 

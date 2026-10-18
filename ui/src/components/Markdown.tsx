@@ -70,6 +70,9 @@ export function safeUrl(url: string): string {
   if (/[\u0000-\u0020\u007f-\u009f]/.test(value)) {
     return "";
   }
+  if (value.startsWith("//") || value.startsWith("/\\") || value.startsWith("\\")) {
+    return "";
+  }
   const colon = value.indexOf(":");
   if (colon === -1) {
     return value;

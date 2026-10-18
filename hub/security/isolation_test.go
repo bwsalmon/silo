@@ -1,11 +1,13 @@
 package security_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
@@ -19,6 +21,40 @@ import (
 func TestCrossTeamIsolation(t *testing.T) {
 	w := newWorld(t)
 	hb := w.hb
+
+	ctx := context.Background()
+	if _, err := hb.h.Grainfiles.SetSubscriptions(ctx, grainfiles.Subscriptions{
+		NodeID:     "ws-a",
+		Owner:      alice,
+		Recipients: []string{"https://github.com/acme/grain-a"},
+		Repos:      []string{"https://github.com/acme/app"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hb.h.Grainfiles.SetSubscriptions(ctx, grainfiles.Subscriptions{
+		NodeID:     "ws-b",
+		Owner:      bob,
+		Recipients: []string{"https://github.com/beta/grain-b"},
+		Repos:      []string{"https://github.com/beta/app"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gfA, err := grainfiles.Parse("tasks/a.task.md", []byte("---\ntitle: Team A Secret Task\nrecipient: https://github.com/acme/grain-a\n---\nTeam A body\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gfA.Repo, gfA.Ref, gfA.Commit = "https://github.com/acme/app", "main", "1111111111111111111111111111111111111111"
+	if _, err := hb.h.Grainfiles.IndexGrainfile(ctx, gfA); err != nil {
+		t.Fatal(err)
+	}
+	gfB, err := grainfiles.Parse("tasks/b.task.md", []byte("---\ntitle: Team B Secret Task\nrecipient: https://github.com/beta/grain-b\n---\nTeam B body\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gfB.Repo, gfB.Ref, gfB.Commit = "https://github.com/beta/app", "main", "2222222222222222222222222222222222222222"
+	if _, err := hb.h.Grainfiles.IndexGrainfile(ctx, gfB); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		who        string
@@ -129,7 +165,41 @@ func TestCrossTeamIsolation(t *testing.T) {
 			if code != http.StatusNotFound || gcode != code {
 				t.Errorf("node %s's UI: %d (%v); a node that does not exist: %d", tc.theirNode, code, h, gcode)
 			}
+
+			// The grainfiles index, subscriptions, and events: nothing of the other team's is visible.
+			theirRepoURL := "https://github.com/" + tc.theirs.Repo
+			for _, q := range []string{"", "?repo=" + theirRepoURL, "?node=" + tc.theirNode, "?include_drafts=true"} {
+				var gfResp grainfiles.GrainfilesResponse
+				hb.must(me, "GET", grainfiles.GrainfilesPath+q, nil, http.StatusOK, &gfResp)
+				for _, g := range gfResp.Grainfiles {
+					if g.Repo == theirRepoURL {
+						t.Errorf("GET /v1/grainfiles%s as %s leaked %s's grainfile %s", q, tc.who, tc.theirTeam, g.URL)
+					}
+					for _, sn := range g.SubscribedNodes {
+						if sn == tc.theirNode {
+							t.Errorf("GET /v1/grainfiles%s as %s leaked subscribed node %s", q, tc.who, sn)
+						}
+					}
+				}
+				for _, sub := range gfResp.Subscriptions {
+					if sub.NodeID == tc.theirNode || sub.Owner == tc.theirOwner {
+						t.Errorf("GET /v1/grainfiles%s as %s leaked subscription %+v", q, tc.who, sub)
+					}
+				}
+				for _, ev := range gfResp.Events {
+					if ev.Repo == theirRepoURL {
+						t.Errorf("GET /v1/grainfiles%s as %s leaked grainfile event %+v", q, tc.who, ev)
+					}
+				}
+			}
 		})
+	}
+
+	// A signed-in user in no team sees no grainfiles, no subscriptions, and no events.
+	var ninaGF grainfiles.GrainfilesResponse
+	hb.must(hb.user(nina), "GET", grainfiles.GrainfilesPath+"?include_drafts=true", nil, http.StatusOK, &ninaGF)
+	if len(ninaGF.Grainfiles) != 0 || len(ninaGF.Subscriptions) != 0 || len(ninaGF.Events) != 0 {
+		t.Errorf("non-member GET /v1/grainfiles leaked data: %+v", ninaGF)
 	}
 
 	// Through all of it, team B's task went on untouched: still

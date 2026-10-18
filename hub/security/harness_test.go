@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/nodeui"
@@ -51,8 +52,9 @@ const (
 	spareA       = "acme/spare"
 	repoB        = "beta/app"
 
-	audience   = "/projects/1/global/backendServices/2"
-	nodeDomain = "nodes.hub.test"
+	audience      = "/projects/1/global/backendServices/2"
+	nodeDomain    = "nodes.hub.test"
+	webhookSecret = "security-suite-webhook-secret"
 )
 
 var b64 = base64.RawURLEncoding
@@ -153,7 +155,9 @@ type hub struct {
 
 // options vary the hub a test starts.
 type options struct {
-	database string // sqlite:<temp> when empty
+	database         string // sqlite:<temp> when empty
+	grainfileFetcher grainfiles.RepoFetcher
+	noWebhookSecret  bool
 }
 
 func startHub(t *testing.T, o options) *hub {
@@ -165,19 +169,25 @@ func startHub(t *testing.T, o options) *hub {
 	if o.database == "" {
 		o.database = "sqlite:" + t.TempDir() + "/hub.db"
 	}
+	whSecret := webhookSecret
+	if o.noWebhookSecret {
+		whSecret = ""
+	}
 	h, err := server.New(context.Background(), server.Config{
-		Database:      o.database,
-		IAPAudience:   audience,
-		IAPKeys:       &identity.KeySet{URL: ks.URL},
-		HubAdmins:     []string{"user:" + root},
-		NodeUIDomain:  nodeDomain,
-		InternalKey:   bytes.Repeat([]byte("k"), rendezvous.MinInternalKey),
-		ClaimsIssuer:  "https://hub.test",
-		ClaimsKeys:    [][]byte{claimsKey(t)},
-		Heartbeat:     time.Second,
-		DispatchRetry: time.Second,
-		ShutdownGrace: 5 * time.Second,
-		Logf:          lg.logf,
+		Database:         o.database,
+		IAPAudience:      audience,
+		IAPKeys:          &identity.KeySet{URL: ks.URL},
+		HubAdmins:        []string{"user:" + root},
+		NodeUIDomain:     nodeDomain,
+		InternalKey:      bytes.Repeat([]byte("k"), rendezvous.MinInternalKey),
+		ClaimsIssuer:     "https://hub.test",
+		ClaimsKeys:       [][]byte{claimsKey(t)},
+		WebhookSecret:    whSecret,
+		GrainfileFetcher: o.grainfileFetcher,
+		Heartbeat:        time.Second,
+		DispatchRetry:    time.Second,
+		ShutdownGrace:    5 * time.Second,
+		Logf:             lg.logf,
 	})
 	if err != nil {
 		t.Fatal(err)

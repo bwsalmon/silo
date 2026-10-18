@@ -88,6 +88,9 @@ type Server struct {
 	// discoverable events for live notifications, reconnect catch-up, and
 	// dependency completion reporting.
 	Grainfiles *grainfiles.Store
+	// AdmitSubscriptions, when set, checks whether owner may claim the
+	// recipient identities and repository subscriptions in sub.
+	AdmitSubscriptions func(ctx context.Context, owner string, sub grainfiles.Subscriptions) error
 	// Bus, when set, broadcasts grainfile event wake-ups across hub pods
 	// so nodes connected to other pods receive notifications.
 	Bus *notify.Bus
@@ -348,6 +351,16 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	var welcomeSub *grainfiles.Subscriptions
 	if s.Grainfiles != nil {
 		if sub, ok := extractHelloSubscriptions(hello, node.ID, owner); ok {
+			if s.AdmitSubscriptions != nil {
+				if err := s.AdmitSubscriptions(ctx, owner, sub); err != nil {
+					if errors.Is(err, ErrUnavailable) {
+						s.logf("rendezvous: could not admit subscriptions for node %q of %s: %s", node.ID, owner, logsafe.Quote(err.Error()))
+						return
+					}
+					refuse(err)
+					return
+				}
+			}
 			stored, err := s.Grainfiles.SetSubscriptions(ctx, sub)
 			if err != nil {
 				if errors.Is(err, grainfiles.ErrInvalid) {
@@ -672,6 +685,16 @@ func (s *Server) subscribeNode(ctx context.Context, nc *nodeConn, owner string, 
 		return
 	}
 	sub := extractSubscribeMessage(msg, nc.id, owner)
+	if s.AdmitSubscriptions != nil {
+		if err := s.AdmitSubscriptions(ctx, owner, sub); err != nil {
+			_ = nc.ctl.write(Message{
+				Type:      TypeSubscribed,
+				RequestID: msg.RequestID,
+				Error:     err.Error(),
+			})
+			return
+		}
+	}
 	stored, err := s.Grainfiles.SetSubscriptions(ctx, sub)
 	if err != nil {
 		_ = nc.ctl.write(Message{
@@ -754,6 +777,42 @@ func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Messag
 				Type:      TypeGrainfileCompletedAck,
 				RequestID: msg.RequestID,
 				Error:     "rendezvous: this hub has no grainfiles store",
+			})
+		}
+		return
+	}
+	completedRec, err := s.Grainfiles.GetIndexByURL(ctx, msg.GrainfileURL, msg.CommitSHA)
+	if err != nil {
+		if msg.RequestID != "" {
+			_ = nc.ctl.write(Message{
+				Type:      TypeGrainfileCompletedAck,
+				RequestID: msg.RequestID,
+				Error:     err.Error(),
+			})
+		}
+		return
+	}
+	sub, subErr := s.Grainfiles.GetSubscriptions(ctx, nc.id)
+	authorized := false
+	if subErr == nil {
+		if completedRec.Recipient != "" {
+			for _, r := range sub.Recipients {
+				if strings.EqualFold(r, completedRec.Recipient) || grainfiles.IsSameRepo(r, completedRec.Recipient) {
+					authorized = true
+					break
+				}
+			}
+		} else if sub.MatchesRecord(completedRec) {
+			authorized = true
+		}
+	}
+	if !authorized {
+		s.logf("rendezvous: node %s refused grainfile_completed for %s: not recipient", logsafe.Quote(nc.id), logsafe.Quote(msg.GrainfileURL))
+		if msg.RequestID != "" {
+			_ = nc.ctl.write(Message{
+				Type:      TypeGrainfileCompletedAck,
+				RequestID: msg.RequestID,
+				Error:     "rendezvous: forbidden: node is not the recipient of grainfile",
 			})
 		}
 		return

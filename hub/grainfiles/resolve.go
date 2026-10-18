@@ -89,12 +89,50 @@ func (r Ref) CanonicalURL() string {
 }
 
 var (
-	anchorRe    = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-	urlSchemeRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:`)
-	headingRe   = regexp.MustCompile(`^(#{1,6})\s+(.*?)\s*#*\s*$`)
-	nonSlugRe   = regexp.MustCompile(`[^\w\s-]`)
-	spaceSlugRe = regexp.MustCompile(`\s`)
+	anchorRe      = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	repoSegSlugRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	urlSchemeRe   = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:`)
+	headingRe     = regexp.MustCompile(`^(#{1,6})\s+(.*?)\s*#*\s*$`)
+	nonSlugRe     = regexp.MustCompile(`[^\w\s-]`)
+	spaceSlugRe   = regexp.MustCompile(`\s`)
 )
+
+func hasEncodedPathHazard(s string) bool {
+	if strings.ContainsRune(s, '\\') || strings.ContainsRune(s, '\x00') {
+		return true
+	}
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "%2e") ||
+		strings.Contains(lower, "%2f") ||
+		strings.Contains(lower, "%5c") ||
+		strings.Contains(lower, "%00")
+}
+
+func trimDotGitSuffix(s string) string {
+	for len(s) >= 4 && strings.EqualFold(s[len(s)-4:], ".git") {
+		s = s[:len(s)-4]
+	}
+	return s
+}
+
+func validRepoSegment(seg string) bool {
+	if seg == "" || seg == "." || seg == ".." || strings.ContainsAny(seg, "@\\") {
+		return false
+	}
+	return repoSegSlugRe.MatchString(seg)
+}
+
+func hasDotSegment(p string) (hasDot, hasDotDot bool) {
+	for _, seg := range strings.Split(p, "/") {
+		switch seg {
+		case ".":
+			hasDot = true
+		case "..":
+			hasDotDot = true
+		}
+	}
+	return hasDot, hasDotDot
+}
 
 // CanonicalRepoURL returns the canonical base URL of a git repository
 // (`https://<lower-host>/<repo-path>`, with default port `:443`, trailing `/`,
@@ -103,13 +141,19 @@ func CanonicalRepoURL(rawURL string) (string, error) {
 	if rawURL == "" {
 		return "", newFinding(CodeMalformedRef, "", "empty repository URL")
 	}
+	if hasEncodedPathHazard(rawURL) {
+		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("encoded path separators or traversal sequences are not allowed in repository URL: %q", rawURL))
+	}
 	if strings.HasPrefix(rawURL, "file://") {
 		rest := strings.Trim(rawURL[len("file://"):], "/")
 		if rest == "" || strings.Contains(rest, "//") {
 			return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("no repository path: %q", rawURL))
 		}
 		segs := strings.Split(rest, "/")
-		repoName := strings.TrimSuffix(segs[0], ".git")
+		repoName := trimDotGitSuffix(segs[0])
+		if !validRepoSegment(repoName) {
+			return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("invalid repository path: %q", rawURL))
+		}
 		return "file://" + repoName, nil
 	}
 	if !strings.HasPrefix(rawURL, "https://") {
@@ -119,8 +163,8 @@ func CanonicalRepoURL(rawURL string) (string, error) {
 	if err != nil {
 		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("malformed URL %q: %v", rawURL, err))
 	}
-	if u.User != nil || strings.Contains(u.Host, "@") {
-		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("credentials are not allowed in reference URLs: %q", rawURL))
+	if u.User != nil || strings.Contains(u.Host, "@") || strings.Contains(u.Path, "@") {
+		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("credentials or @ authority characters are not allowed in reference URLs: %q", rawURL))
 	}
 	if u.RawQuery != "" || strings.Contains(rawURL, "?") {
 		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("query parameters are not allowed in references (%q)", rawURL))
@@ -143,11 +187,20 @@ func CanonicalRepoURL(rawURL string) (string, error) {
 		}
 	}
 	trimmedPath := strings.TrimRight(u.Path, "/")
-	trimmedPath = strings.TrimSuffix(trimmedPath, ".git")
+	trimmedPath = trimDotGitSuffix(trimmedPath)
 	if trimmedPath == "" || trimmedPath == "/" {
 		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("no repository path: %q", rawURL))
 	}
-	cleaned := cleanPosixPath(strings.TrimPrefix(trimmedPath, "/"))
+	rawRepoPath := strings.TrimPrefix(trimmedPath, "/")
+	if hasDot, hasDotDot := hasDotSegment(rawRepoPath); hasDot || hasDotDot {
+		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("invalid repository path: %q", rawURL))
+	}
+	for _, seg := range strings.Split(rawRepoPath, "/") {
+		if !validRepoSegment(seg) {
+			return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("invalid repository path segment %q in %q", seg, rawURL))
+		}
+	}
+	cleaned := cleanPosixPath(rawRepoPath)
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("invalid repository path: %q", rawURL))
 	}
@@ -156,8 +209,8 @@ func CanonicalRepoURL(rawURL string) (string, error) {
 
 // ParseRef parses a reference string according to docs/grainfiles-spec.md §8.1.
 func ParseRef(s string) (Ref, error) {
-	if s == "" || strings.ContainsAny(s, " \t\r\n\\") {
-		return Ref{}, newFinding(CodeMalformedRef, "", "a reference must be a non-empty string without whitespace or backslashes")
+	if s == "" || strings.ContainsAny(s, " \t\r\n\\") || hasEncodedPathHazard(s) {
+		return Ref{}, newFinding(CodeMalformedRef, "", "a reference must be a non-empty string without whitespace, backslashes, or encoded path traversal")
 	}
 	var anchor string
 	if idx := strings.IndexByte(s, '#'); idx >= 0 {
@@ -272,7 +325,7 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 		forge = "github"
 	} else {
 		for _, seg := range segs[:len(segs)-1] {
-			if strings.HasSuffix(seg, ".git") {
+			if len(seg) >= 4 && strings.EqualFold(seg[len(seg)-4:], ".git") {
 				return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("sub-path in repository URL must use /blob/<ref>/ or /tree/<ref>/: %q", s))
 			}
 		}
@@ -282,6 +335,9 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 
 	if mode == "blob" && (len(subSegs) == 0 || trailing) {
 		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("blob URL must name a file path: %q", s))
+	}
+	if gitRef == "." || gitRef == ".." || strings.ContainsAny(gitRef, "@\\") {
+		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("invalid git ref %q in reference URL: %q", gitRef, s))
 	}
 
 	host := hostname
@@ -301,9 +357,14 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 	sub := strings.Join(subSegs, "/")
 	if sub != "" {
 		normSub := cleanPosixPath(sub)
-		if normSub == ".." || strings.HasPrefix(normSub, "../") {
+		hasDot, hasDotDot := hasDotSegment(sub)
+		if normSub == ".." || strings.HasPrefix(normSub, "../") || hasDotDot {
 			return Ref{}, newFinding(CodeEscapesRepo, "", fmt.Sprintf("%q climbs above the repository root", s))
 		}
+		if hasDot {
+			return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("dot segments (.) are not allowed in remote reference URLs: %q", s))
+		}
+		sub = normSub
 		if trailing {
 			sub += "/"
 		}
@@ -363,9 +424,14 @@ func parseFileRef(s, anchor string) (Ref, error) {
 	sub := strings.Join(subSegs, "/")
 	if sub != "" {
 		normSub := cleanPosixPath(sub)
-		if normSub == ".." || strings.HasPrefix(normSub, "../") {
+		hasDot, hasDotDot := hasDotSegment(sub)
+		if normSub == ".." || strings.HasPrefix(normSub, "../") || hasDotDot {
 			return Ref{}, newFinding(CodeEscapesRepo, "", fmt.Sprintf("%q climbs above the repository root", s))
 		}
+		if hasDot {
+			return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("dot segments (.) are not allowed in remote reference URLs: %q", s))
+		}
+		sub = normSub
 		if trailing {
 			sub += "/"
 		}
@@ -626,6 +692,13 @@ func ResolveRefWithSource(src Source, rawRef, defaultMode string) (string, Ref, 
 	var resolvedPath string
 	if r.Form == RefRooted {
 		if r.Path != "" {
+			hasDot, hasDotDot := hasDotSegment(r.Path)
+			if hasDotDot {
+				return "", Ref{}, newFinding(CodeEscapesRepo, src.Path, fmt.Sprintf("%q climbs above the repository root", rawRef))
+			}
+			if hasDot {
+				return "", Ref{}, newFinding(CodeMalformedRef, src.Path, fmt.Sprintf("dot segments (.) are not allowed in rooted references: %q", rawRef))
+			}
 			resolvedPath = cleanPosixPath(r.Path)
 		}
 	} else {
@@ -712,7 +785,7 @@ func IsSameRepo(repoA, repoB string) bool {
 	if errA != nil || errB != nil || ca == "" || cb == "" {
 		return false
 	}
-	return ca == cb
+	return strings.EqualFold(ca, cb)
 }
 
 func canonicalRepoFromAnyRef(s string) (string, error) {
@@ -756,7 +829,7 @@ func (g *Grainfile) AuthorizedReferences(sourceRepoURL string) (sameRepo, crossR
 		if err != nil {
 			continue
 		}
-		if r.Repo == canonSource {
+		if IsSameRepo(r.Repo, canonSource) {
 			sameRepo = append(sameRepo, u)
 		} else {
 			crossRepo = append(crossRepo, u)
@@ -816,7 +889,7 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 	if err != nil {
 		return Ref{}, err
 	}
-	if target.Repo != canonSource {
+	if !IsSameRepo(target.Repo, canonSource) {
 		return Ref{}, fmt.Errorf("cross-origin reference not authorized by source repository")
 	}
 
@@ -825,6 +898,9 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 		targetPath = ""
 	}
 
+	commitTrim := strings.TrimSpace(g.Commit)
+	refTrim := normalizeURLRef(g.Ref, "")
+
 	for _, raw := range g.References {
 		_, allowed, err := ResolveRefWithSource(Source{
 			RepoURL: canonSource,
@@ -832,7 +908,14 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 			Commit:  g.Commit,
 			Path:    g.Path,
 		}, raw, "blob")
-		if err != nil || allowed.Repo != canonSource {
+		if err != nil || !IsSameRepo(allowed.Repo, canonSource) {
+			continue
+		}
+		if target.GitRef != "" &&
+			target.GitRef != urlRef &&
+			target.GitRef != allowed.GitRef &&
+			(commitTrim == "" || target.GitRef != commitTrim) &&
+			(refTrim == "" || target.GitRef != refTrim) {
 			continue
 		}
 		allowedPath := cleanPosixPath(strings.Trim(allowed.Path, "/"))

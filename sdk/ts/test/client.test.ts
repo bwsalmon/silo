@@ -68,6 +68,15 @@ describe('writes', () => {
     expect(f.mock.calls[0][1]?.body).toBe('{"history":true}');
   });
 
+  it('refuses . and .. path segments', async () => {
+    const f = stub(200, '{}');
+    const h = new HubClient({ fetch: f });
+    await expect(async () => h.getTask('..')).rejects.toThrow(/invalid path segment/);
+    await expect(async () => h.getTeam('.')).rejects.toThrow(/invalid path segment/);
+    await expect(async () => h.assignRepo('infra', 'acme/..')).rejects.toThrow(/invalid path segment/);
+    expect(f).not.toHaveBeenCalled();
+  });
+
   it('mint a node token uncached', async () => {
     const f = stub(201, JSON.stringify({ token: 'silo-node_x', node_token: { id: 'k' } }));
     expect((await new HubClient({ fetch: f }).mintNodeToken('ws-1')).token).toBe('silo-node_x');

@@ -68,7 +68,13 @@ export interface HubClientOptions {
 
 type Method = 'POST' | 'PUT' | 'DELETE';
 
-const enc = encodeURIComponent;
+const enc = (s: string): string => {
+  const encoded = encodeURIComponent(s);
+  if (encoded === '.' || encoded === '..') {
+    throw new Error(`invalid path segment: ${JSON.stringify(s)}`);
+  }
+  return encoded;
+};
 const taskPath = (id: string) => `/v1/tasks/${enc(id)}`;
 const teamPath = (team: string) => `/v1/teams/${enc(team)}`;
 // repoPath keeps the slash between a repository's owner and name: the
@@ -346,7 +352,7 @@ export class HubClient {
   // caller holds the text in memory and drops it. A node that is
   // offline answers 503, and then there is no copy to show.
   async fetchArtifact(task: string, ref: string, signal?: AbortSignal): Promise<ArtifactResult> {
-    const r = await this.send(`${this.base}${taskPath(task)}/artifacts?ref=${enc(ref)}`, {
+    const r = await this.send(`${this.base}${taskPath(task)}/artifacts?ref=${encodeURIComponent(ref)}`, {
       credentials: this.opts.credentials ?? 'same-origin',
       cache: 'no-store',
       headers: await this.headers(),

@@ -799,7 +799,12 @@ name or comment. **Gap** means nothing checks it yet.
 | INV-20 | A deployed hub has exactly one human sign-on, and it is IAP or OIDC, never `-dev-user-header`; the IAP-off backend serves exactly `/v1/nodes/connect`; node UI hosts route only to the IAP backend; containers run nonroot with a read-only root filesystem. | `hub/server` `TestConfigSignOn`; `deploy/kubernetes/hub/validate.sh` (node UI route, metrics, NetworkPolicy, numeric user); gap: dev sign-on and the exact match (O-12) |
 | INV-21 | A Grain passes the operator's ambient credentials only to host-directory sandboxes, only for names its operator listed, never `HOME`, and runs host sandboxes on a reachable daemon only with `-allow-unisolated-host-sandboxes`. | grain `pkg/daemon/host_sandbox_env_test.go`, `pkg/agent/sandbox_env_args_test.go`; gap: hub-placed tasks (O-8) |
 | INV-22 | silo's CI workflows declare no write-scoped capability, and each read capability names a repository the workflow's own comment justifies. | gap: a check over `.grain/workflows` |
-| INV-23 | The hub's store holds a node token's secret in no form but its hash, and a minted token is returned once with `Cache-Control: no-store`. | `hub/directory` `TestNodeTokens`; gap: the header |
+| INV-23 | The hub's store holds a node token's secret in no form but its hash, and a minted token is returned once with `Cache-Control: no-store`. | `hub/directory` `TestNodeTokens`; `hub/security` `TestRouteMatrix` |
+| INV-24 | A Grainfile in repository `R` grants read access via `GET /v1/grainfiles/content` only to that Grainfile itself and to files inside `R` explicitly listed in its `references`, pinned to the indexed commit/ref, and never when `draft: true`; cross-repository references, path traversal (`..`, encoded `%2e`, `%2f`, `\`, `%00`), authority confusion (`@`), and unindexed refs/commits are refused with `403 Forbidden`, and proxied files are never stored at rest and carry `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: sandbox`. | `hub/security` `TestGrainfileSameOriginContentProxy`, `TestNoCodeAtRest`; `hub/grainfiles/simtest` `TestEndToEndCrossRepoContentProxyAndGitHubAppAuth` |
+| INV-25 | `POST /v1/webhooks/github` fails closed (`401`) unless `WebhookSecret` is configured and `X-Hub-Signature-256` verifies (or `AllowUnsignedWebhooks` is explicitly set in local tests); `GitHubFetcher` scopes credentials to `github.com` when `BaseURL` is unset, rejects embedded URL credentials and link-local/metadata `BaseURL`s, and refuses HTTP redirects; the YAML parser rejects anchors/aliases, merge keys, explicit tags (in block and flow collections), nesting > 32 levels, front matter > 64 KiB, and files > 1 MiB, and never stores the Grainfile Markdown body in the database or logs. | `hub/security` `TestWebhookReceiverAndGitHubFetcherHardening`, `TestNoCodeAtRest`, `TestRouteMatrix`, `TestOversizedPayloads` |
+| INV-26 | A node may not overwrite another owner's `node_id` subscription row, claim a `recipient` URL owned by another team's user, or claim a `recipient`, `repo`, or `folder` in a repository owned by another team; `GET /v1/grainfiles` returns only grainfiles, subscriptions, and events whose repository or recipient belongs to the caller's teams (or the caller's own node subscriptions). | `hub/security` `TestTenantRecipientIsolationAndControlStreamSpoofing`, `TestCrossTeamIsolation` |
+| INV-27 | Only a node whose registered subscriptions claim the completed Grainfile's `recipient` (or match a recipient-less Grainfile) may report `grainfile_completed` for an indexed, non-draft Grainfile at its indexed ref/commit, with a valid terminal state and bounded reason (≤ 1024 bytes). | `hub/security` `TestTenantRecipientIsolationAndControlStreamSpoofing` |
+| INV-28 | Every external link rendered in `/grainfiles` and `/nodes` from Grainfile metadata (`url`, `recipient`, `requestor`, `references`, `authorized_references`, `depends_on`, `trigger_with`) or node subscriptions (`recipients`, `folders`, `grainfiles`, `ui_url`) rejects `javascript:`, `data:`, `vbscript:`, control characters, and protocol-relative `//` or `/\` URLs and sets `rel="noopener noreferrer"`; the TypeScript SDK rejects `.` and `..` URL path segments. | `ui/src/trust.test.tsx`, `ui/src/content.test.tsx`, `sdk/ts/test/client.test.ts` |
 
 ## 7. Open findings
 
@@ -867,11 +872,12 @@ its paths touch, in this order:
    | --- | --- |
    | `hub/identity`, `hub/server` (`auth`) | INV-1, INV-2, INV-20 |
    | `hub/directory` | INV-5, INV-6, INV-7, INV-9, INV-23 |
-   | `hub/rendezvous`, `hub/registry`, `internal/tunnel/mux` | INV-2, INV-5, INV-19 |
+   | `hub/rendezvous`, `hub/registry`, `internal/tunnel/mux` | INV-2, INV-5, INV-19, INV-26, INV-27 |
+   | `hub/grainfiles` | INV-3, INV-4, INV-9, INV-19, INV-24, INV-25, INV-26, INV-27 |
    | `hub/tasks` | INV-7, INV-9, INV-10, INV-17 |
    | `hub/live`, `events` | INV-3, INV-4, INV-8, INV-14, INV-18 |
    | `hub/nodeui` | INV-13 |
-   | the hub UI (planned) | INV-15, INV-16 |
+   | `ui/`, `sdk/ts` | INV-15, INV-16, INV-28 |
    | `deploy/`, `Dockerfile` | INV-2, INV-20 |
    | `.grain/workflows` | INV-22 |
    | grain `pkg/hubnode`, `pkg/daemon/hub.go`, `pkg/policy` | INV-11, INV-12, INV-17 |
