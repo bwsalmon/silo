@@ -96,6 +96,9 @@ func main() {
 	if *grainfilesFlag != "" {
 		node.Grainfiles = strings.Split(*grainfilesFlag, ",")
 	}
+	if len(node.Recipients) > 0 || len(node.Folders) > 0 || len(node.Grainfiles) > 0 {
+		node.Features = append(node.Features, registry.FeatureGrainfiles)
+	}
 	if *interactive {
 		node.Features = append(node.Features, registry.FeatureInteractive)
 	}

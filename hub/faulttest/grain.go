@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
@@ -27,11 +28,16 @@ import (
 // asks it to resume, and replays each unfinished task's events on every
 // new connection.
 type Grain struct {
-	ID    string
-	Hub   string // the hub's URL, or a Proxy's in front of it
-	Token string
-	Repos []string
-	Slots int
+	ID         string
+	Owner      string // defaults to Ops when empty
+	Hub        string // the hub's URL, or a Proxy's in front of it
+	Hubs       []string
+	Token      string
+	Repos      []string
+	Recipients []string
+	Folders    []string
+	Grainfiles []string
+	Slots      int
 	// Refuse makes the Grain refuse every offer.
 	Refuse bool
 	// Work is how long a task runs, and Events how many status events
@@ -45,11 +51,19 @@ type Grain struct {
 	Ledger *Ledger
 	Logf   func(format string, args ...any)
 
-	mu    sync.Mutex
-	conn  *rendezvous.Conn
-	gen   int // counts connections
-	tasks map[string]*localTask
-	busy  int
+	mu      sync.Mutex
+	conn    *rendezvous.Conn
+	gen     int // counts connections
+	dialIdx int
+	tasks   map[string]*localTask
+	busy    int
+
+	gfMu               sync.Mutex
+	grainfileEvents    []grainfiles.Event
+	grainfileBySeq     map[int64]grainfiles.Event
+	grainfileDups      int
+	lastGrainfileSeq   int64
+	grainfileLatencies []time.Duration
 
 	connects atomic.Int64
 }
@@ -102,10 +116,31 @@ func (g *Grain) Run(ctx context.Context) {
 	}
 	g.mu.Unlock()
 	for ctx.Err() == nil {
+		node := registry.Node{
+			ID:         g.ID,
+			Repos:      g.Repos,
+			Slots:      g.Slots,
+			Recipients: g.Recipients,
+			Folders:    g.Folders,
+			Grainfiles: g.Grainfiles,
+		}
+		var subs *grainfiles.Subscriptions
+		if len(g.Recipients) > 0 || len(g.Folders) > 0 || len(g.Grainfiles) > 0 {
+			node.Features = []string{registry.FeatureGrainfiles}
+			subs = &grainfiles.Subscriptions{
+				Recipients:  g.Recipients,
+				Folders:     g.Folders,
+				Grainfiles:  g.Grainfiles,
+				Cursor:      g.LastGrainfileSeq(),
+				ResetCursor: true,
+			}
+		}
 		cl := &rendezvous.Client{
-			Hub:   g.hub(),
-			Token: func(context.Context) (string, error) { return g.Token, nil },
-			Node:  registry.Node{ID: g.ID, Repos: g.Repos, Slots: g.Slots},
+			Hub:              g.hub(),
+			Token:            func(context.Context) (string, error) { return g.Token, nil },
+			Node:             node,
+			Subscriptions:    subs,
+			OnGrainfileEvent: g.recordGrainfileEvent,
 			Free: func() int {
 				g.mu.Lock()
 				defer g.mu.Unlock()
@@ -156,7 +191,78 @@ func (g *Grain) Run(ctx context.Context) {
 func (g *Grain) hub() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if len(g.Hubs) > 0 {
+		u := g.Hubs[g.dialIdx%len(g.Hubs)]
+		g.dialIdx++
+		return u
+	}
 	return g.Hub
+}
+
+func (g *Grain) recordGrainfileEvent(ev grainfiles.Event) {
+	now := time.Now()
+	g.gfMu.Lock()
+	defer g.gfMu.Unlock()
+	if g.grainfileBySeq == nil {
+		g.grainfileBySeq = map[int64]grainfiles.Event{}
+	}
+	if _, exists := g.grainfileBySeq[ev.Seq]; exists {
+		g.grainfileDups++
+		return
+	}
+	g.grainfileBySeq[ev.Seq] = ev
+	g.grainfileEvents = append(g.grainfileEvents, ev)
+	if ev.Seq > g.lastGrainfileSeq {
+		g.lastGrainfileSeq = ev.Seq
+	}
+	if !ev.CreatedAt.IsZero() {
+		if d := now.Sub(ev.CreatedAt); d >= 0 {
+			g.grainfileLatencies = append(g.grainfileLatencies, d)
+		}
+	}
+}
+
+// LastGrainfileSeq returns the highest grainfile_event seq received by g.
+func (g *Grain) LastGrainfileSeq() int64 {
+	g.gfMu.Lock()
+	defer g.gfMu.Unlock()
+	return g.lastGrainfileSeq
+}
+
+// GrainfileEvents returns a snapshot of the unique grainfile_events received by g.
+func (g *Grain) GrainfileEvents() []grainfiles.Event {
+	g.gfMu.Lock()
+	defer g.gfMu.Unlock()
+	out := make([]grainfiles.Event, len(g.grainfileEvents))
+	copy(out, g.grainfileEvents)
+	return out
+}
+
+// DuplicateGrainfileEvents returns the number of duplicate grainfile_event seqs received by g.
+func (g *Grain) DuplicateGrainfileEvents() int {
+	g.gfMu.Lock()
+	defer g.gfMu.Unlock()
+	return g.grainfileDups
+}
+
+// GrainfileLatencies returns the recorded fan-out latencies for grainfile_events received by g.
+func (g *Grain) GrainfileLatencies() []time.Duration {
+	g.gfMu.Lock()
+	defer g.gfMu.Unlock()
+	out := make([]time.Duration, len(g.grainfileLatencies))
+	copy(out, g.grainfileLatencies)
+	return out
+}
+
+// CompleteGrainfile reports task/process completion over g's active rendezvous connection.
+func (g *Grain) CompleteGrainfile(ctx context.Context, grainfileURL, commitSHA, state, reason string) ([]grainfiles.Event, error) {
+	g.mu.Lock()
+	c := g.conn
+	g.mu.Unlock()
+	if c == nil {
+		return nil, errors.New("grain is offline")
+	}
+	return c.CompleteGrainfile(ctx, grainfileURL, commitSHA, state, reason)
 }
 
 // Reconnect drops the Grain's connection on its side only, without a
