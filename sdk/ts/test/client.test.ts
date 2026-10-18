@@ -107,6 +107,27 @@ describe('writes', () => {
     expect((await new HubClient({ fetch: f }).mintNodeToken('ws-1')).token).toBe('silo-node_x');
     expect(f.mock.calls[0][1]?.cache).toBe('no-store');
   });
+
+  it('sets proposer and viewer roles and team submission policies', async () => {
+    const f = stub(204, '');
+    const h = new HubClient({ fetch: f });
+    await h.setMember('infra', 'user:prop@example.com', 'proposer');
+    await h.setMember('infra', 'user:view@example.com', 'viewer');
+    await h.setTeamSettings('infra', {
+      lost_requeue_after_seconds: 60,
+      anyone_may_propose: false,
+      require_approval: true,
+    });
+    expect(f.mock.calls[0][1]?.body).toBe(JSON.stringify({ role: 'proposer' }));
+    expect(f.mock.calls[1][1]?.body).toBe(JSON.stringify({ role: 'viewer' }));
+    expect(f.mock.calls[2][1]?.body).toBe(
+      JSON.stringify({
+        lost_requeue_after_seconds: 60,
+        anyone_may_propose: false,
+        require_approval: true,
+      }),
+    );
+  });
 });
 
 describe('errors', () => {

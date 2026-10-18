@@ -1,0 +1,189 @@
+# In-cluster PostgreSQL and GitHub API mock for the kind cluster overlay
+# (deploy/kubernetes/hub/e2e-kind.sh, docs/deploy.md).
+#
+# PostgreSQL runs with the same two-role split as Cloud SQL (SA1-L8):
+#   - silo_migrate owns the silo database and its public schema, used
+#     exclusively by the migrate init container (`silo hub migrate`);
+#   - silo_runtime is a least-privileged role granted only SELECT,
+#     INSERT, UPDATE, DELETE and sequence usage by `silo hub migrate`,
+#     used by the hub container (`SILO_HUB_MIGRATE=false`) and by
+#     `silo hub team` and `silo hub token`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+data:
+  01-init.sql: |
+    CREATE ROLE silo_migrate LOGIN PASSWORD 'silo-migrate-kind';
+    CREATE ROLE silo_runtime LOGIN PASSWORD 'silo-runtime-kind';
+    CREATE DATABASE silo OWNER silo_migrate;
+    REVOKE CREATE ON DATABASE silo FROM PUBLIC;
+    \connect silo
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+    ALTER SCHEMA public OWNER TO silo_migrate;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: silo-postgres:kind
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - max_connections=200
+            - -c
+            - fsync=off
+            - -c
+            - synchronous_commit=off
+            - -c
+            - full_page_writes=off
+          env:
+            - name: POSTGRES_PASSWORD
+              value: postgres-superuser-kind
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -h
+                - 127.0.0.1
+                - -p
+                - "5432"
+                - -U
+                - silo_runtime
+                - -d
+                - silo
+            initialDelaySeconds: 1
+            periodSeconds: 1
+          volumeMounts:
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-init
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: github-mock
+  template:
+    metadata:
+      labels:
+        app: github-mock
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: github-mock
+          image: silo-github-mock:kind
+          imagePullPolicy: IfNotPresent
+          args: ["-addr=:8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 1
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-mock
+spec:
+  selector:
+    app: github-mock
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# Allow the hub pods to reach the in-cluster PostgreSQL and GitHub API
+# mock under default-deny-ingress (base/networkpolicy.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-from-hub
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: silo-hub
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: github-mock-from-hub
+spec:
+  podSelector:
+    matchLabels:
+      app: github-mock
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: silo-hub
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -222,13 +222,24 @@ func (f *Filer) file(ctx context.Context, nodeID, owner string, req Filing) (Tas
 		if team == "" {
 			return Task{}, fmt.Errorf("%w: no team owns the repository %s", ErrInvalid, req.Repo)
 		}
-		propose = subAcc.Teams[team] == "" || ownerAcc.Teams[team] == ""
+		propose = !subAcc.MemberOf(team) || !ownerAcc.MemberOf(team)
+		if settings, sErr := f.Directory.TeamSettings(ctx, team); sErr == nil {
+			if propose && !settings.AnyoneMayPropose && subAcc.Teams[team] != directory.Proposer {
+				return Task{}, fmt.Errorf("%w: team %s does not accept proposals from %s", ErrInvalid, team, submitter)
+			}
+			if !propose && settings.RequireApproval {
+				propose = true
+			}
+		}
 		spec.Team = team
 	default:
 		// A team-targeted task is never proposed, for a human either: it
 		// is for a team both its submitter and its filer are in.
-		if subAcc.Teams[req.Team] == "" || ownerAcc.Teams[req.Team] == "" {
+		if !subAcc.MemberOf(req.Team) || !ownerAcc.MemberOf(req.Team) {
 			return Task{}, fmt.Errorf("%w: no such team %s, or its submitter and the node's owner are not both in it", ErrInvalid, req.Team)
+		}
+		if settings, sErr := f.Directory.TeamSettings(ctx, req.Team); sErr == nil && settings.RequireApproval {
+			propose = true
 		}
 		spec.Team = req.Team
 	}
@@ -363,19 +374,22 @@ func (f *Filer) RegisterRun(ctx context.Context, nodeID, owner string, req RunRe
 			if team == "" {
 				return Task{}, fmt.Errorf("%w: no team owns the repository %s", directory.ErrNotAdmitted, repo)
 			}
-			if ownerAcc.Teams[team] == "" {
+			if !ownerAcc.MemberOf(team) {
 				return Task{}, fmt.Errorf("%w: %s is not in team %s for repository %s", directory.ErrNotAdmitted, owner, team, repo)
 			}
 			req.Team = team
 			req.Repo = repo
 		case strings.TrimSpace(req.Team) != "":
 			team := strings.ToLower(strings.TrimSpace(req.Team))
-			if ownerAcc.Teams[team] == "" {
+			if !ownerAcc.MemberOf(team) {
 				return Task{}, fmt.Errorf("%w: %s is not in team %s", directory.ErrNotAdmitted, owner, team)
 			}
 			req.Team = team
 		case len(ownerAcc.Teams) == 1:
 			for team := range ownerAcc.Teams {
+				if !ownerAcc.MemberOf(team) {
+					return Task{}, fmt.Errorf("%w: %s is not in team %s", directory.ErrNotAdmitted, owner, team)
+				}
 				req.Team = team
 			}
 			if repos, err := f.Directory.TeamRepos(ctx, req.Team); err == nil && len(repos) == 1 {

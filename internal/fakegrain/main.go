@@ -37,22 +37,33 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/hub/grainfiles"
+	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/live"
+	"github.com/bwsalmon/silo/hub/nodeui"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
 
 type task struct {
-	ID       string          `json:"id"`
-	NodeTask string          `json:"node_task"`
-	Received []tasks.Message `json:"received"`
-	seq      int64
-	stream   *tasks.Stream
+	ID        string          `json:"id"`
+	NodeTask  string          `json:"node_task"`
+	HubTaskID string          `json:"hub_task_id"`
+	HubURL    string          `json:"hub_url"`
+	Repo      string          `json:"repo,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	Title     string          `json:"title,omitempty"`
+	State     tasks.State     `json:"state,omitempty"`
+	Received  []tasks.Message `json:"received"`
+	seq       int64
+	stream    *tasks.Stream
+	approveCh chan tasks.Message
 }
 
 type grain struct {
-	cl *rendezvous.Client
+	cl       *rendezvous.Client
+	uiTeam   string
+	uiAccess string
 
 	mu              sync.Mutex
 	conn            *rendezvous.Conn
@@ -68,6 +79,30 @@ type grain struct {
 	wake            chan struct{}
 }
 
+func normalizeUIAccess(raw string) string {
+	if strings.EqualFold(strings.TrimSpace(raw), "read-write") {
+		return "read-write"
+	}
+	return "read-only"
+}
+
+func hubTaskURL(hub, id string) string {
+	base := strings.TrimSpace(hub)
+	switch {
+	case strings.HasPrefix(base, "ws://"):
+		base = "http://" + strings.TrimPrefix(base, "ws://")
+	case strings.HasPrefix(base, "wss://"):
+		base = "https://" + strings.TrimPrefix(base, "wss://")
+	}
+	base = strings.TrimSuffix(base, "/")
+	base = strings.TrimSuffix(base, "/v1/nodes/rendezvous")
+	base = strings.TrimSuffix(base, "/")
+	if base == "" || id == "" {
+		return ""
+	}
+	return base + "/tasks/" + id
+}
+
 func main() {
 	hub := flag.String("hub", "", "the hub's URL")
 	tokenFile := flag.String("token-file", "", "the file holding the node's token")
@@ -78,7 +113,9 @@ func main() {
 	grainfilesFlag := flag.String("grainfiles", "", "comma-separated grainfile URLs the node subscribes to")
 	slots := flag.Int("slots", 2, "the node's slots")
 	interactive := flag.Bool("interactive", false, "list the interactive feature")
-	nodeui := flag.Bool("nodeui", false, "list the nodeui feature")
+	nodeuiFlag := flag.Bool("nodeui", false, "list the nodeui feature")
+	uiTeam := flag.String("ui-team", "", "the team whose admins may open the node UI")
+	uiAccess := flag.String("ui-access", "read-only", "the access level for the node UI (read-only or read-write)")
 	control := flag.String("control", "127.0.0.1:0", "the address to serve the control API on")
 	addrFile := flag.String("addr-file", "", "write the control API's address here once it listens")
 	flag.Parse()
@@ -102,8 +139,14 @@ func main() {
 	if *interactive {
 		node.Features = append(node.Features, registry.FeatureInteractive)
 	}
-	if *nodeui {
+	access := normalizeUIAccess(*uiAccess)
+	if *nodeuiFlag || *uiTeam != "" {
 		node.Features = append(node.Features, registry.FeatureNodeUI)
+		node.UI = &registry.NodeUI{
+			Offered: true,
+			Team:    *uiTeam,
+			Access:  access,
+		}
 	}
 	g := &grain{
 		cl: &rendezvous.Client{
@@ -111,6 +154,8 @@ func main() {
 			Token: func(context.Context) (string, error) { return strings.TrimSpace(string(tok)), nil },
 			Node:  node,
 		},
+		uiTeam:    *uiTeam,
+		uiAccess:  access,
 		tasks:     map[string]*task{},
 		artifacts: map[string][]byte{},
 		wake:      make(chan struct{}, 1),
@@ -221,6 +266,15 @@ func (g *grain) handle(c net.Conn) {
 		live.ServeView(c, m, g.view)
 		return
 	}
+	if head.Type == nodeui.TypeHTTP {
+		var m nodeui.Message
+		if json.Unmarshal(line, &m) != nil {
+			c.Close()
+			return
+		}
+		g.serveNodeUI(bufConn{c, r}, m)
+		return
+	}
 	var m tasks.Message
 	if err := json.Unmarshal(line, &m); err != nil || m.Task == nil {
 		c.Close()
@@ -232,7 +286,22 @@ func (g *grain) handle(c net.Conn) {
 	switch m.Type {
 	case tasks.TypeOffer, tasks.TypeResume:
 		if t == nil {
-			t = &task{ID: m.Task.ID, NodeTask: fmt.Sprintf("local-%d", len(g.tasks)+1), Received: []tasks.Message{}}
+			var hubURL string
+			if g.cl != nil {
+				hubURL = hubTaskURL(g.cl.Hub, m.Task.ID)
+			}
+			t = &task{
+				ID:        m.Task.ID,
+				NodeTask:  fmt.Sprintf("local-%d", len(g.tasks)+1),
+				HubTaskID: m.Task.ID,
+				HubURL:    hubURL,
+				Repo:      m.Task.Repo,
+				Kind:      m.Task.Kind,
+				Title:     m.Task.Title,
+				State:     tasks.Running,
+				Received:  []tasks.Message{},
+				approveCh: make(chan tasks.Message, 8),
+			}
 			g.tasks[t.ID] = t
 			g.order = append(g.order, t.ID)
 		}
@@ -258,6 +327,15 @@ func (g *grain) handle(c net.Conn) {
 		m.Attestation = ""
 		g.mu.Lock()
 		t.Received = append(t.Received, m)
+		if m.Type == tasks.TypeApprove && t.approveCh != nil {
+			select {
+			case t.approveCh <- m:
+			default:
+			}
+		}
+		if m.Type == tasks.TypeCancel {
+			t.State = tasks.Cancelled
+		}
 		g.mu.Unlock()
 	}
 }
@@ -384,6 +462,16 @@ func (g *grain) routes() http.Handler {
 		}
 		writeJSON(w, map[string]any{})
 	})
+	mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		t := g.tasks[r.PathValue("id")]
+		g.mu.Unlock()
+		if t == nil {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, t)
+	})
 	mux.HandleFunc("POST /online", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.offline = false
@@ -395,6 +483,113 @@ func (g *grain) routes() http.Handler {
 		writeJSON(w, map[string]any{})
 	})
 	return mux
+}
+
+const (
+	headerHubUIUser   = "X-Grain-Hub-UI-User"
+	headerHubUIRole   = "X-Grain-Hub-UI-Role"
+	headerHubUITeam   = "X-Grain-Hub-UI-Team"
+	headerHubUIAccess = "X-Grain-Hub-UI-Access"
+)
+
+func hasLeakedHubCredentials(r *http.Request) (string, bool) {
+	for k := range r.Header {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-goog-authenticated-user-") || lk == "x-goog-iap-jwt-assertion" || lk == "authorization" {
+			return "header " + k, true
+		}
+	}
+	for _, c := range r.Cookies() {
+		name := strings.ToLower(c.Name)
+		if name == strings.ToLower(identity.SessionCookie) ||
+			name == "__host-"+strings.ToLower(identity.SessionCookie) ||
+			name == strings.ToLower(identity.FlowCookie) ||
+			name == "__host-"+strings.ToLower(identity.FlowCookie) ||
+			strings.HasPrefix(name, "gcp_iap_") ||
+			strings.HasPrefix(name, "__host-gcp_iap_") {
+			return "cookie " + c.Name, true
+		}
+	}
+	return "", false
+}
+
+func (g *grain) serveNodeUI(c net.Conn, m nodeui.Message) {
+	if g.cl != nil && g.cl.Node.UI == nil {
+		_ = nodeui.Refuse(c, "node UI is not enabled")
+		return
+	}
+	_ = nodeui.Serve(c, m, g.uiHandler(m))
+}
+
+func (g *grain) uiHandler(m nodeui.Message) http.Handler {
+	access := normalizeUIAccess(g.uiAccess)
+	mux := http.NewServeMux()
+	tasksHandler := func(w http.ResponseWriter, _ *http.Request) {
+		g.mu.Lock()
+		ts := make([]*task, 0, len(g.order))
+		for _, id := range g.order {
+			ts = append(ts, g.tasks[id])
+		}
+		g.mu.Unlock()
+		writeJSON(w, map[string]any{"tasks": ts})
+	}
+	taskByIDHandler := func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		t := g.tasks[r.PathValue("id")]
+		g.mu.Unlock()
+		if t == nil {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, t)
+	}
+	mux.HandleFunc("GET /tasks", tasksHandler)
+	mux.HandleFunc("GET /api/tasks", tasksHandler)
+	mux.HandleFunc("GET /tasks/{id}", taskByIDHandler)
+	mux.HandleFunc("GET /api/tasks/{id}", taskByIDHandler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		ts := make([]*task, 0, len(g.order))
+		for _, id := range g.order {
+			ts = append(ts, g.tasks[id])
+		}
+		g.mu.Unlock()
+		writeJSON(w, map[string]any{
+			"method": r.Method,
+			"path":   r.URL.Path,
+			"viewer": r.Header.Get(headerHubUIUser),
+			"role":   r.Header.Get(headerHubUIRole),
+			"team":   r.Header.Get(headerHubUITeam),
+			"access": r.Header.Get(headerHubUIAccess),
+			"tasks":  ts,
+		})
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if leaked, bad := hasLeakedHubCredentials(r); bad {
+			http.Error(w, "forbidden: hub credential leaked to node handler: "+leaked, http.StatusBadRequest)
+			return
+		}
+		if m.Viewer != "" && r.Header.Get(headerHubUIUser) == "" {
+			r.Header.Set(headerHubUIUser, m.Viewer)
+		}
+		if m.Role != "" && r.Header.Get(headerHubUIRole) == "" {
+			r.Header.Set(headerHubUIRole, m.Role)
+		}
+		if m.Team != "" && r.Header.Get(headerHubUITeam) == "" {
+			r.Header.Set(headerHubUITeam, m.Team)
+		}
+		if r.Header.Get(headerHubUIAccess) == "" {
+			r.Header.Set(headerHubUIAccess, access)
+		}
+		role := r.Header.Get(headerHubUIRole)
+		if role == nodeui.RoleTeamAdmin && access == "read-only" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "forbidden: team-admin access is read-only", http.StatusForbidden)
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

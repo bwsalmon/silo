@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -33,7 +34,9 @@ import (
 
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/conformance/workload"
+	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/live"
+	"github.com/bwsalmon/silo/hub/nodeui"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 	"github.com/bwsalmon/silo/hub/tasks"
@@ -88,13 +91,119 @@ type Grain struct {
 	Tick time.Duration
 	// Views is how it answers a view: ViewListed when empty.
 	Views Views
-	Logf  func(format string, args ...any)
+	// UIOffered, UITeam, and UIAccess ("read-only" | "read-write") configure
+	// the node's tunneled local web UI (G2-G4).
+	UIOffered bool
+	UITeam    string
+	UIAccess  string
+	// UIHandler, when set, is wrapped by the node's UI policy enforcement
+	// handler; when nil, the default reference UI handler is used.
+	UIHandler http.Handler
+	Logf      func(format string, args ...any)
 
 	mu    sync.Mutex
 	conn  *rendezvous.Conn
 	gen   int
 	tasks map[string]*task // by hub task ID
 	n     int
+}
+
+// TaskStatus is the node's local status/UI view of a task placed by or
+// mirrored to the hub (U5).
+type TaskStatus struct {
+	ID        string      `json:"id"`
+	NodeTask  string      `json:"node_task"`
+	HubTaskID string      `json:"hub_task_id"`
+	HubURL    string      `json:"hub_url"`
+	Repo      string      `json:"repo,omitempty"`
+	Kind      string      `json:"kind,omitempty"`
+	Title     string      `json:"title,omitempty"`
+	State     tasks.State `json:"state"`
+	Reason    string      `json:"reason,omitempty"`
+}
+
+// HubTaskURL returns the canonical Hub task URL (<hub>/tasks/<id>) for a hub
+// task ID (U5).
+func HubTaskURL(hub, id string) string {
+	base := strings.TrimSpace(hub)
+	switch {
+	case strings.HasPrefix(base, "ws://"):
+		base = "http://" + strings.TrimPrefix(base, "ws://")
+	case strings.HasPrefix(base, "wss://"):
+		base = "https://" + strings.TrimPrefix(base, "wss://")
+	}
+	base = strings.TrimSuffix(base, "/")
+	base = strings.TrimSuffix(base, "/v1/nodes/rendezvous")
+	base = strings.TrimSuffix(base, "/")
+	if base == "" || id == "" {
+		return ""
+	}
+	return base + "/tasks/" + id
+}
+
+// TaskStatuses returns the node's local status records for all accepted tasks,
+// including hub_task_id and hub_url (U5).
+func (g *Grain) TaskStatuses() []TaskStatus {
+	g.mu.Lock()
+	list := make([]*task, 0, len(g.tasks))
+	for _, t := range g.tasks {
+		list = append(list, t)
+	}
+	g.mu.Unlock()
+	out := make([]TaskStatus, 0, len(list))
+	for _, t := range list {
+		out = append(out, g.taskStatusOf(t))
+	}
+	slices.SortFunc(out, func(a, b TaskStatus) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out
+}
+
+// TaskStatus returns the node's local status record for a single task by hub
+// task ID or local node_task ID (U5).
+func (g *Grain) TaskStatus(id string) (TaskStatus, bool) {
+	g.mu.Lock()
+	t := g.tasks[id]
+	if t == nil {
+		for _, cand := range g.tasks {
+			if cand.local == id {
+				t = cand
+				break
+			}
+		}
+	}
+	g.mu.Unlock()
+	if t == nil {
+		return TaskStatus{}, false
+	}
+	return g.taskStatusOf(t), true
+}
+
+func (g *Grain) taskStatusOf(t *task) TaskStatus {
+	t.mu.Lock()
+	state := t.result
+	reason := t.reason
+	over := t.over
+	t.mu.Unlock()
+	if state == "" {
+		if over {
+			state = tasks.Cancelled
+		} else {
+			state = tasks.Running
+		}
+	}
+	return TaskStatus{
+		ID:        t.spec.ID,
+		NodeTask:  t.local,
+		HubTaskID: t.spec.ID,
+		HubURL:    HubTaskURL(g.Hub, t.spec.ID),
+		Repo:      t.spec.Repo,
+		Kind:      t.spec.Kind,
+		Title:     t.spec.Title,
+		State:     state,
+		Reason:    reason,
+	}
 }
 
 // task is one task the Grain accepted.
@@ -150,10 +259,18 @@ func (g *Grain) Run(ctx context.Context) error {
 		g.tasks = map[string]*task{}
 	}
 	g.mu.Unlock()
+	node := registry.Node{ID: g.ID, Repos: g.Repos, Slots: g.Slots, Version: "refgrain", Features: g.Features}
+	if g.uiEnabled() {
+		node.UI = &registry.NodeUI{
+			Offered: true,
+			Team:    g.UITeam,
+			Access:  g.uiAccess(),
+		}
+	}
 	cl := &rendezvous.Client{
 		Hub:   g.Hub,
 		Token: func(context.Context) (string, error) { return g.Token, nil },
-		Node:  registry.Node{ID: g.ID, Repos: g.Repos, Slots: g.Slots, Version: "refgrain", Features: g.Features},
+		Node:  node,
 		Free: func() int {
 			g.mu.Lock()
 			defer g.mu.Unlock()
@@ -246,6 +363,15 @@ func (g *Grain) handle(c net.Conn) {
 		default:
 			live.ServeView(c, m, g.view)
 		}
+		return
+	}
+	if head.Type == nodeui.TypeHTTP {
+		var m nodeui.Message
+		if json.Unmarshal(line, &m) != nil {
+			c.Close()
+			return
+		}
+		g.serveNodeUI(bufConn{c, r}, m)
 		return
 	}
 	var m tasks.Message
@@ -503,7 +629,7 @@ func (g *Grain) finish(t *task, state tasks.State, reason string) {
 		code = 1
 	}
 	t.emit(events.TypeResult, func(e *live.Event) {
-		e.Result = &events.Result{Exit: events.Exit{Code: code, Reason: reason}, FinalText: reason}
+		e.Result = &events.Result{State: string(state), Reason: reason, Exit: events.Exit{Code: code, Reason: reason}, FinalText: reason}
 	})
 	t.mu.Lock()
 	if t.over {
@@ -731,4 +857,138 @@ func (g *Grain) view(m live.ViewMessage) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("no artifact %q", m.Ref)
 	}
 	return io.NopCloser(strings.NewReader(workload.Diff)), nil
+}
+
+// Header names synthesized on the node's local UI handler from the hub's
+// nodeui stream metadata (G2-G4).
+const (
+	HeaderHubUIUser   = "X-Grain-Hub-UI-User"
+	HeaderHubUIRole   = "X-Grain-Hub-UI-Role"
+	HeaderHubUITeam   = "X-Grain-Hub-UI-Team"
+	HeaderHubUIAccess = "X-Grain-Hub-UI-Access"
+)
+
+func (g *Grain) uiEnabled() bool {
+	return g.UIOffered || g.UITeam != "" || g.UIAccess != "" || g.UIHandler != nil || slices.Contains(g.Features, registry.FeatureNodeUI)
+}
+
+func (g *Grain) uiAccess() string {
+	switch strings.ToLower(strings.TrimSpace(g.UIAccess)) {
+	case "read-write":
+		return "read-write"
+	default:
+		return "read-only"
+	}
+}
+
+func (g *Grain) serveNodeUI(c net.Conn, m nodeui.Message) {
+	if !g.uiEnabled() {
+		_ = nodeui.Refuse(c, "node UI is not enabled")
+		return
+	}
+	_ = nodeui.Serve(c, m, g.LocalUIHandler(m))
+}
+
+// HasLeakedHubCredentials reports whether r carries any IAP identity/assertion
+// header or Hub session/IAP cookie that hub/nodeui must strip before forwarding
+// to a node (G4).
+func HasLeakedHubCredentials(r *http.Request) (string, bool) {
+	for k := range r.Header {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-goog-authenticated-user-") || lk == "x-goog-iap-jwt-assertion" || lk == "authorization" {
+			return "header " + k, true
+		}
+	}
+	for _, c := range r.Cookies() {
+		name := strings.ToLower(c.Name)
+		if name == strings.ToLower(identity.SessionCookie) ||
+			name == "__host-"+strings.ToLower(identity.SessionCookie) ||
+			name == strings.ToLower(identity.FlowCookie) ||
+			name == "__host-"+strings.ToLower(identity.FlowCookie) ||
+			strings.HasPrefix(name, "gcp_iap_") ||
+			strings.HasPrefix(name, "__host-gcp_iap_") {
+			return "cookie " + c.Name, true
+		}
+	}
+	return "", false
+}
+
+// LocalUIHandler wraps the node's local UI handler with G2-G4 enforcement:
+//   - verifies that X-Goog-Authenticated-User-* and Hub session cookies never
+//     reach the node handler;
+//   - stamps X-Grain-Hub-UI-User, X-Grain-Hub-UI-Role, X-Grain-Hub-UI-Team,
+//     and X-Grain-Hub-UI-Access from the stream metadata m (when not already set);
+//   - enforces read-only mode (allowing GET/HEAD and rejecting state-mutating
+//     methods POST/PUT/DELETE/PATCH with 403 Forbidden) when
+//     X-Grain-Hub-UI-Role == "team-admin" and ui.access == "read-only".
+func (g *Grain) LocalUIHandler(m nodeui.Message) http.Handler {
+	access := g.uiAccess()
+	inner := g.UIHandler
+	if inner == nil {
+		inner = g.defaultUIHandler()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if leaked, bad := HasLeakedHubCredentials(r); bad {
+			http.Error(w, "forbidden: hub credential leaked to node handler: "+leaked, http.StatusBadRequest)
+			return
+		}
+		if m.Viewer != "" && r.Header.Get(HeaderHubUIUser) == "" {
+			r.Header.Set(HeaderHubUIUser, m.Viewer)
+		}
+		if m.Role != "" && r.Header.Get(HeaderHubUIRole) == "" {
+			r.Header.Set(HeaderHubUIRole, m.Role)
+		}
+		if m.Team != "" && r.Header.Get(HeaderHubUITeam) == "" {
+			r.Header.Set(HeaderHubUITeam, m.Team)
+		}
+		if r.Header.Get(HeaderHubUIAccess) == "" {
+			r.Header.Set(HeaderHubUIAccess, access)
+		}
+		role := r.Header.Get(HeaderHubUIRole)
+		if role == nodeui.RoleTeamAdmin && access == "read-only" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "forbidden: team-admin access is read-only", http.StatusForbidden)
+				return
+			}
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+func (g *Grain) defaultUIHandler() http.Handler {
+	mux := http.NewServeMux()
+	tasksHandler := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"node":  g.ID,
+			"tasks": g.TaskStatuses(),
+		})
+	}
+	taskByIDHandler := func(w http.ResponseWriter, r *http.Request) {
+		st, ok := g.TaskStatus(r.PathValue("id"))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(st)
+	}
+	mux.HandleFunc("GET /tasks", tasksHandler)
+	mux.HandleFunc("GET /api/tasks", tasksHandler)
+	mux.HandleFunc("GET /tasks/{id}", taskByIDHandler)
+	mux.HandleFunc("GET /api/tasks/{id}", taskByIDHandler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"node":   g.ID,
+			"method": r.Method,
+			"path":   r.URL.Path,
+			"viewer": r.Header.Get(HeaderHubUIUser),
+			"role":   r.Header.Get(HeaderHubUIRole),
+			"team":   r.Header.Get(HeaderHubUITeam),
+			"access": r.Header.Get(HeaderHubUIAccess),
+			"tasks":  g.TaskStatuses(),
+		})
+	})
+	return mux
 }

@@ -1,9 +1,11 @@
 # The hub's deployment (docs/deploy.md), checked without touching any
-# project: the container image builds, the Kubernetes manifests build
-# and pass a kind cluster's strict server-side validation with the
-# Gateway API's and GKE's CRDs installed, and the terraform validates
-# and passes its tests against mock providers. Nothing is pushed or
-# applied.
+# project: the container image builds and passes packaging and
+# production-guardrail checks, the Kubernetes manifests build and pass a
+# kind cluster's strict server-side validation with the Gateway API's
+# and GKE's CRDs installed, the 2-replica kind overlay boots and passes
+# the end-to-end deployment test against PostgreSQL, and the terraform
+# validates and passes its tests against mock providers. Nothing is
+# pushed or applied to GCP.
 name: deploy
 
 on:
@@ -24,15 +26,27 @@ jobs:
       # The build reaches Go modules and npm packages through this
       # sandbox's own proxies, which a container cannot reach by TLS to
       # the public ones.
-      - name: Build the hub image
+      - name: Build and verify the hub image
         run: |
           docker build --network host --build-arg GOPROXY="$(go env GOPROXY)" --build-arg NPM_REGISTRY="$(npm config get registry)" -t silo-hub:ci .
-          docker run --rm silo-hub:ci hub serve -h 2>&1 | grep -q -- -iap-audience
+          test "$(docker image inspect silo-hub:ci --format '{{.Config.User}}')" = "65532:65532"
+          for subcmd in "hub serve" "hub migrate" "hub team" "hub token" "conformance"; do
+            out="$(docker run --rm silo-hub:ci $subcmd -h 2>&1 || true)"
+            printf '%s\n' "$out" | grep -qi "usage"
+          done
+          docker run --rm silo-hub:ci conformance -only register -- /silo conformance grain
           # The web UI's bundle is embedded, not the placeholder.
           docker run -d --name silo-hub-ci -p 127.0.0.1:18080:8080 silo-hub:ci hub serve -database sqlite::memory: -dev-user-header X-User
           trap 'docker rm -f silo-hub-ci >/dev/null' EXIT
           for i in $(seq 30); do curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1 && break; sleep 1; done
           curl -fsS http://127.0.0.1:18080/ | grep -q 'type="module"'
+          # Production guardrails when KUBERNETES_SERVICE_HOST is set.
+          if out="$(docker run --rm -e KUBERNETES_SERVICE_HOST=10.96.0.1 silo-hub:ci hub serve -database sqlite::memory: -webhook-secret s 2>&1)"; then exit 1; fi
+          printf '%s\n' "$out" | grep -q "refused on Kubernetes"
+          if out="$(docker run --rm -e KUBERNETES_SERVICE_HOST=10.96.0.1 silo-hub:ci hub serve -database postgres://u:p@127.0.0.1:5432/silo -dev-user-header X-User -webhook-secret s 2>&1)"; then exit 1; fi
+          printf '%s\n' "$out" | grep -q "refused on Kubernetes"
+          if out="$(docker run --rm -e KUBERNETES_SERVICE_HOST=10.96.0.1 silo-hub:ci hub serve -database postgres://u:p@127.0.0.1:5432/silo 2>&1)"; then exit 1; fi
+          printf '%s\n' "$out" | grep -q "webhook secret"
 
   manifests:
     name: manifests
@@ -53,6 +67,27 @@ jobs:
 
       - name: Validate the manifests
         run: deploy/kubernetes/hub/validate.sh
+
+  kind:
+    name: kind
+    paths-ignore:
+      - old/**
+      - docs/**
+      - "*.md"
+    sandbox:
+      cpus: 4
+      memory-mb: 8192
+    timeout-minutes: 20
+    steps:
+      - name: Check kind and docker
+        infrastructure: true
+        run: |
+          docker version
+          kind version
+          kubectl version --client
+
+      - name: Run 2-replica kind cluster E2E test
+        run: deploy/kubernetes/hub/e2e-kind.sh
 
   terraform:
     name: terraform

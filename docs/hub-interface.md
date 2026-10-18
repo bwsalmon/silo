@@ -476,10 +476,11 @@ trust boundary.
 ## Serve its own UI (the http stream, `hub/nodeui`, optional)
 
 When an authorized viewer opens `https://<node>.<the hub's node UI
-domain>`, the hub opens a stream ([hub.md](hub.md) §11):
+domain>`, the hub opens a stream ([hub.md](hub.md) §11,
+[grain-ui-proxy.md](grain-ui-proxy.md)):
 
 ```
-hub → node  {"type":"http","node":"<id>","viewer":"<email>"}
+hub → node  {"type":"http","node":"<id>","viewer":"<email>","role":"owner"|"team-admin"}
 node → hub  {"type":"ok"}, then one HTTP/1.1 request is read and its response written,
             a 101 leaving the stream as the upgraded connection
             or {"type":"error","error":"..."}
@@ -487,7 +488,19 @@ node → hub  {"type":"ok"}, then one HTTP/1.1 request is read and its response 
 
 A Grain deployment answers it only if its owner has enabled UI
 view-through, and refuses it otherwise (`nodeui.Serve` and
-`nodeui.Refuse` in `hub/nodeui`).
+`nodeui.Refuse` in `hub/nodeui`). When a node advertises `ui` in
+`hello` (`{"offered":true,"team":"<team>","access":"read-only"|"read-write"}`,
+configured via `-ui-team` and `-ui-access` in `internal/fakegrain` and
+`hub/conformance/refgrain`), `nodeui.Serve` sets `X-Grain-Hub-UI-Role`
+and `X-Grain-Hub-UI-Viewer` on the tunneled HTTP request, and the node's
+local UI handler enforces read-only mode when
+`X-Grain-Hub-UI-Role: team-admin` and `ui.access == "read-only"`
+(allowing `GET`/`HEAD` and rejecting state-mutating methods
+`POST`/`PUT`/`DELETE`/`PATCH` with `403 Forbidden`) while rejecting any
+request that still carries leaked Hub session cookies or
+`X-Goog-Authenticated-User-*` headers (`G2–G4`). For tasks placed by or
+mirrored to the hub, the node's local task status and UI responses
+expose `hub_task_id` and `hub_url` (`<hub>/tasks/<id>`, `U5`).
 
 A Grain deployment serves only the streams defined in this document. It
 serves a `view` stream only for an artifact reference it has itself
@@ -497,7 +510,11 @@ emitted, and an `http` stream only to its own UI handler.
 
 Human callers signed in through IAP or OIDC query `GET /v1/me` and
 the team, task, node, Grainfile, and node-token endpoints
-([hub.md](hub.md) §5, [ui.md](ui.md)). Configured Hub Admins
+([hub.md](hub.md) §5, [ui.md](ui.md)). Team memberships support four
+roles (`admin`, `member`, `proposer`, `viewer`), and per-team settings
+(`GET`/`PUT /v1/teams/{team}/settings`) configure `anyone_may_propose`
+(default `true`) and `require_approval` (default `false`, two-person
+review for member/admin tasks). Configured Hub Admins
 (`SILO_HUB_ADMINS` / `directory.API.HubAdmins`) can toggle global Hub
 Admin privileges per request via the `X-Silo-Admin-Mode` request header:
 

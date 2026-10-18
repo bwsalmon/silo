@@ -25,9 +25,36 @@ import (
 // (dbaccess.Grant), and fails if runtimeRole could change the schema
 // anyway.
 func Migrate(ctx context.Context, url, runtimeRole string) error {
-	postgres := strings.HasPrefix(url, "postgres://") || strings.HasPrefix(url, "postgresql://")
+	postgres := strings.HasPrefix(url, "postgres://") || strings.HasPrefix(databaseScheme(url), "postgresql://")
 	if runtimeRole != "" && !postgres {
 		return errors.New("server: a runtime role needs PostgreSQL; SQLite has no roles")
+	}
+	var db *sql.DB
+	if postgres {
+		var err error
+		db, err = sql.Open("pgx", url)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		if !dbaccess.Spanner(ctx, db) {
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				return fmt.Errorf("server: connecting to migrate: %w", err)
+			}
+			const (
+				migrateLockNS  int32 = 0x73696c6f // "silo"
+				migrateLockKey int32 = 2
+			)
+			if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1, $2)`, migrateLockNS, migrateLockKey); err != nil {
+				conn.Close()
+				return fmt.Errorf("server: locking migration: %w", err)
+			}
+			defer func() {
+				_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1, $2)`, migrateLockNS, migrateLockKey)
+				conn.Close()
+			}()
+		}
 	}
 	d, err := directory.Open(ctx, url)
 	if err != nil {
@@ -62,10 +89,9 @@ func Migrate(ctx context.Context, url, runtimeRole string) error {
 	if runtimeRole == "" {
 		return nil
 	}
-	db, err := sql.Open("pgx", url)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	return dbaccess.Grant(ctx, db, runtimeRole)
+}
+
+func databaseScheme(url string) string {
+	return url
 }

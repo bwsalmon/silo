@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-overlays=(base bsalmon-gke-dev)
+overlays=(base bsalmon-gke-dev kind)
 for o in "${overlays[@]}"; do
 	echo "building $o"
 	kubectl kustomize "$here/$o" >"$work/$o.yaml"
@@ -59,7 +59,7 @@ for o in "${overlays[@]}"; do
 	# Several pods, rolled without ever having fewer ready than the
 	# replicas, kept serving through drains, and spread over zones and
 	# GKE nodes (docs/hub.md §2.2.5).
-	dep="$(awk 'BEGIN { RS = "\n---\n" } /\nkind: Deployment\n/' "$f")"
+	dep="$(awk 'BEGIN { RS = "\n---\n" } /\nkind: Deployment\n/ && /\n  name: silo-hub\n/' "$f")"
 	grep -q '^  replicas: 2$' <<<"$dep" || { echo "$o: the hub must run two replicas"; exit 1; }
 	{ grep -q 'type: RollingUpdate$' <<<"$dep" && grep -q 'maxSurge: 1$' <<<"$dep" && grep -q 'maxUnavailable: 0$' <<<"$dep"; } ||
 		{ echo "$o: the hub must roll with RollingUpdate, maxSurge 1 and maxUnavailable 0"; exit 1; }
@@ -131,10 +131,16 @@ for o in "${overlays[@]}"; do
 	internal="$(np silo-hub-internal-from-hub)"
 	{ ! grep -q 'namespaceSelector\|ipBlock' <<<"$internal" && grep -q 'app: silo-hub$' <<<"$(sed -n '/from:/,$p' <<<"$internal")" &&
 		[ "$(grep -c 'port:' <<<"$internal")" = 1 ] && grep -q 'port: 9092$' <<<"$internal"; } || { echo "$o: 9092 must be open to the hub's pods alone"; exit 1; }
-	[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 4 ] || { echo "$o: a NetworkPolicy beyond the four checked here"; exit 1; }
 	# The hub serves as its least-privileged role and only the migrate
 	# init container has the schema owner's password (SA1-L8).
-	grep -q 'auto-iam-authn=true$' "$f" || { echo "$o: the proxy must log the hub in as its IAM database user"; exit 1; }
+	if [ "$o" = "kind" ]; then
+		[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 6 ] || { echo "$o: a NetworkPolicy beyond the six checked here"; exit 1; }
+		! grep -q 'cloud-sql-proxy' <<<"$dep" || { echo "$o: the kind overlay must replace cloud-sql-proxy with in-cluster postgres"; exit 1; }
+		grep -q 'SILO_HUB_RUNTIME_ROLE: silo_runtime$' "$f" || { echo "$o: the kind overlay must serve as silo_runtime"; exit 1; }
+	else
+		[ "$(grep -c 'kind: NetworkPolicy' "$f")" = 4 ] || { echo "$o: a NetworkPolicy beyond the four checked here"; exit 1; }
+		grep -q 'auto-iam-authn=true$' "$f" || { echo "$o: the proxy must log the hub in as its IAM database user"; exit 1; }
+	fi
 	[ "$(grep -c 'key: migrate-url$' "$f")" = 1 ] || { echo "$o: only the migrate container may have the migrate URL"; exit 1; }
 	grep -A1 'name: SILO_HUB_MIGRATE$' "$f" | grep -q "value: \"false\"$" || { echo "$o: the hub must serve with SILO_HUB_MIGRATE=false"; exit 1; }
 	# The store is PostgreSQL on Cloud SQL, through the proxy: never

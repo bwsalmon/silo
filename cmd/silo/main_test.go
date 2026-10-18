@@ -246,3 +246,61 @@ func TestServeRefusesMissingWebhookSecretOnKubernetes(t *testing.T) {
 		t.Errorf("WebhookSecret = %q, want prod-secret", cfg.WebhookSecret)
 	}
 }
+
+func TestCLISubcommands(t *testing.T) {
+	dir := t.TempDir()
+	db := "sqlite:" + filepath.Join(dir, "hub.db")
+
+	if err := run([]string{"hub", "migrate", "-database", db}); err != nil {
+		t.Fatalf("hub migrate: %v", err)
+	}
+	if err := run([]string{
+		"hub", "team",
+		"-database", db,
+		"-migrate=false",
+		"-id", "infra",
+		"-name", "Infra",
+		"-admin", "user:alice@example.com",
+		"-member", "user:bob@example.com",
+		"-repo", "bwsalmon/silo",
+		"-lost-requeue-after", "10m",
+	}); err != nil {
+		t.Fatalf("hub team: %v", err)
+	}
+	if err := run([]string{
+		"hub", "token",
+		"-database", db,
+		"-migrate=false",
+		"-owner", "alice@example.com",
+		"-node", "ws-1",
+	}); err != nil {
+		t.Fatalf("hub token: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonOut := filepath.Join(dir, "conformance.json")
+	if err := run([]string{
+		"conformance",
+		"-only", "register",
+		"-json", jsonOut,
+		"--", exe, "-test.run=^TestHelperConformanceGrain$", "--",
+	}); err != nil {
+		t.Fatalf("conformance: %v", err)
+	}
+	data, err := os.ReadFile(jsonOut)
+	if err != nil || !strings.Contains(string(data), `"passed": true`) {
+		t.Fatalf("conformance json = %q, err = %v", string(data), err)
+	}
+}
+
+func TestHelperConformanceGrain(t *testing.T) {
+	if os.Getenv("SILO_HUB_URL") == "" {
+		return
+	}
+	if err := run([]string{"conformance", "grain"}); err != nil {
+		t.Fatal(err)
+	}
+}
