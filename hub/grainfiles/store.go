@@ -1438,6 +1438,35 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 		UpdatedAt:  now,
 	}
 
+	sameTeamOwners := map[string]bool{}
+	if len(out.Recipients) > 0 && out.Owner != "" && s.SameTeam != nil {
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT DISTINCT owner FROM grainfile_subscriptions WHERE node_id <> ? AND owner <> ''`), nodeID)
+		if err != nil {
+			return Subscriptions{}, err
+		}
+		var otherOwners []string
+		for rows.Next() {
+			var oOwner string
+			if err := rows.Scan(&oOwner); err != nil {
+				rows.Close()
+				return Subscriptions{}, err
+			}
+			if !strings.EqualFold(oOwner, out.Owner) {
+				otherOwners = append(otherOwners, oOwner)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return Subscriptions{}, err
+		}
+		rows.Close()
+		for _, oOwner := range otherOwners {
+			if s.SameTeam(ctx, out.Owner, oOwner) {
+				sameTeamOwners[strings.ToLower(oOwner)] = true
+			}
+		}
+	}
+
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var prevCursor, prevRev int64
 		var prevOwner string
@@ -1493,7 +1522,7 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 				for _, wanted := range out.Recipients {
 					for _, claimed := range cl.recipients {
 						if strings.EqualFold(wanted, claimed) || IsSameRepo(wanted, claimed) {
-							if s.SameTeam == nil || !s.SameTeam(ctx, out.Owner, cl.owner) {
+							if !sameTeamOwners[strings.ToLower(cl.owner)] {
 								return fmt.Errorf("%w: recipient %q is already claimed by another owner", ErrUnauthorized, wanted)
 							}
 						}

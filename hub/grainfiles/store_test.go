@@ -58,7 +58,8 @@ func dumpAllTables(t *testing.T, dbURL string) string {
 		err error
 	)
 	if path, ok := strings.CutPrefix(dbURL, "sqlite:"); ok {
-		db, err = sql.Open("sqlite", "file:"+path)
+		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+		db.SetMaxOpenConns(1)
 	} else {
 		db, err = sql.Open("pgx", dbURL)
 	}

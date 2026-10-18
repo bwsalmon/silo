@@ -245,7 +245,8 @@ func dump(t *testing.T, database string) map[string][]string {
 		tables string
 	)
 	if path, ok := strings.CutPrefix(database, "sqlite:"); ok {
-		db, err = sql.Open("sqlite", "file:"+path)
+		db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+		db.SetMaxOpenConns(1)
 		tables = `SELECT name FROM sqlite_master WHERE type = 'table'`
 	} else {
 		db, err = sql.Open("pgx", database)
