@@ -318,6 +318,7 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 				free = *msg.Free
 			}
 			if !lease.Heartbeat(free) {
+				s.logf("rendezvous: node %q of %s no longer holds its registration", node.ID, owner)
 				return
 			}
 		case TypeFileTask:
