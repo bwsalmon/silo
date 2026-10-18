@@ -48,6 +48,13 @@ Accordingly, `.task.md` and `.process.md` files separate required routing from o
 
 Using plain `https://` URLs and git author strings avoids inventing a forge-specific `@handle` grammar, a custom `git::` getter prefix, or a separate identity-mapping file.
 
+### Cross-repository access: Grainfiles as repo-scoped capability grants
+
+When deployments connect through **[Grain Hub](hub.md)** (§1.2, §6.1.1, §6.4.1), individual Grain deployments do not need to know about or hold standing git credentials for every other deployment's or team's repositories; each deployment only connects to the Hub as its own `recipient` identity, while the Hub consumes external git repositories via a GitHub App or forge webhooks and API (never hosting git repositories itself or storing source code at rest):
+
+- **Grainfile as a repo-scoped capability grant:** When a non-draft `.task.md` or `.process.md` is merged into **Repo A** with `recipient: <Deployment B>`, Repo A's owners (through Repo A's branch protection, merge policy, and `CODEOWNERS` review, spec §11.1) have explicitly authorized `<Deployment B>` to receive the Grainfile itself and to read the **Repo A** files and folders named in its `references` (as well as reading and working on Repo A when the Grainfile in Repo A asks `<Deployment B>` to act on Repo A). `<Deployment B>` fetches the matched `.task.md` / `.process.md` body and its authorized same-repo `references` through the Hub on demand ([`docs/hub-interface.md`](hub-interface.md)) without holding permanent git credentials for Repo A.
+- **Same-origin authority rule ("a repository can only grant access to itself"):** A Grainfile committed in **Repo A** can authorize `<Deployment B>` to read `references` inside **Repo A** (resolved at the commit/ref of the Grainfile or the pinned `<ref>` in the URL). It **cannot** grant `<Deployment B>` access to a third private repository (**Repo C**) merely by listing a `https://.../repo-c/...` URL in `references` — reading Repo C requires either `<Deployment B>` already having access to Repo C, or Repo C itself publishing/authorizing it.
+
 ## 4. References, dependencies, and `trigger_with` grouping
 
 Grainfiles refer to other files, folders, and repositories using three optional front-matter fields (spec §6.1, §8):
@@ -89,12 +96,12 @@ Setting **`gate: true`** on a `.process.md` marks the process as a merge/commit 
 
 ## 6. Direct execution model
 
-Deployments watch their attached repositories for `.task.md` and `.process.md` files whose `recipient` matches the deployment:
+Deployments watch their attached repositories—or subscribe via **[Grain Hub](hub.md)** as their `recipient` identity ([`docs/hub-interface.md`](hub-interface.md))—for `.task.md` and `.process.md` files whose `recipient` matches the deployment:
 
 1. **Drafts (`draft: true`):** Authors can commit work-in-progress `.task.md` and `.process.md` files with `draft: true` (default `false`; spec §6.3). The linter still checks draft grainfiles for schema and reference errors so authors get full feedback while iterating, but recipient deployments ignore any grainfile with `draft: true` (neither queuing a task nor registering or firing a process trigger or merge gate) until `draft` is set to `false` or removed.
 2. **Deferred execution (`not_before`):** Both `.task.md` and `.process.md` accept an optional `not_before` field (spec §6.4) formatted as an RFC 3339 UTC timestamp (`2026-10-25T09:00:00Z`) or a UTC calendar date (`2026-10-25`, meaning `00:00:00Z` of that day). On a `.task.md`, the deployment holds the task as deferred and does not execute it before `not_before` (in addition to waiting for any `depends_on`). On a `.process.md`, the process does not fire before `not_before`.
-3. **Direct task execution:** When a non-draft `.task.md` is present on a watched repository for that `recipient`, the deployment queues and runs it directly once its `not_before` time (if any) is reached and its `depends_on` are satisfied. Its Markdown body is the prompt, its `references` are materialised or linked as context, and the source `.task.md` URL (plus any optional `requestor` attribution) is recorded on the task.
-4. **Direct process registration:** When a non-draft `.process.md` is present for that `recipient`, the deployment registers its `on` and `trigger_with` triggers (and its `gate` flag), active once `not_before` (if set) is reached. Each firing dispatches a run with the `.process.md` Markdown body as the prompt, ordered by `depends_on`.
+3. **Direct task execution:** When a non-draft `.task.md` is present on a watched or Hub-subscribed repository for that `recipient`, the deployment fetches the `.task.md` body and its authorized same-repo `references` (either on demand through Grain Hub via `fetch_grainfile` / `fetch_reference` without standing credentials for the source repository, or directly from git when it holds host-scoped credentials; §3) and queues and runs it directly once its `not_before` time (if any) is reached and its `depends_on` are satisfied. Its Markdown body is the prompt, its `references` are materialised or linked as context, and the source `.task.md` URL (plus any optional `requestor` attribution) is recorded on the task.
+4. **Direct process registration:** When a non-draft `.process.md` is present for that `recipient`, the deployment registers its `on` and `trigger_with` triggers (and its `gate` flag), active once `not_before` (if set) is reached. Each firing fetches the `.process.md` body and its authorized same-repo `references` (on demand through Grain Hub or from git) and dispatches a run with the `.process.md` Markdown body as the prompt, ordered by `depends_on`.
 
 ## 7. Prior art and design evolution
 
