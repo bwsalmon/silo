@@ -1,297 +1,353 @@
-# The task interface: what a Grain speaks to the hub
+# The Grain Hub interface: what a Grain deployment speaks to the hub
 
-Part of the [hub design](hub.md) (§1.3). This is the **contract**
-between the Silo hub and a Grain. The hub depends on nothing in a Grain
-but these messages. A Grain may be customised by its owner, or be
-different code altogether, as long as it speaks them as written here.
+Part of the [Grain Hub design](hub.md) (§1.3). This is the **contract**
+between **Grain Hub** (formerly **Silo**) and a **Grain deployment**
+(a **node** as the hub sees it). The hub depends on nothing in a Grain
+deployment except these messages. A Grain deployment may be customised
+by its owner, or be different code altogether, as long as it speaks them
+as written here.
 
-Everything below is built: the connection and control stream in
-`hub/rendezvous` (`rendezvous.go`), the task stream in `hub/tasks`
-(`stream.go`), filing a task and its dependencies in `hub/tasks`
-(`filing.go`, `depends.go`), and the event and view streams in
-`hub/live`. The
-sections of [hub.md](hub.md) cited give the full semantics.
+The interface reflects Grain Hub's two core responsibilities
+([hub.md](hub.md) §1):
 
-Whether a Grain speaks it is checked by the conformance kit,
-`silo conformance` ([conformance.md](conformance.md)), which drives a
-Grain through the [conformance workloads](#conformance-workloads)
-below. The reference Grain in `hub/conformance/refgrain` passes it.
+1. **Multi-tenant UI and reachability across Grain deployments:**
+   outbound WebSocket connection and control-stream registration
+   (`hub/rendezvous`, `hub/registry`), live task and process lifecycle
+   and conversation event streaming (`hub/live`), on-demand artifact
+   `view` streams (`hub/live`) and full node-UI `http` streams
+   (`hub/nodeui`), and interactive UI actions (`cancel`, `approve`,
+   `message`) routed over the tunnel to the Grain deployment that owns
+   the task.
+2. **Discovery and subscription for `.task.md` and `.process.md`
+   Grainfiles ([`docs/grainfiles-spec.md`](grainfiles-spec.md)):**
+   subscription registration (`subscriptions` in `hello` and `subscribe`
+   on the control stream), `grainfile_event` and `trigger_event`
+   notifications from forge webhooks, `catchup` queries on
+   connect/reconnect, and cross-deployment `depends_on` / `trigger_with`
+   completion and co-trigger notices.
+
+> **Current build note:** In the current repository build
+> (`github.com/bwsalmon/silo`, `cmd/silo`), the wire subprotocol
+> identifier remains `silo-node.v1`, and `hub/tasks`, `hub/claims`,
+> `hub/conformance`, and `scripts/grain-interop.sh` still carry the
+> earlier imperative task-stream messages (`offer`, `accept`, `refuse`,
+> `resume`, `attest`, `file_task`; see [Legacy imperative task stream in
+> the current build](#legacy-imperative-task-stream-in-the-current-build)
+> below) so `grain-interop` and existing tests remain unbroken until code
+> migration tasks run.
 
 ## Connection
 
-The Grain dials out to `wss://<hub>/v1/nodes/connect`, subprotocol
-`silo-node.v1`, presenting its node token as a bearer token (hub.md
-§4.1, §4.2, §5.2). The WebSocket carries the mux; each message below is
-one JSON line on a mux stream. The hub never dials a Grain.
+The Grain deployment dials out to `wss://<hub>/v1/nodes/connect`,
+subprotocol `silo-node.v1` (retained as the wire subprotocol identifier
+in the current build), presenting its node token as a bearer token
+([hub.md](hub.md) §4.1, §4.2, §5.2). The WebSocket carries the binary
+stream multiplexer (`internal/tunnel/mux`); each message below is one
+JSON line on a mux stream. Grain Hub never dials inbound to a node.
 
-## Register, heartbeat and capacity (the control stream)
+## Register, subscribe, heartbeat and capacity (the control stream)
 
-The Grain opens the first stream (hub.md §4.3):
+The Grain deployment opens the first stream ([hub.md](hub.md) §4.3,
+§6.2):
 
 ```
-node → hub  {"type":"hello","node":{"id":"...","repos":["owner/name",...],"slots":N,"version":"...","labels":{...},"features":["interactive"]}}
+node → hub  {"type":"hello","node":{
+              "id":"...",
+              "repos":["owner/name",...],
+              "slots":N,
+              "version":"...",
+              "labels":{...},
+              "features":["interactive","approvals","grainfiles"],
+              "subscriptions":{
+                "recipients":["https://github.com/acme/grain-eu",...],
+                "repos":["https://github.com/acme/widgets",...],
+                "folders":["https://github.com/acme/widgets/tree/main/.grain",...],
+                "grainfiles":["https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.md",...]
+              }}}
 hub → node  {"type":"welcome","owner":"<from the credential>","heartbeat_seconds":15}
             or {"type":"error","error":"..."}, then close
 node → hub  {"type":"heartbeat","free":N}      every heartbeat_seconds
+node → hub  {"type":"subscribe","request_id":"...","subscriptions":{
+              "recipients":["https://...",...],
+              "repos":["https://...",...],
+              "folders":["https://...",...],
+              "grainfiles":["https://...",...]}}
+hub → node  {"type":"subscribed","request_id":"...","revision":N}
+            or {"type":"subscribed","request_id":"...","error":"..."}
 hub → node  {"type":"goodbye","error":"<why>"}  the hub is shutting down, then close
 ```
 
-`features` lists the optional parts of this interface the Grain
-supports. The hub reads only `interactive` (below). A Grain that
-lists none is never offered a task that needs one. The hub keeps, but does not read,
-`approvals`, which says the Grain sends `approval_request` and takes
-`approve` (below), and `filing`, upward filing; the conformance kit
-reads both, to skip what a Grain does not claim. `hello` must come
-within 30s of the handshake. `free` is the Grain's
-own count of free slots, counting every task it has accepted. After
-`goodbye`, or any drop, the Grain reconnects with backoff: the hub's
-replacement is usually a few seconds away (a rolled pod). A Grain that
-does not know `goodbye` loses nothing by ignoring it, since the
-connection then ends anyway.
+- `hello` must arrive within 30s of the WebSocket handshake.
+- `id`, `repos`, `slots`, `version`, and `labels` register the node in
+  `hub/registry` ([hub.md](hub.md) §3). `owner` is taken from the node
+  token credential, never from `hello`.
+- `features` lists optional capabilities the deployment supports:
+  `interactive` (multi-turn interactive sessions taking `message` turns),
+  `approvals` (in-run `approval_request` events answered with `approve`),
+  and `grainfiles` (Grainfile subscription and notification protocol).
+- `subscriptions` declares what `.task.md` and `.process.md` Grainfiles
+  and forge trigger events this deployment subscribes to ([hub.md](hub.md)
+  §6.2):
 
-## File a task at the hub (the control stream, optional)
+| Field | Meaning |
+| --- | --- |
+| `recipients` | Plain `https://` deployment identity URL(s) (repository or `/tree/<ref>/<folder>` URL, [`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.2) that identify this Grain deployment as a `recipient`. The hub notifies the node whenever a non-draft `.task.md` or `.process.md` naming one of these URLs as its resolved `recipient` is added, updated, or removed in any connected repository the node's owner/teams may access. |
+| `repos` | Repository URLs (`https://github.com/owner/name`, or `owner/name` shorthand) that the deployment watches for `.task.md` and `.process.md` changes and forge trigger events (`push`, `pull_request`, `merge`). |
+| `folders` | Specific repository folder URLs (`https://.../tree/<ref>/<path>`) the deployment watches for Grainfiles. |
+| `grainfiles` | Specific `.task.md` or `.process.md` `https://` URLs the deployment subscribes to — including shared processes and cross-deployment `depends_on` or `trigger_with` targets executed by other deployments ([hub.md](hub.md) §6.5). |
 
-A Grain whose agent proposes work for a repository or team the Grain
-does not serve, typically one another team owns, hands it to the hub on
-the control stream (hub.md §6.6):
+- `subscribe` updates the deployment's active subscription set on the
+  live control stream without reconnecting. Each `subscribe` replaces
+  the node's prior subscription set and is answered by `subscribed` with
+  thesame `request_id` and a monotonic `revision` (or `error` if a URL
+  is malformed or outside the node owner's directory admission).
+- `free` in `heartbeat` is the deployment's current count of free
+  execution slots.
+- After `goodbye`, or any connection drop, the deployment reconnects
+  with exponential backoff: a replacement hub pod is usually a few
+  seconds away during a rolling update.
+
+## Grainfile discovery, trigger notifications and catch-up
+
+Instead of the hub maintaining a parallel imperative task queue, cross-repo
+tasks and standing processes live in git as `.task.md` and `.process.md`
+files ([`docs/grainfiles.md`](grainfiles.md),
+[`docs/grainfiles-spec.md`](grainfiles-spec.md)). Grain Hub receives
+forge webhooks (`push`, `pull_request`, `merge`), indexes Grainfile
+front-matter metadata across connected repositories (storing metadata
+only, never repository checkouts or file bodies at rest), and notifies
+subscribed Grain deployments so they can fetch the Grainfiles from git
+and execute them directly under their own local policy ([hub.md](hub.md)
+§6.1–§6.4).
+
+### Catch-up on connect or reconnect (the control stream)
+
+When a Grain deployment connects, reconnects after an outage, or updates
+its subscriptions, it queries the hub on the control stream to catch up
+on all active non-draft `.task.md` and `.process.md` files matching its
+subscriptions and any trigger or dependency events since its last known
+cursor:
 
 ```
-node → hub  {"type":"file_task","request_id":"<the node's name for it>","task":{
-              "repo":"owner/name" | "team":"<team>",
-              "title":"...","prompt":"...",
-              "origin_task":"<hub id>",            optional: the hub task whose run files this
-              "depends_on":["<hub id>",...],       optional: hub tasks the new one waits for
-              "node_task":"<local id>"}}           optional: the Grain's own task that waits on the new one
-hub → node  {"type":"filed","request_id":"...","task":{...}}       the task filed, a `tasks.Task`
-            or {"type":"filed","request_id":"...","error":"..."}   nothing filed, and why
+node → hub  {"type":"catchup","request_id":"...","since_cursor":"<opaque cursor, or empty for full snapshot>"}
+hub → node  {"type":"catchup_result","request_id":"...","cursor":"<new opaque cursor>",
+              "grainfiles":[<grainfile metadata>,...],
+              "triggers":[<trigger_event payload>,...],
+              "dependencies":[<dependency_done payload>,...]}
+            or {"type":"catchup_result","request_id":"...","error":"..."}
+```
+
+- When `since_cursor` is empty (or older than the hub's event retention
+  window), `grainfiles` contains the full set of currently indexed
+  non-draft `.task.md` and `.process.md` files matching the node's
+  subscriptions, plus any unresolved `triggers` and `dependencies`.
+- When `since_cursor` is current, `catchup_result` returns only the
+  Grainfile additions/updates/removals, trigger firings, and dependency
+  completions since `since_cursor`, advancing the node to `cursor`.
+
+### Grainfile metadata notifications (`grainfile_event`)
+
+When a forge push or merge adds, modifies, or removes a `.task.md` or
+`.process.md` matching a deployment's `recipients` or watched
+`repos`/`folders`/`grainfiles`, the hub sends `grainfile_event` to the
+node (on a hub-opened notification stream or the control stream):
+
+```
+hub → node  {"type":"grainfile_event","cursor":"...","action":"added"|"updated"|"removed","grainfile":{
+              "url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md",
+              "kind":"task"|"process",
+              "repo":"https://github.com/acme/widgets",
+              "ref":"refs/heads/main",
+              "commit":"<git commit SHA>",
+              "path":".grain/tasks/2026-10-16-widget-schema-v2.task.md",
+              "front_matter":{
+                "title":"Migrate widget schema to v2",
+                "recipient":"https://github.com/acme/grain-eu",
+                "requestor":"Alice <alice@example.com>",
+                "draft":false,
+                "not_before":"2026-10-25T09:00:00Z",
+                "created_at":"2026-10-16T13:58:30Z",
+                "references":["/docs/widget-schema.md"],
+                "depends_on":["https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-prep.task.md"],
+                "trigger_with":[],
+                "on":{},
+                "gate":false
+              }}}
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `request_id` | The Grain's name for the filing, 1-128 bytes; the `filed` answering it carries it back. Answers may come in any order. |
-| `repo`, `team` | The target, exactly one, as in `POST /v1/tasks`. |
-| `title`, `prompt` | What to do; the title defaults to the prompt's first line. |
-| `origin_task` | The hub task the filing comes from, if the agent is running one: it must be a task this Grain runs now (`running`, offered to this node as its owner). Absent for work from a task that came from no hub task. |
-| `depends_on` | Up to 16 hub task IDs the new task waits for: each one the Grain's owner may see. |
-| `node_task` | The Grain's own ID, at most 200 bytes, for a local task that waits on the new hub task: the hub sends `dependency_done` (below) when the new task ends. |
-| `node` | Optional; if present it must be the Grain's own node ID. The hub records the filer from the connection, never from the filing. |
+| `cursor` | Monotonic hub cursor for resuming with `catchup` after a disconnect. |
+| `action` | `added` (new non-draft Grainfile, or a draft whose `draft: true` was removed), `updated` (front matter or commit SHA changed while non-draft), or `removed` (file deleted, or `draft` changed from `false` to `true`). |
+| `url` | Canonical plain `https://` forge URL of the `.task.md` or `.process.md` file ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.1). |
+| `kind` | `task` (`.task.md`) or `process` (`.process.md`). |
+| `repo`, `ref`, `commit`, `path` | The authoritative repository URL, branch/ref, commit SHA, and repository-relative path where the Grainfile lives ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.3, §11.1). |
+| `front_matter` | Parsed YAML front-matter metadata (`title`, `recipient`, `requestor`, `draft`, `not_before`, `created_at`, `references`, `depends_on`, `trigger_with`, `on`, `gate`) with repo-local references resolved against `repo` and `ref`. Never includes the Markdown prompt body or repository source files. |
 
-The hub, not the filing, decides who the task is for and whether it
-needs approval:
+**How the Grain deployment acts on `grainfile_event`:**
 
-- Its **submitter** is the submitter of `origin_task`, the human the
-  agent works for; with no `origin_task` it is the Grain's owner. The
-  Grain (`filed_by`, its node ID) and its owner (`filed_by_owner`) are
-  recorded as its **filer**, beside it.
-- It is **queued** only if both the submitter and the Grain's owner are
-  members of the team that owns the repository, by `user:<email>`; it
-  is **proposed** otherwise, for a member of that team to approve, as a
-  human's proposal is. A team-targeted filing is refused unless both
-  are in the team. `approved_by` is never carried over from
-  `origin_task`, and the submitter may not approve the task they are
-  submitter of. An agent cannot launder approval by filing through a
-  Grain: whatever it files outside its submitter's team waits for a
-  member of that team.
+1. **Source authority check (local policy):** The deployment checks that
+   the authoritative source repository and folder (`repo` + `path`) are
+   trusted by its local policy to address work to this `recipient`
+   ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §6.2.3, §11.1). If
+   not trusted, the deployment ignores or logs the refusal locally.
+2. **Drafts and deferral:** Grainfiles with `draft: true` are never
+   dispatched (`added` is not sent while `draft: true`; if an already
+   registered Grainfile is edited to `draft: true`, the hub sends
+   `action: "removed"` so the deployment unregisters its trigger or
+   withdraws the unstarted task). If `not_before` is present, the
+   deployment holds the task or process inactive until that UTC time or
+   date (`YYYY-MM-DD`, meaning `00:00:00Z`) is reached.
+3. **Direct fetch and execution:** The deployment fetches the
+   `.task.md` or `.process.md` (and any `references`) directly from git
+   at `commit` using its own host-scoped credentials, and either queues
+   the `.task.md` in its own backlog (waiting on any `depends_on`) or
+   registers the `.process.md` triggers (`on`, `trigger_with`, and
+   `gate`).
 
-A Grain may file at most **10 tasks at once, and one more each minute**
-(the hub's `tasks.Filer` defaults), and have at most 4 filings awaiting
-their `filed` at once. A filing over either limit is answered with
-`error`, and refusals count against the rate. `filed` with `error`
-does not end the connection, unlike `error`. A hub that takes no
-filings answers every one with `error`. A Grain that does not file
-tasks never sends `file_task`.
+### Forge and co-trigger notifications (`trigger_event`)
 
-## Accept or refuse a task, report its result (the task stream)
-
-The hub opens one stream per task (hub.md §6.2):
+When a forge webhook (`push`, `pull_request`, `merge`) matches the `on`
+filter (`branches`, `paths`, `ignore`) of a non-draft `.process.md`
+that a deployment subscribes to, or when a cross-deployment
+`trigger_with` target fires, the hub sends `trigger_event`:
 
 ```
-hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}    run this task
-            {"type":"resume","task":{...},"requester_attestation":"<JWT>"}   a task you ran when the hub lost you: still yours?
-            {"type":"attest","task":{"id":...},"requester_attestation":"<JWT>"}  a fresh attestation for a task you accepted
-            {"type":"cancel","task":{"id":...}}                              stop it
-            {"type":"approve","task":{"id":...},"request_id":"...",          a human's answer to an approval_request
-             "decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
-            {"type":"message","task":{"id":...},"message":{"id":"...",       a human's message to an interactive task
-             "text":"...","attachments":[...],"sender":"<email>","sent_at":"<RFC 3339>"}}
-            {"type":"dependency_done","task":{"id":...},"state":"...",      a hub task your own task waits on has ended
-             "reason":"...","node_task":"<local id>"}
-node → hub  {"type":"accept","node_task":"<local id>"}
-            {"type":"refuse","reason":"..."}
-            {"type":"result","state":"done"|"failed","reason":"..."}
+hub → node  {"type":"trigger_event","cursor":"...","id":"trig-...","process_url":"https://...",
+              "source":"push"|"pull_request"|"merge"|"trigger_with",
+              "gate":true|false,
+              "event":{
+                "repo":"https://github.com/acme/widgets",
+                "ref":"refs/heads/main",
+                "commit":"<git commit SHA>",
+                "pull_request":42,
+                "base_ref":"refs/heads/main",
+                "changed_paths":["src/widget.go"]},
+              "triggered_by":{
+                "grainfile_url":"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.md",
+                "run_id":"..."}}
 ```
 
-`task` is `tasks.Spec`, and carries the hub's claims about the task
-(hub.md §1.2):
+- `id` deduplicates the trigger firing across reconnects (delivery is
+  at least once).
+- `source` names the trigger kind (`push`, `pull_request`, `merge` from
+  a forge webhook, or `trigger_with` when co-triggered by another
+  process). Schedule (`on.schedule`), `manual`, and `scenario` triggers
+  can be evaluated locally by the deployment that owns the `.process.md`
+  (or triggered via the UI for `manual`).
+- When `gate` is `true`, the deployment runs the `.process.md` as a
+  commit or pull-request merge gate ([`docs/grainfiles-spec.md`](grainfiles-spec.md)
+  §7.2.2).
 
-| Field | Meaning |
-| --- | --- |
-| `id` | The hub's task ID. |
-| `team` | The team the task belongs to. |
-| `repo` | `owner/name`, or empty for a team-targeted task, where the Grain chooses the repository. |
-| `kind` | `interactive` for a session (below); absent for a task that runs to its result. Not among the attested claims. |
-| `title`, `prompt` | What to do. |
-| `submitter` | The requester, from their sign-on to the hub. |
-| `approved_by` | The human who approved the task at the hub: a member of the task's team, never its submitter, who approved it while it was proposed. Absent for a task nobody approved there, which is every task a member of the team filed directly. |
-| `approved_at` | When `approved_by` approved it (RFC 3339); absent with it. |
-| `depends_on` | Hub tasks that were done before the task was offered; absent for none. |
-| `filed_by`, `filed_by_owner` | The Grain that filed the task (above), and the owner it was registered by: the hub's record of its filer. Absent for a task a human filed. |
-| `origin_task` | The hub task whose run filed it; absent with `filed_by`, or for a Grain's filing from no hub task. |
-| `constraints` | The labels or node ID the task was placed by. |
-| `created_at` | When it was submitted. |
+### Cross-deployment `depends_on` and `trigger_with` notices (`dependency_done`)
 
-`capabilities` are not carried yet. A Grain files a task without
-`approved_by` for its own local approval. A task filed at the hub by
-someone outside the team that owns its repository is *proposed*, and
-is never offered until a member of that team approves it (hub.md
-§6.1), so a Grain is only ever offered such a task with `approved_by`
-set. Whether a Grain runs a task with or without `approved_by`, and
-whose approval it accepts, is its own local policy's.
+A `.task.md` or `.process.md` on one Grain deployment may declare
+`depends_on` or `trigger_with` referencing a `.task.md` or
+`.process.md` whose `recipient` is a different Grain deployment
+([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.3, §8.4). The
+waiting deployment includes those target Grainfile URLs in its
+`subscriptions.grainfiles`.
 
-An offer or resume from a hub with a signing key also carries
-`requester_attestation`: a JWT, signed for this Grain's node ID, of the
-claims grain's local policy checks (`iss`, `aud`, `iat`, `exp`,
-`hub_task_id`, `requester`, `team`, `approved_by`,
-`granted_capabilities`, `spec_digest`), with the hub's keys at
-`/v1/claims/keys` (hub.md §6.4). A Grain whose policy names
-`silo_issuer` verifies it and refuses an offer without one; any other
-Grain may ignore it. `spec_digest` is over the task's `repo`, `title`
-and `prompt` exactly as offered, so a Grain that checks it files the
-task's body as the prompt, unchanged, and links the task to the hub by
-`hub_task_id` rather than by anything added to the body.
+When the executing deployment streams lifecycle events (below) reporting
+that a run of a Grainfile has started or finished (`result` with state
+`done`, `failed`, or `cancelled`), Grain Hub routes notices to every
+subscribed deployment watching that Grainfile URL ([hub.md](hub.md)
+§6.5):
 
-An attestation is good for an hour (`exp`), and a Grain checks the one
-kept beside a hub task again before each dispatch of it, which may be
-hours after it accepted the task. So while the task is the Grain's,
-the hub writes `attest` on its stream every half hour: a newly signed
-`requester_attestation` for the same task, with the same claims but
-`iat` and `exp`. A Grain verifies it as it did the offer's, against
-the task it filed, and keeps it in place of the old one; one it cannot
-verify it drops, keeping the old. A Grain that does not know `attest`
-may ignore it, and then holds a task whose attestation has lapsed
-until the hub next resumes it.
-
-The Grain takes these claims on trust and holds the task to its own
-local policy, refusing what that policy does not allow (hub.md §1.2).
-No answer to an offer within a minute counts as a refusal. After
-`accept`, the stream stays open for the task's life: the Grain writes
-`result` there, and the hub writes `cancel`, `approve` and `message` there. A cancel for a task
-with no open stream arrives as the only message on a stream of its own.
-
-A Grain that was away while it ran a task is normally sent `resume`
-for it when it is back. If the task's team requeues lost tasks (hub.md
-§6.3), and the Grain was away longer than the team's grace, the task
-has been put back in the queue instead: no `resume` comes, the hub
-refuses the Grain's events for it, and its result is not recorded. A
-Grain may stop such a task when, some minutes after reconnecting, it
-has been sent neither `resume` nor `cancel` for it.
-
-### Dependencies on hub tasks (optional)
-
-A hub task with `depends_on` is offered only once each task it names is
-`done`. If one of them ends any other way (`failed`, `cancelled`,
-`rejected`), the hub cancels it, with the reason `dependency <id> is
-<state>`, so a Grain is never offered a task whose dependencies did
-not all succeed. A dependency that is `lost` has not ended, and the
-task waits.
-
-A Grain that filed a task with `node_task` is told when that task ends,
-whichever way, on a stream of its own, as the only message on it, as a
-cancel for a task the Grain was away for is:
+- **For `trigger_with`:** when the target `.process.md` fires, the hub
+  sends `trigger_event` with `"source":"trigger_with"` and
+  `triggered_by` naming the target `grainfile_url` and `run_id`.
+- **For `depends_on`:** when the target `.task.md` or `.process.md` run
+  reaches a terminal state, the hub sends `dependency_done`:
 
 ```
-{"type":"dependency_done","task":{"id":"<hub id>"},"state":"done"|"failed"|"cancelled"|"rejected","reason":"...","node_task":"<local id>"}
+hub → node  {"type":"dependency_done","cursor":"...",
+              "grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md",
+              "run_id":"...",
+              "state":"done"|"failed"|"cancelled",
+              "reason":"..."}
 ```
 
-- It is sent to the node that filed the task, only while that node is
-  registered by the owner it was when it filed, and when it is next
-  online if it is away then. The hub writes it once; it may write it
-  again if it restarted before recording the first, so a Grain takes
-  one (`task.id`, `node_task`) once.
-- `done` is the Grain's cue to unblock its local task. Any other
-  `state` means the hub task will never be done: the Grain must not
-  run its local task as if it were, and what it does instead, such as
-  failing or cancelling the local task as the hub cancels a hub task
-  whose dependency failed, is its own local policy.
-- A Grain ignores a `dependency_done` for a local task it no longer
-  has, or one that no longer waits: cancelling the local task does not
-  cancel the hub task, which is the hub's and its team's to cancel, by
-  its submitter, a team admin or a hub admin. Likewise the hub task
-  outlives `origin_task`: the origin ending, whichever way, does not
-  end it.
+- `done` unblocks the waiting deployment's `.task.md` or `.process.md`
+  run (for a co-triggered process that declares both `trigger_with` and
+  `depends_on`, the run triggered by `trigger_with` starts once the
+  matching `run_id` reports `done`).
+- `failed` or `cancelled` means the upstream run did not succeed; the
+  waiting deployment must not execute its dependent run as if the
+  dependency succeeded, and marks or cancels its waiting run according
+  to its local policy.
 
-A Grain that never sets `node_task` is never sent `dependency_done`.
+## Interactive actions from the multi-tenant UI (`cancel`, `approve`, `message`)
 
-### Approvals inside a run (optional)
+Humans signed into Grain Hub's multi-tenant UI (`hub/ui`) can interact
+with tasks and process runs on the Grain deployments their team
+directory access permits ([hub.md](hub.md) §5.3, §6.6). Grain Hub
+authenticates the human caller, checks team access, and routes the
+action over the reverse tunnel (`Server.Open`) to the Grain deployment
+that owns the run:
 
-A Grain that wants a human's go-ahead before it goes on, for instance
-before a tool call its policy holds for approval, sends an
-`approval_request` event on the task's event stream (below):
+```
+hub → node  {"type":"cancel","task":{"id":"<hub id>","node_task":"<local id>"},"cancelled_by":"<email>","reason":"..."}
+hub → node  {"type":"approve","task":{"id":"<hub id>","node_task":"<local id>"},"request_id":"<request id>","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
+hub → node  {"type":"message","task":{"id":"<hub id>","node_task":"<local id>"},"message":{"id":"m-...","text":"...","attachments":[...],"sender":"<email>","sent_at":"<RFC 3339>"}}
+```
+
+### Cancellations (`cancel`)
+
+When an authorized user cancels a task or process run in the hub UI
+(`POST /v1/tasks/{id}/cancel`), the hub sends `cancel` to the owning
+node. If the node is offline when the cancellation is requested, the
+hub holds the pending cancellation and delivers it when the node
+reconnects under the same owner.
+
+### Approvals inside a run (`approval_request` and `approve`, optional)
+
+A Grain deployment that wants a human's go-ahead before proceeding — for
+instance before a tool call its local policy holds for approval — sends
+an `approval_request` event on the run's event stream (below):
 
 ```
 {"type":"approval_request","seq":N,"task":"<hub id>","approval_request":{"id":"<request id>","tool":"...","args":{...},"message":"...","deadline":"<RFC 3339>"}}
 ```
 
-`id` must be unique within the task; `deadline`, if set, is when the
-Grain stops waiting. A member of the task's team answers it at the hub,
-and the hub writes the answer on the task stream:
-
-```
-{"type":"approve","task":{"id":"<hub id>"},"request_id":"<request id>","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
-```
+`id` must be unique within the run; `deadline`, if set, is when the
+deployment stops waiting. A member of the owning team answers it in the
+hub UI (`POST /v1/tasks/{id}/approvals/{request_id}`), and the hub sends
+`approve` to the node:
 
 | Field | Meaning |
 | --- | --- |
 | `request_id` | The `id` of the `approval_request` it answers. |
 | `decision` | `allow` or `deny`. |
-| `answered_by` | The member of the task's team who answered, from their sign-on: the hub's claim, as `approved_by` is. |
-| `reason` | Optional, the answerer's words. |
+| `answered_by` | The team member who answered, from their hub sign-on. |
+| `reason` | Optional explanation from the reviewer. |
 
 The hub sends at most one `approve` for each request: it refuses a
-second answer, an answer after the request's `deadline`, and one for a
-task that is not running, and it answers only an `id` the Grain sent.
-An answer it could not write because the stream had ended is written
-after the Grain's next `accept` of the task (its resume), so a Grain
-may see an `approve` for a request it sent in an earlier session. A
-Grain ignores an `approve` for a request it is no longer waiting on,
-and applies its own local policy to the answer: an `allow` is the
-hub's decision, which the Grain may still refuse to act on.
+second answer, an answer after `deadline`, and one for a run that has
+already finished, and it answers only an `id` the node sent. The Grain
+deployment ignores an `approve` for a request it is no longer waiting on
+and applies its own local policy to the answer.
 
-The `approve` message is not signed beyond what the stream already
-gives: it arrives on the authenticated connection the Grain dialled.
-A Grain that does not support answers simply never sends
-`approval_request`; one that sends it must expect `approve` on the
-task stream, and should treat an unknown message type there as
-ignorable.
+### Interactive sessions (`message` and `awaiting_reply`, optional)
 
-### Interactive sessions (optional)
-
-An **interactive** task (`"kind":"interactive"`) is a session: it stays
-open across many turns, taking messages from the humans at the hub,
-and ends only when the hub cancels it or the Grain closes it with
-`result`. The hub offers one only to a Grain that listed `interactive`
-in its `hello`'s `features`, and writes `message` only for an
-interactive task, so a Grain without the feature never sees either.
+An **interactive** session stays open across multiple turns, taking chat
+messages from authorized users in the hub UI (`POST /v1/tasks/{id}/messages`)
+and ending only when cancelled or when the node closes it with `result`.
 
 ```
-{"type":"message","task":{"id":"<hub id>"},"message":{"id":"m-...","text":"...","attachments":[{"name":"...","ref":"...","media_type":"...","size":N}],"sender":"<email>","sent_at":"<RFC 3339>"}}
+{"type":"message","task":{"id":"<hub id>","node_task":"<local id>"},"message":{"id":"m-...","text":"...","attachments":[{"name":"...","ref":"...","media_type":"...","size":N}],"sender":"<email>","sent_at":"<RFC 3339>"}}
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `id` | Names the message within the task. Delivery is **at least once**: the same message may arrive again (after a resume, say), and the Grain takes one `id` once. |
-| `text` | What the human wrote, Markdown. |
-| `attachments` | References only, never content: the hub keeps no uploaded file. `ref` is an `https` URL or one of the task's own artifact refs; the Grain fetches or resolves it under its own policy, or not at all. |
-| `sender` | The task's submitter or a member of its team, from their sign-on: the hub's claim, which the Grain takes on trust as it does `approved_by`. |
-| `sent_at` | When the hub took the message. |
+| `id` | Identifies the message within the task. Delivery is **at least once**: the node deduplicates by `id`. |
+| `text` | Markdown message body written by the human. |
+| `attachments` | References only, never file content: the hub stores no uploaded files at rest. `ref` is an `https` URL or one of the run's own artifact refs, resolved by the Grain deployment under its own policy. |
+| `sender` | The authenticated human sender from the hub's sign-on. |
+| `sent_at` | When the hub recorded the message (RFC 3339). |
 
-A message posted while the task is not yet accepted, or while the
-Grain is offline, is **queued** at the hub and written after the
-Grain's next `accept` of the task (its offer or resume). The hub
-refuses (409) a message to a task that is over, so none arrives after
-the task's `result` or `cancel`.
-
-On the task's event stream (below) a Grain running a session sends:
+On the run's event stream (below), a Grain deployment running an
+interactive session sends:
 
 ```
 {"type":"awaiting_reply","seq":N,"task":"<hub id>","awaiting_reply":{"state":"waiting","question":"..."}}
@@ -299,33 +355,49 @@ On the task's event stream (below) a Grain running a session sends:
 {"type":"message","seq":N,"task":"<hub id>","message":{"id":"m-..."}}
 ```
 
-- `awaiting_reply` `waiting` when the agent stops for a human, with the
-  question it asks if it asks one, and `resumed` when it goes on, with
-  the `id` of the message that woke it if one did. It is a lifecycle
-  event: stored and broadcast, and what the hub's UI shows as "waiting
-  for you".
-- `message` when the session takes a message in, naming its `id`. It
-  is a conversation event: the hub stores and broadcasts its own record
-  of the message in its place, whatever else the event carries, and
-  drops one naming an `id` it never sent for the task. This is how a
-  message appears in the task's conversation, so a Grain that supports
-  sessions sends it once for each message it takes in.
+- `awaiting_reply` `waiting` when the agent pauses for human input (shown
+  in the hub UI as "waiting for you"), and `resumed` when it continues.
+- `message` when the session ingests a human message, naming its `id`.
+  The hub stores and broadcasts its own record of that message in the
+  conversation timeline and drops any `id` it never sent for the task.
 
-## Stream events (the event stream)
+## Stream events (the event stream, `hub/live`)
 
-For each task it runs, the Grain opens a stream to the hub and writes
-the event envelope of package `events` (`events/events.go`), one event per line,
-each with `"task":"<hub id>"` added (hub.md §7.1). The first line binds
-the stream to a task the hub placed on that Grain. The hub writes
-nothing back. Events at or below the task's last `seq` are dropped as
-duplicates, so `seq` must keep increasing across the sessions the Grain
-runs for the task. Node-only events (diffs, file contents, tool calls
-and logs) are sent as references only:
-`{"type":"artifact","kind":"...","ref":"<opaque>","size":...}`.
+For each task or process run it executes, the Grain deployment opens a
+stream to the hub (`NodeStream`) and writes the event envelope of
+package `events` (`events/events.go`), one JSON event per line
+([hub.md](hub.md) §7.1):
 
-## Serve a view (the view stream)
+```
+node → hub  {"type":"status","seq":1,"time":"<RFC 3339>","task":"<id>","node_task":"<local id>","grainfile":"https://...","status":{"state":"running","message":"..."}}
+node → hub  {"type":"artifact","seq":2,"time":"<RFC 3339>","task":"<id>","artifact":{"kind":"diff","ref":"<opaque>","size":N}}
+node → hub  {"type":"result","seq":3,"time":"<RFC 3339>","task":"<id>","result":{"status":"done","reason":"..."}}
+```
 
-When a viewer opens an artifact, the hub opens a stream (hub.md §7.2):
+- The first line binds the stream to the run (`task` / `node_task`, and
+  `grainfile` when the run executes a `.task.md` or `.process.md` file).
+  The hub writes nothing back on the event stream.
+- Events at or below the run's last `seq` are dropped as duplicates, so
+  `seq` must increase monotonically across the sessions the Grain
+  deployment runs for that task.
+- Lifecycle (`status`, `usage`, `resumable`, `result`, `awaiting_reply`)
+  and conversation (`message`, `approval_request`, assistant final text)
+  events are stored by the hub and broadcast to authorized subscribers;
+  when a run of a `.task.md` or `.process.md` finishes (`result`), the
+  hub also uses that lifecycle event to route cross-deployment
+  `dependency_done` notices (above).
+- Token stream deltas (`transcript` text/thinking/error items) are held
+  only in an in-memory ring buffer per run for late joiners.
+- Node-only events (diffs, file contents, `tool_call` arguments and
+  results, sandbox and tool logs) are never stored by the hub and are
+  broadcast only as opaque references:
+  `{"type":"artifact","kind":"...","ref":"<opaque>","size":...}`.
+
+## Serve a view (the view stream, `hub/live`)
+
+When an authorized viewer in the hub UI opens an artifact reference
+(`GET /v1/tasks/{id}/artifacts?ref=<ref>`), the hub opens a stream to
+the owning node ([hub.md](hub.md) §7.2):
 
 ```
 hub → node  {"type":"view","task":"<hub id>","node_task":"<local id>","ref":"<ref>"}
@@ -333,15 +405,17 @@ node → hub  {"type":"ok"}, then the artifact's bytes until the node closes the
             or {"type":"error","error":"..."}
 ```
 
-The hub asks only for a ref the node listed in the task's artifact
-events, but a node must still serve only those itself, never resolve a
-ref as a path, and answer an error to any other ref: the hub's check is
-defence in depth, not the node's boundary.
+The hub asks only for a `ref` the node itself listed in the run's
+artifact events (`task_refs`), and never stores or caches the streamed
+bytes. A node must still serve only refs it has itself listed, never
+resolve a `ref` as an arbitrary filesystem path, and return an error for
+any other `ref`: the hub's check is defence in depth, not the node's
+trust boundary.
 
-## Serve its own UI (the http stream, optional)
+## Serve its own UI (the http stream, `hub/nodeui`, optional)
 
-When the node's owner opens `https://<node>.<the hub's node UI
-domain>`, the hub opens a stream (hub.md §11):
+When an authorized viewer opens `https://<node>.<the hub's node UI
+domain>`, the hub opens a stream ([hub.md](hub.md) §11):
 
 ```
 hub → node  {"type":"http","node":"<id>","viewer":"<email>"}
@@ -350,47 +424,50 @@ node → hub  {"type":"ok"}, then one HTTP/1.1 request is read and its response 
             or {"type":"error","error":"..."}
 ```
 
-A Grain answers it only if its owner has turned this on, and refuses it
-otherwise. `nodeui.Serve` and `nodeui.Refuse` (`hub/nodeui`) are this
-end.
+A Grain deployment answers it only if its owner has enabled UI
+view-through, and refuses it otherwise (`nodeui.Serve` and
+`nodeui.Refuse` in `hub/nodeui`).
 
-A Grain serves only the streams above. It serves a view only of an
-artifact it has itself listed, and an http stream only to its own UI.
+A Grain deployment serves only the streams defined in this document. It
+serves a `view` stream only for an artifact reference it has itself
+emitted, and an `http` stream only to its own UI handler.
 
-## Conformance workloads
+---
 
-A task whose prompt's first line is
+## Legacy imperative task stream in the current build
 
-```
-silo-conformance/v1 <workload>
-```
+Until the code migration tasks replace `hub/tasks`, `hub/claims`, and
+`hub/conformance` with the Grainfile subscription indexer and router
+above, the current Go build (`cmd/silo`, `hub/tasks`, `hub/claims`,
+`hub/conformance`, and `scripts/grain-interop.sh`) still implements the
+earlier imperative task-stream messages and conformance workloads:
 
-is a **conformance workload**, filed by the conformance kit
-([conformance.md](conformance.md)) or by anyone checking a Grain. A
-Grain may short-circuit it: run no model and touch no repository, and
-do exactly what the workload says, through the messages above. Its
-title is `silo conformance: <workload>`, and the rest of the prompt is
-prose for a human. Package `hub/conformance/workload` has these as Go
-constants. A Grain that does not recognise the marker runs the task as
-any other, which the kit's checks will not, in general, accept.
-
-| Workload | What the Grain does, once it has accepted the task |
-| --- | --- |
-| `run` | Sends a `status` event, then an `artifact` event `{"kind":"diff","ref":"<its own ref>","size":N}` for the change below, then a `result` event, then `result` `done` on the task stream. It serves the ref on the view stream, with exactly the change's bytes. |
-| `hold` | Sends a `status` event with the message `silo-conformance: started`, then a `status` event every second or so. It never ends on its own: it runs until cancelled, holding its slot. |
-| `approve` | Sends `silo-conformance: started`, then an `approval_request` with `id` `silo-conformance`. On its `approve`, it ends with `result` `done` for `allow`, or `failed` for `deny`. This workload is only filed on a Grain that lists `approvals`. |
-| `interactive` | Filed with `"kind":"interactive"`, only on a Grain that lists `interactive`. It sends `silo-conformance: started` and `awaiting_reply` `waiting`. On the first message it sends a `message` event naming its `id`, then `awaiting_reply` `resumed` with that `message_id`, then `result` `done`. |
-| `file <owner/name>` | Only on a Grain that lists `filing`. It sends `silo-conformance: started`, then files a task upward (`file_task`, above) in the repository the first line names, with the title `silo conformance: run`, the `run` workload's prompt, `origin_task` this task, and `node_task` the Grain's own ID for this task, which waits on the new one. A filing the hub refuses because it does not have this task's `accept` yet may be sent again. On `filed` it sends `silo-conformance: filed <id>`, the filed task's ID. On that task's `dependency_done` `done` it sends `silo-conformance: unblocked <id>`, then `result` `done`; on any other `state`, `result` `failed`. |
-
-Each workload says `silo-conformance: started` once per run of it. A
-Grain that runs the same task twice therefore says it twice, which is
-what the kit's restart scenario looks for.
-
-The fixed change a `run` makes, byte for byte:
-
-```
---- /dev/null
-+++ b/SILO-CONFORMANCE
-@@ -0,0 +1 @@
-+This change was made by a Grain running the silo conformance kit.
-```
+- **Upward filing on the control stream (`file_task` / `filed`):**
+  ```
+  node → hub  {"type":"file_task","request_id":"...","task":{"repo":"owner/name" | "team":"<team>","title":"...","prompt":"...","origin_task":"<hub id>","depends_on":["<hub id>",...],"node_task":"<local id>"}}
+  hub → node  {"type":"filed","request_id":"...","task":{...}}   or {"type":"filed","request_id":"...","error":"..."}
+  ```
+- **Imperative task stream (`offer`, `resume`, `attest`, `accept`,
+  `refuse`, `result`):**
+  ```
+  hub → node  {"type":"offer","task":{...},"requester_attestation":"<JWT>"}
+              {"type":"resume","task":{...},"requester_attestation":"<JWT>"}
+              {"type":"attest","task":{"id":...},"requester_attestation":"<JWT>"}
+              {"type":"cancel","task":{"id":...}}
+              {"type":"approve","task":{"id":...},"request_id":"...","decision":"allow"|"deny","answered_by":"<email>","reason":"..."}
+              {"type":"message","task":{"id":...},"message":{"id":"...","text":"...","attachments":[...],"sender":"<email>","sent_at":"<RFC 3339>"}}
+              {"type":"dependency_done","task":{"id":...},"state":"done"|"failed"|"cancelled"|"rejected","reason":"...","node_task":"<local id>"}
+  node → hub  {"type":"accept","node_task":"<local id>"}
+              {"type":"refuse","reason":"..."}
+              {"type":"result","state":"done"|"failed","reason":"..."}
+  ```
+- **Conformance workloads (`silo-conformance/v1 <workload>`):** checked
+  by `silo conformance` ([conformance.md](conformance.md)) and
+  `hub/conformance/refgrain` for `run`, `hold`, `approve`,
+  `interactive`, and `file <owner/name>`, with `run` emitting the diff:
+  ```
+  --- /dev/null
+  +++ b/SILO-CONFORMANCE
+  @@ -0,0 +1 @@
+  +This change was made by a Grain running the silo conformance kit.
+  ```
