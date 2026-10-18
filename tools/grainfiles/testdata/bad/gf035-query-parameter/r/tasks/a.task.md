@@ -1,7 +1,7 @@
 ---
 title: T
 requestor: "Bruce Salmon <bsalmon@google.com>"
-recipient: "git::https://github.com/acme/grain-eu.git"
-references: ["git::https://github.com/acme/widgets.git//docs/d.md?ref=main&depth=1"]
+recipient: "https://github.com/acme/grain-eu"
+references: ["https://github.com/acme/widgets/blob/main/docs/d.md?ref=main"]
 ---
 Run the task.

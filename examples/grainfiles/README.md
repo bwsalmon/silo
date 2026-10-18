@@ -8,16 +8,16 @@ python3 tools/grainfiles/grainlint.py examples/grainfiles
 
 See [`docs/grainfiles-spec.md`](../../docs/grainfiles-spec.md), Appendix A.
 
-## `widgets/`: a code repository (`https://github.com/acme/widgets.git`)
+## `widgets/`: a code repository (`https://github.com/acme/widgets`)
 
 - `docs/widget-schema.md` and `src/widget.go`: design documentation and Go source code referenced by tasks and processes.
-- `.grain/tasks/2026-10-16-widget-schema-v2.task.md`: a discrete task requested by a user (`Bruce Salmon <bsalmon@google.com>`) and addressed to the `grain-eu` deployment (`git::https://github.com/acme/grain-eu.git`), referencing the design doc heading `/docs/widget-schema.md#schema-version-header` and `/src/widget.go`.
-- `.grain/tasks/2026-10-16-widget-schema-v2-migration.task.md`: a follow-up task with `depends_on: ["./2026-10-16-widget-schema-v2.task.md"]` and `not_before: "2026-10-25T09:00:00Z"`.
+- `.grain/tasks/2026-10-16-widget-schema-v2.task.md`: a discrete task with optional user attribution (`Bruce Salmon <bsalmon@google.com>`) addressed to the `grain-eu` deployment (`https://github.com/acme/grain-eu`), referencing the design doc heading `/docs/widget-schema.md#schema-version-header` and `/src/widget.go`.
+- `.grain/tasks/2026-10-16-widget-schema-v2-migration.task.md`: a follow-up task omitting optional `requestor`, with `depends_on: ["./2026-10-16-widget-schema-v2.task.md"]` and `not_before: "2026-10-25T09:00:00Z"`.
 - `.grain/tasks/2026-11-01-drop-widget-v1-support.task.md`: a work-in-progress draft task (`draft: true`, `not_before: "2026-11-01"`) depending on the migration task; validated by `grainlint.py` while ignored by recipient deployments until `draft` is `false` or removed.
 - `.grain/processes/schema-security-review.process.md`: a gating review process (`gate: true`) triggered on `pull_request` and `push` events touching `src/**`.
 - `.grain/processes/release-cut-check.process.md`: a process triggered on a `scenario` condition and `manual: {}`.
 
-## `grain-eu/`: a deployment repository (`https://github.com/acme/grain-eu.git`)
+## `grain-eu/`: a deployment repository (`https://github.com/acme/grain-eu`)
 
-- `processes/qualification/smoke.process.md`: the lead step of a nightly release-qualification suite, with a deployment URL `requestor` and `recipient`, a cron `schedule` trigger in `Europe/Berlin`, a `manual` trigger, and a cross-repository `go-getter` reference to `widgets`.
-- `processes/qualification/report.process.md`: the summary step of the qualification suite, grouped and ordered alongside `smoke.process.md` via `trigger_with: ["./smoke.process.md"]` and `depends_on: ["./smoke.process.md"]`.
+- `processes/qualification/smoke.process.md`: the lead step of a nightly release-qualification suite, with a plain `https://` deployment URL `requestor` and `recipient`, a cron `schedule` trigger in `Europe/Berlin`, a `manual` trigger, and cross-repository `https://` `/tree/` and `/blob/` references to `widgets`.
+- `processes/qualification/report.process.md`: the summary step of the qualification suite (omitting optional `requestor`), grouped and ordered alongside `smoke.process.md` via `trigger_with: ["./smoke.process.md"]` and `depends_on: ["./smoke.process.md"]`.

@@ -2,7 +2,7 @@
 
 **Status:** draft for review (bsalmon@google.com). Normative.
 
-This document specifies the Grainfile Format: a portable, git-native format for authoring discrete **tasks** (`<name>.task.md`) and standing **processes** (`<name>.process.md`) that Grain deployments execute directly. It defines the two grainfile kinds, their YAML front matter and Markdown prompt bodies, user and deployment identities (`requestor` and `recipient`), draft and deferral controls (`draft`, `not_before`), cross-repository and repo-local references (`references`, `depends_on`, `trigger_with`), structured process triggers (`on`) and merge gating (`gate`), the direct execution model, and the lint rules that validate a repository tree.
+This document specifies the Grainfile Format: a portable, git-native format for authoring discrete **tasks** (`<name>.task.md`) and standing **processes** (`<name>.process.md`) that Grain deployments execute directly. It defines the two grainfile kinds, their YAML front matter and Markdown prompt bodies, repository source authority, deployment identities (`recipient`) and optional attribution metadata (`requestor`), draft and deferral controls (`draft`, `not_before`), cross-repository and repo-local references (`references`, `depends_on`, `trigger_with`), structured process triggers (`on`) and merge gating (`gate`), the direct execution model, and the lint rules that validate a repository tree.
 
 It is **not** an engine's internal database schema. Live run state, sandbox orchestration, queue ranking, and execution logs are each deployment's own concern (§2.3); deployments watch repositories for `.task.md` and `.process.md` files addressed to them and execute them directly (§9).
 
@@ -53,13 +53,13 @@ Where this specification makes a normative design choice, the choice is marked *
 : A `<name>.process.md` grainfile (§7.2): a standing, repeatable process with structured triggers (`on` and/or `trigger_with`) and an optional `gate` flag. Its Markdown body is the prompt dispatched whenever the process fires.
 
 **deployment**
-: An execution engine (such as a Grain deployment) identified by the go-getter URL of a git repository or folder that it controls (§6.2.2).
+: An execution engine (such as a Grain deployment) identified by the plain `https://` URL of a git repository or folder that it controls (§6.2.2).
 
 **requestor**
-: Who requested the task or process: either a user identity (`Name <email>`) or a deployment identity (§6.2).
+: Optional attribution metadata recording who requested or owns the task or process: either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (§6.2). The authoritative source of a grainfile is the URL of the repository/folder where the file itself lives (§6.2.3, §11.1).
 
 **recipient**
-: The deployment identity (`git::https://...` or repo-local folder reference) intended to execute the task or process (§6.2.2).
+: The deployment identity (`https://...` repository or folder URL, or repo-local folder reference) intended to execute the task or process (§6.2.2).
 
 **asset**
 : Any file in a repository that is not a grainfile: source code, design documents, images, configuration files, or `README.md`.
@@ -68,9 +68,9 @@ Where this specification makes a normative design choice, the choice is marked *
 
 The format defines:
 - the two grainfile kinds, `task` (`<name>.task.md`) and `process` (`<name>.process.md`) (§7);
-- user identities (`Name <email>`) and deployment identities (go-getter repository/folder references) in `requestor` and `recipient` (§6);
+- source authority from the repository/folder URL where the grainfile lives, required `recipient` deployment identities (plain `https://` repository/folder URLs or repo-local paths), and optional `requestor` attribution (`Name <email>` or plain `https://` URL) (§6);
 - work-in-progress drafting (`draft: true`) and deferred execution/activation (`not_before`) (§6.3, §6.4);
-- go-getter remote references and repo-local references in `references`, `depends_on`, and `trigger_with` (§8);
+- plain `https://` remote references (including standard forge `/blob/<ref>/<path>` and `/tree/<ref>/<path>` URLs) and repo-local references in `references`, `depends_on`, and `trigger_with` (§8);
 - structured process triggers (`on`: `schedule`, `push`, `merge`, `pull_request`, `manual`, `scenario`) and commit/pull-request gating (`gate: true`) (§7.2);
 - multi-step workflows and suites expressed by combining `trigger_with` and `depends_on` (§7.2.3, §8.4);
 - the direct execution model by which deployments watch repositories and execute matching `.task.md` and `.process.md` files (§9);
@@ -166,7 +166,7 @@ Every `.task.md` and `.process.md` shares the following base fields and MAY incl
 | Field | Type | Req. | Meaning |
 | --- | --- | --- | --- |
 | `title` | single-line string | Req. | Non-empty one-line summary of the task or process (GF020). |
-| `requestor` | *user identity* or *deployment identity* | Req. | Who requested the task or process (§6.2). |
+| `requestor` | *user identity* or *deployment identity* | Opt. | Optional attribution metadata recording who requested or owns the task or process (§6.2). |
 | `recipient` | *deployment identity* | Req. | The deployment intended to execute the task or process (§6.2.2). |
 | `created_at` | *time* (§1.4) | Opt. | When the grainfile was created (`YYYY-MM-DDTHH:MM:SSZ`). |
 | `draft` | boolean | Opt. | Default `false`. When `true`, marks the grainfile as a work-in-progress draft that recipient deployments MUST ignore until `draft` is `false` or omitted (§6.3, §9). |
@@ -176,13 +176,13 @@ Every `.task.md` and `.process.md` shares the following base fields and MAY incl
 | `references` | list of *ref* (§8) | Opt. | References to relevant documents, code paths, design docs, or grainfiles provided as context to the run. |
 | `x_*` | any | Opt. | Extension fields (§3.3). |
 
-### 6.2 Identities (`requestor` and `recipient`)
+### 6.2 Source authority and identities (`recipient` and `requestor`)
 
-**Decision:** Grainfiles use two kinds of identity—**user identities** and **deployment identities**—rather than forge-specific `@handle` strings or custom principal namespaces:
+**Decision:** The authoritative, authenticated source of a `.task.md` or `.process.md` is the canonical URL of the repository and folder where the grainfile itself lives—governed by that repository's branch protection, merge policy, and `CODEOWNERS` reviews (§11.1). Because any unreviewed text inside YAML front matter is only as trustworthy as the repository commit that carries it, `requestor` is **optional** attribution metadata, while `recipient` identifies the deployment that executes the grainfile. Grainfiles use two kinds of identity—**user identities** and **deployment / URL identities**—rather than forge-specific `@handle` strings or custom principal namespaces:
 
 #### 6.2.1 User identity
 
-A **user identity** uses standard git author notation `Name <email>`:
+A **user identity** uses standard RFC 5322 / git author notation `Name <email>`:
 
 ```abnf
 user-identity = display-name 1*WSP "<" local-part "@" domain ">"
@@ -195,15 +195,16 @@ display-name  = non-angle *( non-angle / WSP )
 
 #### 6.2.2 Deployment identity
 
-A **deployment identity** is a reference (§8.1) to the git repository or folder that the deployment controls:
-- Across repositories, a go-getter repository or folder URL, such as `git::https://github.com/acme/grain-eu.git` or `git::https://github.com/acme/deployments.git//grain-eu`.
-- Within the same repository, a repo-relative path (such as `.` or `../grain-eu`) or a `/`-rooted path from the repository root (such as `/grain-eu`).
-- A deployment identity MUST NOT carry a `#<anchor>` suffix (GF035) and MUST NOT resolve to a file (GF032). When the target repository is present in the linted tree, the referenced repository or folder MUST exist (GF030).
+A **deployment identity** is a reference (§8.1) naming the git repository or folder that the deployment controls:
+- Across repositories, a plain `https://` repository or folder URL, such as `https://github.com/acme/grain-eu` or `https://github.com/acme/deployments/tree/main/grain-eu` (or `file://` in local test suites).
+- Within the same repository, a repo-local relative path (such as `.` or `../grain-eu`) or a `/`-rooted path from the repository root (such as `/grain-eu`).
+- When used in `requestor`, a plain `https://` URL MAY also name a user profile, team, or deployment URL.
+- A deployment identity MUST NOT carry a `#<anchor>` suffix or query parameters (GF035) and MUST NOT resolve to a file (GF032). When the target repository is present in the linted tree, the referenced repository or folder MUST exist (GF030).
 
-#### 6.2.3 Rules for `requestor` and `recipient`
+#### 6.2.3 Rules for `recipient` and `requestor`
 
-- **`requestor`** (REQUIRED on both `.task.md` and `.process.md`) MAY be either a user identity (`Name <email>`) or a deployment identity (when a deployment files or owns a task or process).
 - **`recipient`** (REQUIRED on both `.task.md` and `.process.md`) MUST be a deployment identity (GF020). A user identity in `recipient` is an error (GF020).
+- **`requestor`** (OPTIONAL on both `.task.md` and `.process.md`) MAY be omitted; when present, it MUST be either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (GF020, GF035).
 
 ### 6.3 Drafts (`draft`)
 
@@ -231,7 +232,7 @@ A `task` grainfile describes a discrete unit of work to be executed once by its 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `title` | string | Req. | | One-line summary. |
-| `requestor` | *user identity* or *deployment identity* | Req. | | Who requested the task (§6.2). |
+| `requestor` | *user identity* or *deployment identity* | Opt. | | Optional attribution: who requested the task (§6.2). |
 | `recipient` | *deployment identity* | Req. | | Deployment that executes the task (§6.2.2). |
 | `created_at` | *time* | Opt. | | Creation timestamp in UTC (`Z`). |
 | `draft` | boolean | Opt. | `false` | When `true`, recipient deployments ignore the task until `draft` is `false` or omitted (§6.3, §9). |
@@ -247,7 +248,7 @@ Example (`2026-10-16-widget-schema-v2.task.md`):
 ---
 title: Add version header to the widget binary schema
 requestor: Bruce Salmon <bsalmon@google.com>
-recipient: git::https://github.com/acme/grain-eu.git
+recipient: https://github.com/acme/grain-eu
 created_at: "2026-10-16T09:00:00Z"
 references:
   - /docs/widget-schema.md#schema-version-header
@@ -265,7 +266,7 @@ A `process` grainfile describes a standing, repeatable process registered on its
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `title` | string | Req. | | One-line summary. |
-| `requestor` | *user identity* or *deployment identity* | Req. | | Who requested or owns the process (§6.2). |
+| `requestor` | *user identity* or *deployment identity* | Opt. | | Optional attribution: who requested or owns the process (§6.2). |
 | `recipient` | *deployment identity* | Req. | | Deployment that registers and executes the process (§6.2.2). |
 | `created_at` | *time* | Opt. | | Creation timestamp in UTC (`Z`). |
 | `draft` | boolean | Opt. | `false` | When `true`, recipient deployments ignore the process until `draft` is `false` or omitted (§6.3, §9). |
@@ -313,7 +314,7 @@ Example (`schema-security-review.process.md` and a two-step qualification group)
 ---
 title: Security review for widget schema and parser changes
 requestor: Bruce Salmon <bsalmon@google.com>
-recipient: git::https://github.com/acme/grain-eu.git
+recipient: https://github.com/acme/grain-eu
 "on":
   pull_request:
     branches: ["main"]
@@ -335,34 +336,44 @@ bounds-checking or downgrade issue.
 
 ```abnf
 reference = ( remote / rooted / relative ) [ "#" anchor ]
-remote    = %s"git::" ( %s"https://" / %s"file://" ) repo-path [ "//" sub-path ] [ "?ref=" gitref ]
+remote    = ( %s"https://" / %s"file://" ) host "/" repo-or-forge-path
 rooted    = "/" [ sub-path ]
 relative  = sub-path                    ; may start with "./" or "../"
 anchor    = 1*( ALPHA / DIGIT / "-" / "_" / "." )
 ```
 
-8.1.1. **Remote references** use HashiCorp `go-getter` syntax: the forced getter prefix `git::`, the repository URL (`https://` or, in tests only, `file://`), an optional `//<sub-path>` inside the repository, and an optional `?ref=<gitref>` query parameter naming a branch, tag, or commit SHA:
+8.1.1. **Remote references** are plain `https://` URLs (and `file://` in local tests), optionally followed by `#<anchor>`:
+- **Standard forge file and tree URLs:**
+  - GitHub / Gitea: `https://<host>/<owner>/<repo>/blob/<ref>/<sub-path>` (file) and `https://<host>/<owner>/<repo>/tree/<ref>[/<sub-path>]` (directory)
+  - GitLab: `https://<host>/<repo-path>/-/blob/<ref>/<sub-path>` (file) and `https://<host>/<repo-path>/-/tree/<ref>[/<sub-path>]` (directory)
+  - Gitiles: `https://<host>/<repo-path>/+/<ref>[/<sub-path>]`
+- **Direct repository URLs:** `https://<host>/<owner>/<repo>` (naming the repository root at its default branch).
+
+Examples:
 
 ```
-git::https://github.com/acme/widgets.git//docs/widget-schema.md?ref=main#schema-version-header
+https://github.com/acme/widgets/blob/main/docs/widget-schema.md#schema-version-header
+https://github.com/acme/widgets/tree/main/src
+https://github.com/acme/grain-eu/blob/main/processes/smoke.process.md
+https://github.com/acme/grain-eu
 ```
 
-**Decision:** Only the `git::` getter, only `https://` (and `file://` in tests; an executor MUST refuse `file://` outside tests), and only a single `ref` query parameter are allowed (GF035). Shorthand URLs without `git::`, SSH URLs (`git@...`, `ssh://`), and other query parameters (`depth`, `sshkey`) are errors (GF035).
+**Decision:** Only plain `https://` URLs (and `file://` in tests; an executor MUST refuse `file://` outside tests) are allowed for remote references (GF035). Legacy `git::` getter prefixes, `//` subdirectory separators, `?` query parameters, unencrypted `http://`, and SSH URLs (`git@...`, `ssh://`) are errors (GF035).
 
 8.1.2. **Local references** name paths within the same repository at the same commit:
 - **Rooted references** begin with `/` and are resolved relative to the **repository root** (`/` alone names the repository root).
 - **Relative references** do not begin with `/` (they MAY begin with `./` or `../`) and are resolved relative to the directory containing the referring grainfile. A relative reference MUST NOT climb above the repository root (GF036).
 
-8.1.3. **Anchors.** `#<anchor>` is split off at the first `#` before parsing the path or query string. On a Markdown file (a grainfile or a `.md` asset), `<anchor>` names a heading's GitHub-style slug (lower-cased heading text with punctuation removed and spaces replaced by `-`). On a folder reference, an anchor is not allowed (GF030).
+8.1.3. **Anchors.** `#<anchor>` is split off at the first `#` before parsing the path. On a Markdown file (a grainfile or a `.md` asset), `<anchor>` names a heading's GitHub-style slug (lower-cased heading text with punctuation removed and spaces replaced by `-`). On a folder reference, an anchor is not allowed (GF030).
 
 ### 8.2 Resolution
 
 To resolve a reference from a grainfile in repository `R`:
 1. Split off any `#<anchor>` (§8.1.3).
 2. Parse the reference according to §8.1 (reporting GF035 if malformed).
-3. For a remote reference, locate the target repository at `ref` (or its default branch if `?ref=` is omitted). In offline linting, a `stubs.yaml` file at the top of the linted workspace maps repository URLs to local subdirectories; unmapped remote repositories are treated as external and not resolved further.
+3. For a remote reference, locate the target repository at `<ref>` (or its default branch for a direct repository URL). In offline linting, a `stubs.yaml` file at the top of the linted workspace maps repository URLs to local subdirectories; unmapped remote repositories are treated as external and not resolved further.
 4. For a local reference, resolve `/`-rooted paths from `R`'s root and relative paths from the referring file's directory, reporting GF036 if the normalised path climbs above `R`'s root.
-5. Check that the target file or directory exists in the target repository (GF030 if missing). A reference with a trailing `/` (or an empty sub-path on a remote repository) MUST resolve to a directory (GF030 if it does not exist).
+5. Check that the target file or directory exists in the target repository (GF030 if missing). A `/blob/<ref>/<sub-path>` reference MUST resolve to a file, and a `/tree/<ref>[/<sub-path>]` reference, a reference with a trailing `/`, or a direct repository URL MUST resolve to a directory (GF030 if it does not exist).
 6. If `#<anchor>` was given on a Markdown file, verify that a heading with that slug exists in the file's body (GF030 if absent).
 
 ### 8.3 Target kinds
@@ -370,7 +381,7 @@ To resolve a reference from a grainfile in repository `R`:
 References in fields that expect a specific kind of target MUST resolve to that target kind when the target repository is available (GF032):
 - `depends_on`: each entry MUST resolve to a `.task.md` (`task`) or `.process.md` (`process`) grainfile.
 - `trigger_with`: each entry MUST resolve to a `.task.md` (`task`) or `.process.md` (`process`) grainfile.
-- `recipient` (and `requestor` when it is a deployment identity): MUST resolve to a repository or directory, never a file.
+- `recipient` (and `requestor` when it is a deployment or URL identity): MUST resolve to a repository or directory, never a file.
 - `references`: MAY resolve to any grainfile, asset file, directory, or repository.
 
 ### 8.4 Dependency and trigger graphs
@@ -381,14 +392,14 @@ References in fields that expect a specific kind of target MUST resolve to that 
 
 ### 8.5 Canonical form
 
-The **canonical reference** of a grainfile, directory, or repository is `git::https://<host>/<repo-path>[//<sub-path>]` with `<host>` lower-cased, default port `:443` and trailing `.git` stripped from `<repo-path>`, and `.` or `..` segments normalised. Deployments compare `recipient` identities and grainfile identities using canonical form.
+The **canonical reference** of a repository, folder, or grainfile is its plain `https://<host>/<repo-path>` URL (or `https://<host>/<repo-path>/tree/<ref>/<sub-path>` for a folder and `https://<host>/<repo-path>/blob/<ref>/<sub-path>` for a file), with `<host>` lower-cased, default port `:443` and trailing `.git` stripped from `<repo-path>`, and `.` or `..` segments normalised. Deployments compare `recipient` identities, source repository/folder authority, and grainfile identities using canonical form.
 
 ## 9. Direct execution model
 
 9.1. **Repository watching and drafts.** A Grain deployment watches its attached repositories for `.task.md` and `.process.md` files whose `recipient` matches the deployment's own canonical identity (or a local reference that resolves to the deployment's folder). When `draft: true` (§6.3), the deployment MUST ignore the grainfile—neither queuing a `.task.md` nor registering or firing a `.process.md` trigger or merge gate—until `draft` is set to `false` or omitted.
 
 9.2. **No translation step.** Non-draft grainfiles are executed directly without an intermediate template-rendering or task-compilation agent:
-- **Executing a `.task.md`:** If `not_before` is set (§6.4), the deployment holds the task as deferred and MUST NOT execute it before `not_before`. Once `not_before` (if any) has been reached and every grainfile in `depends_on` has completed successfully (and, if `trigger_with` is set, when a referenced grainfile fires), the deployment queues and runs the task directly. The `.task.md`'s `title` is the task title, its Markdown body is the prompt, its `references` are provided as context to the run, and the source `.task.md` reference is recorded on the task.
+- **Executing a `.task.md`:** If `not_before` is set (§6.4), the deployment holds the task as deferred and MUST NOT execute it before `not_before`. Once `not_before` (if any) has been reached and every grainfile in `depends_on` has completed successfully (and, if `trigger_with` is set, when a referenced grainfile fires), the deployment queues and runs the task directly. The `.task.md`'s `title` is the task title, its Markdown body is the prompt, its `references` are provided as context to the run, and the source `.task.md` URL (along with optional `requestor` attribution) is recorded on the task.
 - **Executing a `.process.md`:** The deployment registers the `.process.md` directly as a standing trigger (and merge gate when `gate: true`). If `not_before` is set (§6.4), the process does not fire before `not_before`. Once active, whenever any condition in `on` matches—or whenever any grainfile referenced in `trigger_with` is triggered—the deployment dispatches a run once `depends_on` are satisfied, using the `.process.md`'s Markdown body as the prompt and `references` as context. When `gate: true`, the deployment holds the triggering commit or pull request until the run succeeds.
 
 ## 10. Errors and lint
@@ -404,21 +415,21 @@ The **canonical reference** of a grainfile, directory, or repository is `git::ht
 | GF004 | error | Front matter outside the YAML subset: not a mapping, non-string key, duplicate key, or uses YAML anchors, aliases, merge keys, or tags (§5.3). |
 | GF005 | warning | A Markdown file has an unregistered `.<kind>.md` suffix (§4.2.3). |
 | GF006 | error | A path or file size limit of §4.1.4 or §4.3 is exceeded, or two paths in a repository differ only in case. |
-| GF020 | error | Schema or field validation failure: missing required field (`title`, `requestor`, `recipient`, or `on`/`trigger_with` on `process`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `created_at` or `not_before` date/time, unknown `on` trigger source, or invalid `schedule.cron` / event filter (§6, §7). |
+| GF020 | error | Schema or field validation failure: missing required field (`title`, `recipient`, or `on`/`trigger_with` on `process`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `created_at` or `not_before` date/time, unknown `on` trigger source, or invalid `schedule.cron` / event filter (§6, §7). |
 | GF022 | warning | Unknown front-matter field not beginning with `x_` (§3.3). |
 | GF030 | error | A reference does not resolve: missing file, missing directory, or missing Markdown heading `#<anchor>` (§8.2). |
 | GF032 | error | A reference resolves to the wrong kind: `depends_on` or `trigger_with` target is not a `task` or `process` grainfile, or a deployment identity resolves to a file instead of a repository or folder (§6.2.2, §8.3). |
 | GF034 | error | Cycle in `depends_on` or `trigger_with` (§8.4). |
-| GF035 | error | Malformed reference: not a valid `git::https://` (or `git::file://`) go-getter string or local path, uses an unsupported getter, scheme, or query parameter, or attaches `#<anchor>` to a deployment identity (§6.2.2, §8.1). |
+| GF035 | error | Malformed reference: not a valid `https://` (or `file://`) URL or local path, uses a `git::` prefix, `//` path separator, unsupported scheme, or query parameter, or attaches `#<anchor>` to a deployment identity (§6.2.2, §8.1). |
 | GF036 | error | A relative reference climbs above its repository root (§8.1.2). |
 
 ## 11. Security considerations
 
-11.1. **Protected branches.** Deployments SHOULD act only on `.task.md` and `.process.md` files from protected branches (or verified pull-request events for `on.pull_request`), using the forge's branch protection and `CODEOWNERS` reviews as the write-authority boundary.
+11.1. **Protected branches and source authority.** The authenticated source of a `.task.md` or `.process.md` is the repository and folder URL where the file lives, not its optional `requestor` attribution field (§6.2). Deployments SHOULD act only on `.task.md` and `.process.md` files from protected branches (or verified pull-request events for `on.pull_request`), using the forge's branch protection and `CODEOWNERS` reviews as the write-authority boundary.
 
 11.2. **Host-scoped credentials.** References never carry credentials (§8.1.1). When fetching a cross-repository reference, a deployment MUST only send credentials configured for that reference's host.
 
-11.3. **No local file URLs in production.** `git::file://` references exist only for local test suites; an executor MUST refuse `file://` references outside tests (§8.1.1).
+11.3. **No local file URLs in production.** `file://` references exist only for local test suites; an executor MUST refuse `file://` references outside tests (§8.1.1).
 
 11.4. **Resource limits.** Readers enforce the file, front-matter, and path-length bounds of §4.1.4 and §4.3 before parsing YAML or dispatching runs.
 
@@ -434,8 +445,8 @@ The **canonical reference** of a grainfile, directory, or repository is `git::ht
 
 [`examples/grainfiles/`](../examples/grainfiles/README.md) contains two example repositories mapped via `stubs.yaml`; `python3 tools/grainfiles/grainlint.py examples/grainfiles` validates them all:
 
-- **`widgets/`** (`https://github.com/acme/widgets.git`): a code repository with design notes (`docs/widget-schema.md`), Go source (`src/widget.go`), three discrete tasks in `.grain/tasks/` (`2026-10-16-widget-schema-v2.task.md`, `2026-10-16-widget-schema-v2-migration.task.md` with `depends_on` and `not_before: "2026-10-25T09:00:00Z"`, and `2026-11-01-drop-widget-v1-support.task.md` with `draft: true` and `not_before: "2026-11-01"`), and two processes in `.grain/processes/` (`schema-security-review.process.md` with `gate: true` on pull requests and pushes, and `release-cut-check.process.md` with `scenario` and `manual` triggers).
-- **`grain-eu/`** (`https://github.com/acme/grain-eu.git`): a deployment repository with a two-step nightly qualification group in `processes/qualification/`: `smoke.process.md` (with adeployment URL `requestor` and `recipient`, `on.schedule` in `Europe/Berlin`, and cross-repo `references`) and `report.process.md` (paired via `trigger_with: ["./smoke.process.md"]` and ordered via `depends_on: ["./smoke.process.md"]`).
+- **`widgets/`** (`https://github.com/acme/widgets`): a code repository with design notes (`docs/widget-schema.md`), Go source (`src/widget.go`), three discrete tasks in `.grain/tasks/` (`2026-10-16-widget-schema-v2.task.md`, `2026-10-16-widget-schema-v2-migration.task.md` omitting optional `requestor` and using `depends_on` and `not_before: "2026-10-25T09:00:00Z"`, and `2026-11-01-drop-widget-v1-support.task.md` with `draft: true` and `not_before: "2026-11-01"`), and two processes in `.grain/processes/` (`schema-security-review.process.md` with `gate: true` on pull requests and pushes, and `release-cut-check.process.md` with `scenario` and `manual` triggers).
+- **`grain-eu/`** (`https://github.com/acme/grain-eu`): a deployment repository with a two-step nightly qualification group in `processes/qualification/`: `smoke.process.md` (with plain `https://` deployment URL `requestor` and `recipient`, `on.schedule` in `Europe/Berlin`, and cross-repo `https://` `/tree/` and `/blob/` `references`) and `report.process.md` (omitting optional `requestor`, paired via `trigger_with: ["./smoke.process.md"]` and ordered via `depends_on: ["./smoke.process.md"]`).
 
 Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/testdata/bad/`, generated by `tools/grainfiles/testdata/mkfixtures.py` and checked by `python3 tools/grainfiles/grainlint.py --self-test`.
 
@@ -444,7 +455,7 @@ Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/te
 1. **Two directly executed kinds (`task` and `process`).** Discrete one-off tasks are `<name>.task.md` and standing/repeatable processes are `<name>.process.md`, both executed directly with their Markdown body as the prompt (§2.1, §7, §9).
 2. **Lower-case ASCII stems.** Grainfile stems use lower-case ASCII letters, digits, `.`, `-`, `_` (and optional compact UTC timestamps) so filenames are portable across case-insensitive file systems (§4.1.3).
 3. **Unknown fields warn; `x_*` extends; unknown trigger sources fail closed.** Unrecognised fields emit a warning (`GF022`) while `x_*` extension fields are silent; unknown `on` trigger sources are an error (`GF020`) (§3.3, §3.4).
-4. **Git author user identities and go-getter deployment identities.** `requestor` accepts either `Name <email>` or a deployment repository/folder reference; `recipient` requires a deployment repository/folder reference (§6.2).
+4. **Repository/folder source authority, required `recipient`, and optional `requestor`.** The authenticated source of a grainfile is the URL of the repository/folder where it lives; `recipient` requires a plain `https://` (or repo-local) deployment repository/folder identity, while `requestor` is optional attribution metadata accepting `Name <email>` or a plain `https://` URL / deployment identity (§6.2, §11.1).
 5. **Drafts and time-based deferral (`draft` and `not_before`).** Authors can commit work-in-progress grainfiles with `draft: true` (validated by the linter, ignored by recipient deployments) and defer task execution or process activation until a future UTC timestamp or `YYYY-MM-DD` date via `not_before` (§6.3, §6.4, §9).
 6. **Multi-step workflows via `trigger_with` and `depends_on`.** Co-triggering (`trigger_with`) combined with ordering (`depends_on`) expresses multi-task groups and suites without a separate suite or folder-template kind (§7.2.3, §8.4).
-7. **Restricted go-getter and repo-local references.** Remote references allow only `git::`, `https://` (`file://` in tests), and `?ref=`; `/`-rooted references are relative to the repository root (§8.1).
+7. **Plain `https://` forge URLs and repo-local references.** Remote references are plain `https://` URLs (`file://` in tests) using standard forge `/blob/<ref>/<path>`, `/tree/<ref>/<path>`, `/-/blob|tree/<ref>/<path>`, `/+/<ref>/<path>`, or direct repository URLs without `git::`, `//`, or `?ref=`; `/`-rooted references are relative to the repository root (§8.1).
