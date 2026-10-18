@@ -118,7 +118,7 @@ function SafeExternalLink({ url, label, sx }: { url: string; label?: string; sx?
     );
   }
   return (
-    <MuiLink href={href} target="_blank" rel="noreferrer" underline="hover" sx={sx}>
+    <MuiLink href={href} target="_blank" rel="noreferrer" color="text.primary" underline="hover" sx={sx}>
       {text}
     </MuiLink>
   );
@@ -195,6 +195,11 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
     [subscriptions, selected],
   );
 
+  const selectedTriggers = useMemo(
+    () => (selected ? summarizeTriggers(selected.on ?? selected.on_spec) : []),
+    [selected],
+  );
+
   return (
     <Stack spacing={2.5}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
@@ -231,8 +236,8 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
             onChange={(e) => setDraftFilter(e.target.value as 'all' | 'active' | 'draft')}
             sx={{ minWidth: 160 }}
           >
-            <MenuItem value="all">All states</MenuItem>
-            <MenuItem value="active">Active (non-draft)</MenuItem>
+            <MenuItem value="all">All</MenuItem>
+            <MenuItem value="active">Active only</MenuItem>
             <MenuItem value="draft">Drafts only</MenuItem>
           </TextField>
           <TextField
@@ -290,12 +295,11 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                         {g.title}
                       </Typography>
                       <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-                        {g.draft && <Chip size="small" label="Draft" color="warning" variant="outlined" />}
+                        {g.draft && <Chip size="small" label="Draft" color="warning" />}
                         {g.not_before && (
                           <Chip
                             size="small"
                             label={`Not before ${g.not_before}`}
-                            color="secondary"
                             variant="outlined"
                           />
                         )}
@@ -390,7 +394,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
       </Paper>
 
       {selected && (
-        <Paper sx={{ p: 2.5 }}>
+        <Paper data-testid="grainfile-detail" sx={{ p: 2.5 }}>
           <Stack spacing={2}>
             <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -399,7 +403,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                 {selected.draft && <Chip size="small" label="Draft" color="warning" />}
                 {selected.gate && <Chip size="small" label="Gate" color="success" />}
                 {selected.not_before && (
-                  <Chip size="small" label={`Not before ${selected.not_before}`} color="secondary" variant="outlined" />
+                  <Chip size="small" label={`Not before ${selected.not_before}`} variant="outlined" />
                 )}
               </Stack>
               <SafeExternalLink url={selected.url} label={selected.url} sx={{ fontFamily: mono, fontSize: 12 }} />
@@ -441,6 +445,18 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                     <strong>Commit:</strong> <code>{selected.commit_sha}</code>
                   </Typography>
                 )}
+                {selectedTriggers.length > 0 && (
+                  <Box>
+                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                      <strong>Triggers (on):</strong>
+                    </Typography>
+                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                      {selectedTriggers.map((t) => (
+                        <Chip key={t} size="small" label={t} variant="outlined" />
+                      ))}
+                    </Stack>
+                  </Box>
+                )}
                 {selectedSubscriptions.length > 0 && (
                   <Box>
                     <Typography variant="body2">
@@ -458,10 +474,26 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                     references
                   </Typography>
                   {selected.references && selected.references.length > 0 ? (
-                    <Stack spacing={0.25}>
-                      {selected.references.map((ref) => (
-                        <SafeExternalLink key={ref} url={ref} sx={{ fontFamily: mono, fontSize: 12 }} />
-                      ))}
+                    <Stack spacing={0.5}>
+                      {selected.references.map((ref) => {
+                        const isAuthorized = Boolean(
+                          selected.authorized_references?.includes(ref) ||
+                            ref.startsWith('/') ||
+                            ref.startsWith('./') ||
+                            shortRepo(ref).toLowerCase().startsWith(shortRepo(selected.repo).toLowerCase() + '/'),
+                        );
+                        return (
+                          <Stack key={ref} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                            <SafeExternalLink url={ref} sx={{ fontFamily: mono, fontSize: 12 }} />
+                            <Chip
+                              size="small"
+                              label={isAuthorized ? 'Authorized (same-repo)' : 'External'}
+                              color={isAuthorized ? 'success' : 'default'}
+                              variant={isAuthorized ? 'filled' : 'outlined'}
+                            />
+                          </Stack>
+                        );
+                      })}
                     </Stack>
                   ) : (
                     <Typography variant="body2" color="text.secondary">

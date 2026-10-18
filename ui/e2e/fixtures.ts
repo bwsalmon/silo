@@ -8,15 +8,20 @@
 // every request, its EventSource streams included. The hub admin seeds
 // the directory through the same API the UI uses.
 import { test as base, expect, type Browser, type Page } from '@playwright/test';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, createWriteStream } from 'node:fs';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { createHmac } from 'node:crypto';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, createWriteStream } from 'node:fs';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { binDir } from './paths';
 
 export const userHeader = 'X-Silo-E2e-User';
 export const hubAdmin = 'admin@e2e.test';
+export const webhookSecret = 'e2e-webhook-secret';
+export const githubToken = 'ghs_e2e_sim_token';
+export const nodeUIDomain = 'nodes.hub.e2e.test';
 
 export interface Reply<T = any> {
   status: number;
@@ -27,6 +32,8 @@ export class Hub {
   constructor(
     readonly url: string,
     readonly proc: ChildProcess,
+    readonly dir: string = '',
+    readonly githubSim?: HttpServer,
   ) {}
 
   // api calls the hub's API as user, with the hub's own Origin, which
@@ -52,6 +59,135 @@ export class Hub {
     const r = await this.api<T>(user, method, path, body);
     if (r.status < 200 || r.status > 299) throw new Error(`${method} ${path} as ${user}: ${r.status} ${JSON.stringify(r.body)}`);
     return r.body;
+  }
+
+  gitRepoDir(slug: string): string {
+    return join(this.dir, 'repos', ...slug.split('/'));
+  }
+
+  private initGitRepo(slug: string, branch = 'main'): void {
+    const repoDir = this.gitRepoDir(slug);
+    mkdirSync(repoDir, { recursive: true });
+    execFileSync('git', ['init', '-b', branch, repoDir], { stdio: 'ignore' });
+    execFileSync('git', ['-C', repoDir, 'config', 'user.name', 'E2E Simulator'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', repoDir, 'config', 'user.email', 'sim@e2e.test'], { stdio: 'ignore' });
+  }
+
+  // pushGitHub commits files to a real local git repository served by the
+  // worker's GitHub simulator and posts an HMAC-SHA256 signed push webhook
+  // to the hub.
+  async pushGitHub(slug: string, branch: string, files: Record<string, string>, removed: string[] = []): Promise<string> {
+    const repoDir = this.gitRepoDir(slug);
+    if (!existsSync(join(repoDir, '.git'))) this.initGitRepo(slug, branch);
+    let beforeSha = '0000000000000000000000000000000000000000';
+    try {
+      beforeSha = execFileSync('git', ['-C', repoDir, 'rev-parse', `refs/heads/${branch}`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch {
+      // First commit on branch.
+    }
+    execFileSync('git', ['-C', repoDir, 'checkout', '-B', branch], { stdio: 'ignore' });
+    const modified: string[] = [];
+    for (const [relPath, content] of Object.entries(files)) {
+      const abs = join(repoDir, relPath);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content, 'utf8');
+      modified.push(relPath);
+    }
+    for (const relPath of removed) {
+      const abs = join(repoDir, relPath);
+      if (existsSync(abs)) rmSync(abs, { force: true });
+    }
+    execFileSync('git', ['-C', repoDir, 'add', '-A'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', repoDir, 'commit', '--allow-empty', '-m', `update ${modified.join(', ')}`], { stdio: 'ignore' });
+    const afterSha = execFileSync('git', ['-C', repoDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+    const payload = JSON.stringify({
+      ref: `refs/heads/${branch}`,
+      before: beforeSha,
+      after: afterSha,
+      repository: {
+        full_name: slug,
+        html_url: `https://github.com/${slug}`,
+        default_branch: 'main',
+      },
+      head_commit: {
+        id: afterSha,
+        added: [],
+        modified,
+        removed,
+      },
+      commits: [
+        {
+          id: afterSha,
+          added: [],
+          modified,
+          removed,
+        },
+      ],
+    });
+    const sig = 'sha256=' + createHmac('sha256', webhookSecret).update(payload).digest('hex');
+    const res = await fetch(`${this.url}/v1/webhooks/github`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': 'push',
+        'X-Hub-Signature-256': sig,
+      },
+      body: payload,
+    });
+    if (!res.ok) {
+      throw new Error(`webhook failed: ${res.status} ${await res.text()}`);
+    }
+    return afterSha;
+  }
+
+  // pullRequestGitHub posts an HMAC-SHA256 signed pull_request webhook to the hub.
+  async pullRequestGitHub(
+    slug: string,
+    opts: {
+      action?: string;
+      number?: number;
+      headRef?: string;
+      baseRef?: string;
+      sha: string;
+      modified?: string[];
+      merged?: boolean;
+    },
+  ): Promise<void> {
+    const payload = JSON.stringify({
+      action: opts.action ?? (opts.merged ? 'closed' : 'opened'),
+      merged: Boolean(opts.merged),
+      repository: {
+        full_name: slug,
+        html_url: `https://github.com/${slug}`,
+        default_branch: 'main',
+      },
+      pull_request: {
+        number: opts.number ?? 1,
+        merged: Boolean(opts.merged),
+        merge_commit_sha: opts.merged ? opts.sha : undefined,
+        head: { ref: opts.headRef ?? 'feature', sha: opts.sha },
+        base: { ref: opts.baseRef ?? 'main', sha: opts.sha },
+        modified: opts.modified ?? [],
+        changed_paths: opts.modified ?? [],
+      },
+    });
+    const sig = 'sha256=' + createHmac('sha256', webhookSecret).update(payload).digest('hex');
+    const res = await fetch(`${this.url}/v1/webhooks/github`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': 'pull_request',
+        'X-Hub-Signature-256': sig,
+      },
+      body: payload,
+    });
+    if (!res.ok) {
+      throw new Error(`pull_request webhook failed: ${res.status} ${await res.text()}`);
+    }
   }
 }
 
@@ -81,14 +217,71 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, timeout =
 }
 
 async function startHub(dir: string): Promise<Hub> {
+  const githubSim = createHttpServer((req, res) => {
+    const auth = req.headers['authorization'];
+    if (auth !== `Bearer ${githubToken}`) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ message: 'Bad credentials' }));
+      return;
+    }
+    const u = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const m = u.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)$/);
+    if (!m) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    const [, owner, repoName, rawPath] = m;
+    const filePath = rawPath.split('/').map(decodeURIComponent).join('/');
+    const ref = u.searchParams.get('ref') || 'HEAD';
+    const repoDir = join(dir, 'repos', owner, repoName);
+    try {
+      const out = execFileSync('git', ['-C', repoDir, 'show', `${ref}:${filePath}`], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      res.end(out);
+    } catch {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ message: 'Not Found' }));
+    }
+  });
+  await new Promise<void>((resolve) => githubSim.listen(0, '127.0.0.1', () => resolve()));
+  const simAddr = githubSim.address();
+  const githubSimUrl = `http://127.0.0.1:${simAddr && typeof simAddr === 'object' ? simAddr.port : 0}`;
+
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
   const database = process.env.SILO_E2E_DATABASE || `sqlite:${join(dir, 'hub.db')}`;
   const log = createWriteStream(join(dir, 'hub.log'));
   const proc = spawn(
     `${binDir}/silo`,
-    ['hub', 'serve', '-addr', `127.0.0.1:${port}`, '-database', database, '-dev-user-header', userHeader, '-admins', `user:${hubAdmin}`,
-      '-heartbeat', '1s', '-dispatch-retry', '1s', '-shutdown-grace', '2s'],
+    [
+      'hub',
+      'serve',
+      '-addr',
+      `127.0.0.1:${port}`,
+      '-database',
+      database,
+      '-dev-user-header',
+      userHeader,
+      '-admins',
+      `user:${hubAdmin}`,
+      '-heartbeat',
+      '1s',
+      '-dispatch-retry',
+      '1s',
+      '-shutdown-grace',
+      '2s',
+      '-webhook-secret',
+      webhookSecret,
+      '-github-token',
+      githubToken,
+      '-github-api-url',
+      githubSimUrl,
+      '-node-ui-domain',
+      nodeUIDomain,
+    ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   proc.stdout?.pipe(log);
@@ -97,7 +290,7 @@ async function startHub(dir: string): Promise<Hub> {
     if (proc.exitCode !== null) throw new Error(`the hub exited ${proc.exitCode}; see ${join(dir, 'hub.log')}`);
     return (await fetch(url + '/healthz')).ok || undefined;
   });
-  return new Hub(url, proc);
+  return new Hub(url, proc, dir, githubSim);
 }
 
 // A Grain is a fake Grain node (internal/fakegrain), driven through its
@@ -170,6 +363,7 @@ export interface GrainState {
   failures: number;
   last_error: string;
   tasks: GrainTask[];
+  grainfile_events?: any[];
 }
 
 export interface GrainOptions {
@@ -177,6 +371,10 @@ export interface GrainOptions {
   repos: string[];
   id?: string;
   interactive?: boolean;
+  nodeui?: boolean;
+  recipients?: string[];
+  folders?: string[];
+  grainfiles?: string[];
   // token, when set, is the node token to connect with; otherwise the
   // owner mints one through the API.
   token?: string;
@@ -217,6 +415,7 @@ export const test = base.extend<
       const hub = await startHub(workDir);
       await use(hub);
       hub.proc.kill('SIGTERM');
+      hub.githubSim?.close();
     },
     { scope: 'worker' },
   ],
@@ -260,6 +459,10 @@ export const test = base.extend<
       writeFileSync(join(dir, 'token'), token, { mode: 0o600 });
       const args = ['-hub', hub.url, '-token-file', join(dir, 'token'), '-id', id, '-repos', o.repos.join(','), '-addr-file', join(dir, 'addr')];
       if (o.interactive) args.push('-interactive');
+      if (o.nodeui) args.push('-nodeui');
+      if (o.recipients && o.recipients.length > 0) args.push('-recipients', o.recipients.join(','));
+      if (o.folders && o.folders.length > 0) args.push('-folders', o.folders.join(','));
+      if (o.grainfiles && o.grainfiles.length > 0) args.push('-grainfiles', o.grainfiles.join(','));
       const log = createWriteStream(join(dir, 'grain.log'));
       const proc = spawn(`${binDir}/fakegrain`, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       proc.stdout?.pipe(log);

@@ -108,6 +108,149 @@ describe('the task page’s view-through', () => {
   });
 });
 
+describe('the grainfiles and nodes pages’ storage boundary', () => {
+  it('writes nothing to storage or service workers when browsing /grainfiles, inspecting details, and viewing /nodes', async () => {
+    const overview = {
+      grainfiles: [
+        {
+          repo: 'https://github.com/acme/app',
+          path: 'tasks/01-deploy.task.md',
+          commit_sha: '1111111111111111111111111111111111111111',
+          ref: 'main',
+          url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
+          kind: 'task',
+          title: 'Deploy service to staging',
+          recipient: 'https://github.com/acme/grain-eu',
+          requestor: 'Alice <alice@example.com>',
+          draft: false,
+          not_before: '2026-10-19T00:00:00Z',
+          references: ['https://github.com/acme/app/blob/main/docs/arch.md', 'https://github.com/other/repo/blob/main/ext.md'],
+          authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
+          depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.md'],
+          updated_at: '2026-10-18T10:05:00Z',
+        },
+        {
+          repo: 'https://github.com/acme/infra',
+          path: '.grain/processes/ci.process.md',
+          commit_sha: '2222222222222222222222222222222222222222',
+          ref: 'main',
+          url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.md',
+          kind: 'process',
+          title: 'Continuous verification gate',
+          recipient: 'https://github.com/acme/grain-us',
+          draft: true,
+          gate: true,
+          trigger_with: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.md'],
+          on: {
+            push: { branches: ['main'] },
+            schedule: { cron: '0 * * * *', timezone: 'UTC' },
+            scenario: { description: 'Verify staging' },
+          },
+          updated_at: '2026-10-18T10:06:00Z',
+        },
+      ],
+      subscriptions: [
+        {
+          node_id: 'ws-eu-1',
+          owner: 'alice@example.com',
+          recipients: ['https://github.com/acme/grain-eu'],
+          repos: ['https://github.com/acme/app'],
+          folders: ['https://github.com/acme/app/tree/main/tasks'],
+          grainfiles: ['https://github.com/acme/app/blob/main/tasks/01-deploy.task.md'],
+          cursor: 3,
+          revision: 1,
+          updated_at: '2026-10-18T10:05:00Z',
+        },
+      ],
+      events: [
+        {
+          seq: 1,
+          type: 'task_ready',
+          repo: 'https://github.com/acme/app',
+          path: 'tasks/01-deploy.task.md',
+          grainfile_url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
+          kind: 'task',
+          title: 'Deploy service to staging',
+          recipient: 'https://github.com/acme/grain-eu',
+          created_at: '2026-10-18T10:05:00Z',
+        },
+        {
+          seq: 2,
+          type: 'process_triggered',
+          repo: 'https://github.com/acme/infra',
+          path: '.grain/processes/ci.process.md',
+          grainfile_url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.md',
+          kind: 'process',
+          title: 'Continuous verification gate',
+          recipient: 'https://github.com/acme/grain-us',
+          trigger_source: 'push',
+          gate: true,
+          reason: 'commit 2222222 on main',
+          created_at: '2026-10-18T10:06:00Z',
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === '/v1/me') return Response.json({ email: 'alice@example.com', hub_admin: false, teams: { infra: 'admin' } });
+        if (url.startsWith('/v1/grainfiles')) return Response.json(overview);
+        if (url === '/v1/nodes') {
+          return Response.json({
+            nodes: [
+              {
+                id: 'ws-eu-1',
+                repos: ['acme/app'],
+                slots: 4,
+                owner: 'alice@example.com',
+                status: 'online',
+                free: 3,
+                claimed: 0,
+                connected_at: '2026-10-18T10:00:00Z',
+                last_seen: '2026-10-18T10:05:00Z',
+                features: ['grainfiles', 'nodeui'],
+                recipients: ['https://github.com/acme/grain-eu'],
+                folders: ['https://github.com/acme/app/tree/main/tasks'],
+                grainfiles: ['https://github.com/acme/app/blob/main/tasks/01-deploy.task.md'],
+                ui: { offered: true, url: 'https://ws-eu-1.nodes.hub.example.com/' },
+                ui_url: 'https://ws-eu-1.nodes.hub.example.com/',
+              },
+            ],
+          });
+        }
+        if (url === '/v1/node-tokens') return Response.json({ node_tokens: [] });
+        return new Response('no', { status: 404 });
+      }),
+    );
+
+    const w = watchStorage();
+    window.history.replaceState(null, '', '/grainfiles');
+    render(<App />);
+
+    await screen.findAllByText('Deploy service to staging');
+    expect(screen.getByText('task_ready')).toBeTruthy();
+
+    // Inspect the second Grainfile and filter the list.
+    fireEvent.click(screen.getByText('Continuous verification gate'));
+    await screen.findByText('process_triggered');
+    fireEvent.change(screen.getByLabelText('Repository'), { target: { value: 'acme/app' } });
+
+    // Navigate to /nodes and inspect connected deployment subscriptions.
+    fireEvent.click(screen.getByRole('button', { name: 'Nodes' }));
+    await screen.findByText('ws-eu-1');
+    expect(screen.getByText('https://github.com/acme/grain-eu')).toBeTruthy();
+
+    expect(w.register).not.toHaveBeenCalled();
+    expect(w.idbOpen).not.toHaveBeenCalled();
+    expect(w.cachesOpen).not.toHaveBeenCalled();
+    expect(w.setItem).not.toHaveBeenCalled();
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+    expect(document.cookie).toBe('');
+  });
+});
+
 // The UI's own code, and the client SDK it builds in from source
 // (sdk/ts/src, through vite.config.ts's alias), name no storage API at
 // all, and the built bundle

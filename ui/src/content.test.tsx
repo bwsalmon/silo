@@ -91,6 +91,176 @@ describe('node and submitter content', () => {
     expect(hrefs).toContain('https://evil.example/track.png');
     expect(hrefs.some((h) => /script|data:/i.test(h ?? ''))).toBe(false);
   });
+
+  it('neutralizes script-bearing and unsafe URLs in /grainfiles and /nodes subscription views', async () => {
+    const overview = {
+      grainfiles: [
+        {
+          repo: 'https://github.com/acme/app',
+          path: 'tasks/01-evil.task.md',
+          commit_sha: '1111111111111111111111111111111111111111',
+          ref: 'main',
+          url: 'javascript:window.pwned=10',
+          kind: 'task',
+          title: `task ${xss}`,
+          recipient: 'javascript:window.pwned=11',
+          requestor: `req ${xss} javascript:window.pwned=12`,
+          draft: false,
+          not_before: '2026-10-19T00:00:00Z',
+          references: [
+            'javascript:window.pwned=13',
+            'data:text/html,<script>window.pwned=14</script>',
+            xss,
+            'https://github.com/acme/app/blob/main/docs/safe.md',
+          ],
+          authorized_references: [
+            'javascript:window.pwned=13',
+            'https://github.com/acme/app/blob/main/docs/safe.md',
+          ],
+          depends_on: [
+            'javascript:window.pwned=15',
+            'data:text/html,<script>window.pwned=16</script>',
+            'https://github.com/acme/app/blob/main/tasks/dep.task.md',
+          ],
+          trigger_with: [
+            'javascript:window.pwned=17',
+            'data:text/html,<script>window.pwned=18</script>',
+            xss,
+          ],
+          on: {
+            scenario: [
+              { description: `scen ${xss}` },
+              { description: 'javascript:window.pwned=19' },
+              { description: 'data:text/html,<script>window.pwned=20</script>' },
+            ],
+          },
+          updated_at: '2026-10-18T10:05:00Z',
+        },
+        {
+          repo: 'data:text/html,<script>window.pwned=21</script>',
+          path: 'processes/02-evil.process.md',
+          commit_sha: '2222222222222222222222222222222222222222',
+          ref: 'main',
+          url: 'https://github.com/acme/app/blob/main/processes/02-evil.process.md',
+          kind: 'process',
+          title: `proc ${xss}`,
+          recipient: 'data:text/html,<script>window.pwned=22</script>',
+          requestor: 'data:text/html,<script>window.pwned=23</script>',
+          draft: true,
+          gate: true,
+          references: ['java\tscript:window.pwned=24'],
+          depends_on: ['java\tscript:window.pwned=25'],
+          trigger_with: ['java\tscript:window.pwned=26'],
+          on: {
+            scenario: { description: `proc-scen ${xss}` },
+          },
+          updated_at: '2026-10-18T10:06:00Z',
+        },
+      ],
+      subscriptions: [
+        {
+          node_id: `ws-${xss}`,
+          owner: xss,
+          recipients: ['javascript:window.pwned=11'],
+          repos: ['https://github.com/acme/app'],
+          folders: ['javascript:window.pwned=27'],
+          grainfiles: ['javascript:window.pwned=10'],
+          cursor: 1,
+          revision: 1,
+          updated_at: '2026-10-18T10:05:00Z',
+        },
+      ],
+      events: [
+        {
+          seq: 1,
+          type: 'process_triggered',
+          repo: 'https://github.com/acme/app',
+          path: 'processes/02-evil.process.md',
+          grainfile_url: 'https://github.com/acme/app/blob/main/processes/02-evil.process.md',
+          kind: 'process',
+          title: `proc ${xss}`,
+          recipient: 'javascript:window.pwned=22',
+          trigger_source: xss,
+          triggered_by: 'javascript:window.pwned=28',
+          dependency_url: 'data:text/html,<script>window.pwned=29</script>',
+          reason: `event-reason ${xss}`,
+          created_at: '2026-10-18T10:06:00Z',
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === '/v1/me') return Response.json({ email: 'alice@example.com', hub_admin: false, teams: { infra: 'admin' } });
+        if (url.startsWith('/v1/grainfiles')) return Response.json(overview);
+        if (url === '/v1/nodes') {
+          return Response.json({
+            nodes: [
+              {
+                id: `ws-node-${xss}`,
+                repos: [`acme/app-${xss}`],
+                slots: 2,
+                owner: 'alice@example.com',
+                status: 'online',
+                free: 2,
+                claimed: 0,
+                connected_at: '2026-10-18T10:00:00Z',
+                last_seen: '2026-10-18T10:05:00Z',
+                features: ['grainfiles', 'nodeui'],
+                recipients: [
+                  'javascript:window.pwned=30',
+                  'data:text/html,<script>window.pwned=31</script>',
+                  'https://github.com/acme/grain-safe',
+                ],
+                folders: ['javascript:window.pwned=32', xss],
+                grainfiles: [
+                  'javascript:window.pwned=33',
+                  'data:text/html,<script>window.pwned=34</script>',
+                  'https://github.com/acme/app/blob/main/tasks/ok.task.md',
+                ],
+                ui: { offered: true, url: 'javascript:window.pwned=35' },
+                ui_url: 'javascript:window.pwned=35',
+              },
+            ],
+          });
+        }
+        if (url === '/v1/node-tokens') return Response.json({ node_tokens: [] });
+        return new Response('no', { status: 404 });
+      }),
+    );
+
+    window.history.replaceState(null, '', '/grainfiles');
+    const { container, unmount } = render(<App />);
+    await screen.findAllByText(`task ${xss}`);
+    await screen.findAllByText(`scenario: scen ${xss}`);
+
+    assertInert(container);
+    const taskHrefs = [...container.querySelectorAll('a[href]')].map((a) => a.getAttribute('href'));
+    expect(taskHrefs).toContain('https://github.com/acme/app/blob/main/docs/safe.md');
+    expect(taskHrefs).toContain('https://github.com/acme/app/blob/main/tasks/dep.task.md');
+    expect(taskHrefs.some((h) => /javascript:|data:/i.test(h ?? ''))).toBe(false);
+
+    // Inspect the second row (process) and verify its metadata and trigger events are inert.
+    fireEvent.click(screen.getByText(`proc ${xss}`));
+    await screen.findByText(`event-reason ${xss}`);
+    await screen.findAllByText(`scenario: proc-scen ${xss}`);
+    assertInert(container);
+    const procHrefs = [...container.querySelectorAll('a[href]')].map((a) => a.getAttribute('href'));
+    expect(procHrefs.some((h) => /javascript:|data:/i.test(h ?? ''))).toBe(false);
+    unmount();
+
+    // Verify /nodes subscription view neutralizes unsafe links and scripts as well.
+    window.history.replaceState(null, '', '/nodes');
+    const { container: nodesContainer } = render(<App />);
+    await screen.findByText(`ws-node-${xss}`);
+    assertInert(nodesContainer);
+    const nodeHrefs = [...nodesContainer.querySelectorAll('a[href]')].map((a) => a.getAttribute('href'));
+    expect(nodeHrefs).toContain('https://github.com/acme/grain-safe');
+    expect(nodeHrefs).toContain('https://github.com/acme/app/blob/main/tasks/ok.task.md');
+    expect(nodeHrefs.some((h) => /javascript:|data:/i.test(h ?? ''))).toBe(false);
+    expect(screen.queryByRole('link', { name: 'Open Grain UI' })).toBeNull();
+  });
 });
 
 describe('safeUrl', () => {
