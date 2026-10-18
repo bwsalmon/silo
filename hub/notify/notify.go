@@ -32,14 +32,16 @@ const Channel = "silo_hub"
 //	{"message":"<task>"}          a human posted an interactive task a message: the dispatcher sends it
 //	{"node":"<id>"}               a node's row in the shared registry changed: refill the mirror
 //	{"event":"<task>","seq":N}    the task's event N was stored
+//	{"grainfile":true,"seq":N}    grainfile event N was stored: deliver to subscribed nodes
 type Message struct {
-	Wake    bool   `json:"wake,omitempty"`
-	Cancel  string `json:"cancel,omitempty"`
-	Approve string `json:"approve,omitempty"`
-	Message string `json:"message,omitempty"`
-	Node    string `json:"node,omitempty"`
-	Event   string `json:"event,omitempty"`
-	Seq     int64  `json:"seq,omitempty"`
+	Wake      bool   `json:"wake,omitempty"`
+	Cancel    string `json:"cancel,omitempty"`
+	Approve   string `json:"approve,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Node      string `json:"node,omitempty"`
+	Event     string `json:"event,omitempty"`
+	Grainfile bool   `json:"grainfile,omitempty"`
+	Seq       int64  `json:"seq,omitempty"`
 
 	// Reconnected is never sent: the bus hands it to its handlers each
 	// time its listening connection is (re)established, since notices
@@ -163,6 +165,8 @@ func (b *Bus) Post(m Message) {
 		key = "n" + m.Node
 	case m.Event != "":
 		key = "e" + m.Event
+	case m.Grainfile:
+		key = "g"
 	case m.Cancel != "":
 		key = "c" + m.Cancel
 	case m.Approve != "":

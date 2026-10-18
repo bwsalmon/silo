@@ -563,10 +563,24 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 		at = s.now()
 	}
 	at = at.UTC()
+	precheck, err := s.loadLatestIndexQ(s.db, ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	hasWork := false
+	for _, rec := range precheck {
+		if !rec.removed && !rec.Draft && !rec.readyEmitted && rec.ToGrainfile().ActiveAt(at) {
+			hasWork = true
+			break
+		}
+	}
+	if !hasWork {
+		return nil, nil
+	}
 	var emitted []Event
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	err = s.tx(ctx, func(tx *sql.Tx) error {
 		emitted = nil
-		records, err := s.loadLatestIndexTx(tx, ctx, "")
+		records, err := s.loadLatestIndexQ(tx, ctx, "")
 		if err != nil {
 			return err
 		}
@@ -722,13 +736,7 @@ func (s *Store) ListIndexByRepo(ctx context.Context, repoURL string) ([]IndexRec
 			return nil, err
 		}
 	}
-	var out []IndexRecord
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		var err error
-		out, err = s.loadLatestIndexTx(tx, ctx, canonRepo)
-		return err
-	})
-	return out, err
+	return s.loadLatestIndexQ(s.db, ctx, canonRepo)
 }
 
 // ListIndexByRecipient returns the latest non-removed IndexRecord per
@@ -756,7 +764,11 @@ func (s *Store) ListIndexByRecipient(ctx context.Context, recipientURL string, i
 	return out, nil
 }
 
-func (s *Store) loadLatestIndexTx(tx *sql.Tx, ctx context.Context, canonRepo string) ([]IndexRecord, error) {
+type rowQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func (s *Store) loadLatestIndexQ(q rowQueryer, ctx context.Context, canonRepo string) ([]IndexRecord, error) {
 	query := `SELECT ` + selectIndexCols + ` FROM grainfile_index`
 	var args []any
 	if canonRepo != "" {
@@ -765,7 +777,7 @@ func (s *Store) loadLatestIndexTx(tx *sql.Tx, ctx context.Context, canonRepo str
 	}
 	query += ` ORDER BY updated_at DESC, commit_sha DESC`
 
-	rows, err := tx.QueryContext(ctx, s.q(query), args...)
+	rows, err := q.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -807,10 +819,25 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 	at = at.UTC()
 	ev.At = at
 
+	repoRecords, err := s.loadLatestIndexQ(s.db, ctx, canonRepo)
+	if err != nil {
+		return nil, err
+	}
+	hasMatch := false
+	for _, rec := range repoRecords {
+		if !rec.removed && !rec.Draft && rec.Kind == KindProcess && rec.ToGrainfile().MatchesEvent(ev) {
+			hasMatch = true
+			break
+		}
+	}
+	if !hasMatch {
+		return nil, nil
+	}
+
 	var triggeredEvents []Event
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		triggeredEvents = nil
-		allRecords, err := s.loadLatestIndexTx(tx, ctx, "")
+		allRecords, err := s.loadLatestIndexQ(tx, ctx, "")
 		if err != nil {
 			return err
 		}
@@ -925,7 +952,7 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 	var recorded []Event
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		recorded = nil
-		allRecords, err := s.loadLatestIndexTx(tx, ctx, "")
+		allRecords, err := s.loadLatestIndexQ(tx, ctx, "")
 		if err != nil {
 			return err
 		}
@@ -1149,6 +1176,14 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.Reason = pl.Reason
 	}
 	return ev, nil
+}
+
+// MaxEventSeq returns the highest event sequence number recorded in
+// grainfile_events, or 0 when none exist.
+func (s *Store) MaxEventSeq(ctx context.Context) (int64, error) {
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM grainfile_events`).Scan(&seq)
+	return seq, err
 }
 
 // EventsSince returns all discoverable Grainfile events with seq > sinceSeq,

@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/net/websocket"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/internal/tunnel/mux"
 )
@@ -33,6 +34,12 @@ type Client struct {
 	Token func(ctx context.Context) (string, error)
 	// Node is what the node registers as.
 	Node registry.Node
+	// Subscriptions, when non-nil, declares the node's grainfile
+	// subscriptions in hello on each connection.
+	Subscriptions *grainfiles.Subscriptions
+	// OnGrainfileEvent, when set, is called for every grainfile_event
+	// notification delivered by the hub on the control stream.
+	OnGrainfileEvent func(grainfiles.Event)
 	// Free, when set, is asked for the node's free slots at each
 	// heartbeat; Node.Slots when nil.
 	Free func() int
@@ -52,32 +59,27 @@ func (cl *Client) logf(format string, args ...any) {
 
 // Conn is one live connection to the hub.
 type Conn struct {
-	m     *mux.Mux
-	ctl   *lines
-	owner string
-	once  sync.Once
+	m               *mux.Mux
+	ctl             *lines
+	owner           string
+	once            sync.Once
+	grainfileEvents chan grainfiles.Event
 
 	mu      sync.Mutex
 	goodbye string
-	filings map[string]chan Message // file_tasks awaiting their filed, by request ID
+	subs    *grainfiles.Subscriptions
+	filings map[string]chan Message // requests awaiting their hub answer, by request ID
 }
 
 // ErrFileRefused is the hub refusing to file a task (Conn.FileTask);
 // the message says why.
 var ErrFileRefused = errors.New("rendezvous: hub refused the filing")
 
-// FileTask asks the hub to file a task, on the control stream
-// (TypeFileTask), and waits for its answer: the task the hub filed, as
-// JSON (tasks.Task), or its refusal, wrapping ErrFileRefused. filing is
-// marshalled as the file_task's task: a tasks.Filing.
-func (c *Conn) FileTask(ctx context.Context, filing any) (json.RawMessage, error) {
-	raw, err := json.Marshal(filing)
-	if err != nil {
-		return nil, err
-	}
+func (c *Conn) request(ctx context.Context, req Message) (Message, error) {
 	b := make([]byte, 8)
 	rand.Read(b)
 	id := hex.EncodeToString(b)
+	req.RequestID = id
 	ch := make(chan Message, 1)
 	c.mu.Lock()
 	if c.filings == nil {
@@ -90,23 +92,124 @@ func (c *Conn) FileTask(ctx context.Context, filing any) (json.RawMessage, error
 		delete(c.filings, id)
 		c.mu.Unlock()
 	}()
-	if err := c.ctl.write(Message{Type: TypeFileTask, RequestID: id, Task: raw}); err != nil {
-		return nil, err
+	if err := c.ctl.write(req); err != nil {
+		return Message{}, err
 	}
 	select {
 	case m := <-ch:
-		if m.Error != "" || len(m.Task) == 0 {
-			return nil, fmt.Errorf("%w: %s", ErrFileRefused, m.Error)
-		}
-		return m.Task, nil
+		return m, nil
 	case <-c.Done():
-		return nil, errors.New("rendezvous: the connection ended before the hub answered")
+		return Message{}, errors.New("rendezvous: the connection ended before the hub answered")
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return Message{}, ctx.Err()
 	}
 }
 
-// filed hands the hub's answer to the FileTask waiting for it.
+// FileTask asks the hub to file a task, on the control stream
+// (TypeFileTask), and waits for its answer: the task the hub filed, as
+// JSON (tasks.Task), or its refusal, wrapping ErrFileRefused. filing is
+// marshalled as the file_task's task: a tasks.Filing.
+func (c *Conn) FileTask(ctx context.Context, filing any) (json.RawMessage, error) {
+	raw, err := json.Marshal(filing)
+	if err != nil {
+		return nil, err
+	}
+	m, err := c.request(ctx, Message{Type: TypeFileTask, Task: raw})
+	if err != nil {
+		return nil, err
+	}
+	if m.Error != "" || len(m.Task) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrFileRefused, m.Error)
+	}
+	return m.Task, nil
+}
+
+// Subscribe updates the node's grainfile subscriptions on the control
+// stream (TypeSubscribe) and waits for the hub's acknowledgement.
+func (c *Conn) Subscribe(ctx context.Context, sub grainfiles.Subscriptions) (grainfiles.Subscriptions, error) {
+	m, err := c.request(ctx, Message{
+		Type:          TypeSubscribe,
+		Subscriptions: &sub,
+		Recipients:    sub.Recipients,
+		Repos:         sub.Repos,
+		Folders:       sub.Folders,
+		Grainfiles:    sub.Grainfiles,
+		Cursor:        sub.Cursor,
+	})
+	if err != nil {
+		return grainfiles.Subscriptions{}, err
+	}
+	if m.Error != "" {
+		return grainfiles.Subscriptions{}, fmt.Errorf("rendezvous: subscribe: %s", m.Error)
+	}
+	var out grainfiles.Subscriptions
+	if m.Subscriptions != nil {
+		out = *m.Subscriptions
+	}
+	c.mu.Lock()
+	cp := out
+	c.subs = &cp
+	c.mu.Unlock()
+	return out, nil
+}
+
+// Catchup asks the hub for any grainfile events matching the node's
+// subscriptions since sinceCursor (or the stored cursor when sinceCursor <= 0).
+func (c *Conn) Catchup(ctx context.Context, sinceCursor int64) ([]grainfiles.Event, int64, error) {
+	m, err := c.request(ctx, Message{
+		Type:   TypeCatchup,
+		Cursor: sinceCursor,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	if m.Error != "" {
+		return nil, 0, fmt.Errorf("rendezvous: catchup: %s", m.Error)
+	}
+	return m.GrainfileEvents, m.Cursor, nil
+}
+
+// CompleteGrainfile reports task or process completion referencing
+// grainfileURL so the hub can emit dependency_completed notices to
+// deployments waiting on it via depends_on.
+func (c *Conn) CompleteGrainfile(ctx context.Context, grainfileURL, commitSHA, state, reason string) ([]grainfiles.Event, error) {
+	m, err := c.request(ctx, Message{
+		Type:         TypeGrainfileCompleted,
+		GrainfileURL: grainfileURL,
+		CommitSHA:    commitSHA,
+		State:        state,
+		Reason:       reason,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if m.Error != "" {
+		return nil, fmt.Errorf("rendezvous: complete grainfile: %s", m.Error)
+	}
+	return m.GrainfileEvents, nil
+}
+
+// GrainfileEvents returns a channel receiving live and catch-up
+// grainfile_event notifications delivered by the hub on this connection.
+// The channel is closed when the connection ends.
+func (c *Conn) GrainfileEvents() <-chan grainfiles.Event {
+	return c.grainfileEvents
+}
+
+// Subscriptions returns the node's grainfile subscriptions as
+// acknowledged by the hub in welcome or the latest Subscribe call, or
+// nil if none were declared.
+func (c *Conn) Subscriptions() *grainfiles.Subscriptions {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.subs == nil {
+		return nil
+	}
+	cp := *c.subs
+	return &cp
+}
+
+// filed hands the hub's answer to the request waiting for it.
 func (c *Conn) filed(m Message) {
 	c.mu.Lock()
 	ch := c.filings[m.RequestID]
@@ -167,7 +270,17 @@ func (cl *Client) Connect(ctx context.Context) (*Conn, error) {
 	}
 	l := newLines(st)
 	node := cl.Node
-	if err := l.write(Message{Type: TypeHello, Node: &node}); err != nil {
+	helloMsg := Message{Type: TypeHello, Node: &node}
+	if cl.Subscriptions != nil {
+		subCopy := *cl.Subscriptions
+		helloMsg.Subscriptions = &subCopy
+		helloMsg.Recipients = subCopy.Recipients
+		helloMsg.Repos = subCopy.Repos
+		helloMsg.Folders = subCopy.Folders
+		helloMsg.Grainfiles = subCopy.Grainfiles
+		helloMsg.Cursor = subCopy.Cursor
+	}
+	if err := l.write(helloMsg); err != nil {
 		return fail(fmt.Errorf("rendezvous: hello: %w", err))
 	}
 	if dl, ok := ctx.Deadline(); ok {
@@ -185,27 +298,46 @@ func (cl *Client) Connect(ctx context.Context) (*Conn, error) {
 	case w.Type != TypeWelcome:
 		return fail(fmt.Errorf("rendezvous: expected welcome, got %q", w.Type))
 	}
-	c := &Conn{m: m, ctl: l, owner: w.Owner}
+	c := &Conn{
+		m:               m,
+		ctl:             l,
+		owner:           w.Owner,
+		subs:            w.Subscriptions,
+		grainfileEvents: make(chan grainfiles.Event, 64),
+	}
 	hb := time.Duration(w.HeartbeatSeconds) * time.Second
 	if hb <= 0 {
 		hb = DefaultHeartbeat
 	}
 	go cl.heartbeat(c, hb)
 	go func() {
-		// The hub sends nothing more on the control stream but the
-		// answers to the node's filings and a goodbye; a read ending is
-		// the stream or the connection ending.
+		defer close(c.grainfileEvents)
+		// The hub sends answers to control requests, grainfile_event
+		// notifications, and a goodbye; a read ending is the stream or the
+		// connection ending.
 		for {
 			msg, err := l.read()
 			if err != nil {
 				c.Close()
 				return
 			}
-			if msg.Type == TypeFiled {
+			switch msg.Type {
+			case TypeFiled, TypeSubscribed, TypeCatchupResult, TypeGrainfileCompletedAck:
 				c.filed(msg)
 				continue
-			}
-			if msg.Type == TypeGoodbye {
+			case TypeGrainfileEvent:
+				if msg.GrainfileEvent != nil {
+					ev := *msg.GrainfileEvent
+					if cl.OnGrainfileEvent != nil {
+						cl.OnGrainfileEvent(ev)
+					}
+					select {
+					case c.grainfileEvents <- ev:
+					default:
+					}
+				}
+				continue
+			case TypeGoodbye:
 				c.mu.Lock()
 				c.goodbye = msg.Error
 				c.mu.Unlock()

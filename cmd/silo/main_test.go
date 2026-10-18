@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -110,4 +112,80 @@ func TestCheckDatabaseAllowsDev(t *testing.T) {
 			t.Errorf("CheckDatabase(%q, %v) = %v, want nil", c.db, c.dev, err)
 		}
 	}
+}
+
+func TestBuildServeConfigGrainfilesFlagsAndEnv(t *testing.T) {
+	t.Run("from env vars", func(t *testing.T) {
+		t.Setenv("SILO_HUB_DATABASE", "sqlite::memory:")
+		t.Setenv("SILO_HUB_DEV", "true")
+		t.Setenv("SILO_HUB_WEBHOOK_SECRET", "env-webhook-secret")
+		t.Setenv("SILO_HUB_GITHUB_TOKEN", "ghp_env_token")
+		t.Setenv("SILO_HUB_GITHUB_API_URL", "https://ghe.example.com/api/v3")
+		t.Setenv("SILO_HUB_GITHUB_APP_ID", "4242")
+		t.Setenv("SILO_HUB_GITHUB_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----")
+
+		_, cfg, err := buildServeConfig(nil)
+		if err != nil {
+			t.Fatalf("buildServeConfig: %v", err)
+		}
+		if cfg.WebhookSecret != "env-webhook-secret" {
+			t.Errorf("WebhookSecret = %q, want env-webhook-secret", cfg.WebhookSecret)
+		}
+		if cfg.GitHubToken != "ghp_env_token" {
+			t.Errorf("GitHubToken = %q, want ghp_env_token", cfg.GitHubToken)
+		}
+		if cfg.GitHubAPIURL != "https://ghe.example.com/api/v3" {
+			t.Errorf("GitHubAPIURL = %q, want https://ghe.example.com/api/v3", cfg.GitHubAPIURL)
+		}
+		if cfg.GitHubAppID != 4242 {
+			t.Errorf("GitHubAppID = %d, want 4242", cfg.GitHubAppID)
+		}
+		if !strings.Contains(string(cfg.GitHubAppPrivateKey), "BEGIN RSA PRIVATE KEY") {
+			t.Errorf("GitHubAppPrivateKey = %q", string(cfg.GitHubAppPrivateKey))
+		}
+	})
+
+	t.Run("from flags and secret files", func(t *testing.T) {
+		dir := t.TempDir()
+		whFile := filepath.Join(dir, "webhook.secret")
+		tokFile := filepath.Join(dir, "github.token")
+		appKeyFile := filepath.Join(dir, "app.pem")
+		if err := os.WriteFile(whFile, []byte("file-wh-secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tokFile, []byte("ghp_file_token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(appKeyFile, []byte("file-app-pem"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, cfg, err := buildServeConfig([]string{
+			"-database", "sqlite::memory:",
+			"-dev",
+			"-webhook-secret-file", whFile,
+			"-github-token-file", tokFile,
+			"-github-api-url", "https://api.github.test",
+			"-github-app-id", "99",
+			"-github-app-key-file", appKeyFile,
+		})
+		if err != nil {
+			t.Fatalf("buildServeConfig: %v", err)
+		}
+		if cfg.WebhookSecret != "file-wh-secret" {
+			t.Errorf("WebhookSecret = %q, want file-wh-secret", cfg.WebhookSecret)
+		}
+		if cfg.GitHubToken != "ghp_file_token" {
+			t.Errorf("GitHubToken = %q, want ghp_file_token", cfg.GitHubToken)
+		}
+		if cfg.GitHubAPIURL != "https://api.github.test" {
+			t.Errorf("GitHubAPIURL = %q, want https://api.github.test", cfg.GitHubAPIURL)
+		}
+		if cfg.GitHubAppID != 99 {
+			t.Errorf("GitHubAppID = %d, want 99", cfg.GitHubAppID)
+		}
+		if string(cfg.GitHubAppPrivateKey) != "file-app-pem" {
+			t.Errorf("GitHubAppPrivateKey = %q, want file-app-pem", string(cfg.GitHubAppPrivateKey))
+		}
+	})
 }

@@ -169,7 +169,12 @@ func migrate(args []string) error {
 	return nil
 }
 
-func serve(args []string) error {
+func envInt64(name string) int64 {
+	v, _ := strconv.ParseInt(strings.TrimSpace(os.Getenv(name)), 10, 64)
+	return v
+}
+
+func buildServeConfig(args []string) (string, server.Config, error) {
 	fs := flag.NewFlagSet("silo hub serve", flag.ContinueOnError)
 	addr := fs.String("addr", env("SILO_HUB_ADDR", ":8080"), "address to listen on [SILO_HUB_ADDR]")
 	db := databaseFlag(fs)
@@ -203,23 +208,37 @@ func serve(args []string) error {
 		"sign the claims each task offer carries as this issuer, the silo_issuer of nodes' policies: the hub's URL (docs/hub.md §6.4) [SILO_HUB_CLAIMS_ISSUER]")
 	claimsKeys := fs.String("claims-key-file", env("SILO_HUB_CLAIMS_KEY_FILE", ""),
 		"comma-separated files holding the PEM private keys (EC P-256 or RSA) task claims are signed with: the first signs, all are published at "+claims.KeysPath+" [SILO_HUB_CLAIMS_KEY_FILE]")
+	webhookSecret := fs.String("webhook-secret", env("SILO_HUB_WEBHOOK_SECRET", env("SILO_HUB_GITHUB_WEBHOOK_SECRET", "")),
+		"shared HMAC secret verifying X-Hub-Signature-256 on /v1/webhooks/github [SILO_HUB_WEBHOOK_SECRET]")
+	webhookSecretFile := fs.String("webhook-secret-file", env("SILO_HUB_WEBHOOK_SECRET_FILE", env("SILO_HUB_GITHUB_WEBHOOK_SECRET_FILE", "")),
+		"file holding the shared HMAC secret for /v1/webhooks/github [SILO_HUB_WEBHOOK_SECRET_FILE]")
+	githubToken := fs.String("github-token", env("SILO_HUB_GITHUB_TOKEN", ""),
+		"GitHub API token used by the Hub to fetch Grainfiles and authorized references [SILO_HUB_GITHUB_TOKEN]")
+	githubTokenFile := fs.String("github-token-file", env("SILO_HUB_GITHUB_TOKEN_FILE", ""),
+		"file holding the GitHub API token used by the Hub [SILO_HUB_GITHUB_TOKEN_FILE]")
+	githubAPIURL := fs.String("github-api-url", env("SILO_HUB_GITHUB_API_URL", ""),
+		"base URL of the GitHub REST API (defaults to https://api.github.com) [SILO_HUB_GITHUB_API_URL]")
+	githubAppID := fs.Int64("github-app-id", envInt64("SILO_HUB_GITHUB_APP_ID"),
+		"GitHub App ID for minting installation tokens when fetching Grainfiles [SILO_HUB_GITHUB_APP_ID]")
+	githubAppKeyFile := fs.String("github-app-key-file", env("SILO_HUB_GITHUB_APP_KEY_FILE", env("SILO_HUB_GITHUB_APP_PRIVATE_KEY_FILE", "")),
+		"file holding the PEM private key for the GitHub App [SILO_HUB_GITHUB_APP_KEY_FILE]")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return "", server.Config{}, err
 	}
 	if *db == "" {
-		return errors.New("silo hub serve: -database is required: postgres://... (sqlite:PATH with -dev, for local development)")
+		return "", server.Config{}, errors.New("silo hub serve: -database is required: postgres://... (sqlite:PATH with -dev, for local development)")
 	}
 	if err := server.CheckDevSignOn(*devHeader, os.Getenv); err != nil {
-		return err
+		return "", server.Config{}, err
 	}
 	if err := server.CheckDatabase(*db, *dev || *devHeader != "", os.Getenv); err != nil {
-		return err
+		return "", server.Config{}, err
 	}
 	var pems [][]byte
 	for _, f := range list(*claimsKeys) {
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return fmt.Errorf("a claims key: %w", err)
+			return "", server.Config{}, fmt.Errorf("a claims key: %w", err)
 		}
 		pems = append(pems, b)
 	}
@@ -227,9 +246,36 @@ func serve(args []string) error {
 	if *internalKey != "" {
 		b, err := os.ReadFile(*internalKey)
 		if err != nil {
-			return fmt.Errorf("the internal key: %w", err)
+			return "", server.Config{}, fmt.Errorf("the internal key: %w", err)
 		}
 		key = bytes.TrimSpace(b)
+	}
+	whSecret := strings.TrimSpace(*webhookSecret)
+	if *webhookSecretFile != "" {
+		b, err := os.ReadFile(*webhookSecretFile)
+		if err != nil {
+			return "", server.Config{}, fmt.Errorf("the webhook secret: %w", err)
+		}
+		whSecret = strings.TrimSpace(string(b))
+	}
+	ghToken := strings.TrimSpace(*githubToken)
+	if *githubTokenFile != "" {
+		b, err := os.ReadFile(*githubTokenFile)
+		if err != nil {
+			return "", server.Config{}, fmt.Errorf("the github token: %w", err)
+		}
+		ghToken = strings.TrimSpace(string(b))
+	}
+	var ghAppKey []byte
+	if rawKey := os.Getenv("SILO_HUB_GITHUB_APP_PRIVATE_KEY"); rawKey != "" {
+		ghAppKey = []byte(rawKey)
+	}
+	if *githubAppKeyFile != "" {
+		b, err := os.ReadFile(*githubAppKeyFile)
+		if err != nil {
+			return "", server.Config{}, fmt.Errorf("the github app private key: %w", err)
+		}
+		ghAppKey = b
 	}
 	cfg := server.Config{
 		Database:     *db,
@@ -239,25 +285,38 @@ func serve(args []string) error {
 		OIDCClientID: *clientID,
 		// Secrets come only from the environment, never a flag, so
 		// they do not show in the process list.
-		OIDCClientSecret: os.Getenv("SILO_HUB_OIDC_CLIENT_SECRET"),
-		OIDCRedirectURL:  *redirect,
-		OIDCSessionKey:   []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
-		DevUserHeader:    *devHeader,
-		HubAdmins:        list(*admins),
-		NodeUIDomain:     *nodeUI,
-		ShutdownGrace:    *grace,
-		Heartbeat:        *heartbeat,
-		DispatchRetry:    *retry,
-		MetricsAddr:      *metricsAddr,
-		Pod:              *pod,
-		PodAddr:          *podAddr,
-		InternalAddr:     *internalAddr,
-		InternalKey:      key,
-		ClaimsIssuer:     *claimsIssuer,
-		ClaimsKeys:       pems,
-		Logf:             log.Printf,
+		OIDCClientSecret:    os.Getenv("SILO_HUB_OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:     *redirect,
+		OIDCSessionKey:      []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
+		DevUserHeader:       *devHeader,
+		HubAdmins:           list(*admins),
+		NodeUIDomain:        *nodeUI,
+		ShutdownGrace:       *grace,
+		Heartbeat:           *heartbeat,
+		DispatchRetry:       *retry,
+		MetricsAddr:         *metricsAddr,
+		Pod:                 *pod,
+		PodAddr:             *podAddr,
+		InternalAddr:        *internalAddr,
+		InternalKey:         key,
+		ClaimsIssuer:        *claimsIssuer,
+		ClaimsKeys:          pems,
+		WebhookSecret:       whSecret,
+		GitHubToken:         ghToken,
+		GitHubAPIURL:        strings.TrimSpace(*githubAPIURL),
+		GitHubAppID:         *githubAppID,
+		GitHubAppPrivateKey: ghAppKey,
+		Logf:                log.Printf,
 	}
-	l, err := net.Listen("tcp", *addr)
+	return *addr, cfg, nil
+}
+
+func serve(args []string) error {
+	addr, cfg, err := buildServeConfig(args)
+	if err != nil {
+		return err
+	}
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}

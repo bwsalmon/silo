@@ -2,11 +2,16 @@ package grainfiles
 
 import (
 	"context"
+	"crypto"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -14,16 +19,20 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwsalmon/silo/hub/route"
 )
 
-// HTTP paths served by the Grainfile webhook receiver and content proxy.
+// HTTP paths served by the Grainfile webhook receiver, content proxy, and
+// human inspection endpoint.
 const (
 	GitHubWebhookPath = "/v1/webhooks/github"
 	ContentPath       = "/v1/grainfiles/content"
+	GrainfilesPath    = "/v1/grainfiles"
 )
 
 const maxWebhookBodyBytes = 10 * 1024 * 1024 // 10 MiB
@@ -50,8 +59,20 @@ type GitHubFetcher struct {
 	HTTPClient *http.Client
 	// Token is an optional bearer token for authenticating to GitHub.
 	Token string
+	// AppID and AppPrivateKey configure GitHub App authentication when
+	// Token and TokenFunc are unset.
+	AppID         int64
+	AppPrivateKey []byte
 	// TokenFunc, when set, returns a bearer token for repoURL on demand.
 	TokenFunc func(ctx context.Context, repoURL string) (string, error)
+
+	mu         sync.Mutex
+	instTokens map[string]cachedInstToken
+}
+
+type cachedInstToken struct {
+	token     string
+	expiresAt time.Time
 }
 
 // FetchFile fetches filePath at ref from repoURL via the GitHub Contents API.
@@ -97,6 +118,12 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 		if t != "" {
 			tok = t
 		}
+	} else if tok == "" && f.AppID > 0 && len(f.AppPrivateKey) > 0 {
+		t, err := f.installationToken(ctx, base, owner, repo)
+		if err != nil {
+			return nil, err
+		}
+		tok = t
 	}
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
@@ -164,6 +191,127 @@ func parseGitHubOwnerRepo(repoURL string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("cannot extract owner/repo from %q", repoURL)
 	}
 	return parts[0], parts[1], nil
+}
+
+func (f *GitHubFetcher) installationToken(ctx context.Context, base, owner, repo string) (string, error) {
+	key := strings.ToLower(owner + "/" + repo)
+	now := time.Now().UTC()
+
+	f.mu.Lock()
+	if f.instTokens == nil {
+		f.instTokens = make(map[string]cachedInstToken)
+	}
+	if cached, ok := f.instTokens[key]; ok && cached.token != "" && now.Add(time.Minute).Before(cached.expiresAt) {
+		f.mu.Unlock()
+		return cached.token, nil
+	}
+	f.mu.Unlock()
+
+	appJWT, err := mintGitHubAppJWT(f.AppID, f.AppPrivateKey, now)
+	if err != nil {
+		return "", err
+	}
+
+	client := f.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	instEndpoint := fmt.Sprintf("%s/repos/%s/%s/installation", base, url.PathEscape(owner), url.PathEscape(repo))
+	instReq, err := http.NewRequestWithContext(ctx, http.MethodGet, instEndpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	instReq.Header.Set("Accept", "application/vnd.github+json")
+	instReq.Header.Set("Authorization", "Bearer "+appJWT)
+	instResp, err := client.Do(instReq)
+	if err != nil {
+		return "", err
+	}
+	defer instResp.Body.Close()
+	if instResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(instResp.Body, 4096))
+		return "", fmt.Errorf("github app installation lookup %s returned %d: %s", instEndpoint, instResp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var inst struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(instResp.Body).Decode(&inst); err != nil || inst.ID <= 0 {
+		return "", fmt.Errorf("decoding github app installation for %s/%s: %w", owner, repo, err)
+	}
+
+	tokEndpoint := fmt.Sprintf("%s/app/installations/%d/access_tokens", base, inst.ID)
+	tokReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokEndpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	tokReq.Header.Set("Accept", "application/vnd.github+json")
+	tokReq.Header.Set("Authorization", "Bearer "+appJWT)
+	tokResp, err := client.Do(tokReq)
+	if err != nil {
+		return "", err
+	}
+	defer tokResp.Body.Close()
+	if tokResp.StatusCode != http.StatusCreated && tokResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(tokResp.Body, 4096))
+		return "", fmt.Errorf("github app token mint %s returned %d: %s", tokEndpoint, tokResp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var minted struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(tokResp.Body).Decode(&minted); err != nil || minted.Token == "" {
+		return "", fmt.Errorf("decoding github app installation token: %w", err)
+	}
+	exp := minted.ExpiresAt
+	if exp.IsZero() {
+		exp = now.Add(30 * time.Minute)
+	}
+
+	f.mu.Lock()
+	f.instTokens[key] = cachedInstToken{token: minted.Token, expiresAt: exp}
+	f.mu.Unlock()
+	return minted.Token, nil
+}
+
+func mintGitHubAppJWT(appID int64, pemBytes []byte, now time.Time) (string, error) {
+	priv, err := parseRSAPrivateKey(pemBytes)
+	if err != nil {
+		return "", err
+	}
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	claimsBytes, _ := json.Marshal(map[string]any{
+		"iat": now.Add(-60 * time.Second).Unix(),
+		"exp": now.Add(9 * time.Minute).Unix(),
+		"iss": appID,
+	})
+	payload := base64.RawURLEncoding.EncodeToString(claimsBytes)
+	signingInput := hdr + "." + payload
+	digest := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", fmt.Errorf("signing github app JWT: %w", err)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, errors.New("github app private key: invalid PEM")
+	}
+	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return k, nil
+	}
+	pk, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("github app private key: %w", err)
+	}
+	rsaKey, ok := pk.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("github app private key: not an RSA key")
+	}
+	return rsaKey, nil
 }
 
 // MemoryFetcher is a thread-safe in-memory RepoFetcher for tests.
@@ -275,8 +423,16 @@ func VerifyGitHubSignature(secret, signatureHeader string, body []byte) bool {
 	return hmac.Equal(gotMAC, expectedMAC)
 }
 
-// API serves the forge webhook ingestion endpoint (POST /v1/webhooks/github)
-// and the on-demand authorized content proxy (GET /v1/grainfiles/content).
+// Viewer describes what a signed-in human caller may see on GET /v1/grainfiles.
+type Viewer struct {
+	Email    string
+	HubAdmin bool
+	SeesRepo func(repo string) bool
+}
+
+// API serves the forge webhook ingestion endpoint (POST /v1/webhooks/github),
+// the on-demand authorized content proxy (GET /v1/grainfiles/content), and the
+// human read-only inspection endpoint (GET /v1/grainfiles).
 type API struct {
 	Store         *Store
 	Fetcher       RepoFetcher
@@ -286,6 +442,14 @@ type API struct {
 	Authenticate func(ctx context.Context, token string) (nodeID string, err error)
 	// Directory, when set, verifies node tokens via VerifyNodeToken.
 	Directory NodeTokenVerifier
+	// Access, when set, authenticates human callers for GET /v1/grainfiles
+	// and scopes results to their teams and nodes.
+	Access func(r *http.Request) (Viewer, error)
+	// OnEvents, when set, is called after a webhook records one or more
+	// discoverable grainfile events.
+	OnEvents func(events []Event)
+	// Logf, when set, logs non-fatal diagnostic messages.
+	Logf func(format string, args ...any)
 
 	mu         sync.RWMutex
 	NodeTokens map[string]string
@@ -311,12 +475,18 @@ func (a *API) SetNodeToken(token, nodeID string) {
 	a.NodeTokens[token] = nodeID
 }
 
-// Handler returns an http.Handler (and route.Lister) serving
-// POST /v1/webhooks/github and GET /v1/grainfiles/content.
-func (a *API) Handler() http.Handler {
-	m := route.NewMux()
+// Register mounts the grainfile endpoints on mux.
+func (a *API) Register(m *route.Mux) {
 	m.HandleFunc("POST "+GitHubWebhookPath, a.serveGitHubWebhook)
 	m.HandleFunc("GET "+ContentPath, a.serveContent)
+	m.HandleFunc("GET "+GrainfilesPath, a.serveGrainfiles)
+}
+
+// Handler returns an http.Handler (and route.Lister) serving
+// POST /v1/webhooks/github, GET /v1/grainfiles/content, and GET /v1/grainfiles.
+func (a *API) Handler() http.Handler {
+	m := route.NewMux()
+	a.Register(m)
 	return m
 }
 
@@ -443,7 +613,7 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if rawRepo == "" && pl.Repository.FullName != "" {
 		rawRepo = "https://github.com/" + strings.Trim(pl.Repository.FullName, "/")
 	}
-	canonRepo, err := canonicalRepoFromAnyRef(rawRepo)
+	canonRepo, err := normalizeSubRepoURL(rawRepo)
 	if err != nil {
 		http.Error(w, "invalid repository in webhook: "+err.Error(), http.StatusBadRequest)
 		return
@@ -451,6 +621,8 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 	ref, commitSHA := extractRefAndCommit(source, pl)
 	upsertPaths, removedPaths, allChangedPaths := extractWebhookPaths(pl)
+
+	prevSeq, _ := a.Store.MaxEventSeq(r.Context())
 
 	var indexed []IndexRecord
 	for _, remPath := range removedPaths {
@@ -513,6 +685,14 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	emittedEvents := trigEvents
+	if newEvents, err := a.Store.EventsSince(r.Context(), prevSeq); err == nil && len(newEvents) > 0 {
+		emittedEvents = newEvents
+	}
+	if len(emittedEvents) > 0 && a.OnEvents != nil {
+		a.OnEvents(emittedEvents)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(WebhookResponse{
@@ -521,7 +701,7 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		Ref:     ref,
 		Commit:  commitSHA,
 		Indexed: indexed,
-		Events:  trigEvents,
+		Events:  emittedEvents,
 	})
 }
 
@@ -743,6 +923,8 @@ func (a *API) serveContent(w http.ResponseWriter, r *http.Request) {
 		} else {
 			rawTarget = rawURL
 		}
+	} else if rawGrainfile != "" && rawTarget == "" && rawURL != "" {
+		rawTarget = rawURL
 	}
 
 	// Case 1: An explicit authorizing Grainfile was named (by URL or repo+grainfile path).
@@ -947,4 +1129,212 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// OverviewResponse is the JSON payload returned by GET /v1/grainfiles for
+// human read-only inspection of indexed grainfiles, node subscriptions, and
+// recent discoverable events.
+type OverviewResponse struct {
+	Grainfiles    []IndexRecord   `json:"grainfiles"`
+	Subscriptions []Subscriptions `json:"subscriptions"`
+	Events        []Event         `json:"events"`
+}
+
+func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
+	if a.Store == nil {
+		http.Error(w, "grainfiles store not configured", http.StatusInternalServerError)
+		return
+	}
+	var acc *Viewer
+	if a.Access != nil {
+		v, err := a.Access(r)
+		if err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		acc = &v
+	}
+
+	q := r.URL.Query()
+	rawRepo := strings.TrimSpace(q.Get("repo"))
+	rawRecipient := strings.TrimSpace(q.Get("recipient"))
+	rawKind := strings.TrimSpace(q.Get("kind"))
+	rawNode := strings.TrimSpace(q.Get("node"))
+	includeDrafts := q.Get("include_drafts") != "false" && q.Get("include_drafts") != "0"
+
+	var filterRepo string
+	if rawRepo != "" {
+		var err error
+		filterRepo, err = normalizeSubRepoURL(rawRepo)
+		if err != nil {
+			http.Error(w, "invalid repo filter: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	var filterRecipient string
+	if rawRecipient != "" {
+		var err error
+		filterRecipient, err = normalizeRecipientURL(rawRecipient)
+		if err != nil {
+			http.Error(w, "invalid recipient filter: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	records, err := a.Store.ListIndexByRepo(r.Context(), filterRepo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	subs, err := a.Store.ListSubscriptions(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	events, err := a.Store.EventsSince(r.Context(), 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	visibleRecords := make([]IndexRecord, 0, len(records))
+	for _, rec := range records {
+		if !includeDrafts && rec.Draft {
+			continue
+		}
+		if filterRecipient != "" && rec.Recipient != filterRecipient {
+			continue
+		}
+		if rawKind != "" && string(rec.Kind) != rawKind {
+			continue
+		}
+		if !canSeeRecord(acc, rec) {
+			continue
+		}
+		visibleRecords = append(visibleRecords, rec)
+	}
+
+	visibleSubs := make([]Subscriptions, 0, len(subs))
+	for _, sub := range subs {
+		if rawNode != "" && sub.NodeID != rawNode {
+			continue
+		}
+		if filterRecipient != "" && !slices.Contains(sub.Recipients, filterRecipient) {
+			continue
+		}
+		if filterRepo != "" && !subTouchesRepo(sub, filterRepo) {
+			continue
+		}
+		if !canSeeSubscription(acc, sub) {
+			continue
+		}
+		visibleSubs = append(visibleSubs, sub)
+	}
+
+	visibleEvents := make([]Event, 0, len(events))
+	for _, ev := range events {
+		if filterRepo != "" && !IsSameRepo(ev.Repo, filterRepo) {
+			continue
+		}
+		if filterRecipient != "" && ev.Recipient != filterRecipient {
+			continue
+		}
+		if rawKind != "" && string(ev.Kind) != rawKind {
+			continue
+		}
+		if !canSeeEvent(acc, ev) {
+			continue
+		}
+		visibleEvents = append(visibleEvents, ev)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(OverviewResponse{
+		Grainfiles:    visibleRecords,
+		Subscriptions: visibleSubs,
+		Events:        visibleEvents,
+	})
+}
+
+func canSeeRepoURL(acc *Viewer, rawURL string) bool {
+	if acc == nil || acc.HubAdmin {
+		return true
+	}
+	if acc.SeesRepo == nil {
+		return false
+	}
+	owner, repo, err := parseGitHubOwnerRepo(rawURL)
+	if err != nil {
+		return false
+	}
+	return acc.SeesRepo(owner + "/" + repo)
+}
+
+func canSeeRecord(acc *Viewer, rec IndexRecord) bool {
+	if acc == nil || acc.HubAdmin {
+		return true
+	}
+	return canSeeRepoURL(acc, rec.Repo) || canSeeRepoURL(acc, rec.Recipient)
+}
+
+func canSeeEvent(acc *Viewer, ev Event) bool {
+	if acc == nil || acc.HubAdmin {
+		return true
+	}
+	return canSeeRepoURL(acc, ev.Repo) || canSeeRepoURL(acc, ev.Recipient)
+}
+
+func canSeeSubscription(acc *Viewer, sub Subscriptions) bool {
+	if acc == nil || acc.HubAdmin {
+		return true
+	}
+	if sub.Owner != "" && strings.EqualFold(sub.Owner, acc.Email) {
+		return true
+	}
+	for _, u := range sub.Recipients {
+		if canSeeRepoURL(acc, u) {
+			return true
+		}
+	}
+	for _, u := range sub.Repos {
+		if canSeeRepoURL(acc, u) {
+			return true
+		}
+	}
+	for _, u := range sub.Folders {
+		if canSeeRepoURL(acc, u) {
+			return true
+		}
+	}
+	for _, u := range sub.Grainfiles {
+		if canSeeRepoURL(acc, u) {
+			return true
+		}
+	}
+	return false
+}
+
+func subTouchesRepo(sub Subscriptions, canonRepo string) bool {
+	for _, r := range sub.Repos {
+		if IsSameRepo(r, canonRepo) {
+			return true
+		}
+	}
+	for _, r := range sub.Recipients {
+		if IsSameRepo(r, canonRepo) {
+			return true
+		}
+	}
+	for _, f := range sub.Folders {
+		if parsed, err := ParseRef(f); err == nil && IsSameRepo(parsed.Repo, canonRepo) {
+			return true
+		}
+	}
+	for _, g := range sub.Grainfiles {
+		if parsed, err := ParseRef(g); err == nil && IsSameRepo(parsed.Repo, canonRepo) {
+			return true
+		}
+	}
+	return false
 }

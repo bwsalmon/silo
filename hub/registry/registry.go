@@ -56,14 +56,26 @@ type Node struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Features are the parts of the task interface the node supports
 	// beyond the ones every node speaks (docs/hub-interface.md):
-	// FeatureInteractive. The dispatcher places a task that needs one
-	// only on a node that lists it.
+	// FeatureInteractive, FeatureGrainfiles. The dispatcher places a task
+	// that needs one only on a node that lists it.
 	Features []string `json:"features,omitempty"`
+	// Recipients are the deployment URLs this node accepts grainfiles for
+	// (matched against a grainfile's frontmatter recipient).
+	Recipients []string `json:"recipients,omitempty"`
+	// Folders are repository folder URLs this node subscribes to for
+	// grainfiles.
+	Folders []string `json:"folders,omitempty"`
+	// Grainfiles are explicit grainfile URLs this node subscribes to.
+	Grainfiles []string `json:"grainfiles,omitempty"`
 }
 
 // FeatureInteractive is a node that runs interactive tasks: sessions
 // that take a human's messages (tasks.KindInteractive).
 const FeatureInteractive = "interactive"
+
+// FeatureGrainfiles is a node that subscribes to grainfile events and
+// fetches grainfile content through the hub.
+const FeatureGrainfiles = "grainfiles"
 
 // maxFeatures bounds what a node may list.
 const maxFeatures = 32

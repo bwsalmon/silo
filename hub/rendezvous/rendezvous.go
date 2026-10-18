@@ -27,6 +27,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 )
 
@@ -68,6 +69,31 @@ const (
 	// RequestID: the task it filed, in Task, or why it filed none, in
 	// Error. Unlike error, it does not end the connection.
 	TypeFiled = "filed" // hub → node
+
+	// TypeSubscribe updates a node's grainfile subscriptions (recipient
+	// deployment URLs, repositories, folders, and grainfile URLs) on an
+	// active control stream. The hub answers with TypeSubscribed.
+	TypeSubscribe = "subscribe" // node → hub
+	// TypeSubscribed acknowledges a node's TypeSubscribe request with its
+	// canonicalized subscriptions, revision, and cursor (or Error).
+	TypeSubscribed = "subscribed" // hub → node
+	// TypeGrainfileEvent delivers one discoverable grainfile notification
+	// (task_ready, process_updated, process_triggered,
+	// dependency_completed) from the hub to a subscribed node.
+	TypeGrainfileEvent = "grainfile_event" // hub → node
+	// TypeCatchup asks the hub for missed grainfile_event notifications
+	// since Cursor (or the node's stored cursor).
+	TypeCatchup = "catchup" // node → hub
+	// TypeCatchupResult answers a TypeCatchup request with the matching
+	// GrainfileEvents and updated Cursor.
+	TypeCatchupResult = "catchup_result" // hub → node
+	// TypeGrainfileCompleted reports completion of a task or process
+	// referencing a source Grainfile URL so the hub can emit
+	// dependency_completed notices to waiting deployments.
+	TypeGrainfileCompleted = "grainfile_completed" // node → hub
+	// TypeGrainfileCompletedAck answers a TypeGrainfileCompleted message
+	// with any emitted dependency_completed events (or Error).
+	TypeGrainfileCompletedAck = "grainfile_completed_ack" // hub → node
 )
 
 // Message is one line on the control stream.
@@ -85,11 +111,37 @@ type Message struct {
 	Free *int `json:"free,omitempty"`
 	// Error is the reason, in error, and in a filed that filed nothing.
 	Error string `json:"error,omitempty"`
-	// RequestID names a file_task, and the filed answering it.
+	// RequestID names a file_task, subscribe, catchup, or
+	// grainfile_completed request, and the hub message answering it.
 	RequestID string `json:"request_id,omitempty"`
 	// Task is the filing, in file_task, and the task filed, in filed:
 	// package tasks' to read and write (tasks.Filing, tasks.Task).
 	Task json.RawMessage `json:"task,omitempty"`
+
+	// Subscriptions, or the shorthand fields Recipients/Repos/Folders/Grainfiles/Cursor,
+	// declare a node's grainfile subscriptions in hello or subscribe, and
+	// return the stored subscriptions in welcome or subscribed.
+	Subscriptions *grainfiles.Subscriptions `json:"subscriptions,omitempty"`
+	Recipients    []string                  `json:"recipients,omitempty"`
+	Repos         []string                  `json:"repos,omitempty"`
+	Folders       []string                  `json:"folders,omitempty"`
+	Grainfiles    []string                  `json:"grainfiles,omitempty"`
+	Cursor        int64                     `json:"cursor,omitempty"`
+	Revision      int64                     `json:"revision,omitempty"`
+
+	// GrainfileEvent carries a single grainfile notification in
+	// TypeGrainfileEvent.
+	GrainfileEvent *grainfiles.Event `json:"grainfile_event,omitempty"`
+	// GrainfileEvents carries a batch of grainfile notifications in
+	// TypeCatchupResult or TypeGrainfileCompletedAck.
+	GrainfileEvents []grainfiles.Event `json:"grainfile_events,omitempty"`
+
+	// GrainfileURL, CommitSHA, State, and Reason report completion of a
+	// source Grainfile in TypeGrainfileCompleted.
+	GrainfileURL string `json:"grainfile_url,omitempty"`
+	CommitSHA    string `json:"commit_sha,omitempty"`
+	State        string `json:"state,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 // maxLine bounds one control message.

@@ -13,6 +13,8 @@ import (
 
 	"golang.org/x/net/websocket"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
+	"github.com/bwsalmon/silo/hub/notify"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/route"
 	"github.com/bwsalmon/silo/internal/logsafe"
@@ -80,6 +82,13 @@ type Server struct {
 	// DialInternal, when set, dials another pod's internal listener;
 	// net.Dialer's when nil.
 	DialInternal func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Grainfiles, when set, stores node grainfile subscriptions and
+	// discoverable events for live notifications, reconnect catch-up, and
+	// dependency completion reporting.
+	Grainfiles *grainfiles.Store
+	// Bus, when set, broadcasts grainfile event wake-ups across hub pods
+	// so nodes connected to other pods receive notifications.
+	Bus *notify.Bus
 
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
@@ -90,9 +99,21 @@ type Server struct {
 }
 
 type nodeConn struct {
-	m     *mux.Mux
-	ctl   *lines
-	lease *registry.Lease
+	id     string
+	m      *mux.Mux
+	ctl    *lines
+	lease  *registry.Lease
+	wakeCh chan struct{}
+}
+
+func (nc *nodeConn) wakeGrainfiles() {
+	if nc == nil || nc.wakeCh == nil {
+		return
+	}
+	select {
+	case nc.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 // ErrUnavailable wraps an Admit error that is not a refusal but the
@@ -258,7 +279,23 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	}
 	defer lease.Close()
 
-	nc := &nodeConn{m: m, ctl: l, lease: lease}
+	var welcomeSub *grainfiles.Subscriptions
+	if s.Grainfiles != nil {
+		if sub, ok := extractHelloSubscriptions(hello, node.ID, owner); ok {
+			stored, err := s.Grainfiles.SetSubscriptions(ctx, sub)
+			if err != nil {
+				if errors.Is(err, grainfiles.ErrInvalid) {
+					refuse(err)
+					return
+				}
+				s.logf("rendezvous: could not store subscriptions for node %q of %s: %s", node.ID, owner, logsafe.Quote(err.Error()))
+				return
+			}
+			welcomeSub = &stored
+		}
+	}
+
+	nc := &nodeConn{id: node.ID, m: m, ctl: l, lease: lease, wakeCh: make(chan struct{}, 1)}
 	s.mu.Lock()
 	if s.closing != "" {
 		// Shutdown has already said goodbye to the connections it saw.
@@ -288,12 +325,35 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	if hb <= 0 {
 		hb = DefaultHeartbeat
 	}
-	if err := l.write(Message{Type: TypeWelcome, Owner: owner, HeartbeatSeconds: int((hb + time.Second - 1) / time.Second)}); err != nil {
+	welcomeMsg := Message{
+		Type:             TypeWelcome,
+		Owner:            owner,
+		HeartbeatSeconds: int((hb + time.Second - 1) / time.Second),
+		Subscriptions:    welcomeSub,
+	}
+	if welcomeSub != nil {
+		welcomeMsg.Revision = welcomeSub.Revision
+		welcomeMsg.Cursor = welcomeSub.Cursor
+	}
+	if err := l.write(welcomeMsg); err != nil {
 		return
 	}
 	s.logf("rendezvous: node %q of %s online: %d slots for %v", node.ID, owner, node.Slots, node.Repos)
 	s.observe(EventConnected)
 	defer s.observe(EventDisconnected)
+
+	if s.Grainfiles != nil {
+		pumpDone := make(chan struct{})
+		go func() {
+			defer close(pumpDone)
+			s.pumpGrainfileEvents(ctx, nc)
+		}()
+		defer func() {
+			m.Close()
+			<-pumpDone
+		}()
+		nc.wakeGrainfiles()
+	}
 
 	var filing atomic.Int32
 	go s.acceptNodeStreams(node.ID, m)
@@ -323,6 +383,12 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 			}
 		case TypeFileTask:
 			s.fileTask(ctx, node.ID, owner, l, msg, &filing)
+		case TypeSubscribe:
+			s.subscribeNode(ctx, nc, owner, msg)
+		case TypeCatchup:
+			s.catchupNode(ctx, nc, msg)
+		case TypeGrainfileCompleted, "dependency_completed":
+			s.completeGrainfile(ctx, nc, msg)
 		default:
 			s.logf("rendezvous: node %q sent an unknown %s message", node.ID, logsafe.Quote(msg.Type))
 		}
@@ -484,4 +550,258 @@ func (s *Server) Shutdown(ctx context.Context, reason string) error {
 		s.logf("rendezvous: said goodbye to %d nodes: %s", len(conns), reason)
 	}
 	return err
+}
+
+func extractHelloSubscriptions(hello Message, nodeID, owner string) (grainfiles.Subscriptions, bool) {
+	hasSub := hello.Subscriptions != nil ||
+		len(hello.Recipients) > 0 ||
+		len(hello.Repos) > 0 ||
+		len(hello.Folders) > 0 ||
+		len(hello.Grainfiles) > 0 ||
+		hello.Cursor > 0
+	if hello.Node != nil {
+		if len(hello.Node.Recipients) > 0 ||
+			len(hello.Node.Folders) > 0 ||
+			len(hello.Node.Grainfiles) > 0 ||
+			hello.Node.Supports(registry.FeatureGrainfiles) {
+			hasSub = true
+		}
+	}
+	if !hasSub {
+		return grainfiles.Subscriptions{}, false
+	}
+	sub := extractSubscribeMessage(hello, nodeID, owner)
+	if hello.Node != nil {
+		sub.Recipients = append(sub.Recipients, hello.Node.Recipients...)
+		sub.Folders = append(sub.Folders, hello.Node.Folders...)
+		sub.Grainfiles = append(sub.Grainfiles, hello.Node.Grainfiles...)
+	}
+	return sub, true
+}
+
+func extractSubscribeMessage(msg Message, nodeID, owner string) grainfiles.Subscriptions {
+	var sub grainfiles.Subscriptions
+	if msg.Subscriptions != nil {
+		sub = *msg.Subscriptions
+	}
+	sub.NodeID = nodeID
+	sub.Owner = owner
+	sub.Recipients = append(sub.Recipients, msg.Recipients...)
+	sub.Repos = append(sub.Repos, msg.Repos...)
+	sub.Folders = append(sub.Folders, msg.Folders...)
+	sub.Grainfiles = append(sub.Grainfiles, msg.Grainfiles...)
+	if sub.Cursor == 0 && msg.Cursor > 0 {
+		sub.Cursor = msg.Cursor
+	}
+	return sub
+}
+
+func (s *Server) subscribeNode(ctx context.Context, nc *nodeConn, owner string, msg Message) {
+	if s.Grainfiles == nil {
+		_ = nc.ctl.write(Message{
+			Type:      TypeSubscribed,
+			RequestID: msg.RequestID,
+			Error:     "rendezvous: this hub has no grainfiles store",
+		})
+		return
+	}
+	sub := extractSubscribeMessage(msg, nc.id, owner)
+	stored, err := s.Grainfiles.SetSubscriptions(ctx, sub)
+	if err != nil {
+		_ = nc.ctl.write(Message{
+			Type:      TypeSubscribed,
+			RequestID: msg.RequestID,
+			Error:     err.Error(),
+		})
+		return
+	}
+	_ = nc.ctl.write(Message{
+		Type:          TypeSubscribed,
+		RequestID:     msg.RequestID,
+		Subscriptions: &stored,
+		Revision:      stored.Revision,
+		Cursor:        stored.Cursor,
+	})
+	nc.wakeGrainfiles()
+}
+
+func (s *Server) catchupNode(ctx context.Context, nc *nodeConn, msg Message) {
+	if s.Grainfiles == nil {
+		if msg.RequestID != "" {
+			_ = nc.ctl.write(Message{
+				Type:      TypeCatchupResult,
+				RequestID: msg.RequestID,
+				Error:     "rendezvous: this hub has no grainfiles store",
+			})
+		}
+		return
+	}
+	if msg.RequestID == "" {
+		if msg.Cursor > 0 {
+			_ = s.Grainfiles.AdvanceCursor(ctx, nc.id, msg.Cursor)
+		}
+		nc.wakeGrainfiles()
+		return
+	}
+	var (
+		evs       []grainfiles.Event
+		newCursor int64
+		err       error
+	)
+	if msg.Cursor > 0 {
+		evs, err = s.Grainfiles.EventsForNode(ctx, nc.id, msg.Cursor)
+		newCursor = msg.Cursor
+		for _, ev := range evs {
+			if ev.Seq > newCursor {
+				newCursor = ev.Seq
+			}
+		}
+		if err == nil && newCursor > 0 {
+			_ = s.Grainfiles.AdvanceCursor(ctx, nc.id, newCursor)
+		}
+	} else {
+		evs, newCursor, err = s.Grainfiles.CatchupNode(ctx, nc.id, true)
+	}
+	if err != nil {
+		_ = nc.ctl.write(Message{
+			Type:      TypeCatchupResult,
+			RequestID: msg.RequestID,
+			Error:     err.Error(),
+		})
+		return
+	}
+	if evs == nil {
+		evs = []grainfiles.Event{}
+	}
+	_ = nc.ctl.write(Message{
+		Type:            TypeCatchupResult,
+		RequestID:       msg.RequestID,
+		GrainfileEvents: evs,
+		Cursor:          newCursor,
+	})
+}
+
+func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Message) {
+	if s.Grainfiles == nil {
+		if msg.RequestID != "" {
+			_ = nc.ctl.write(Message{
+				Type:      TypeGrainfileCompletedAck,
+				RequestID: msg.RequestID,
+				Error:     "rendezvous: this hub has no grainfiles store",
+			})
+		}
+		return
+	}
+	state := msg.State
+	if state == "" {
+		state = "done"
+	}
+	evs, err := s.Grainfiles.RecordDependencyCompleted(ctx, msg.GrainfileURL, msg.CommitSHA, state, msg.Reason)
+	if err != nil {
+		if msg.RequestID != "" {
+			_ = nc.ctl.write(Message{
+				Type:      TypeGrainfileCompletedAck,
+				RequestID: msg.RequestID,
+				Error:     err.Error(),
+			})
+		}
+		return
+	}
+	if evs == nil {
+		evs = []grainfiles.Event{}
+	}
+	if msg.RequestID != "" {
+		_ = nc.ctl.write(Message{
+			Type:            TypeGrainfileCompletedAck,
+			RequestID:       msg.RequestID,
+			GrainfileURL:    msg.GrainfileURL,
+			GrainfileEvents: evs,
+		})
+	}
+	if len(evs) > 0 {
+		s.NotifyGrainfiles(evs...)
+	}
+}
+
+func (s *Server) pumpGrainfileEvents(ctx context.Context, nc *nodeConn) {
+	for {
+		select {
+		case <-nc.wakeCh:
+			s.deliverNodeGrainfileEvents(ctx, nc)
+		case <-nc.m.Done():
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *Server) deliverNodeGrainfileEvents(ctx context.Context, nc *nodeConn) {
+	if s.Grainfiles == nil {
+		return
+	}
+	sub, err := s.Grainfiles.GetSubscriptions(ctx, nc.id)
+	if err != nil {
+		return
+	}
+	if len(sub.Recipients) == 0 && len(sub.Repos) == 0 && len(sub.Folders) == 0 && len(sub.Grainfiles) == 0 {
+		return
+	}
+	evs, err := s.Grainfiles.EventsForNode(ctx, nc.id, sub.Cursor)
+	if err != nil || len(evs) == 0 {
+		return
+	}
+	for _, ev := range evs {
+		select {
+		case <-nc.m.Done():
+			return
+		default:
+		}
+		evCopy := ev
+		_ = s.Grainfiles.AdvanceCursor(context.WithoutCancel(ctx), nc.id, ev.Seq)
+		if err := nc.ctl.write(Message{
+			Type:           TypeGrainfileEvent,
+			GrainfileEvent: &evCopy,
+			Cursor:         ev.Seq,
+		}); err != nil {
+			return
+		}
+	}
+}
+
+// NotifyGrainfiles wakes all locally connected nodes to deliver any new
+// matching grainfile events, and posts a cross-pod notice on Bus when set.
+func (s *Server) NotifyGrainfiles(evs ...grainfiles.Event) {
+	s.wakeLocalGrainfiles()
+	if s.Bus != nil {
+		var maxSeq int64 = 1
+		for _, ev := range evs {
+			if ev.Seq > maxSeq {
+				maxSeq = ev.Seq
+			}
+		}
+		s.Bus.Post(notify.Message{Grainfile: true, Seq: maxSeq})
+	}
+}
+
+// Notice handles a cross-pod notification from Bus: when a grainfile
+// event was recorded (or the bus reconnected), every connected node on
+// this pod checks for new matching events.
+func (s *Server) Notice(m notify.Message) {
+	if !m.Grainfile && !m.Reconnected {
+		return
+	}
+	s.wakeLocalGrainfiles()
+}
+
+func (s *Server) wakeLocalGrainfiles() {
+	s.mu.Lock()
+	conns := make([]*nodeConn, 0, len(s.conns))
+	for _, nc := range s.conns {
+		conns = append(conns, nc)
+	}
+	s.mu.Unlock()
+	for _, nc := range conns {
+		nc.wakeGrainfiles()
+	}
 }

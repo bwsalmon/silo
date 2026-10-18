@@ -12,9 +12,18 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/bwsalmon/silo/hub/directory"
 )
+
+type fakeTokenVerifier struct {
+	tokens map[string]struct{ owner, node string }
+}
+
+func (f *fakeTokenVerifier) VerifyNodeToken(_ context.Context, tok string) (string, string, error) {
+	if rec, ok := f.tokens[tok]; ok {
+		return rec.owner, rec.node, nil
+	}
+	return "", "", ErrUnauthorized
+}
 
 func TestWebhookIngestionAndContentProxy(t *testing.T) {
 	eachStore(t, func(t *testing.T, s *Store, dbURL string) {
@@ -26,26 +35,15 @@ func TestWebhookIngestionAndContentProxy(t *testing.T) {
 		api := NewAPI(s, fetcher)
 		api.WebhookSecret = "test-webhook-secret-key"
 
-		// Set up a real directory.Store on the same database to test real minted
-		// node tokens alongside in-memory node tokens.
-		dirStore, err := directory.Open(ctx, dbURL)
-		if err != nil {
-			t.Fatalf("directory.Open: %v", err)
-		}
-		defer dirStore.Close()
-		api.Directory = dirStore
-
-		tokEU, _, err := dirStore.MintNodeToken(ctx, "alice@example.com", "node-eu")
-		if err != nil {
-			t.Fatalf("MintNodeToken(node-eu): %v", err)
-		}
-		tokUS, _, err := dirStore.MintNodeToken(ctx, "bob@example.com", "node-us")
-		if err != nil {
-			t.Fatalf("MintNodeToken(node-us): %v", err)
-		}
-		tokOther, _, err := dirStore.MintNodeToken(ctx, "mallory@example.com", "node-other")
-		if err != nil {
-			t.Fatalf("MintNodeToken(node-other): %v", err)
+		tokEU := "silo-node_0000000000000001_eu"
+		tokUS := "silo-node_0000000000000002_us"
+		tokOther := "silo-node_0000000000000003_other"
+		api.Directory = &fakeTokenVerifier{
+			tokens: map[string]struct{ owner, node string }{
+				tokEU:    {owner: "alice@example.com", node: "node-eu"},
+				tokUS:    {owner: "bob@example.com", node: "node-us"},
+				tokOther: {owner: "mallory@example.com", node: "node-other"},
+			},
 		}
 
 		// Register subscriptions for node-eu and node-us; node-other subscribes to a different recipient.

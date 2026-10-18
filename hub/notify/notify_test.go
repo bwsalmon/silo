@@ -70,10 +70,11 @@ func TestPostCoalesces(t *testing.T) {
 		b.Post(Message{Node: "n1"})
 		b.Post(Message{Event: "t1", Seq: int64(i + 1)})
 		b.Post(Message{Event: "t2", Seq: int64(100 - i)})
+		b.Post(Message{Grainfile: true, Seq: int64(i + 1)})
 	}
 	conn.Close()
 
-	want := map[Message]bool{{Wake: true}: true, {Node: "n1"}: true, {Event: "t1", Seq: 100}: true, {Event: "t2", Seq: 100}: true}
+	want := map[Message]bool{{Wake: true}: true, {Node: "n1"}: true, {Event: "t1", Seq: 100}: true, {Event: "t2", Seq: 100}: true, {Grainfile: true, Seq: 100}: true}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		ms := got()
@@ -87,8 +88,8 @@ func TestPostCoalesces(t *testing.T) {
 		}
 		if ok {
 			// The first wake-up, sent alone, and the burst's.
-			if len(ms) > 5 {
-				t.Errorf("got %d notices for the burst, want at most 5: %v", len(ms), ms)
+			if len(ms) > 6 {
+				t.Errorf("got %d notices for the burst, want at most 6: %v", len(ms), ms)
 			}
 			for m := range seen {
 				if !want[m] {

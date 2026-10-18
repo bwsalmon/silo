@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/tasks"
 	"github.com/bwsalmon/silo/internal/pgtest"
@@ -93,6 +94,12 @@ func TestMigrateThenServeLeastPrivileged(t *testing.T) {
 	must(h.Directory.SetTeamSettings(ctx, "infra", directory.Settings{LostRequeueAfter: time.Hour}))
 	_, _, err = h.Directory.MintNodeToken(ctx, "alice@example.com", "ws-1")
 	must(err)
+	_, err = h.Grainfiles.SetSubscriptions(ctx, grainfiles.Subscriptions{
+		NodeID:     "ws-1",
+		Owner:      "alice@example.com",
+		Recipients: []string{"https://github.com/bwsalmon/silo"},
+	})
+	must(err)
 	task, err := h.Backlog.Create(ctx, tasks.Spec{Team: "infra", Repo: "bwsalmon/silo", Submitter: "alice@example.com", Prompt: "p"})
 	must(err)
 	e, class, err := live.Classify([]byte(`{"v":1,"seq":1,"type":"status","task":"` + task.ID + `","status":{"phase":"setup","step":"tools","state":"done"}}`))
@@ -156,6 +163,13 @@ func TestMigrateSQLite(t *testing.T) {
 	}
 	defer h.Close()
 	if err := h.Directory.CreateTeam(ctx, "infra", "Infra"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Grainfiles.SetSubscriptions(ctx, grainfiles.Subscriptions{
+		NodeID:     "ws-1",
+		Owner:      "alice@example.com",
+		Recipients: []string{"https://github.com/bwsalmon/silo"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 }

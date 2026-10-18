@@ -54,6 +54,7 @@ import (
 
 	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/lease"
 	"github.com/bwsalmon/silo/hub/live"
@@ -184,6 +185,24 @@ type Config struct {
 	// routes the load balancer exposes.
 	MetricsAddr string
 
+	// WebhookSecret is the HMAC-SHA256 secret used to verify
+	// X-Hub-Signature-256 on POST /v1/webhooks/github.
+	WebhookSecret string
+	// GitHubToken is a static GitHub API bearer token used by the hub's
+	// grainfile fetcher and content proxy.
+	GitHubToken string
+	// GitHubAPIURL overrides the GitHub REST API base URL (default
+	// https://api.github.com).
+	GitHubAPIURL string
+	// GitHubAppID and GitHubAppPrivateKey configure GitHub App
+	// authentication for fetching grainfiles when GitHubToken is unset.
+	GitHubAppID         int64
+	GitHubAppPrivateKey []byte
+	// GrainfileFetcher overrides the RepoFetcher used to read grainfiles
+	// and referenced files from source repositories. When nil, a
+	// GitHubFetcher configured from GitHubToken / GitHubApp* is used.
+	GrainfileFetcher grainfiles.RepoFetcher
+
 	// Logf, when set, receives the hub's log lines.
 	Logf func(format string, args ...any)
 }
@@ -292,19 +311,21 @@ func (h headerAuth) Principal(r *http.Request) (identity.Principal, error) {
 type Hub struct {
 	cfg Config
 
-	Directory *directory.Store
-	Backlog   *tasks.Store
-	Events    *live.Store
-	Leases    *lease.Store
-	Nodes     *registry.Store
+	Directory  *directory.Store
+	Backlog    *tasks.Store
+	Events     *live.Store
+	Leases     *lease.Store
+	Nodes      *registry.Store
+	Grainfiles *grainfiles.Store
 	// Bus carries wake-ups and event notices between the hub's pods
 	// (docs/hub.md §2.2.4): nil on SQLite.
-	Bus        *notify.Bus
-	Registry   *registry.Registry
-	Rendezvous *rendezvous.Server
-	Dispatcher *tasks.Dispatcher
-	Live       *live.Hub
-	NodeUI     *nodeui.Server
+	Bus           *notify.Bus
+	Registry      *registry.Registry
+	Rendezvous    *rendezvous.Server
+	Dispatcher    *tasks.Dispatcher
+	Live          *live.Hub
+	GrainfilesAPI *grainfiles.API
+	NodeUI        *nodeui.Server
 
 	handler  http.Handler
 	routes   *route.Mux
@@ -332,9 +353,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		h.Close()
 		return nil, err
 	}
-	openDirectory, openBacklog, openEvents, openLeases, openNodes := directory.Open, tasks.Open, live.Open, lease.Open, registry.OpenStore
+	openDirectory, openBacklog, openEvents, openLeases, openNodes, openGrainfiles := directory.Open, tasks.Open, live.Open, lease.Open, registry.OpenStore, grainfiles.Open
 	if cfg.NoMigrate {
-		openDirectory, openBacklog, openEvents, openLeases, openNodes = directory.OpenExisting, tasks.OpenExisting, live.OpenExisting, lease.OpenExisting, registry.OpenExistingStore
+		openDirectory, openBacklog, openEvents, openLeases, openNodes, openGrainfiles = directory.OpenExisting, tasks.OpenExisting, live.OpenExisting, lease.OpenExisting, registry.OpenExistingStore, grainfiles.OpenExisting
 	}
 	if h.Directory, err = openDirectory(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the team directory: %w", err))
@@ -350,6 +371,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	}
 	if h.Nodes, err = openNodes(ctx, cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the shared registry: %w", err))
+	}
+	if h.Grainfiles, err = openGrainfiles(ctx, cfg.Database); err != nil {
+		return fail(fmt.Errorf("server: opening the grainfiles store: %w", err))
 	}
 	if h.Bus, err = notify.Open(cfg.Database); err != nil {
 		return fail(fmt.Errorf("server: opening the notice bus: %w", err))
@@ -396,6 +420,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Observe:   h.metrics.observeRendezvous,
 
 		InternalKey: cfg.InternalKey,
+		Grainfiles:  h.Grainfiles,
+		Bus:         h.Bus,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
 	dirAPI.Unbind = h.Registry.Unbind
@@ -441,12 +467,43 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		h.Bus.Handle(h.Registry.Notice)
 		h.Bus.Handle(h.Dispatcher.Notice)
 		h.Bus.Handle(h.Live.Notice)
+		h.Bus.Handle(h.Rendezvous.Notice)
 	}
 	h.Rendezvous.NodeStream = h.Live.NodeStream
 	filer := &tasks.Filer{Store: h.Backlog, Directory: h.Directory, Dispatcher: h.Dispatcher, Burst: cfg.FileBurst, Every: cfg.FileEvery, Logf: cfg.Logf}
 	h.Rendezvous.FileTask = filer.File
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
 	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI, Requests: h.Events}
+	fetcher := cfg.GrainfileFetcher
+	if fetcher == nil {
+		fetcher = &grainfiles.GitHubFetcher{
+			BaseURL:       cfg.GitHubAPIURL,
+			Token:         cfg.GitHubToken,
+			AppID:         cfg.GitHubAppID,
+			AppPrivateKey: cfg.GitHubAppPrivateKey,
+		}
+	}
+	h.GrainfilesAPI = &grainfiles.API{
+		Store:         h.Grainfiles,
+		Fetcher:       fetcher,
+		WebhookSecret: cfg.WebhookSecret,
+		Directory:     h.Directory,
+		Access: func(r *http.Request) (grainfiles.Viewer, error) {
+			acc, err := dirAPI.Access(r)
+			if err != nil {
+				return grainfiles.Viewer{}, err
+			}
+			return grainfiles.Viewer{
+				Email:    acc.Email,
+				HubAdmin: acc.HubAdmin,
+				SeesRepo: acc.SeesRepo,
+			}, nil
+		},
+		OnEvents: func(evs []grainfiles.Event) {
+			h.Rendezvous.NotifyGrainfiles(evs...)
+		},
+		Logf: cfg.Logf,
+	}
 
 	m := route.NewMux()
 	h.routes = m
@@ -468,6 +525,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	tk := tasksAPI.Handler()
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
+	h.GrainfilesAPI.Register(m)
 	lv := h.Live.Handler()
 	m.Handle("GET "+live.EventsPath, h.metrics.subscriptions(lv))
 	m.Handle("GET "+live.ArtifactsPath, h.metrics.viewThrough(lv))
@@ -586,6 +644,9 @@ func (h *Hub) Close() error {
 	}
 	if h.Nodes != nil {
 		errs = append(errs, h.Nodes.Close())
+	}
+	if h.Grainfiles != nil {
+		errs = append(errs, h.Grainfiles.Close())
 	}
 	if h.Bus != nil {
 		errs = append(errs, h.Bus.Close())

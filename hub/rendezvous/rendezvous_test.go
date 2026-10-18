@@ -10,11 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/internal/testlog"
 )
@@ -363,5 +365,170 @@ func TestShutdownSaysGoodbye(t *testing.T) {
 	_, err = client(ts.URL, "alice-tok", registry.Node{ID: "ws-1", Repos: []string{"o/r"}, Slots: 1}).Connect(ctx(t))
 	if err == nil || errors.Is(err, ErrRefused) {
 		t.Errorf("connecting to a hub that is shutting down: %v, want the handshake to fail (503)", err)
+	}
+}
+
+func TestGrainfileSubscriptionsNotificationsAndCompletions(t *testing.T) {
+	s, ts := hub(t)
+	gfStore, err := grainfiles.Open(ctx(t), "sqlite:"+filepath.Join(t.TempDir(), "gf.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gfStore.Close() })
+	s.Grainfiles = gfStore
+
+	// 1. Backward compatibility: a node that omits subscriptions connects normally.
+	plainConn, err := client(ts.URL, "alice-tok", registry.Node{ID: "ws-plain", Repos: []string{"acme/app"}, Slots: 1}).Connect(ctx(t))
+	if err != nil {
+		t.Fatalf("plain node connect: %v", err)
+	}
+	defer plainConn.Close()
+	if plainConn.Subscriptions() != nil {
+		t.Errorf("expected nil Subscriptions for plain node, got %+v", plainConn.Subscriptions())
+	}
+
+	// 2. Node B connects declaring its recipient deployment URL in hello.
+	clB := client(ts.URL, "alice-tok", registry.Node{
+		ID:         "ws-b",
+		Repos:      []string{"acme/grain-b"},
+		Slots:      2,
+		Features:   []string{registry.FeatureGrainfiles},
+		Recipients: []string{"https://github.com/acme/grain-b"},
+	})
+	connB, err := clB.Connect(ctx(t))
+	if err != nil {
+		t.Fatalf("ws-b connect: %v", err)
+	}
+	defer connB.Close()
+	if sub := connB.Subscriptions(); sub == nil || len(sub.Recipients) != 1 || sub.Recipients[0] != "https://github.com/acme/grain-b" {
+		t.Fatalf("welcome subscriptions = %+v", sub)
+	}
+
+	// 3. Index a .task.md targeting Node B and notify: Node B receives task_ready live.
+	taskB, err := grainfiles.Parse("tasks/build.task.md", []byte("---\ntitle: Build artifact\nrecipient: https://github.com/acme/grain-b\n---\nBuild.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskB.Repo = "https://github.com/acme/repo-a"
+	taskB.Ref = "main"
+	taskB.Commit = "sha-1"
+	recB, err := gfStore.IndexGrainfile(ctx(t), taskB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.NotifyGrainfiles()
+
+	select {
+	case ev := <-connB.GrainfileEvents():
+		if ev.Type != grainfiles.EventTaskReady || ev.GrainfileURL != recB.URL {
+			t.Fatalf("unexpected live event: %+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for live task_ready event on ws-b")
+	}
+
+	// 4. Disconnect Node B, index a .process.md and trigger it while Node B is offline,
+	// then reconnect Node B and verify cursor-based catch-up delivers only missed events.
+	connB.Close()
+	eventually(t, "ws-b offline", func() bool {
+		e, _ := s.Registry.Get("ws-b")
+		return e.Status == registry.Offline
+	})
+
+	procB, err := grainfiles.Parse("processes/audit.process.md", []byte("---\ntitle: Security audit\nrecipient: https://github.com/acme/grain-b\non:\n  push:\n    branches: [\"main\"]\n    paths: [\"src/**\"]\n---\nAudit.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	procB.Repo = "https://github.com/acme/repo-a"
+	procB.Ref = "main"
+	procB.Commit = "sha-2"
+	if _, err := gfStore.IndexGrainfile(ctx(t), procB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gfStore.EvaluateTriggers(ctx(t), "https://github.com/acme/repo-a", "sha-2", grainfiles.ForgeEvent{
+		Source:       grainfiles.TriggerPush,
+		Branch:       "main",
+		ChangedPaths: []string{"src/app.go"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	connB2, err := clB.Connect(ctx(t))
+	if err != nil {
+		t.Fatalf("ws-b reconnect: %v", err)
+	}
+	defer connB2.Close()
+
+	var caughtUp []string
+	for range 2 {
+		select {
+		case ev := <-connB2.GrainfileEvents():
+			caughtUp = append(caughtUp, ev.Type)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for reconnect catchup events, got %v", caughtUp)
+		}
+	}
+	if len(caughtUp) != 2 || caughtUp[0] != grainfiles.EventProcessUpdated || caughtUp[1] != grainfiles.EventProcessTriggered {
+		t.Fatalf("expected [process_updated, process_triggered] on reconnect catchup, got %v", caughtUp)
+	}
+
+	// 5. Node C connects and subscribes via conn.Subscribe to recipient grain-c,
+	// which has a task depending on taskB (depends_on). When Node B reports completion
+	// of taskB via CompleteGrainfile, Node C receives dependency_completed live.
+	taskC, err := grainfiles.Parse("tasks/deploy.task.md", []byte("---\ntitle: Deploy artifact\nrecipient: https://github.com/acme/grain-c\ndepends_on:\n  - https://github.com/acme/repo-a/blob/main/tasks/build.task.md\n---\nDeploy.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskC.Repo = "https://github.com/acme/repo-c"
+	taskC.Ref = "main"
+	taskC.Commit = "sha-c1"
+	recC, err := gfStore.IndexGrainfile(ctx(t), taskC)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connC, err := client(ts.URL, "bob-tok", registry.Node{ID: "ws-c", Slots: 1}).Connect(ctx(t))
+	if err != nil {
+		t.Fatalf("ws-c connect: %v", err)
+	}
+	defer connC.Close()
+
+	updatedSub, err := connC.Subscribe(ctx(t), grainfiles.Subscriptions{
+		Recipients: []string{"https://github.com/acme/grain-c"},
+	})
+	if err != nil {
+		t.Fatalf("ws-c Subscribe: %v", err)
+	}
+	if updatedSub.Revision != 1 {
+		t.Errorf("updatedSub.Revision = %d, want 1", updatedSub.Revision)
+	}
+
+	// Drain the initial task_ready for deploy.task.md delivered after Subscribe.
+	select {
+	case ev := <-connC.GrainfileEvents():
+		if ev.Type != grainfiles.EventTaskReady || ev.GrainfileURL != recC.URL {
+			t.Fatalf("expected initial task_ready for ws-c, got %+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ws-c initial task_ready")
+	}
+
+	// Node B reports completion of build.task.md.
+	depEvents, err := connB2.CompleteGrainfile(ctx(t), recB.URL, "sha-1", "done", "merged PR #10")
+	if err != nil {
+		t.Fatalf("CompleteGrainfile: %v", err)
+	}
+	if len(depEvents) != 1 || depEvents[0].Type != grainfiles.EventDependencyCompleted {
+		t.Fatalf("CompleteGrainfile events = %+v", depEvents)
+	}
+
+	// Node C receives dependency_completed live over its rendezvous stream!
+	select {
+	case ev := <-connC.GrainfileEvents():
+		if ev.Type != grainfiles.EventDependencyCompleted || ev.GrainfileURL != recC.URL || ev.DependencyState != "done" {
+			t.Fatalf("unexpected dependency_completed event on ws-c: %+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for live dependency_completed event on ws-c")
 	}
 }
