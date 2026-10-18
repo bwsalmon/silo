@@ -97,10 +97,48 @@ deployments and has two core responsibilities:
   and enforces its own local policy on which repository and folder
   sources it trusts, failing closed on anything its local policy does
   not allow.
+- **Consuming external git repositories (never hosting git repos):**
+  Grain Hub **consumes** external git repositories (via a GitHub App or
+  forge webhooks and API) rather than hosting git repositories itself
+  (§6.1.1):
+  - Grainfile source authority ([`docs/grainfiles-spec.md`](grainfiles-spec.md)
+    §11.1) relies on the external forge's branch protection, `CODEOWNERS`,
+    and pull-request review on the repositories where code and docs live.
+  - Consuming external repos keeps the hub stateless with respect to git
+    packfiles and preserves the **no source code at rest** invariant
+    (§1.1): the hub database stores only Grainfile metadata and YAML
+    front matter, never source trees or file bodies.
+  - Individual Grain deployments do not need to know about or hold
+    standing credentials for every other deployment's or team's
+    repositories; each deployment only connects to the hub as its own
+    `recipient` identity.
 - **Subscriptions (`recipient` + watched repos/processes):** A Grain
   deployment registers and updates its subscriptions with the hub (§6.2):
   its own `recipient` deployment URL(s), plus any repositories, folder
   paths, or shared `.process.md` / `.task.md` URLs it subscribes to.
+- **Cross-repository content access via `recipient` and `references`:**
+  - **Grainfile as a repo-scoped capability grant:** When a non-draft
+    `.task.md` or `.process.md` is merged into **Repo A** with
+    `recipient: <Deployment B>`, Repo A's owners have explicitly
+    authorized `<Deployment B>` to receive the Grainfile itself and to
+    read the **Repo A** files and folders named in its `references` (as
+    well as reading/working on Repo A when the Grainfile in Repo A asks
+    `<Deployment B>` to act on Repo A) (§6.4.1).
+  - **Same-origin authority rule ("a repository can only grant access to
+    itself"):** A Grainfile committed in **Repo A** can authorize
+    `<Deployment B>` to read `references` inside **Repo A** (resolved at
+    the commit/ref of the Grainfile or the pinned ref in the URL). It
+    **cannot** grant `<Deployment B>` access to a third private
+    repository (**Repo C**) merely by listing a `https://.../repo-c/...`
+    URL in `references` — reading Repo C requires either `<Deployment B>`
+    already having access to Repo C, or Repo C itself
+    publishing/authorizing it.
+  - **On-demand fetch through the hub:** A subscribed Grain deployment
+    fetches the matched `.task.md` / `.process.md` body and its
+    authorized same-repo `references` through the hub on demand
+    ([hub-interface.md](hub-interface.md), §6.4.1) without holding
+    permanent git credentials for Repo A; the hub streams them from the
+    forge API and never stores them at rest in the hub database.
 - **Indexing and webhook/event notification:**
   - Because Grain deployments run on workstations or VMs behind
     NAT/firewalls and should not have to poll every repository in an
@@ -116,8 +154,10 @@ deployments and has two core responsibilities:
     event (`push`, `pull_request`, `merge`) matches a subscribed
     `.process.md` trigger, the hub notifies the subscribed Grain
     deployment over its connection (and answers catch-up queries on
-    connect/reconnect, §6.4) so the node can fetch the Grainfile from
-    git and execute it directly.
+    connect/reconnect, §6.4) so the node can fetch the Grainfile body and
+    its authorized same-repo `references` on demand through the hub (or
+    directly from git when it holds credentials for that repo) and
+    execute it directly.
   - When `.task.md` or `.process.md` files declare cross-deployment
     `depends_on` or `trigger_with` references, the hub routes
     completion and trigger notices between the subscribed deployments
@@ -128,13 +168,14 @@ deployments and has two core responsibilities:
 Grain Hub depends on nothing in a Grain deployment except the
 **node–hub interface** it speaks over the rendezvous: register, declare
 Grainfile subscriptions, heartbeat with capacity, receive Grainfile and
-trigger notifications (and catch up on reconnect), receive cross-deployment
-dependency/co-trigger notices and interactive UI actions (`cancel`,
-`approve`, `message`), stream lifecycle and conversation events, and
-serve on-demand `view` and `http` streams. **Grain deployments can
-differ.** A user may customise their own Grain deployment, or run
-different code altogether, as long as it conforms to that contract:
-[hub-interface.md](hub-interface.md).
+trigger notifications (and catch up on reconnect), fetch matched
+Grainfile bodies and authorized same-repo `references` on demand, receive
+cross-deployment dependency/co-trigger notices and interactive UI actions
+(`cancel`, `approve`, `message`), stream lifecycle and conversation
+events, and serve on-demand `view` and `http` streams. **Grain
+deployments can differ.** A user may customise their own Grain
+deployment, or run different code altogether, as long as it conforms to
+that contract: [hub-interface.md](hub-interface.md).
 
 ## 2. Components
 
@@ -632,7 +673,10 @@ Either side opens further streams once the node is welcomed:
   authorized viewer reads a diff or tool log through (`view`, §7.2), and
   how an authorized viewer reaches a node's own full UI (`http`, §11).
 - **A node to the hub:** handed to `Server.NodeStream`. These are the
-  node's live event streams for its task and process runs (§7.1). With
+  node's live event streams for its task and process runs (§7.1) and
+  its on-demand fetch streams for matched `.task.md` / `.process.md`
+  bodies and authorized same-repo `references` (`fetch_grainfile`,
+  `fetch_reference`, §6.4.1, [hub-interface.md](hub-interface.md)). With
   none set, they are reset.
 
 ### 4.5 The node side
@@ -882,6 +926,31 @@ In the Grainfile model ([`docs/grainfiles-spec.md`](grainfiles-spec.md)):
   `recipient` URL, failing closed on any source its policy does not
   admit.
 
+#### 6.1.1 Why Grain Hub consumes external repositories (never hosts git repos)
+
+Grain Hub **consumes** external git repositories (via a GitHub App or
+forge webhooks and API) rather than hosting git repositories itself:
+
+1. **Forge-enforced source authority
+   ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §11.1):** Grainfile
+   source authority relies on the external forge's branch protection,
+   `CODEOWNERS`, and pull-request review on the repositories where code,
+   documentation, and workflows already live. Hosting separate git
+   repositories on the hub would duplicate or bypass the forge review
+   and branch-protection boundary that governs write authority.
+2. **Stateless with respect to git packfiles and no source code at
+   rest:** Consuming external repositories via forge webhooks and API
+   keeps the hub stateless with respect to git objects and packfiles and
+   preserves the **no source code at rest** invariant (§1.1, §6.3): the
+   hub database stores only Grainfile metadata and YAML front matter,
+   never source trees, git packfiles, or file bodies.
+3. **Decoupled deployment credentials:** Individual Grain deployments do
+   not need to know about or hold standing git credentials for every
+   other deployment's or team's repositories across an organization; each
+   deployment only connects to the hub as its own `recipient` identity
+   and receives notifications and authorized content through the hub
+   (§6.4.1).
+
 ### 6.2 Subscriptions (`recipient` and watched repositories/processes)
 
 A Grain deployment registers its subscriptions with Grain Hub in its
@@ -966,8 +1035,11 @@ When the hub processes a forge webhook or a node connects/reconnects
      inactive until `not_before` is reached.
    - Upon receiving `grainfile_event`, the subscribed Grain deployment
      verifies the source repository/folder against its local policy,
-     fetches the `.task.md` or `.process.md` (and any `references`)
-     directly from git at `commit`, and executes or registers it.
+     fetches the `.task.md` or `.process.md` body and any authorized
+     same-repo `references` at `commit` (on demand through the hub via
+     `fetch_grainfile` / `fetch_reference`, §6.4.1, or directly from git
+     when the deployment holds credentials for that repository), and
+     executes or registers it.
 2. **Forge trigger matching (`trigger_event`):**
    - When a forge webhook event (`push`, `pull_request`, `merge`)
      matches the `on` branch and path filters (`branches`, `paths`,
@@ -976,9 +1048,10 @@ When the hub processes a forge webhook or a node connects/reconnects
      `trigger_event` notification to the subscribed deployment naming
      the `.process.md` URL, the trigger source (`push`, `pull_request`,
      `merge`), `gate`, and the commit/ref/PR details.
-   - The subscribed deployment fetches the `.process.md` from git and
-     dispatches a process run (holding the commit or pull request merge
-     gate when `gate: true`).
+   - The subscribed deployment fetches the `.process.md` (and any
+     authorized same-repo `references`) on demand through the hub or
+     from git and dispatches a process run (holding the commit or pull
+     request merge gate when `gate: true`).
 3. **Catch-up on connect/reconnect (`catchup` / `catchup_result`):**
    - When a Grain deployment connects or reconnects, it sends `catchup`
      with its last seen cursor (or empty for a full snapshot). The hub
@@ -986,6 +1059,45 @@ When the hub processes a forge webhook or a node connects/reconnects
      `.task.md` and `.process.md` metadata matching the node's
      subscriptions and any missed trigger or dependency notices since
      that cursor.
+
+#### 6.4.1 Cross-repository content access via `recipient` and `references`
+
+A Grainfile in **Repo A** enables **Deployment B** (`recipient`) to read
+content from Repo A through the hub without Deployment B holding
+permanent git credentials for Repo A ([hub-interface.md](hub-interface.md),
+[`docs/grainfiles.md`](grainfiles.md)):
+
+- **Grainfile as a repo-scoped capability grant:** When a non-draft
+  `.task.md` or `.process.md` is merged into **Repo A** with
+  `recipient: <Deployment B>`, Repo A's owners (via Repo A's protected
+  branch and `CODEOWNERS` review,
+  [`docs/grainfiles-spec.md`](grainfiles-spec.md) §11.1) have explicitly
+  authorized `<Deployment B>` to receive the Grainfile itself and to
+  read the **Repo A** files and folders named in its `references` (as
+  well as reading/working on Repo A when the Grainfile in Repo A asks
+  `<Deployment B>` to act on Repo A).
+- **Same-origin authority rule ("a repository can only grant access to
+  itself"):** A Grainfile committed in **Repo A** can authorize
+  `<Deployment B>` to read `references` inside **Repo A** (resolved at
+  the commit/ref of the Grainfile or the pinned ref in the URL). It
+  **cannot** grant `<Deployment B>` access to a third private repository
+  (**Repo C**) merely by listing a `https://.../repo-c/...` URL in
+  `references` — reading Repo C requires either `<Deployment B>` already
+  having access to Repo C, or Repo C itself publishing/authorizing it.
+- **On-demand fetch through the hub (`fetch_grainfile`,
+  `fetch_reference`):** When `<Deployment B>` acts on a matched
+  `.task.md` or `.process.md` from Repo A, it opens a stream to the hub
+  ([hub-interface.md](hub-interface.md)) to fetch the `.task.md` /
+  `.process.md` Markdown body and its authorized same-repo `references`
+  on demand at the pinned commit/ref. The hub verifies that the calling
+  node's admitted `subscriptions.recipients` includes the Grainfile's
+  `recipient` (or that the node's owner is admitted to Repo A in
+  `hub/directory`) and, for `fetch_reference`, that the requested
+  reference is declared in the Grainfile's `references` and resolves
+  within **Repo A** (same-origin check). The hub then reads the file or
+  tree from the external forge API using its GitHub App / forge
+  credentials and streams the bytes directly to the node — never storing
+  Grainfile bodies or source files at rest in the hub database.
 
 ### 6.5 Cross-deployment `depends_on` and `trigger_with` routing
 
@@ -1199,15 +1311,20 @@ route by route and caller by caller, and says how to extend it, is
 - **Node identity comes from the credential.** The hello carries no
   trusted owner. Node IDs are bound to their first owner. Admission and
   subscriptions are checked against the team directory (§5.3).
-- **Git source authority and local policy enforcement** (§1.2, §6.1,
+- **Git source authority, repo-scoped capability grants, and local policy
+  enforcement** (§1.2, §6.1, §6.4.1,
   [`docs/grainfiles-spec.md`](grainfiles-spec.md) §11.1). Cross-repo
   `.task.md` and `.process.md` Grainfiles take their authority from the
-  git repository and folder where they live, protected by the forge's
-  branch protection and `CODEOWNERS`. The hub indexes only front-matter
-  metadata and notifies subscribed deployments; each Grain deployment is
-  the PEP that verifies repository/folder source authority against its
-  own local policy and fetches Grainfiles directly from git, failing
-  closed.
+  external git repository and folder where they live, protected by the
+  forge's branch protection and `CODEOWNERS`. A non-draft Grainfile in
+  **Repo A** naming **Deployment B** as `recipient` acts as a
+  repo-scoped capability grant authorizing Deployment B to fetch the
+  Grainfile and its same-repo `references` in Repo A through the hub on
+  demand, subject to the **same-origin authority rule** ("a repository
+  can only grant access to itself" — Repo A can never grant access to a
+  third private repository Repo C). Each Grain deployment is the PEP
+  that verifies repository/folder source authority against its own local
+  policy, failing closed.
 - **The hub can reach a node only through the streams the protocol
   defines** ([the contract](hub-interface.md)): Grainfile/trigger/dependency
   notifications, interactive UI actions (`cancel`, `approve`,
@@ -1216,9 +1333,12 @@ route by route and caller by caller, and says how to extend it, is
   those, so a compromised hub cannot read a node's files beyond the
   artifacts that node has itself listed, and what its own UI shows a
   signed-in user (§11).
-- **No source code at rest on the hub** (§1.1, §6.3, §7.2). Neither the
-  Grainfile metadata index nor the event store holds repository
-  checkouts, file contents, diffs, or sandbox/tool logs.
+- **No source code at rest on the hub** (§1.1, §6.1.1, §6.3, §6.4.1,
+  §7.2). The hub consumes external repositories via forge webhooks and
+  API rather than hosting git repositories itself; neither the Grainfile
+  metadata index nor the event store holds git packfiles, repository
+  checkouts, Grainfile bodies, file contents, diffs, or sandbox/tool
+  logs at rest.
 
 ## 9. Stages
 
