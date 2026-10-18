@@ -153,7 +153,7 @@ type ctxKey struct{}
 // for whom.
 type target struct {
 	node, viewer, role, team string
-	https                    bool
+	https, legacy            bool
 }
 
 // refusal is the node's answer error: it does not serve its UI here.
@@ -220,6 +220,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		role:   role,
 		team:   uiTeam,
 		https:  isHTTPS,
+		legacy: e.UI == nil && role == RoleOwner,
 	})))
 }
 
@@ -273,6 +274,9 @@ func rewrite(pr *httputil.ProxyRequest) {
 		pr.Out.Header.Set("X-Forwarded-Proto", "https")
 	}
 	for _, h := range clientHeaders {
+		if h == identity.IAPHeader && t.legacy {
+			continue
+		}
 		pr.Out.Header.Del(h)
 	}
 	if cs := pr.In.Cookies(); len(cs) > 0 {

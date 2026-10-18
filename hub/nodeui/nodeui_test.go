@@ -93,7 +93,7 @@ func newHarness(t *testing.T) *harness {
 // first lines the node is sent arrive on asked.
 func (h *harness) connect(t *testing.T, id, owner string, ui http.Handler) (*rendezvous.Conn, <-chan Message) {
 	t.Helper()
-	return h.connectNode(t, registry.Node{ID: id, Slots: 1}, owner, ui)
+	return h.connectNode(t, registry.Node{ID: id, Slots: 1, UI: &registry.NodeUI{Offered: true}}, owner, ui)
 }
 
 func (h *harness) connectNode(t *testing.T, node registry.Node, owner string, ui http.Handler) (*rendezvous.Conn, <-chan Message) {
