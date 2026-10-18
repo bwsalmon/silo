@@ -148,8 +148,11 @@ export interface GrainfileTriggers {
   scenario?: ScenarioTrigger | ScenarioTrigger[];
 }
 
-// Grainfile is an indexed .task.md or .process.md metadata record from GET /v1/grainfiles (hub.md §6.3).
+// Grainfile is an indexed .task.grain.md or .process.grain.md metadata record from GET /v1/grainfiles (hub.md §6.3).
 export interface Grainfile {
+  grainfile?: string;
+  spec_summary_path?: string;
+  spec_path?: string;
   repo: string;
   path: string;
   commit_sha?: string;
@@ -167,6 +170,7 @@ export interface Grainfile {
   authorized_references?: string[];
   depends_on?: string[];
   trigger_with?: string[];
+  when?: GrainfileTriggers;
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
   gate?: boolean;
@@ -207,6 +211,9 @@ export interface GrainfileEvent {
   seq?: number;
   id?: string;
   type: GrainfileEventType;
+  grainfile?: string;
+  spec_summary_path?: string;
+  spec_path?: string;
   repo: string;
   path?: string;
   commit_sha?: string;
@@ -221,6 +228,7 @@ export interface GrainfileEvent {
   authorized_references?: string[];
   depends_on?: string[];
   trigger_with?: string[];
+  when?: GrainfileTriggers;
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
   gate?: boolean;

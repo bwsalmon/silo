@@ -31,14 +31,17 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Fatalf("expected 0 findings on examples/grainfiles, got %v", findings)
 	}
 
-	// 2. Test widgets/2026-10-16-widget-schema-v2.task.md
-	v2Path := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-10-16-widget-schema-v2.task.md")
+	// 2. Test widgets/2026-10-16-widget-schema-v2.task.grain.md
+	v2Path := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-10-16-widget-schema-v2.task.grain.md")
 	v2, err := ParseFile(v2Path)
 	if err != nil {
 		t.Fatalf("ParseFile(v2): %v", err)
 	}
 	if v2.Kind != KindTask {
 		t.Errorf("v2.Kind = %q, want %q", v2.Kind, KindTask)
+	}
+	if v2.Grainfile != "v1" || v2.SpecSummaryPath != "docs/grainfile-v1.md" || v2.SpecPath != "docs/grainfiles-spec.md" {
+		t.Errorf("v2 version metadata = (%q, %q, %q)", v2.Grainfile, v2.SpecSummaryPath, v2.SpecPath)
 	}
 	if v2.Name != "2026-10-16-widget-schema-v2" {
 		t.Errorf("v2.Name = %q, want 2026-10-16-widget-schema-v2", v2.Name)
@@ -55,10 +58,6 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if v2.Draft {
 		t.Errorf("v2.Draft = true, want false")
 	}
-	wantCreated := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
-	if !v2.CreatedAt.Equal(wantCreated) {
-		t.Errorf("v2.CreatedAt = %v, want %v", v2.CreatedAt, wantCreated)
-	}
 	if !v2.NotBefore.IsZero() {
 		t.Errorf("v2.NotBefore = %v, want zero", v2.NotBefore)
 	}
@@ -66,10 +65,10 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Errorf("unexpected v2.Body: %q", v2.Body)
 	}
 
-	if err := v2.Resolve("https://github.com/acme/widgets", "refs/heads/main", ".grain/tasks/2026-10-16-widget-schema-v2.task.md"); err != nil {
+	if err := v2.Resolve("https://github.com/acme/widgets", "refs/heads/main", ".grain/tasks/2026-10-16-widget-schema-v2.task.grain.md"); err != nil {
 		t.Fatalf("v2.Resolve: %v", err)
 	}
-	if v2.URL != "https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md" {
+	if v2.URL != "https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md" {
 		t.Errorf("v2.URL = %q", v2.URL)
 	}
 	wantV2Refs := []string{
@@ -93,8 +92,8 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Errorf("expected v2 not to authorize /src/other.go")
 	}
 
-	// 3. Test widgets/2026-10-16-widget-schema-v2-migration.task.md (no requestor, depends_on, RFC 3339 not_before)
-	migPath := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-10-16-widget-schema-v2-migration.task.md")
+	// 3. Test widgets/2026-10-16-widget-schema-v2-migration.task.grain.md (no requestor, depends_on, RFC 3339 not_before)
+	migPath := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-10-16-widget-schema-v2-migration.task.grain.md")
 	mig, err := ParseFile(migPath)
 	if err != nil {
 		t.Fatalf("ParseFile(mig): %v", err)
@@ -112,18 +111,18 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if !mig.ActiveAt(wantMigNB) {
 		t.Errorf("expected mig to be active at not_before")
 	}
-	if err := mig.Resolve("https://github.com/acme/widgets", "main", ".grain/tasks/2026-10-16-widget-schema-v2-migration.task.md"); err != nil {
+	if err := mig.Resolve("https://github.com/acme/widgets", "main", ".grain/tasks/2026-10-16-widget-schema-v2-migration.task.grain.md"); err != nil {
 		t.Fatalf("mig.Resolve: %v", err)
 	}
 	wantMigDeps := []string{
-		"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.md",
+		"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md",
 	}
 	if !reflect.DeepEqual(mig.DependsOn, wantMigDeps) {
 		t.Errorf("mig.DependsOn = %v, want %v", mig.DependsOn, wantMigDeps)
 	}
 
-	// 4. Test widgets/2026-11-01-drop-widget-v1-support.task.md (draft: true, YYYY-MM-DD not_before)
-	dropPath := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-11-01-drop-widget-v1-support.task.md")
+	// 4. Test widgets/2026-11-01-drop-widget-v1-support.task.grain.md (draft: true, YYYY-MM-DD not_before)
+	dropPath := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-11-01-drop-widget-v1-support.task.grain.md")
 	drop, err := ParseFile(dropPath)
 	if err != nil {
 		t.Fatalf("ParseFile(drop): %v", err)
@@ -142,8 +141,8 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Errorf("draft task must not authorize reference fetches")
 	}
 
-	// 5. Test widgets/schema-security-review.process.md (gate: true, pull_request & push triggers)
-	secPath := filepath.Join(examplesDir, "widgets", ".grain", "processes", "schema-security-review.process.md")
+	// 5. Test widgets/schema-security-review.process.grain.md (gate: true, pull_request & push triggers)
+	secPath := filepath.Join(examplesDir, "widgets", ".grain", "processes", "schema-security-review.process.grain.md")
 	sec, err := ParseFile(secPath)
 	if err != nil {
 		t.Fatalf("ParseFile(sec): %v", err)
@@ -180,35 +179,35 @@ func TestExamplesGrainfiles(t *testing.T) {
 		Branch:       "main",
 		ChangedPaths: []string{"src/widget.go"},
 	}) {
-		t.Errorf("expected merge not to match when on.merge is not set")
+		t.Errorf("expected merge not to match when when.merge is not set")
 	}
 
-	// 6. Test widgets/release-cut-check.process.md (scenario + manual)
-	relPath := filepath.Join(examplesDir, "widgets", ".grain", "processes", "release-cut-check.process.md")
+	// 6. Test widgets/release-cut-check.process.grain.md (scenario + manual)
+	relPath := filepath.Join(examplesDir, "widgets", ".grain", "processes", "release-cut-check.process.grain.md")
 	rel, err := ParseFile(relPath)
 	if err != nil {
 		t.Fatalf("ParseFile(rel): %v", err)
 	}
-	if rel.On.Manual == nil {
-		t.Errorf("expected rel.On.Manual != nil")
+	if rel.When.Manual == nil {
+		t.Errorf("expected rel.When.Manual != nil")
 	}
-	if rel.On.Scenario == nil || !strings.Contains(rel.On.Scenario.Description, "release/*") {
-		t.Errorf("unexpected rel.On.Scenario: %+v", rel.On.Scenario)
+	if rel.When.Scenario == nil || !strings.Contains(rel.When.Scenario.Description, "release/*") {
+		t.Errorf("unexpected rel.When.Scenario: %+v", rel.When.Scenario)
 	}
 
-	// 7. Test grain-eu/processes/qualification/smoke.process.md & report.process.md
-	smokePath := filepath.Join(examplesDir, "grain-eu", "processes", "qualification", "smoke.process.md")
+	// 7. Test grain-eu/processes/qualification/smoke.process.grain.md & report.process.grain.md
+	smokePath := filepath.Join(examplesDir, "grain-eu", "processes", "qualification", "smoke.process.grain.md")
 	smoke, err := ParseFile(smokePath)
 	if err != nil {
 		t.Fatalf("ParseFile(smoke): %v", err)
 	}
-	if smoke.On.Schedule == nil || smoke.On.Schedule.Cron != "0 2 * * *" || smoke.On.Schedule.Timezone != "Europe/Berlin" {
-		t.Errorf("unexpected smoke.On.Schedule: %+v", smoke.On.Schedule)
+	if smoke.When.Schedule == nil || smoke.When.Schedule.Cron != "0 2 * * *" || smoke.When.Schedule.Timezone != "Europe/Berlin" {
+		t.Errorf("unexpected smoke.When.Schedule: %+v", smoke.When.Schedule)
 	}
-	if err := smoke.Resolve("https://github.com/acme/grain-eu", "main", "processes/qualification/smoke.process.md"); err != nil {
+	if err := smoke.Resolve("https://github.com/acme/grain-eu", "main", "processes/qualification/smoke.process.grain.md"); err != nil {
 		t.Fatalf("smoke.Resolve: %v", err)
 	}
-	// smoke.process.md lives in grain-eu, but its references point to acme/widgets (cross-repo!)
+	// smoke.process.grain.md lives in grain-eu, but its references point to acme/widgets (cross-repo!)
 	smokeSame, smokeCross := smoke.AuthorizedReferences("https://github.com/acme/grain-eu")
 	if len(smokeSame) != 0 || len(smokeCross) != 2 {
 		t.Errorf("smoke.AuthorizedReferences(grain-eu) = (same=%v, cross=%v), want 0 same and 2 cross", smokeSame, smokeCross)
@@ -217,15 +216,21 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Errorf("grainfile in grain-eu must not authorize cross-origin fetch from acme/widgets")
 	}
 
-	repPath := filepath.Join(examplesDir, "grain-eu", "processes", "qualification", "report.process.md")
+	repPath := filepath.Join(examplesDir, "grain-eu", "processes", "qualification", "report.process.grain.md")
 	rep, err := ParseFile(repPath)
 	if err != nil {
 		t.Fatalf("ParseFile(rep): %v", err)
 	}
-	if err := rep.Resolve("https://github.com/acme/grain-eu", "main", "processes/qualification/report.process.md"); err != nil {
+	if rep.Recipient != "/" {
+		t.Errorf("rep.Recipient before Resolve = %q, want \"/\"", rep.Recipient)
+	}
+	if err := rep.Resolve("https://github.com/acme/grain-eu", "main", "processes/qualification/report.process.grain.md"); err != nil {
 		t.Fatalf("rep.Resolve: %v", err)
 	}
-	wantSmokeURL := []string{"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.md"}
+	if rep.Recipient != "https://github.com/acme/grain-eu" {
+		t.Errorf("rep.Recipient after Resolve = %q, want https://github.com/acme/grain-eu", rep.Recipient)
+	}
+	wantSmokeURL := []string{"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.grain.md"}
 	if !reflect.DeepEqual(rep.TriggerWith, wantSmokeURL) {
 		t.Errorf("rep.TriggerWith = %v, want %v", rep.TriggerWith, wantSmokeURL)
 	}
@@ -310,13 +315,13 @@ func TestPythonGrainlintCrossCheckParity(t *testing.T) {
 		t.Fatalf("LintTree(examples/grainfiles) findings = %v, want none", goFindings)
 	}
 
-	// Verify every individual valid .task.md and .process.md file in examples/grainfiles parses cleanly in Go.
+	// Verify every individual valid .task.grain.md / .process.grain.md file in examples/grainfiles parses cleanly in Go.
 	var validCount int
 	err = filepath.WalkDir(examplesDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
 			return walkErr
 		}
-		if strings.HasSuffix(path, ".task.md") || strings.HasSuffix(path, ".process.md") {
+		if strings.HasSuffix(path, ".task.grain.md") || strings.HasSuffix(path, ".process.grain.md") || strings.HasSuffix(path, ".task.md") || strings.HasSuffix(path, ".process.md") {
 			validCount++
 			gf, pErr := ParseFile(path)
 			if pErr != nil {
@@ -384,17 +389,14 @@ func TestPythonGrainlintCrossCheckParity(t *testing.T) {
 }
 
 func TestParseAndValidateFields(t *testing.T) {
-	t.Run("task with compact UTC stem and x_ extensions and unknown field warning", func(t *testing.T) {
+	t.Run("task with default recipient, grainfile v1, x_ extensions, and unknown field warning", func(t *testing.T) {
 		raw := []byte(`---
-title: Compact UTC task
-recipient: /deployments/eu
+title: Compact task
 requestor: https://github.com/acme/team-a
-created_at: 2026-10-16T13:58:30.123Z
 not_before: 2026-10-20
 draft: false
-trigger_with: ./lead.process.md
 depends_on:
-  - /processes/lead.process.md
+  - /tasks/lead.task.grain.md
 references:
   - ./design.md#overview
 x_custom_priority: 1
@@ -403,12 +405,18 @@ unknown_field: ignored
 ---
 Execute the task.
 `)
-		g, err := Parse("tasks/20261016T135830Z-compact.task.md", raw)
+		g, err := Parse("tasks/20261016-compact.task.grain.md", raw)
 		if err != nil {
 			t.Fatalf("Parse failed: %v", err)
 		}
-		if g.Kind != KindTask || g.Name != "20261016T135830Z-compact" {
+		if g.Kind != KindTask || g.Name != "20261016-compact" {
 			t.Errorf("Kind=%q Name=%q", g.Kind, g.Name)
+		}
+		if g.Grainfile != "v1" || g.SpecSummaryPath != "docs/grainfile-v1.md" || g.SpecPath != "docs/grainfiles-spec.md" {
+			t.Errorf("version metadata = (%q, %q, %q)", g.Grainfile, g.SpecSummaryPath, g.SpecPath)
+		}
+		if g.Recipient != "/" {
+			t.Errorf("Recipient = %q, want \"/\"", g.Recipient)
 		}
 		if len(g.Warnings) != 1 || g.Warnings[0].Code != CodeUnknownField {
 			t.Errorf("Warnings = %v, want 1 GF022 warning", g.Warnings)
@@ -416,20 +424,29 @@ Execute the task.
 		if g.Extensions["x_custom_priority"] != int64(1) {
 			t.Errorf("x_custom_priority = %v (%T)", g.Extensions["x_custom_priority"], g.Extensions["x_custom_priority"])
 		}
-		if !reflect.DeepEqual(g.TriggerWith, []string{"./lead.process.md"}) {
-			t.Errorf("TriggerWith = %v", g.TriggerWith)
-		}
 		wantNB := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 		if !g.NotBefore.Equal(wantNB) {
 			t.Errorf("NotBefore = %v, want %v", g.NotBefore, wantNB)
+		}
+		prompt := FormatExecutionPrompt(g, []MaterializedReference{
+			{URL: "https://github.com/acme/widgets/blob/a1b2c3d4/tasks/design.md#overview", CommitSHA: "a1b2c3d4", Content: "# Design\n"},
+		}, &MaterializedPRDiff{
+			RepoURL:       "https://github.com/acme/widgets",
+			BaseCommitSHA: "a1b2c3d4",
+			HeadCommitSHA: "e5f6a7b8",
+			Diff:          "diff --git a/widget.go b/widget.go",
+		})
+		if !strings.Contains(prompt, "<grainfile_prompt") || !strings.Contains(prompt, "<grainfile_reference") || !strings.Contains(prompt, "<pull_request_diff") {
+			t.Errorf("unexpected FormatExecutionPrompt output:\n%s", prompt)
 		}
 	})
 
 	t.Run("process with string scenario and schedule default UTC timezone", func(t *testing.T) {
 		raw := []byte(`---
+grainfile: v1
 title: Nightly check
 recipient: https://github.com/acme/grain-eu
-on:
+when:
   schedule:
     cron: "30 4 * * 1-5"
   scenario: "When cutting a release branch"
@@ -438,18 +455,18 @@ on:
 ---
 Check the release branch.
 `)
-		g, err := Parse("processes/nightly.process.md", raw)
+		g, err := Parse("processes/nightly.process.grain.md", raw)
 		if err != nil {
 			t.Fatalf("Parse failed: %v", err)
 		}
-		if g.On.Schedule == nil || g.On.Schedule.Timezone != "UTC" {
-			t.Errorf("Schedule = %+v, want Timezone=UTC", g.On.Schedule)
+		if g.When.Schedule == nil || g.When.Schedule.Timezone != "UTC" {
+			t.Errorf("Schedule = %+v, want Timezone=UTC", g.When.Schedule)
 		}
-		if g.On.Scenario == nil || g.On.Scenario.Description != "When cutting a release branch" {
-			t.Errorf("Scenario = %+v", g.On.Scenario)
+		if g.When.Scenario == nil || g.When.Scenario.Description != "When cutting a release branch" {
+			t.Errorf("Scenario = %+v", g.When.Scenario)
 		}
-		if g.On.Merge == nil || !reflect.DeepEqual(g.On.Merge.Branches, []string{"main", "release/*"}) {
-			t.Errorf("Merge = %+v", g.On.Merge)
+		if g.When.Merge == nil || !reflect.DeepEqual(g.When.Merge.Branches, []string{"main", "release/*"}) {
+			t.Errorf("Merge = %+v", g.When.Merge)
 		}
 	})
 
@@ -462,15 +479,39 @@ Check the release branch.
 		}{
 			{
 				name: "uppercase stem",
-				path: "tasks/BadName.task.md",
+				path: "tasks/BadName.task.grain.md",
 				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeBadName,
 			},
 			{
-				name: "invalid compact UTC in stem",
-				path: "tasks/20260230T990000Z-bad.task.md",
+				name: "uppercase T and Z in stem rejected",
+				path: "tasks/20261016T135830Z-bad.task.grain.md",
 				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeBadName,
+			},
+			{
+				name: "non-string grainfile version",
+				path: "tasks/a.task.grain.md",
+				body: "---\ngrainfile: 1\ntitle: T\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "unsupported grainfile version",
+				path: "tasks/a.task.grain.md",
+				body: "---\ngrainfile: v2\ntitle: T\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "trigger_with on task",
+				path: "tasks/a.task.grain.md",
+				body: "---\ntitle: T\ntrigger_with: ./p.process.grain.md\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "task depends_on process",
+				path: "tasks/a.task.grain.md",
+				body: "---\ntitle: T\ndepends_on:\n  - ./p.process.grain.md\n---\n",
+				code: CodeWrongTargetKind,
 			},
 			{
 				name: "unknown suffix",
@@ -577,10 +618,9 @@ title: Multi-ref task
 recipient: ../deployments/grain-eu
 requestor: /teams/platform
 depends_on:
-  - ./prep.task.md
-  - /tasks/shared/init.task.md
-  - https://GitHub.com:443/acme/widgets.git/blob/main/.grain/tasks/ext.task.md
-trigger_with: ../processes/nightly.process.md
+  - ./prep.task.grain.md
+  - /tasks/shared/init.task.grain.md
+  - https://GitHub.com:443/acme/widgets.git/blob/main/.grain/tasks/ext.task.grain.md
 references:
   - ./design.md# framing
   - /docs/arch.md#overview
@@ -594,12 +634,12 @@ Prompt body.
 	// Fix anchor without space
 	raw = []byte(strings.ReplaceAll(string(raw), "# framing", "#framing"))
 
-	g, err := Parse(".grain/tasks/work.task.md", raw)
+	g, err := Parse(".grain/tasks/work.task.grain.md", raw)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	err = g.Resolve("https://GitHub.com:443/acme/widgets.git/", "refs/heads/main", ".grain/tasks/work.task.md")
+	err = g.Resolve("https://GitHub.com:443/acme/widgets.git/", "refs/heads/main", ".grain/tasks/work.task.grain.md")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -607,7 +647,7 @@ Prompt body.
 	if g.Repo != "https://github.com/acme/widgets" {
 		t.Errorf("g.Repo = %q", g.Repo)
 	}
-	if g.URL != "https://github.com/acme/widgets/blob/main/.grain/tasks/work.task.md" {
+	if g.URL != "https://github.com/acme/widgets/blob/main/.grain/tasks/work.task.grain.md" {
 		t.Errorf("g.URL = %q", g.URL)
 	}
 	if g.Recipient != "https://github.com/acme/widgets/tree/main/.grain/deployments/grain-eu" {
@@ -617,18 +657,32 @@ Prompt body.
 		t.Errorf("g.Requestor = %q", g.Requestor)
 	}
 	wantDeps := []string{
-		"https://github.com/acme/widgets/blob/main/.grain/tasks/prep.task.md",
-		"https://github.com/acme/widgets/blob/main/tasks/shared/init.task.md",
-		"https://github.com/acme/widgets/blob/main/.grain/tasks/ext.task.md",
+		"https://github.com/acme/widgets/blob/main/.grain/tasks/prep.task.grain.md",
+		"https://github.com/acme/widgets/blob/main/tasks/shared/init.task.grain.md",
+		"https://github.com/acme/widgets/blob/main/.grain/tasks/ext.task.grain.md",
 	}
 	if !reflect.DeepEqual(g.DependsOn, wantDeps) {
 		t.Errorf("g.DependsOn = %v, want %v", g.DependsOn, wantDeps)
 	}
-	wantTW := []string{
-		"https://github.com/acme/widgets/blob/main/.grain/processes/nightly.process.md",
+
+	procRaw := []byte(`---
+title: Co-triggered process
+trigger_with: ../processes/nightly.process.grain.md
+---
+Run co-triggered check.
+`)
+	gp, err := Parse(".grain/processes/follow.process.grain.md", procRaw)
+	if err != nil {
+		t.Fatalf("Parse(proc): %v", err)
 	}
-	if !reflect.DeepEqual(g.TriggerWith, wantTW) {
-		t.Errorf("g.TriggerWith = %v, want %v", g.TriggerWith, wantTW)
+	if err := gp.Resolve("https://GitHub.com:443/acme/widgets.git/", "refs/heads/main", ".grain/processes/follow.process.grain.md"); err != nil {
+		t.Fatalf("gp.Resolve: %v", err)
+	}
+	wantTW := []string{
+		"https://github.com/acme/widgets/blob/main/.grain/processes/nightly.process.grain.md",
+	}
+	if !reflect.DeepEqual(gp.TriggerWith, wantTW) {
+		t.Errorf("gp.TriggerWith = %v, want %v", gp.TriggerWith, wantTW)
 	}
 
 	sameRepo, crossRepo := g.AuthorizedReferences("https://github.com/acme/widgets")

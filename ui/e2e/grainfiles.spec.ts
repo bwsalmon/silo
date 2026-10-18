@@ -3,7 +3,7 @@
 // connected fake Grain node with active subscriptions.
 import { expect, hubAdmin, storage, test } from './fixtures';
 
-test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfiles, and inspect .task.md and .process.md details', async ({
+test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfiles, and inspect .task.grain.md and .process.grain.md details', async ({
   world,
   hub,
   pageAs,
@@ -20,18 +20,19 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
     repos: [world.repo, repo2],
     recipients: [recipientAlpha],
     folders: [`https://github.com/${world.repo}/tree/main/tasks`],
-    grainfiles: [`https://github.com/${world.repo}/blob/main/.grain/processes/gate.process.md`],
+    grainfiles: [`https://github.com/${world.repo}/blob/main/.grain/processes/gate.process.grain.md`],
   });
 
   await hub.pushGitHub(repo2, 'main', {
-    'processes/lint.process.md': [
+    'processes/lint.process.grain.md': [
       '---',
+      'grainfile: v1',
       `title: Lint documentation ${world.n}`,
       `recipient: ${recipientBeta}`,
       `requestor: Bob <${world.member}>`,
       'draft: false',
       'gate: false',
-      'on:',
+      'when:',
       '  push:',
       '    branches: [main]',
       '---',
@@ -43,8 +44,9 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
 
   await hub.pushGitHub(world.repo, 'main', {
     'docs/spec.md': '# Architecture Spec\n',
-    'tasks/01-migrate.task.md': [
+    'tasks/01-migrate.task.grain.md': [
       '---',
+      'grainfile: v1',
       `title: Migrate billing schema ${world.n}`,
       `recipient: ${recipientAlpha}`,
       `requestor: Alice <${world.admin}>`,
@@ -54,15 +56,13 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
       '  - /docs/spec.md',
       '  - https://github.com/external/other/blob/main/external-notes.md',
       'depends_on:',
-      `  - https://github.com/${repo2}/blob/main/processes/lint.process.md`,
-      'trigger_with:',
-      '  - /.grain/processes/gate.process.md',
+      '  - ./02-draft.task.grain.md',
       '---',
       '# Migrate billing schema',
       '',
       'Run the billing database migration.',
     ].join('\n'),
-    'tasks/02-draft.task.md': [
+    'tasks/02-draft.task.grain.md': [
       '---',
       `title: Draft rollout plan ${world.n}`,
       `recipient: ${recipientAlpha}`,
@@ -74,8 +74,9 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
       '',
       'Work in progress rollout plan.',
     ].join('\n'),
-    '.grain/processes/gate.process.md': [
+    '.grain/processes/gate.process.grain.md': [
       '---',
+      'grainfile: v1',
       `title: Continuous verification gate ${world.n}`,
       `recipient: ${recipientAlpha}`,
       `requestor: Alice <${world.admin}>`,
@@ -85,10 +86,11 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
       '  - /docs/spec.md',
       '  - https://github.com/external/other/blob/main/runbook.md',
       'depends_on:',
-      `  - https://github.com/${repo2}/blob/main/processes/lint.process.md`,
+      `  - https://github.com/${repo2}/blob/main/processes/lint.process.grain.md`,
       'trigger_with:',
-      `  - https://github.com/${repo2}/blob/main/processes/lint.process.md`,
-      'on:',
+      '  - /tasks/01-migrate.task.grain.md',
+      `  - https://github.com/${repo2}/blob/main/processes/lint.process.grain.md`,
+      'when:',
       '  schedule:',
       '    cron: "0 * * * *"',
       '    timezone: UTC',
@@ -134,14 +136,14 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
 
   // 1. Search & filtering: Kind filter (task vs process)
   await page.getByRole('combobox', { name: 'Kind' }).click();
-  await page.getByRole('option', { name: 'Tasks (.task.md)' }).click();
+  await page.getByRole('option', { name: 'Tasks (.task.grain.md)' }).click();
   await expect(table.getByText(migrateTitle)).toBeVisible();
   await expect(table.getByText(draftTitle)).toBeVisible();
   await expect(table.getByText(gateTitle)).toHaveCount(0);
   await expect(table.getByText(lintTitle)).toHaveCount(0);
 
   await page.getByRole('combobox', { name: 'Kind' }).click();
-  await page.getByRole('option', { name: 'Processes (.process.md)' }).click();
+  await page.getByRole('option', { name: 'Processes (.process.grain.md)' }).click();
   await expect(table.getByText(gateTitle)).toBeVisible();
   await expect(table.getByText(lintTitle)).toBeVisible();
   await expect(table.getByText(migrateTitle)).toHaveCount(0);
@@ -218,11 +220,10 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   await expect(detail.getByText('Authorized (same-repo)')).toBeVisible();
   await expect(detail.getByText('External', { exact: true })).toBeVisible();
 
-  // depends_on and trigger_with links
-  const depUrl = `https://github.com/${repo2}/blob/main/processes/lint.process.md`;
-  const twUrl = `https://github.com/${world.repo}/blob/main/.grain/processes/gate.process.md`;
-  await expect(detail.getByRole('link', { name: depUrl })).toHaveAttribute('href', depUrl);
-  await expect(detail.getByRole('link', { name: twUrl })).toHaveAttribute('href', twUrl);
+  // depends_on link on task
+  const taskDepUrl = `https://github.com/${world.repo}/blob/main/tasks/02-draft.task.grain.md`;
+  const depUrl = `https://github.com/${repo2}/blob/main/processes/lint.process.grain.md`;
+  await expect(detail.getByRole('link', { name: taskDepUrl })).toHaveAttribute('href', taskDepUrl);
 
   // Subscribed nodes and recent events
   await expect(detail.getByText(new RegExp(node.id))).toBeVisible();

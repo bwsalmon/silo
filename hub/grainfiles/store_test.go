@@ -138,11 +138,14 @@ depends_on:
 		}
 
 		wantAuthorized := []string{
-			"https://github.com/acme/widgets/blob/main/docs/widget-schema.md#schema-version-header",
-			"https://github.com/acme/widgets/blob/main/.grain/tasks/helper.md",
+			"https://github.com/acme/widgets/blob/a1b2c3d4/docs/widget-schema.md#schema-version-header",
+			"https://github.com/acme/widgets/blob/a1b2c3d4/.grain/tasks/helper.md",
 		}
 		if !reflect.DeepEqual(rec.AuthorizedReferences, wantAuthorized) {
 			t.Errorf("rec.AuthorizedReferences = %v, want %v", rec.AuthorizedReferences, wantAuthorized)
+		}
+		if rec.Grainfile != "v1" || rec.SpecSummaryPath != "docs/grainfile-v1.md" || rec.SpecPath != "docs/grainfiles-spec.md" {
+			t.Errorf("rec version metadata = (%q, %q, %q)", rec.Grainfile, rec.SpecSummaryPath, rec.SpecPath)
 		}
 		if len(rec.References) != 3 {
 			t.Errorf("rec.References = %v, want 3 entries", rec.References)
@@ -552,6 +555,156 @@ func TestSubscriptionValidationAndReconnectCursor(t *testing.T) {
 		}
 		if sub2.Revision != 2 || sub2.Cursor != 42 || sub2.Owner != "alice@example.com" {
 			t.Errorf("expected revision=2, cursor=42, owner preserved; got %+v", sub2)
+		}
+	})
+}
+
+func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+		s.Now = func() time.Time { return time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC) }
+
+		if _, err := s.SetSubscriptions(ctx, Subscriptions{
+			NodeID:     "node-eu",
+			Owner:      "alice@example.com",
+			Recipients: []string{"https://github.com/acme/grain-eu"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. A .task.grain.md pushed on a feature branch (non-default branch) must NOT emit task_ready.
+		featTask, err := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task\nrecipient: https://github.com/acme/grain-eu\n---\nRun once.\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = featTask.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/feat/branch",
+			Commit:  "sha-feat-1",
+			Path:    ".grain/tasks/one-off.task.grain.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, featTask); err != nil {
+			t.Fatal(err)
+		}
+		if evs, _, err := s.CatchupNode(ctx, "node-eu", true); err != nil || len(evs) != 0 {
+			t.Fatalf("expected 0 events for .task.grain.md on non-default branch, got %+v (err=%v)", evs, err)
+		}
+
+		// 2. Pushing the same .task.grain.md on main emits task_ready; editing before completion emits updated task_ready.
+		mainTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task v1\nrecipient: https://github.com/acme/grain-eu\n---\nRun once.\n"))
+		_ = mainTask.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/main",
+			Commit:  "sha-main-1",
+			Path:    ".grain/tasks/one-off.task.grain.md",
+		})
+		rec1, err := s.IndexGrainfile(ctx, mainTask)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evs1, _, _ := s.CatchupNode(ctx, "node-eu", true)
+		if len(evs1) != 1 || evs1[0].Type != EventTaskReady || evs1[0].Title != "One-off task v1" {
+			t.Fatalf("expected initial task_ready, got %+v", evs1)
+		}
+
+		// Edit before completion -> emits updated task_ready.
+		editTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task v2\nrecipient: https://github.com/acme/grain-eu\n---\nRun once v2.\n"))
+		_ = editTask.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/main",
+			Commit:  "sha-main-2",
+			Path:    ".grain/tasks/one-off.task.grain.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, editTask); err != nil {
+			t.Fatal(err)
+		}
+		evs2, _, _ := s.CatchupNode(ctx, "node-eu", true)
+		if len(evs2) != 1 || evs2[0].Type != EventTaskReady || evs2[0].Title != "One-off task v2" {
+			t.Fatalf("expected updated task_ready on edit before completion, got %+v", evs2)
+		}
+
+		// 3. Complete the task -> subsequent pushes must NOT re-emit task_ready (task idempotency),
+		// and deleting a completed task must be a no-op!
+		if _, err := s.RecordDependencyCompleted(ctx, rec1.URL, "sha-main-2", "done", "completed"); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _ = s.CatchupNode(ctx, "node-eu", true)
+
+		repushTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task v3\nrecipient: https://github.com/acme/grain-eu\n---\nRun once v3.\n"))
+		_ = repushTask.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/main",
+			Commit:  "sha-main-3",
+			Path:    ".grain/tasks/one-off.task.grain.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, repushTask); err != nil {
+			t.Fatal(err)
+		}
+		if evs3, _, err := s.CatchupNode(ctx, "node-eu", true); err != nil || len(evs3) != 0 {
+			t.Fatalf("completed task must not re-run on subsequent push, got %+v (err=%v)", evs3, err)
+		}
+		if err := s.RemoveGrainfile(ctx, "https://github.com/acme/widgets", ".grain/tasks/one-off.task.grain.md"); err != nil {
+			t.Fatalf("RemoveGrainfile(completed): %v", err)
+		}
+		if evs4, _, err := s.CatchupNode(ctx, "node-eu", true); err != nil || len(evs4) != 0 {
+			t.Fatalf("deleting completed task must be a no-op, got %+v (err=%v)", evs4, err)
+		}
+
+		// 4. Deleting a queued (uncompleted) task emits a cancellation event (dependency_completed with state=cancelled).
+		qTask, _ := Parse(".grain/tasks/cancel-me.task.grain.md", []byte("---\ntitle: Cancel me\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n"))
+		_ = qTask.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/main",
+			Commit:  "sha-q-1",
+			Path:    ".grain/tasks/cancel-me.task.grain.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, qTask); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _ = s.CatchupNode(ctx, "node-eu", true)
+		if err := s.RemoveGrainfile(ctx, "https://github.com/acme/widgets", ".grain/tasks/cancel-me.task.grain.md"); err != nil {
+			t.Fatalf("RemoveGrainfile(queued): %v", err)
+		}
+		delEvs, _, err := s.CatchupNode(ctx, "node-eu", true)
+		if err != nil || len(delEvs) != 1 || delEvs[0].Type != EventDependencyCompleted || delEvs[0].DependencyState != "cancelled" {
+			t.Fatalf("deleting queued task: expected cancelled event, got %+v (err=%v)", delEvs, err)
+		}
+
+		// 5. Bounded trigger_with chain depth (MaxTriggerWithDepth = 8) & cycle safety.
+		for i := 0; i <= MaxTriggerWithDepth+3; i++ {
+			path := fmt.Sprintf(".grain/processes/p%02d.process.grain.md", i)
+			var yamlBody string
+			if i == 0 {
+				yamlBody = "---\ntitle: Root process\nrecipient: https://github.com/acme/grain-eu\nwhen:\n  push:\n    branches: [\"main\"]\n---\nRoot.\n"
+			} else {
+				prevURL := fmt.Sprintf("https://github.com/acme/widgets/blob/main/.grain/processes/p%02d.process.grain.md", i-1)
+				yamlBody = fmt.Sprintf("---\ntitle: Step %d\nrecipient: https://github.com/acme/grain-eu\ntrigger_with:\n  - %s\n---\nStep.\n", i, prevURL)
+			}
+			pg, err := Parse(path, []byte(yamlBody))
+			if err != nil {
+				t.Fatalf("Parse(%s): %v", path, err)
+			}
+			_ = pg.ResolveSource(Source{
+				RepoURL: "https://github.com/acme/widgets",
+				Ref:     "refs/heads/main",
+				Commit:  "sha-chain",
+				Path:    path,
+			})
+			if _, err := s.IndexGrainfile(ctx, pg); err != nil {
+				t.Fatalf("IndexGrainfile(%s): %v", path, err)
+			}
+		}
+		chainEvs, err := s.EvaluateTriggers(ctx, "https://github.com/acme/widgets", "sha-chain-run", ForgeEvent{
+			Source:       TriggerPush,
+			Branch:       "main",
+			ChangedPaths: []string{"README.md"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Root (depth 0) + MaxTriggerWithDepth (8) transitive hops = 9 total events (p00..p08).
+		if len(chainEvs) != MaxTriggerWithDepth+1 {
+			t.Fatalf("expected bounded trigger_with chain of %d events (1 root + %d hops), got %d", MaxTriggerWithDepth+1, MaxTriggerWithDepth, len(chainEvs))
 		}
 	})
 }

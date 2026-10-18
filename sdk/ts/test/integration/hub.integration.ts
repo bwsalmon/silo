@@ -278,11 +278,12 @@ describe('the SDK against silo hub serve', () => {
   it('indexes Grainfiles from real git repos and filters/inspects them through the SDK', async () => {
     const h = as(alice);
 
-    await commitAndPushWebhook(repo, 'main', {
+    const shaRepo = await commitAndPushWebhook(repo, 'main', {
       'docs/spec.md': '# Spec\n',
       'tasks/schema.json': '{"type":"object"}\n',
-      'tasks/migrate.task.md': [
+      'tasks/migrate.task.grain.md': [
         '---',
+        'grainfile: v1',
         'title: Migrate Database',
         `recipient: ${recipientAlpha}`,
         'requestor: Alice <alice@sdk.test>',
@@ -292,15 +293,13 @@ describe('the SDK against silo hub serve', () => {
         '  - ./schema.json',
         '  - https://github.com/other/repo/blob/main/secret.md',
         'depends_on:',
-        `  - https://github.com/${repoDocs}/blob/main/processes/lint.process.md`,
-        'trigger_with:',
-        '  - ./verify.process.md',
+        '  - ./draft-idea.task.grain.md',
         '---',
         '# Migrate Database',
         '',
         'Run the migration.',
       ].join('\n'),
-      'tasks/draft-idea.task.md': [
+      'tasks/draft-idea.task.grain.md': [
         '---',
         'title: Draft Idea',
         `recipient: ${recipientAlpha}`,
@@ -311,13 +310,15 @@ describe('the SDK against silo hub serve', () => {
         '',
         'Work in progress.',
       ].join('\n'),
-      'tasks/verify.process.md': [
+      'tasks/verify.process.grain.md': [
         '---',
         'title: Verify Migration',
         `recipient: ${recipientAlpha}`,
         'requestor: Alice <alice@sdk.test>',
         'gate: true',
-        'on:',
+        'trigger_with:',
+        `  - https://github.com/${repoDocs}/blob/main/processes/lint.process.grain.md`,
+        'when:',
         '  push:',
         '    branches: [main]',
         '    paths: ["src/**"]',
@@ -329,13 +330,13 @@ describe('the SDK against silo hub serve', () => {
     });
 
     await commitAndPushWebhook(repoDocs, 'main', {
-      'processes/lint.process.md': [
+      'processes/lint.process.grain.md': [
         '---',
         'title: Lint Docs',
         `recipient: ${recipientBeta}`,
         'requestor: https://github.com/sdk/grain-alpha',
         'gate: false',
-        'on:',
+        'when:',
         '  pull_request:',
         '    branches: [main]',
         '---',
@@ -348,51 +349,51 @@ describe('the SDK against silo hub serve', () => {
     // Default listGrainfiles includes non-drafts and drafts unless filtered.
     const all = await h.listGrainfiles({ include_drafts: true });
     expect(all.map((g) => `${g.repo}:${g.path}`)).toEqual([
-      `https://github.com/${repoDocs}:processes/lint.process.md`,
-      `https://github.com/${repo}:tasks/draft-idea.task.md`,
-      `https://github.com/${repo}:tasks/migrate.task.md`,
-      `https://github.com/${repo}:tasks/verify.process.md`,
+      `https://github.com/${repoDocs}:processes/lint.process.grain.md`,
+      `https://github.com/${repo}:tasks/draft-idea.task.grain.md`,
+      `https://github.com/${repo}:tasks/migrate.task.grain.md`,
+      `https://github.com/${repo}:tasks/verify.process.grain.md`,
     ]);
 
     // Filter by kind
     const tasksOnly = await h.listGrainfiles({ kind: 'task', include_drafts: true });
-    expect(tasksOnly.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md', 'tasks/migrate.task.md']);
+    expect(tasksOnly.map((g) => g.path)).toEqual(['tasks/draft-idea.task.grain.md', 'tasks/migrate.task.grain.md']);
     const procsOnly = await h.listGrainfiles({ kind: 'process', include_drafts: true });
-    expect(procsOnly.map((g) => g.path)).toEqual(['processes/lint.process.md', 'tasks/verify.process.md']);
+    expect(procsOnly.map((g) => g.path)).toEqual(['processes/lint.process.grain.md', 'tasks/verify.process.grain.md']);
 
     // Filter by recipient
     const alphaOnly = await h.listGrainfiles({ recipient: recipientAlpha, include_drafts: true });
     expect(alphaOnly.map((g) => g.path)).toEqual([
-      'tasks/draft-idea.task.md',
-      'tasks/migrate.task.md',
-      'tasks/verify.process.md',
+      'tasks/draft-idea.task.grain.md',
+      'tasks/migrate.task.grain.md',
+      'tasks/verify.process.grain.md',
     ]);
     const betaOnly = await h.listGrainfiles({ recipient: recipientBeta, include_drafts: true });
-    expect(betaOnly.map((g) => g.path)).toEqual(['processes/lint.process.md']);
+    expect(betaOnly.map((g) => g.path)).toEqual(['processes/lint.process.grain.md']);
 
     // Filter by repo
     const docsOnly = await h.listGrainfiles({ repo: repoDocs, include_drafts: true });
-    expect(docsOnly.map((g) => g.path)).toEqual(['processes/lint.process.md']);
+    expect(docsOnly.map((g) => g.path)).toEqual(['processes/lint.process.grain.md']);
 
     // Filter by draft
     const draftsOnly = await h.listGrainfiles({ draft: true });
-    expect(draftsOnly.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md']);
+    expect(draftsOnly.map((g) => g.path)).toEqual(['tasks/draft-idea.task.grain.md']);
     const nonDraftsOnly = await h.listGrainfiles({ draft: false });
     expect(nonDraftsOnly.map((g) => g.path)).toEqual([
-      'processes/lint.process.md',
-      'tasks/migrate.task.md',
-      'tasks/verify.process.md',
+      'processes/lint.process.grain.md',
+      'tasks/migrate.task.grain.md',
+      'tasks/verify.process.grain.md',
     ]);
 
     // Filter by gate
     const gatedOnly = await h.listGrainfiles({ gate: true, include_drafts: true });
-    expect(gatedOnly.map((g) => g.path)).toEqual(['tasks/verify.process.md']);
+    expect(gatedOnly.map((g) => g.path)).toEqual(['tasks/verify.process.grain.md']);
 
     // Filter by requestor (both Name <email> and https:// URL)
     const byEmail = await h.listGrainfiles({ requestor: 'Alice <alice@sdk.test>', include_drafts: true });
-    expect(byEmail.map((g) => g.path)).toEqual(['tasks/migrate.task.md', 'tasks/verify.process.md']);
+    expect(byEmail.map((g) => g.path)).toEqual(['tasks/migrate.task.grain.md', 'tasks/verify.process.grain.md']);
     const byUrl = await h.listGrainfiles({ requestor: 'https://github.com/sdk/grain-beta', include_drafts: true });
-    expect(byUrl.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md']);
+    expect(byUrl.map((g) => g.path)).toEqual(['tasks/draft-idea.task.grain.md']);
 
     // Combined filter
     const combined = await h.listGrainfiles({
@@ -403,29 +404,29 @@ describe('the SDK against silo hub serve', () => {
       gate: true,
       requestor: 'Alice <alice@sdk.test>',
     });
-    expect(combined.map((g) => g.path)).toEqual(['tasks/verify.process.md']);
+    expect(combined.map((g) => g.path)).toEqual(['tasks/verify.process.grain.md']);
 
     // Direct getGrainfilesOverview and filter parameters (kind, recipient, repo, draft, node)
     const overview = await h.getGrainfilesOverview({ include_drafts: true });
     expect(overview.grainfiles.map((g) => g.path)).toEqual([
-      'processes/lint.process.md',
-      'tasks/draft-idea.task.md',
-      'tasks/migrate.task.md',
-      'tasks/verify.process.md',
+      'processes/lint.process.grain.md',
+      'tasks/draft-idea.task.grain.md',
+      'tasks/migrate.task.grain.md',
+      'tasks/verify.process.grain.md',
     ]);
     expect(overview.subscriptions.some((s) => s.node_id === node && s.recipients?.includes(recipientAlpha))).toBe(true);
     expect(overview.events.map((e) => e.type)).toEqual(expect.arrayContaining(['task_ready', 'process_updated']));
 
     const overviewByKind = await h.getGrainfilesOverview({ kind: 'task', draft: false });
-    expect(overviewByKind.grainfiles.map((g) => g.path)).toEqual(['tasks/migrate.task.md']);
+    expect(overviewByKind.grainfiles.map((g) => g.path)).toEqual(['tasks/migrate.task.grain.md']);
     expect(overviewByKind.events.every((e) => !e.kind || e.kind === 'task')).toBe(true);
 
     const overviewByRecipient = await h.getGrainfilesOverview({ recipient: recipientBeta });
-    expect(overviewByRecipient.grainfiles.map((g) => g.path)).toEqual(['processes/lint.process.md']);
+    expect(overviewByRecipient.grainfiles.map((g) => g.path)).toEqual(['processes/lint.process.grain.md']);
     expect(overviewByRecipient.events.every((e) => !e.recipient || e.recipient === recipientBeta)).toBe(true);
 
     const overviewByRepo = await h.getGrainfilesOverview({ repo, draft: true });
-    expect(overviewByRepo.grainfiles.map((g) => g.path)).toEqual(['tasks/draft-idea.task.md']);
+    expect(overviewByRepo.grainfiles.map((g) => g.path)).toEqual(['tasks/draft-idea.task.grain.md']);
 
     // Verify node recipient subscription reporting via listNodes and listGrainfileSubscriptions
     const nodes = await h.listNodes();
@@ -440,37 +441,43 @@ describe('the SDK against silo hub serve', () => {
     expect(nodeSubs[0].recipients).toEqual([recipientAlpha]);
 
     const alphaEvents = await h.listGrainfileEvents({ recipient: recipientAlpha, kind: 'task' });
-    expect(alphaEvents.some((e) => e.type === 'task_ready' && e.path === 'tasks/migrate.task.md')).toBe(true);
+    expect(alphaEvents.some((e) => e.type === 'task_ready' && e.path === 'tasks/migrate.task.grain.md')).toBe(true);
 
     // Inspect a Grainfile for detail metadata, authorized_references, recent_events, and subscriptions
-    const inspection = await h.inspectGrainfile(`https://github.com/${repo}/blob/main/tasks/migrate.task.md`);
+    const inspection = await h.inspectGrainfile(`https://github.com/${repo}/blob/main/tasks/migrate.task.grain.md`);
     expect(inspection.grainfile).not.toBeNull();
     expect(inspection.grainfile?.title).toBe('Migrate Database');
+    expect(inspection.grainfile?.grainfile).toBe('v1');
+    expect(inspection.grainfile?.spec_summary_path).toBe('docs/grainfile-v1.md');
+    expect(inspection.grainfile?.spec_path).toBe('docs/grainfiles-spec.md');
     expect(inspection.grainfile?.references).toEqual([
       `https://github.com/${repo}/blob/main/docs/spec.md`,
       `https://github.com/${repo}/blob/main/tasks/schema.json`,
       'https://github.com/other/repo/blob/main/secret.md',
     ]);
     expect(inspection.grainfile?.authorized_references).toEqual([
-      `https://github.com/${repo}/blob/main/docs/spec.md`,
-      `https://github.com/${repo}/blob/main/tasks/schema.json`,
+      `https://github.com/${repo}/blob/${shaRepo}/docs/spec.md`,
+      `https://github.com/${repo}/blob/${shaRepo}/tasks/schema.json`,
     ]);
     expect(inspection.grainfile?.depends_on).toEqual([
-      `https://github.com/${repoDocs}/blob/main/processes/lint.process.md`,
-    ]);
-    expect(inspection.grainfile?.trigger_with).toEqual([
-      `https://github.com/${repo}/blob/main/tasks/verify.process.md`,
+      `https://github.com/${repo}/blob/main/tasks/draft-idea.task.grain.md`,
     ]);
     expect(inspection.grainfile?.subscribed_nodes).toContain(node);
     expect(inspection.grainfile?.recent_events?.map((e) => e.type)).toContain('task_ready');
     expect(inspection.events.map((e) => e.type)).toContain('task_ready');
     expect(inspection.subscriptions.some((s) => s.node_id === node)).toBe(true);
 
+    const procInspection = await h.inspectGrainfile(`https://github.com/${repo}/blob/main/tasks/verify.process.grain.md`);
+    expect(procInspection.grainfile?.trigger_with).toEqual([
+      `https://github.com/${repoDocs}/blob/main/processes/lint.process.grain.md`,
+    ]);
+    expect(procInspection.grainfile?.when?.push?.branches).toEqual(['main']);
+
     // Verify the live fakegrain node received the grainfile_events for recipientAlpha
     await until('fakegrain to receive grainfile_events', async () => {
       const st = await control('GET', '/state');
       const evs: Array<{ type: string; path: string }> = st.grainfile_events ?? [];
-      return evs.some((e) => e.type === 'task_ready' && e.path === 'tasks/migrate.task.md') ? true : undefined;
+      return evs.some((e) => e.type === 'task_ready' && e.path === 'tasks/migrate.task.grain.md') ? true : undefined;
     });
   });
 });

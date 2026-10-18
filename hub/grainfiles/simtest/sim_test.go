@@ -543,8 +543,8 @@ Bootstrap beta service cluster.
 				t.Fatalf("expected 3 references on migrate.task.md, got %v", mig.References)
 			}
 			wantAuthRefs := []string{
-				"https://github.com/acme/platform/blob/main/docs/spec.md",
-				"https://github.com/acme/platform/blob/main/tasks/schema.json",
+				fmt.Sprintf("https://github.com/acme/platform/blob/%s/docs/spec.md", shaPlatform),
+				fmt.Sprintf("https://github.com/acme/platform/blob/%s/tasks/schema.json", shaPlatform),
 			}
 			if !slices.Equal(mig.AuthorizedReferences, wantAuthRefs) {
 				t.Fatalf("authorized_references = %v, want %v", mig.AuthorizedReferences, wantAuthRefs)

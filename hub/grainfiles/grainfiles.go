@@ -1,7 +1,7 @@
 // Package grainfiles parses, validates, resolves, and evaluates triggers and
-// same-repository reference access grants for .task.md and .process.md
-// Grainfiles (docs/grainfiles-spec.md, docs/grainfiles.md, docs/hub.md §6,
-// docs/hub-interface.md).
+// same-repository reference access grants for .task.grain.md and
+// .process.grain.md Grainfiles (docs/grainfile-v1.md, docs/grainfiles-spec.md,
+// docs/grainfiles.md, docs/hub.md §6, docs/hub-interface.md).
 package grainfiles
 
 import (
@@ -20,9 +20,9 @@ import (
 type Kind string
 
 const (
-	// KindTask is a discrete task (<name>.task.md) executed once.
+	// KindTask is a discrete task (<name>.task.grain.md) executed once.
 	KindTask Kind = "task"
-	// KindProcess is a standing repeatable process (<name>.process.md).
+	// KindProcess is a standing repeatable process (<name>.process.grain.md).
 	KindProcess Kind = "process"
 )
 
@@ -31,7 +31,50 @@ func (k Kind) Valid() bool {
 	return k == KindTask || k == KindProcess
 }
 
-// Registered trigger sources for .process.md files (docs/grainfiles-spec.md §12.2).
+// Registered Grainfile format versions and specification paths (docs/grainfiles-spec.md §6.1).
+const (
+	VersionV1           = "v1"
+	SpecSummaryPathV1   = "docs/grainfile-v1.md"
+	SpecPathV1          = "docs/grainfiles-spec.md"
+	CommonSchemaPathV1  = "schemas/grainfiles/common.schema.json"
+	TaskSchemaPathV1    = "schemas/grainfiles/task.schema.json"
+	ProcessSchemaPathV1 = "schemas/grainfiles/process.schema.json"
+)
+
+// VersionSpec maps a Grainfile format version identifier (such as "v1") to the
+// repository-relative paths of its concise agent summary, normative
+// specification, and JSON schemas (docs/grainfiles-spec.md §6.1).
+type VersionSpec struct {
+	Version           string `json:"version"`
+	SpecSummaryPath   string `json:"spec_summary_path"`
+	SpecPath          string `json:"spec_path"`
+	CommonSchemaPath  string `json:"common_schema_path"`
+	TaskSchemaPath    string `json:"task_schema_path"`
+	ProcessSchemaPath string `json:"process_schema_path"`
+}
+
+var versionRegistry = map[string]VersionSpec{
+	VersionV1: {
+		Version:           VersionV1,
+		SpecSummaryPath:   SpecSummaryPathV1,
+		SpecPath:          SpecPathV1,
+		CommonSchemaPath:  CommonSchemaPathV1,
+		TaskSchemaPath:    TaskSchemaPathV1,
+		ProcessSchemaPath: ProcessSchemaPathV1,
+	},
+}
+
+// LookupVersion looks up a registered Grainfile version specification. An
+// empty version string defaults to VersionV1 ("v1").
+func LookupVersion(v string) (VersionSpec, bool) {
+	if v == "" {
+		v = VersionV1
+	}
+	spec, ok := versionRegistry[v]
+	return spec, ok
+}
+
+// Registered trigger sources for .process.grain.md files (docs/grainfiles-spec.md §12.2).
 const (
 	TriggerSchedule    = "schedule"
 	TriggerPush        = "push"
@@ -42,12 +85,14 @@ const (
 	TriggerWith        = "trigger_with"
 )
 
-// Resource limits (docs/grainfiles-spec.md §4.1.4, §4.3, §11.4).
+// Resource limits (docs/grainfiles-spec.md §4.1.4, §4.3, §8.4.2, §11.4).
 const (
-	MaxFileBytes        = 1024 * 1024
-	MaxFrontMatterBytes = 64 * 1024
-	MaxPathBytes        = 1024
-	MaxSegmentBytes     = 255
+	MaxFileBytes         = 1024 * 1024
+	MaxFrontMatterBytes  = 64 * 1024
+	MaxPathBytes         = 1024
+	MaxSegmentBytes      = 255
+	MaxTriggerWithDepth  = 8
+	MaxTriggerWithFanOut = 32
 )
 
 // Lint and validation codes (docs/grainfiles-spec.md §10).
@@ -119,11 +164,16 @@ func (e Errors) Error() string {
 	return strings.Join(parts, "\n")
 }
 
-// Grainfile is a parsed and validated .task.md or .process.md file.
+// Grainfile is a parsed and validated .task.grain.md or .process.grain.md file.
 type Grainfile struct {
 	Kind Kind   `json:"kind"`
 	Name string `json:"name,omitempty"`
 	Path string `json:"path,omitempty"`
+
+	// Format version and specification paths (docs/grainfiles-spec.md §6.1).
+	Grainfile       string `json:"grainfile"`
+	SpecSummaryPath string `json:"spec_summary_path"`
+	SpecPath        string `json:"spec_path"`
 
 	// Authoritative source metadata populated by Resolve.
 	URL    string `json:"url,omitempty"`
@@ -143,6 +193,7 @@ type Grainfile struct {
 	References   []string       `json:"references,omitempty"`
 	DependsOn    []string       `json:"depends_on,omitempty"`
 	TriggerWith  []string       `json:"trigger_with,omitempty"`
+	When         Triggers       `json:"when,omitempty"`
 	On           Triggers       `json:"on,omitempty"`
 	Gate         bool           `json:"gate,omitempty"`
 	Extensions   map[string]any `json:"extensions,omitempty"`
@@ -154,8 +205,8 @@ type Grainfile struct {
 	Warnings []Finding `json:"-"`
 }
 
-// Triggers holds the structured trigger rules under `on` in a .process.md file
-// (docs/grainfiles-spec.md §7.2.1).
+// Triggers holds the structured trigger rules under `when` in a
+// .process.grain.md file (docs/grainfiles-spec.md §7.2.1).
 type Triggers struct {
 	Schedule    *ScheduleTrigger `json:"schedule,omitempty"`
 	Push        *EventFilter     `json:"push,omitempty"`
@@ -175,13 +226,13 @@ func (t Triggers) IsZero() bool {
 		t.Scenario == nil
 }
 
-// ScheduleTrigger is `on.schedule` (docs/grainfiles-spec.md §7.2.1).
+// ScheduleTrigger is `when.schedule` (docs/grainfiles-spec.md §7.2.1).
 type ScheduleTrigger struct {
 	Cron     string `json:"cron"`
 	Timezone string `json:"timezone,omitempty"`
 }
 
-// EventFilter is `on.push`, `on.merge`, or `on.pull_request`
+// EventFilter is `when.push`, `when.merge`, or `when.pull_request`
 // (docs/grainfiles-spec.md §7.2.1).
 type EventFilter struct {
 	Branches []string `json:"branches,omitempty"`
@@ -189,30 +240,60 @@ type EventFilter struct {
 	Ignore   []string `json:"ignore,omitempty"`
 }
 
-// ManualTrigger is `on.manual: {}` (docs/grainfiles-spec.md §7.2.1).
+// ManualTrigger is `when.manual: {}` (docs/grainfiles-spec.md §7.2.1).
 type ManualTrigger struct{}
 
-// ScenarioTrigger is `on.scenario` (docs/grainfiles-spec.md §7.2.1).
+// ScenarioTrigger is `when.scenario` (docs/grainfiles-spec.md §7.2.1).
 type ScenarioTrigger struct {
 	Description string `json:"description"`
 }
 
 var (
-	stemRe         = regexp.MustCompile(`^(\d{8}T\d{6}Z|[a-z0-9])[a-z0-9._-]*$`)
-	compactUTCRe   = regexp.MustCompile(`^(\d{8}T\d{6}Z)`)
-	unknownKindRe  = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.md$`)
-	userIdentityRe = regexp.MustCompile(`^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$`)
-	timeRe         = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$`)
-	dateRe         = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	stemRe             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+	unknownGrainKindRe = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.grain\.md$`)
+	unknownKindRe      = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.md$`)
+	userIdentityRe     = regexp.MustCompile(`^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$`)
+	timeRe             = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$`)
+	dateRe             = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 )
 
-// ClassifyPath classifies a repository-relative path according to
-// docs/grainfiles-spec.md §4.1 and §4.2.
+// ClassifyStrictPath classifies a repository-relative path strictly against
+// the canonical .task.grain.md and .process.grain.md suffixes
+// (docs/grainfiles-spec.md §4.1 and §4.2).
 //
-// If relPath ends with .task.md or .process.md, isGrainfile is true and kind
-// and stem are returned. If relPath is an asset Markdown file with an
-// unregistered .<kind>.md suffix (excluding README*), warnCode is "GF005".
+// If relPath ends with .task.grain.md or .process.grain.md, isGrainfile is true
+// and kind and stem are returned. If relPath is an asset Markdown file with an
+// unregistered .<kind>.grain.md or .<kind>.md suffix (excluding README*),
+// warnCode is "GF005".
+func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile bool, warnCode string) {
+	norm := filepath.ToSlash(relPath)
+	leaf := norm
+	if idx := strings.LastIndexByte(norm, '/'); idx >= 0 {
+		leaf = norm[idx+1:]
+	}
+	for _, k := range []Kind{KindTask, KindProcess} {
+		suf := "." + string(k) + ".grain.md"
+		if strings.HasSuffix(leaf, suf) {
+			return k, leaf[:len(leaf)-len(suf)], true, ""
+		}
+	}
+	if unknownGrainKindRe.MatchString(leaf) {
+		return "", "", false, CodeUnknownSuffix
+	}
+	if unknownKindRe.MatchString(leaf) && !strings.HasPrefix(strings.ToLower(leaf), "readme") {
+		return "", "", false, CodeUnknownSuffix
+	}
+	return "", "", false, ""
+}
+
+// ClassifyPath classifies a repository-relative path according to
+// docs/grainfiles-spec.md §4.1 and §4.2, matching canonical .task.grain.md /
+// .process.grain.md files first and accepting legacy .task.md / .process.md
+// suffixes for backward compatibility.
 func ClassifyPath(relPath string) (kind Kind, stem string, isGrainfile bool, warnCode string) {
+	if k, s, ok, _ := ClassifyStrictPath(relPath); ok {
+		return k, s, true, ""
+	}
 	norm := filepath.ToSlash(relPath)
 	leaf := norm
 	if idx := strings.LastIndexByte(norm, '/'); idx >= 0 {
@@ -224,24 +305,14 @@ func ClassifyPath(relPath string) (kind Kind, stem string, isGrainfile bool, war
 			return k, leaf[:len(leaf)-len(suf)], true, ""
 		}
 	}
-	if unknownKindRe.MatchString(leaf) && !strings.HasPrefix(strings.ToLower(leaf), "readme") {
-		return "", "", false, CodeUnknownSuffix
-	}
-	return "", "", false, ""
+	_, _, _, warn := ClassifyStrictPath(relPath)
+	return "", "", false, warn
 }
 
-// ValidateStem checks whether stem matches the Grainfile stem grammar
-// (docs/grainfiles-spec.md §4.1).
+// ValidateStem checks whether stem matches the lowercase ASCII Grainfile stem
+// grammar `[a-z0-9][a-z0-9._-]*` (docs/grainfiles-spec.md §4.1).
 func ValidateStem(stem string) bool {
-	if !stemRe.MatchString(stem) {
-		return false
-	}
-	if m := compactUTCRe.FindString(stem); m != "" {
-		if _, err := time.Parse("20060102T150405Z", m); err != nil {
-			return false
-		}
-	}
-	return true
+	return stemRe.MatchString(stem)
 }
 
 // ParseFilename validates a Grainfile filename or repository-relative path
@@ -261,7 +332,7 @@ func ParseFilename(relPath string) (Kind, string, error) {
 		if warnCode != "" {
 			return "", "", newFinding(warnCode, relPath, "unregistered kind suffix")
 		}
-		return "", "", newFinding(CodeBadName, relPath, "filename must end with .task.md or .process.md")
+		return "", "", newFinding(CodeBadName, relPath, "filename must end with .task.grain.md or .process.grain.md")
 	}
 	if !ValidateStem(stem) {
 		return kind, stem, newFinding(CodeBadName, relPath, fmt.Sprintf("bad grainfile name %q", stem))
@@ -432,27 +503,40 @@ func splitAndParseFrontMatter(path string, raw []byte) (map[string]any, string, 
 
 var (
 	knownTaskFields = map[string]bool{
-		"title":        true,
-		"requestor":    true,
-		"recipient":    true,
-		"created_at":   true,
-		"draft":        true,
-		"not_before":   true,
-		"depends_on":   true,
-		"trigger_with": true,
-		"references":   true,
+		"grainfile":  true,
+		"title":      true,
+		"requestor":  true,
+		"recipient":  true,
+		"draft":      true,
+		"not_before": true,
+		"depends_on": true,
+		"references": true,
 	}
 	knownProcessFields = map[string]bool{
+		"grainfile":    true,
 		"title":        true,
 		"requestor":    true,
 		"recipient":    true,
-		"created_at":   true,
 		"draft":        true,
 		"not_before":   true,
 		"depends_on":   true,
 		"trigger_with": true,
 		"references":   true,
+		"when":         true,
 		"on":           true,
+		"gate":         true,
+	}
+	strictProcessFields = map[string]bool{
+		"grainfile":    true,
+		"title":        true,
+		"requestor":    true,
+		"recipient":    true,
+		"draft":        true,
+		"not_before":   true,
+		"depends_on":   true,
+		"trigger_with": true,
+		"references":   true,
+		"when":         true,
 		"gate":         true,
 	}
 	knownTriggerSources = map[string]bool{
@@ -487,7 +571,28 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 			continue
 		}
 		if !known[k] {
+			if g.Kind == KindTask && (k == "when" || k == "on" || k == "gate" || k == "trigger_with") {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .process.grain.md files", k)))
+				continue
+			}
 			g.Warnings = append(g.Warnings, newFinding(CodeUnknownField, where, fmt.Sprintf("unknown field %q", k)))
+		}
+	}
+
+	// grainfile (optional format version string, defaults to "v1"; §6.1)
+	g.Grainfile = VersionV1
+	g.SpecSummaryPath = SpecSummaryPathV1
+	g.SpecPath = SpecPathV1
+	if rawVer, ok := fm["grainfile"]; ok {
+		verStr, ok := rawVer.(string)
+		if !ok || verStr == "" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "grainfile: must be a non-empty string"))
+		} else if vSpec, valid := LookupVersion(verStr); !valid {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("grainfile: unsupported version %q (expected %q)", verStr, VersionV1)))
+		} else {
+			g.Grainfile = vSpec.Version
+			g.SpecSummaryPath = vSpec.SpecSummaryPath
+			g.SpecPath = vSpec.SpecPath
 		}
 	}
 
@@ -502,9 +607,9 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		g.Title = title
 	}
 
-	// recipient (required deployment identity)
+	// recipient (optional deployment identity, defaults to "/" — the enclosing repository; §6.3)
 	if rawRec, ok := fm["recipient"]; !ok {
-		errs = append(errs, newFinding(CodeSchemaInvalid, where, "recipient: required field missing"))
+		g.Recipient = "/"
 	} else if rec, ok := rawRec.(string); !ok || rec == "" {
 		errs = append(errs, newFinding(CodeSchemaInvalid, where, "recipient: must be a non-empty string"))
 	} else if strings.ContainsAny(rec, "<>@\\ \t\r\n") {
@@ -541,21 +646,6 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		}
 	}
 
-	// created_at (optional RFC 3339 UTC timestamp)
-	if rawCA, ok := fm["created_at"]; ok {
-		if ca, ok := rawCA.(string); !ok || ca == "" {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "created_at: must be an RFC 3339 UTC timestamp string"))
-		} else {
-			t, err := ParseTime(ca)
-			if err != nil {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("created_at: %v", err)))
-			} else {
-				g.CreatedAt = t
-				g.CreatedAtRaw = ca
-			}
-		}
-	}
-
 	// not_before (optional RFC 3339 UTC timestamp or YYYY-MM-DD UTC date)
 	if rawNB, ok := fm["not_before"]; ok {
 		if nb, ok := rawNB.(string); !ok || nb == "" {
@@ -578,43 +668,67 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		g.References = refs
 	}
 
-	// depends_on (optional list of refs to .task.md / .process.md)
+	// depends_on (optional list of refs: on a task must target tasks only; on a process targets tasks or processes; §8.3)
 	if rawDeps, ok := fm["depends_on"]; ok {
-		deps, depErrs := validateRefSlice(rawDeps, "depends_on", where, true)
+		deps, depErrs := validateDependsOnSlice(rawDeps, g.Kind, where, g.Path)
 		errs = append(errs, depErrs...)
 		g.DependsOn = deps
 	}
 
-	// trigger_with (optional string or non-empty list of refs to .task.md / .process.md)
-	_, hasTriggerWith := fm["trigger_with"]
-	if hasTriggerWith {
-		rawTW := fm["trigger_with"]
-		switch v := rawTW.(type) {
-		case string:
-			if v == "" || strings.ContainsAny(v, " \t\r\n\\") {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be a valid reference"))
-			} else {
-				g.TriggerWith = []string{v}
-				if f := validateSingleRef(v, "trigger_with", where, true, g.Path); f != nil {
-					errs = append(errs, *f)
+	if g.Kind == KindProcess {
+		// trigger_with (optional string or non-empty list of refs to .task.grain.md / .process.grain.md; §7.2)
+		_, hasTriggerWith := fm["trigger_with"]
+		if hasTriggerWith {
+			rawTW := fm["trigger_with"]
+			switch v := rawTW.(type) {
+			case string:
+				if v == "" || strings.ContainsAny(v, " \t\r\n\\") {
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be a valid reference"))
+				} else {
+					g.TriggerWith = []string{v}
+					if f := validateSingleRef(v, "trigger_with", where, true, g.Path); f != nil {
+						errs = append(errs, *f)
+					}
 				}
+			case []any:
+				if len(v) == 0 {
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be non-empty"))
+				} else {
+					tw, twErrs := validateRefSliceWithSourcePath(rawTW, "trigger_with", where, true, g.Path)
+					errs = append(errs, twErrs...)
+					g.TriggerWith = tw
+				}
+			default:
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be a string or non-empty list of strings"))
 			}
-		case []any:
-			if len(v) == 0 {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be non-empty"))
+		}
+
+		// gate (optional bool, default false)
+		if rawGate, ok := fm["gate"]; ok {
+			if b, ok := rawGate.(bool); !ok {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "gate: must be a boolean"))
 			} else {
-				tw, twErrs := validateRefSliceWithSourcePath(rawTW, "trigger_with", where, true, g.Path)
-				errs = append(errs, twErrs...)
-				g.TriggerWith = tw
+				g.Gate = b
 			}
-		default:
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with: must be a string or non-empty list of strings"))
+		}
+
+		rawWhen, hasWhen := fm["when"]
+		if !hasWhen {
+			// Accept legacy `on` as a fallback when `when` is absent.
+			rawWhen, hasWhen = fm["on"]
+		}
+		if !hasWhen && !hasTriggerWith {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "process must specify at least one of when or trigger_with"))
+		}
+		if hasWhen {
+			triggers, whenErrs := validateWhenTriggers(rawWhen, where)
+			errs = append(errs, whenErrs...)
+			g.When = triggers
+			g.On = triggers
 		}
 	}
 
 	// Validate local climbing above repo root if g.Path is relative to repo root.
-	// Note: when g.Path is only a filesystem path, local traversal is checked on Resolve
-	// and when climbing above g.Path itself.
 	for _, ref := range g.References {
 		if f := checkLocalClimb(ref, "references", where, g.Path); f != nil {
 			errs = append(errs, *f)
@@ -626,28 +740,19 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		}
 	}
 
-	if g.Kind == KindProcess {
-		// gate (optional bool, default false)
-		if rawGate, ok := fm["gate"]; ok {
-			if b, ok := rawGate.(bool); !ok {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "gate: must be a boolean"))
-			} else {
-				g.Gate = b
-			}
-		}
-
-		_, hasOn := fm["on"]
-		if !hasOn && !hasTriggerWith {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "process must specify at least one of on or trigger_with"))
-		}
-		if hasOn {
-			triggers, onErrs := validateOnTriggers(fm["on"], where)
-			errs = append(errs, onErrs...)
-			g.On = triggers
-		}
-	}
-
 	return errs
+}
+
+func isTaskTargetPath(p string) bool {
+	return strings.HasSuffix(p, ".task.grain.md") || strings.HasSuffix(p, ".task.md")
+}
+
+func isProcessTargetPath(p string) bool {
+	return strings.HasSuffix(p, ".process.grain.md") || strings.HasSuffix(p, ".process.md")
+}
+
+func isGrainfileTargetPath(p string) bool {
+	return isTaskTargetPath(p) || isProcessTargetPath(p)
 }
 
 func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
@@ -670,16 +775,46 @@ func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
 		return &f
 	}
 	for _, k := range []Kind{KindTask, KindProcess} {
-		suf := "." + string(k) + ".md"
-		if strings.HasSuffix(r.Path, suf) || strings.HasSuffix(r.Repo, suf) {
-			f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s grainfile, expected a repository or folder", field, s, k))
-			return &f
+		for _, suf := range []string{"." + string(k) + ".grain.md", "." + string(k) + ".md"} {
+			if strings.HasSuffix(r.Path, suf) || strings.HasSuffix(r.Repo, suf) {
+				f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s grainfile, expected a repository or folder", field, s, k))
+				return &f
+			}
 		}
 	}
 	if f := checkLocalClimb(s, field, where, where); f != nil {
 		return f
 	}
 	return nil
+}
+
+func validateDependsOnSlice(raw any, sourceKind Kind, where, sourcePath string) ([]string, Errors) {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, Errors{newFinding(CodeSchemaInvalid, where, "depends_on: must be a list of strings")}
+	}
+	var out []string
+	var errs Errors
+	for i, item := range list {
+		s, ok := item.(string)
+		if !ok || s == "" || strings.ContainsAny(s, " \t\r\n\\") {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("depends_on.%d: must be a non-empty reference string", i)))
+			continue
+		}
+		out = append(out, s)
+		if f := validateSingleRef(s, "depends_on", where, true, sourcePath); f != nil {
+			errs = append(errs, *f)
+			continue
+		}
+		if sourceKind == KindTask {
+			if r, err := ParseRef(s); err == nil {
+				if !isGrainfileTargetPath(r.Path) || strings.HasSuffix(r.Path, ".process.grain.md") || (strings.HasSuffix(sourcePath, ".task.grain.md") && !isTaskTargetPath(r.Path)) {
+					errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("depends_on: %q is not a task grainfile (a .task.grain.md may only depend on .task.grain.md files)", s)))
+				}
+			}
+		}
+	}
+	return out, errs
 }
 
 func validateRefSlice(raw any, field, where string, mustBeGrainfile bool) ([]string, Errors) {
@@ -728,8 +863,7 @@ func validateSingleRef(s, field, where string, mustBeGrainfile bool, sourcePath 
 			f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a folder, expected task or process", field, s))
 			return &f
 		}
-		targetPath := r.Path
-		if !strings.HasSuffix(targetPath, ".task.md") && !strings.HasSuffix(targetPath, ".process.md") {
+		if !isGrainfileTargetPath(r.Path) {
 			f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is not a task or process grainfile", field, s))
 			return &f
 		}
@@ -772,15 +906,19 @@ func checkLocalClimb(s, field, where, sourcePath string) *Finding {
 }
 
 func validateOnTriggers(raw any, where string) (Triggers, Errors) {
+	return validateWhenTriggers(raw, where)
+}
+
+func validateWhenTriggers(raw any, where string) (Triggers, Errors) {
 	var t Triggers
 	var errs Errors
 
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return t, Errors{newFinding(CodeSchemaInvalid, where, "on: must be a mapping")}
+		return t, Errors{newFinding(CodeSchemaInvalid, where, "when: must be a mapping")}
 	}
 	if len(m) == 0 {
-		return t, Errors{newFinding(CodeSchemaInvalid, where, "on: must have at least one trigger source")}
+		return t, Errors{newFinding(CodeSchemaInvalid, where, "when: must have at least one trigger source")}
 	}
 
 	keys := make([]string, 0, len(m))
@@ -792,29 +930,29 @@ func validateOnTriggers(raw any, where string) (Triggers, Errors) {
 	for _, k := range keys {
 		val := m[k]
 		if !knownTriggerSources[k] {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("unknown trigger source %q in on", k)))
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("unknown trigger source %q in when", k)))
 			continue
 		}
 		switch k {
 		case TriggerSchedule:
 			sm, ok := val.(map[string]any)
 			if !ok {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.schedule: must be a mapping"))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule: must be a mapping"))
 				continue
 			}
 			for sk := range sm {
 				if sk != "cron" && sk != "timezone" {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("on.schedule: unknown property %q", sk)))
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("when.schedule: unknown property %q", sk)))
 				}
 			}
 			rawCron, hasCron := sm["cron"]
 			if !hasCron {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.schedule: cron is required"))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule: cron is required"))
 				continue
 			}
 			cronStr, ok := rawCron.(string)
 			if !ok || cronStr == "" {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.schedule.cron: must be a non-empty string"))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule.cron: must be a non-empty string"))
 				continue
 			}
 			if len(strings.Fields(cronStr)) != 5 {
@@ -825,7 +963,7 @@ func validateOnTriggers(raw any, where string) (Triggers, Errors) {
 			if rawTZ, hasTZ := sm["timezone"]; hasTZ {
 				tzStr, ok := rawTZ.(string)
 				if !ok || tzStr == "" {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.schedule.timezone: must be a non-empty string"))
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule.timezone: must be a non-empty string"))
 					continue
 				}
 				tz = tzStr
@@ -836,7 +974,7 @@ func validateOnTriggers(raw any, where string) (Triggers, Errors) {
 			}
 
 		case TriggerPush, TriggerMerge, TriggerPullRequest:
-			ef, efErrs := validateEventFilter(val, "on."+k, where)
+			ef, efErrs := validateEventFilter(val, "when."+k, where)
 			errs = append(errs, efErrs...)
 			if len(efErrs) == 0 {
 				switch k {
@@ -852,11 +990,11 @@ func validateOnTriggers(raw any, where string) (Triggers, Errors) {
 		case TriggerManual:
 			mm, ok := val.(map[string]any)
 			if !ok {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.manual: must be an empty mapping {}"))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.manual: must be an empty mapping {}"))
 				continue
 			}
 			if len(mm) > 0 {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.manual: does not accept properties"))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.manual: does not accept properties"))
 				continue
 			}
 			t.Manual = &ManualTrigger{}
@@ -865,26 +1003,26 @@ func validateOnTriggers(raw any, where string) (Triggers, Errors) {
 			switch sv := val.(type) {
 			case string:
 				if sv == "" {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.scenario: must be a non-empty string"))
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.scenario: must be a non-empty string"))
 				} else {
 					t.Scenario = &ScenarioTrigger{Description: sv}
 				}
 			case map[string]any:
 				for sk := range sv {
 					if sk != "description" {
-						errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("on.scenario: unknown property %q", sk)))
+						errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("when.scenario: unknown property %q", sk)))
 					}
 				}
 				rawDesc, hasDesc := sv["description"]
 				if !hasDesc {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.scenario: description is required"))
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.scenario: description is required"))
 				} else if desc, ok := rawDesc.(string); !ok || desc == "" {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.scenario.description: must be a non-empty string"))
+					errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.scenario.description: must be a non-empty string"))
 				} else {
 					t.Scenario = &ScenarioTrigger{Description: desc}
 				}
 			default:
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "on.scenario: must be a string or {description} mapping"))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.scenario: must be a string or {description} mapping"))
 			}
 		}
 	}
@@ -949,4 +1087,89 @@ func validateStringSlice(raw any, fieldPath, where string, nonEmptyList bool) ([
 		out = append(out, s)
 	}
 	return out, errs
+}
+
+// MaterializedReference is a fetched reference file tagged with its source URL
+// and immutable git commit SHA for structural delimiting from a Grainfile's
+// Markdown prompt body (docs/grainfiles-spec.md §11.5).
+type MaterializedReference struct {
+	URL       string `json:"url"`
+	CommitSHA string `json:"commit_sha"`
+	Content   string `json:"content"`
+}
+
+// MaterializedPRDiff is an untrusted pull-request diff tagged with its source
+// repository URL, base commit SHA, and head commit SHA (docs/grainfiles-spec.md §11.5).
+type MaterializedPRDiff struct {
+	RepoURL       string `json:"repo_url"`
+	BaseCommitSHA string `json:"base_commit_sha"`
+	HeadCommitSHA string `json:"head_commit_sha"`
+	Diff          string `json:"diff"`
+}
+
+func sanitizeDelimitAttr(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == '"' || r == '<' || r == '>' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func escapeClosingDelimiters(s string) string {
+	r := strings.NewReplacer(
+		"</grainfile_prompt", "<\\/grainfile_prompt",
+		"</grainfile_reference", "<\\/grainfile_reference",
+		"</pull_request_diff", "<\\/pull_request_diff",
+	)
+	return r.Replace(s)
+}
+
+// FormatExecutionPrompt structurally delimits the trusted Grainfile Markdown
+// prompt body from untrusted materialized references and pull-request diffs,
+// tagging each context block with its source URL and commit SHA so embedded
+// closing tags cannot escape the untrusted data block (docs/grainfiles-spec.md §11.5).
+func FormatExecutionPrompt(g *Grainfile, refs []MaterializedReference, prDiff *MaterializedPRDiff) string {
+	var b strings.Builder
+	urlAttr := ""
+	commitAttr := ""
+	if g != nil {
+		urlAttr = sanitizeDelimitAttr(g.URL)
+		commitAttr = sanitizeDelimitAttr(g.Commit)
+	}
+	fmt.Fprintf(&b, "<grainfile_prompt url=%q commit=%q>\n", urlAttr, commitAttr)
+	if g != nil {
+		body := strings.TrimRight(g.Body, "\r\n")
+		if body != "" {
+			b.WriteString(body)
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString("</grainfile_prompt>\n")
+
+	for _, ref := range refs {
+		fmt.Fprintf(&b, "<grainfile_reference url=%q commit=%q trust=\"untrusted_data\">\n",
+			sanitizeDelimitAttr(ref.URL), sanitizeDelimitAttr(ref.CommitSHA))
+		content := escapeClosingDelimiters(strings.TrimRight(ref.Content, "\r\n"))
+		if content != "" {
+			b.WriteString(content)
+			b.WriteByte('\n')
+		}
+		b.WriteString("</grainfile_reference>\n")
+	}
+
+	if prDiff != nil {
+		fmt.Fprintf(&b, "<pull_request_diff repo=%q base_commit=%q head_commit=%q trust=\"untrusted_data\">\n",
+			sanitizeDelimitAttr(prDiff.RepoURL),
+			sanitizeDelimitAttr(prDiff.BaseCommitSHA),
+			sanitizeDelimitAttr(prDiff.HeadCommitSHA))
+		diff := escapeClosingDelimiters(strings.TrimRight(prDiff.Diff, "\r\n"))
+		if diff != "" {
+			b.WriteString(diff)
+			b.WriteByte('\n')
+		}
+		b.WriteString("</pull_request_diff>\n")
+	}
+
+	return b.String()
 }

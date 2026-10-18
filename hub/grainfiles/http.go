@@ -174,25 +174,42 @@ func (f *GitHubFetcher) FetchFile(ctx context.Context, repoURL, ref, filePath st
 	}
 
 	// If the server answered with a standard GitHub Contents JSON envelope
-	// instead of raw bytes, decode its base64 content field.
-	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") &&
-		!strings.Contains(resp.Header.Get("Content-Type"), "raw") {
-		var envelope struct {
-			Type     string `json:"type"`
-			Encoding string `json:"encoding"`
-			Content  string `json:"content"`
+	// instead of raw bytes, verify it is a regular file (`type: "file"`, not a
+	// symlink or submodule) and decode its base64 content field.
+	var envelope struct {
+		Type            string `json:"type"`
+		Encoding        string `json:"encoding"`
+		Content         string `json:"content"`
+		Target          string `json:"target"`
+		SubmoduleGitURL string `json:"submodule_git_url"`
+	}
+	isJSONEnvelope := strings.Contains(resp.Header.Get("Content-Type"), "application/json") &&
+		!strings.Contains(resp.Header.Get("Content-Type"), "raw")
+	if isJSONEnvelope {
+		if err := json.Unmarshal(raw, &envelope); err == nil {
+			if (envelope.Type != "" && envelope.Type != "file") || envelope.Target != "" || envelope.SubmoduleGitURL != "" {
+				objKind := firstNonEmpty(envelope.Type, "non-file")
+				return nil, fmt.Errorf("github contents API %q is a %s git object, not a regular file", filePath, objKind)
+			}
+			if envelope.Encoding == "base64" {
+				cleaned := strings.ReplaceAll(envelope.Content, "\n", "")
+				cleaned = strings.ReplaceAll(cleaned, "\r", "")
+				decoded, err := base64.StdEncoding.DecodeString(cleaned)
+				if err != nil {
+					return nil, fmt.Errorf("decoding base64 content for %q: %w", filePath, err)
+				}
+				if len(decoded) > MaxFileBytes {
+					return nil, fmt.Errorf("file %q exceeds %d bytes", filePath, MaxFileBytes)
+				}
+				return decoded, nil
+			}
 		}
-		if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Encoding == "base64" {
-			cleaned := strings.ReplaceAll(envelope.Content, "\n", "")
-			cleaned = strings.ReplaceAll(cleaned, "\r", "")
-			decoded, err := base64.StdEncoding.DecodeString(cleaned)
-			if err != nil {
-				return nil, fmt.Errorf("decoding base64 content for %q: %w", filePath, err)
+	} else if len(raw) > 0 && raw[0] == '{' {
+		if err := json.Unmarshal(raw, &envelope); err == nil {
+			if envelope.Type == "symlink" || envelope.Type == "submodule" || envelope.SubmoduleGitURL != "" {
+				objKind := firstNonEmpty(envelope.Type, "submodule")
+				return nil, fmt.Errorf("github contents API %q is a %s git object, not a regular file", filePath, objKind)
 			}
-			if len(decoded) > MaxFileBytes {
-				return nil, fmt.Errorf("file %q exceeds %d bytes", filePath, MaxFileBytes)
-			}
-			return decoded, nil
 		}
 	}
 	return raw, nil
@@ -589,10 +606,11 @@ type githubWebhookPayload struct {
 	Merged bool   `json:"merged"`
 
 	Repository struct {
-		HTMLURL  string `json:"html_url"`
-		CloneURL string `json:"clone_url"`
-		URL      string `json:"url"`
-		FullName string `json:"full_name"`
+		HTMLURL       string `json:"html_url"`
+		CloneURL      string `json:"clone_url"`
+		URL           string `json:"url"`
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
 	} `json:"repository"`
 
 	HeadCommit *githubCommitPayload  `json:"head_commit"`
@@ -695,58 +713,73 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 	ref, commitSHA := extractRefAndCommit(source, pl)
 	upsertPaths, removedPaths, allChangedPaths := extractWebhookPaths(pl)
+	isDefaultBranch := isDefaultOrProtectedBranch(ref, pl.Repository.DefaultBranch)
 
 	prevSeq, _ := a.Store.MaxEventSeq(r.Context())
 
 	var indexed []IndexRecord
-	for _, remPath := range removedPaths {
-		if _, _, isGF, _ := ClassifyPath(remPath); isGF {
-			if err := a.Store.RemoveGrainfile(r.Context(), canonRepo, remPath); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+	// Security invariant (§9, §11.1):
+	//   - On pull_request events, never index or remove Grainfile definitions
+	//     from the untrusted PR head; evaluate triggers against the base branch's
+	//     indexed .process.grain.md definitions.
+	//   - On push events to non-default/unprotected branches, never index or
+	//     execute .task.grain.md files.
+	if source != TriggerPullRequest {
+		for _, remPath := range removedPaths {
+			if kind, _, isGF, _ := ClassifyPath(remPath); isGF {
+				if kind == KindTask && !isDefaultBranch {
+					continue
+				}
+				if err := a.Store.RemoveGrainfile(r.Context(), canonRepo, remPath); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
-	}
 
-	webhookNow := a.Store.now()
-	for _, p := range upsertPaths {
-		_, _, isGF, _ := ClassifyPath(p)
-		if !isGF {
-			continue
-		}
-		if a.Fetcher == nil {
-			http.Error(w, "repo fetcher not configured", http.StatusInternalServerError)
-			return
-		}
-		fetchRef := firstNonEmpty(commitSHA, ref, "main")
-		rawBytes, err := a.Fetcher.FetchFile(r.Context(), canonRepo, fetchRef, p)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+		webhookNow := a.Store.now()
+		for _, p := range upsertPaths {
+			kind, _, isGF, _ := ClassifyPath(p)
+			if !isGF {
 				continue
 			}
-			http.Error(w, fmt.Sprintf("fetching %s: %v", p, err), http.StatusBadGateway)
-			return
+			if kind == KindTask && !isDefaultBranch {
+				continue
+			}
+			if a.Fetcher == nil {
+				http.Error(w, "repo fetcher not configured", http.StatusInternalServerError)
+				return
+			}
+			fetchRef := firstNonEmpty(commitSHA, ref, "main")
+			rawBytes, err := a.Fetcher.FetchFile(r.Context(), canonRepo, fetchRef, p)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				http.Error(w, fmt.Sprintf("fetching %s: %v", p, err), http.StatusBadGateway)
+				return
+			}
+			gf, err := Parse(p, rawBytes)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("parsing %s: %v", p, err), http.StatusUnprocessableEntity)
+				return
+			}
+			if err := gf.ResolveSource(Source{
+				RepoURL: canonRepo,
+				Ref:     ref,
+				Commit:  commitSHA,
+				Path:    p,
+			}); err != nil {
+				http.Error(w, fmt.Sprintf("resolving %s: %v", p, err), http.StatusUnprocessableEntity)
+				return
+			}
+			rec, err := a.Store.indexGrainfileAt(r.Context(), gf, webhookNow)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("indexing %s: %v", p, err), http.StatusInternalServerError)
+				return
+			}
+			indexed = append(indexed, rec)
 		}
-		gf, err := Parse(p, rawBytes)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("parsing %s: %v", p, err), http.StatusUnprocessableEntity)
-			return
-		}
-		if err := gf.ResolveSource(Source{
-			RepoURL: canonRepo,
-			Ref:     ref,
-			Commit:  commitSHA,
-			Path:    p,
-		}); err != nil {
-			http.Error(w, fmt.Sprintf("resolving %s: %v", p, err), http.StatusUnprocessableEntity)
-			return
-		}
-		rec, err := a.Store.indexGrainfileAt(r.Context(), gf, webhookNow)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("indexing %s: %v", p, err), http.StatusInternalServerError)
-			return
-		}
-		indexed = append(indexed, rec)
 	}
 
 	_, _ = a.Store.PromoteDeferred(r.Context(), a.Store.now())
@@ -998,26 +1031,54 @@ func hasPathTraversalOrHazard(v string) bool {
 	return false
 }
 
+type repoOwnerDirectory interface {
+	RepoOwner(ctx context.Context, repo string) (string, error)
+}
+
 func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, rec IndexRecord) bool {
 	if !sub.MatchesRecord(rec) {
 		return false
 	}
-	if a.AuthorizeOwnerRepo == nil {
+	authorize := a.AuthorizeOwnerRepo
+	if authorize == nil && a.Store != nil {
+		authorize = a.Store.AuthorizeOwnerRepo
+	}
+	if authorize == nil {
 		return true
 	}
-	// If the Grainfile names an explicit recipient and the node is subscribed to
-	// that recipient, the Grainfile in rec.Repo is granting cross-deployment
-	// capability access to that recipient (docs/grainfiles-spec.md §11.1).
+	// If the Grainfile names a recipient and the node is subscribed to that
+	// recipient, the Grainfile in rec.Repo is granting cross-deployment
+	// capability access to that recipient, provided the node's owner is
+	// admitted for the recipient repository (docs/grainfiles-spec.md §11.1, §11.2).
 	if rec.Recipient != "" {
 		for _, r := range sub.Recipients {
 			if strings.EqualFold(r, rec.Recipient) || IsSameRepo(r, rec.Recipient) {
-				return true
+				if sub.Owner == "" {
+					return true
+				}
+				recRepo, err := canonicalRepoFromAnyRef(rec.Recipient)
+				if err != nil {
+					return false
+				}
+				if dir, ok := a.Directory.(repoOwnerDirectory); ok {
+					owner, repoName, pErr := parseGitHubOwnerRepo(recRepo)
+					if pErr == nil {
+						team, tErr := dir.RepoOwner(ctx, owner+"/"+repoName)
+						if tErr != nil {
+							return false
+						}
+						if team == "" {
+							return true
+						}
+					}
+				}
+				return authorize(ctx, sub.Owner, recRepo)
 			}
 		}
 	}
 	// Otherwise the node matched via Repos, Folders, or Grainfiles subscription,
 	// which requires the node's owner to have repository access to rec.Repo.
-	return a.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo)
+	return authorize(ctx, sub.Owner, rec.Repo)
 }
 
 func pinnedFetchRef(rec IndexRecord) string {

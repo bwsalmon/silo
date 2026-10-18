@@ -477,6 +477,19 @@ func TestTenantRecipientIsolationAndControlStreamSpoofing(t *testing.T) {
 	if sat, err := hb.h.Grainfiles.DependenciesSatisfied(ctx, downRec.URL); err != nil || !sat {
 		t.Fatalf("DependenciesSatisfied after legitimate completion = %v (err=%v), want true", sat, err)
 	}
+
+	// 5. Direct hub/grainfiles.Store directory-verified recipient authorization check:
+	// AuthorizeOwnerRepo blocks bob from claiming team-a's recipient repository directly on Store.SetSubscriptions.
+	hb.h.Grainfiles.AuthorizeOwnerRepo = func(_ context.Context, owner, repo string) bool {
+		return owner == alice && repo == "acme/app"
+	}
+	if _, err := hb.h.Grainfiles.SetSubscriptions(ctx, grainfiles.Subscriptions{
+		NodeID:     "ws-b-direct",
+		Owner:      bob,
+		Recipients: []string{"https://github.com/acme/app"},
+	}); err == nil {
+		t.Fatal("Store.SetSubscriptions allowed bob to subscribe to team-a recipient repo https://github.com/acme/app")
+	}
 }
 
 func jsonMarshal(v any) ([]byte, error) {

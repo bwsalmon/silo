@@ -14,35 +14,40 @@ function open(path: string) {
 const sampleOverview = {
   grainfiles: [
     {
+      grainfile: 'v1',
+      spec_summary_path: 'docs/grainfile-v1.md',
+      spec_path: 'docs/grainfiles-spec.md',
       repo: 'https://github.com/acme/app',
-      path: 'tasks/01-deploy.task.md',
+      path: 'tasks/01-deploy.task.grain.md',
       commit_sha: '1111111111111111111111111111111111111111',
       ref: 'main',
-      url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
+      url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.grain.md',
       kind: 'task',
       title: 'Deploy service to staging',
       recipient: 'https://github.com/acme/grain-eu',
       requestor: 'Alice <alice@example.com>',
       draft: false,
       not_before: '2026-10-19T00:00:00Z',
-      created_at: '2026-10-18T10:00:00Z',
       references: ['/docs/arch.md'],
       authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
-      depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.md'],
+      depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md'],
       updated_at: '2026-10-18T10:05:00Z',
     },
     {
+      grainfile: 'v1',
+      spec_summary_path: 'docs/grainfile-v1.md',
+      spec_path: 'docs/grainfiles-spec.md',
       repo: 'https://github.com/acme/infra',
-      path: '.grain/processes/ci.process.md',
+      path: '.grain/processes/ci.process.grain.md',
       commit_sha: '2222222222222222222222222222222222222222',
       ref: 'main',
-      url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.md',
+      url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md',
       kind: 'process',
       title: 'Continuous verification gate',
       recipient: 'https://github.com/acme/grain-us',
       draft: true,
-      trigger_with: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.md'],
-      on: {
+      trigger_with: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
+      when: {
         push: { branches: ['main'] },
         schedule: { cron: '0 * * * *' },
       },
@@ -57,7 +62,7 @@ const sampleOverview = {
       recipients: ['https://github.com/acme/grain-eu'],
       repos: ['https://github.com/acme/app'],
       folders: ['https://github.com/acme/app/tree/main/tasks'],
-      grainfiles: ['https://github.com/acme/app/blob/main/tasks/01-deploy.task.md'],
+      grainfiles: ['https://github.com/acme/app/blob/main/tasks/01-deploy.task.grain.md'],
       cursor: 5,
       revision: 1,
       updated_at: '2026-10-18T10:05:00Z',
@@ -68,8 +73,8 @@ const sampleOverview = {
       seq: 1,
       type: 'task_ready',
       repo: 'https://github.com/acme/app',
-      path: 'tasks/01-deploy.task.md',
-      grainfile_url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
+      path: 'tasks/01-deploy.task.grain.md',
+      grainfile_url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.grain.md',
       kind: 'task',
       title: 'Deploy service to staging',
       recipient: 'https://github.com/acme/grain-eu',
@@ -79,8 +84,8 @@ const sampleOverview = {
       seq: 2,
       type: 'process_triggered',
       repo: 'https://github.com/acme/infra',
-      path: '.grain/processes/ci.process.md',
-      grainfile_url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.md',
+      path: '.grain/processes/ci.process.grain.md',
+      grainfile_url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md',
       kind: 'process',
       title: 'Continuous verification gate',
       recipient: 'https://github.com/acme/grain-us',
@@ -122,14 +127,15 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getByText('Gate')).toBeTruthy();
     expect(screen.getByText('push (branches: main)')).toBeTruthy();
     expect(screen.getByText('schedule: 0 * * * *')).toBeTruthy();
-    expect(screen.getByText('acme/app:tasks/00-prep.task.md').getAttribute('href')).toBe(
-      'https://github.com/acme/app/blob/main/tasks/00-prep.task.md',
+    expect(screen.getByText('acme/app:tasks/00-prep.task.grain.md').getAttribute('href')).toBe(
+      'https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md',
     );
-    expect(screen.getByText('acme/infra:.grain/processes/smoke.process.md').getAttribute('href')).toBe(
-      'https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.md',
+    expect(screen.getByText('acme/infra:.grain/processes/smoke.process.grain.md').getAttribute('href')).toBe(
+      'https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md',
     );
 
     // Inspection panel for first Grainfile (Deploy service to staging)
+    expect(screen.getByText('docs/grainfile-v1.md')).toBeTruthy();
     expect(screen.getByText('https://github.com/acme/app/blob/main/docs/arch.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/docs/arch.md',
     );

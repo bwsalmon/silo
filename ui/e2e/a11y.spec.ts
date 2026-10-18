@@ -20,7 +20,7 @@ async function check(page: Page, what: string): Promise<string[]> {
 test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, fileTask }) => {
   const recipient = `https://github.com/e2e/grain-a11y-${world.n}`;
   const folder = `https://github.com/${world.repo}/tree/main/tasks`;
-  const processUrl = `https://github.com/${world.repo}/blob/main/.grain/processes/ci.process.md`;
+  const processUrl = `https://github.com/${world.repo}/blob/main/.grain/processes/ci.process.grain.md`;
   const node = await grain({
     owner: world.admin,
     repos: [world.repo],
@@ -32,8 +32,9 @@ test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, file
   });
   await hub.pushGitHub(world.repo, 'main', {
     'docs/spec.md': '# Spec\n',
-    'tasks/01-a11y.task.md': [
+    'tasks/01-a11y.task.grain.md': [
       '---',
+      'grainfile: v1',
       'title: Accessible Grainfile task',
       `recipient: ${recipient}`,
       `requestor: Alice <${world.admin}>`,
@@ -42,19 +43,20 @@ test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, file
       'references:',
       '  - /docs/spec.md',
       '  - https://github.com/external/other/blob/main/notes.md',
-      'trigger_with:',
-      '  - /.grain/processes/ci.process.md',
       '---',
       '# Accessible task',
     ].join('\n'),
-    '.grain/processes/ci.process.md': [
+    '.grain/processes/ci.process.grain.md': [
       '---',
+      'grainfile: v1',
       'title: Accessible CI process',
       `recipient: ${recipient}`,
       `requestor: Alice <${world.admin}>`,
       'draft: true',
       'gate: true',
-      'on:',
+      'trigger_with:',
+      '  - /tasks/01-a11y.task.grain.md',
+      'when:',
       '  schedule:',
       '    cron: "0 * * * *"',
       '    timezone: UTC',

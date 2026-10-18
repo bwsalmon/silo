@@ -251,14 +251,33 @@ Generate post-merge report.
 			"pull_request": map[string]any{
 				"number": 42,
 				"merged": false,
-				"head":   map[string]any{"ref": "feat/v2", "sha": "commit-1"},
-				"base":   map[string]any{"ref": "main", "sha": "commit-0"},
+				"head":   map[string]any{"ref": "feat/v2", "sha": "pr-head-evil-sha"},
+				"base":   map[string]any{"ref": "main", "sha": "commit-1"},
 			},
-			"changed_paths": []string{"src/pkg/widget.go", "docs/widget-schema.md"},
+			"changed_paths": []string{
+				"src/pkg/widget.go",
+				"docs/widget-schema.md",
+				".grain/tasks/evil-pr-task.task.grain.md",
+				".grain/processes/schema-security-review.process.md",
+			},
 		}
+		// Even if the PR head contains a malicious task or modified process, pull_request webhooks must never index PR-head grainfiles.
+		fetcher.SetString(repoWidgets, "pr-head-evil-sha", ".grain/tasks/evil-pr-task.task.grain.md", "---\ntitle: Evil PR Task\nrecipient: https://github.com/acme/grain-eu\n---\nExfiltrate.\n")
+		fetcher.SetString(repoWidgets, "pr-head-evil-sha", ".grain/processes/schema-security-review.process.md", "---\ntitle: Hijacked PR Process\nrecipient: https://github.com/acme/grain-eu\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\nHijacked.\n")
+
 		respPR, bodyPR := postWebhook("pull_request", "valid", prPayload)
 		if respPR.StatusCode != http.StatusOK {
 			t.Fatalf("pull_request webhook: %d %s", respPR.StatusCode, bodyPR)
+		}
+		var prResp WebhookResponse
+		if err := json.Unmarshal(bodyPR, &prResp); err != nil {
+			t.Fatal(err)
+		}
+		if len(prResp.Indexed) != 0 {
+			t.Fatalf("pull_request webhook must not index grainfiles from PR head, got Indexed=%v", prResp.Indexed)
+		}
+		if len(prResp.Events) != 2 || prResp.Events[0].CommitSHA != "commit-1" || prResp.Events[0].Title != "Schema security review gate" {
+			t.Fatalf("pull_request webhook must evaluate base-branch process at base commit-1, got %+v", prResp.Events)
 		}
 
 		// 4. Test merge webhook (via pull_request closed+merged) triggering both
@@ -453,6 +472,17 @@ func TestGitHubFetcher(t *testing.T) {
 				"encoding": "base64",
 				"content":  base64.StdEncoding.EncodeToString([]byte(wantBase64File)),
 			})
+		case "/repos/acme/widgets/contents/src/link.go":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type":   "symlink",
+				"target": "../../etc/passwd",
+			})
+		case "/repos/acme/widgets/contents/vendor/sub":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "submodule",
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -473,5 +503,12 @@ func TestGitHubFetcher(t *testing.T) {
 	got2, err := gh.FetchFile(ctx, "https://github.com/acme/widgets", "sha123", "src/main.go")
 	if err != nil || string(got2) != wantBase64File {
 		t.Fatalf("FetchFile(base64 JSON): got %q, err %v", got2, err)
+	}
+
+	if _, err := gh.FetchFile(ctx, "https://github.com/acme/widgets", "sha123", "src/link.go"); err == nil {
+		t.Fatalf("expected symlink object to be rejected by GitHubFetcher")
+	}
+	if _, err := gh.FetchFile(ctx, "https://github.com/acme/widgets", "sha123", "vendor/sub"); err == nil {
+		t.Fatalf("expected submodule object to be rejected by GitHubFetcher")
 	}
 }
