@@ -97,6 +97,11 @@ type Config struct {
 	// backend service, "/projects/NUMBER/global/backendServices/ID"
 	// (docs/hub.md §5.1).
 	IAPAudience string
+	// NodeUIIAPAudience, when set alongside IAPAudience and NodeUIDomain,
+	// checks IAP assertions on node UI hosts (*.<NodeUIDomain>) against a
+	// dedicated GCLB backend service audience, falling back to IAPAudience
+	// when unset.
+	NodeUIIAPAudience string
 	// IAPKeys, when set, are the keys IAP assertions are checked
 	// against; nil fetches IAP's published keys. For tests.
 	IAPKeys *identity.KeySet
@@ -230,7 +235,15 @@ func (c *Config) auth() (identity.Authenticator, http.Handler, []string, error) 
 		if !strings.HasPrefix(c.IAPAudience, "/projects/") {
 			return nil, nil, nil, fmt.Errorf("server: IAP audience %q: want /projects/NUMBER/global/backendServices/ID", c.IAPAudience)
 		}
-		return &identity.IAP{Audience: c.IAPAudience, Keys: c.IAPKeys}, nil, nil, nil
+		if c.NodeUIIAPAudience != "" && !strings.HasPrefix(c.NodeUIIAPAudience, "/projects/") {
+			return nil, nil, nil, fmt.Errorf("server: node UI IAP audience %q: want /projects/NUMBER/global/backendServices/ID", c.NodeUIIAPAudience)
+		}
+		return &identity.IAP{
+			Audience:       c.IAPAudience,
+			NodeUIAudience: c.NodeUIIAPAudience,
+			NodeUIDomain:   c.NodeUIDomain,
+			Keys:           c.IAPKeys,
+		}, nil, nil, nil
 	case c.OIDCIssuer != "":
 		if c.OIDCClientID == "" || c.OIDCRedirectURL == "" || len(c.OIDCSessionKey) < 32 {
 			return nil, nil, nil, errors.New("server: OIDC needs a client ID, a redirect URL and a session key of at least 32 bytes")
@@ -292,6 +305,20 @@ func CheckDevSignOn(header string, getenv func(string) string) error {
 	}
 	if getenv("KUBERNETES_SERVICE_HOST") != "" {
 		return errors.New("server: the development user header is refused on Kubernetes, where anyone who reaches the hub could claim to be anyone; sign on with IAP or OIDC")
+	}
+	return nil
+}
+
+// CheckWebhookSecret refuses an empty WebhookSecret on Kubernetes
+// (KUBERNETES_SERVICE_HOST != ""), where /v1/webhooks/github is routed
+// past IAP on the silo-hub-nodes backend (docs/deploy.md) and must
+// verify X-Hub-Signature-256 on every delivery.
+func CheckWebhookSecret(secret string, getenv func(string) string) error {
+	if strings.TrimSpace(secret) != "" {
+		return nil
+	}
+	if getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return errors.New("server: a webhook secret (-webhook-secret or -webhook-secret-file) is required on Kubernetes, where /v1/webhooks/github is exposed outside IAP: unsigned webhooks are refused in production")
 	}
 	return nil
 }
@@ -469,10 +496,12 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			urls = append(urls, sub.Folders...)
 			return admitOwnerRepoURLs(ctx, owner, urls)
 		},
-		Visible:   dirAPI.Visible,
-		Heartbeat: hb,
-		Logf:      cfg.Logf,
-		Observe:   h.metrics.observeRendezvous,
+		ValidateUI:             h.Directory.ValidateNodeUI,
+		ObserveGrainfileEvents: h.metrics.observeGrainfileEvents,
+		Visible:                dirAPI.Visible,
+		Heartbeat:              hb,
+		Logf:                   cfg.Logf,
+		Observe:                h.metrics.observeRendezvous,
 
 		InternalKey:  cfg.InternalKey,
 		Grainfiles:   h.Grainfiles,
@@ -596,7 +625,10 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	tk := tasksAPI.Handler()
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
-	h.GrainfilesAPI.Register(m)
+	gf := h.GrainfilesAPI.Handler()
+	m.Handle("POST "+grainfiles.GitHubWebhookPath, h.metrics.wrapWebhooks(gf))
+	m.Handle("GET "+grainfiles.ContentPath, h.metrics.wrapContentRequests(gf))
+	m.Handle("GET "+grainfiles.GrainfilesPath, gf)
 	lv := h.Live.Handler()
 	m.Handle("GET "+live.EventsPath, h.metrics.subscriptions(lv))
 	m.Handle("GET "+live.ArtifactsPath, h.metrics.viewThrough(lv))

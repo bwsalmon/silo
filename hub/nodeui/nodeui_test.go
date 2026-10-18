@@ -67,13 +67,14 @@ func newHarness(t *testing.T) *harness {
 			}
 			return rendezvous.Identity{Owner: tok}, nil
 		},
-		Heartbeat: time.Second,
-		Logf:      logf,
+		ValidateUI: dir.ValidateNodeUI,
+		Heartbeat:  time.Second,
+		Logf:       logf,
 	}
 	ui := &Server{
 		Domain:    domain,
 		Registry:  rv.Registry,
-		Directory: &directory.API{Store: dir, Auth: headerAuth{}},
+		Directory: &directory.API{Store: dir, Auth: headerAuth{}, HubAdmins: []string{"user:hubadmin@example.com"}},
 		Open:      rv.Open,
 		Logf:      logf,
 	}
@@ -92,10 +93,18 @@ func newHarness(t *testing.T) *harness {
 // first lines the node is sent arrive on asked.
 func (h *harness) connect(t *testing.T, id, owner string, ui http.Handler) (*rendezvous.Conn, <-chan Message) {
 	t.Helper()
+	return h.connectNode(t, registry.Node{ID: id, Slots: 1}, owner, ui)
+}
+
+func (h *harness) connectNode(t *testing.T, node registry.Node, owner string, ui http.Handler) (*rendezvous.Conn, <-chan Message) {
+	t.Helper()
+	if node.Slots == 0 {
+		node.Slots = 1
+	}
 	cl := &rendezvous.Client{
 		Hub:   h.rvURL,
 		Token: func(context.Context) (string, error) { return owner, nil },
-		Node:  registry.Node{ID: id, Slots: 1},
+		Node:  node,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -184,15 +193,17 @@ func nodeUI(sse <-chan struct{}) http.Handler {
 func TestNode(t *testing.T) {
 	s := &Server{Domain: "Nodes.Example.com"}
 	for host, want := range map[string]string{
-		"ws-1.nodes.example.com":      "ws-1",
-		"WS-1.nodes.example.com:443":  "ws-1",
-		"ws-1.nodes.example.com.":     "ws-1",
-		"nodes.example.com":           "",
-		"a.b.nodes.example.com":       "",
-		"ws_1.nodes.example.com":      "",
-		"ws-1.nodes.example.com.evil": "",
-		"ws-1.example.com":            "",
-		"-x.nodes.example.com":        "",
+		"ws-1.nodes.example.com":         "ws-1",
+		"WS-1.nodes.example.com:443":     "ws-1",
+		"ws-1.nodes.example.com.":        "ws-1",
+		"nodes.example.com":              "",
+		"a.b.nodes.example.com":          "",
+		"ws_1.nodes.example.com":         "",
+		"ws-1.nodes.example.com.evil":    "",
+		"ws-1.example.com":               "",
+		"-x.nodes.example.com":           "",
+		"xn--ws-1.nodes.example.com":     "",
+		"XN--nxasmq6b.nodes.example.com": "",
 	} {
 		got, ok := s.Node(host)
 		if got != want || ok != (want != "") {
@@ -210,23 +221,31 @@ func TestViewThrough(t *testing.T) {
 	host := "ws-1." + domain
 
 	r, _ := http.NewRequest("GET", "http://x/api/hello?a=1", nil)
-	r.Header.Set("Cookie", "grain_session=s0; "+identity.SessionCookie+"=hub-session")
+	r.Header.Set("Cookie", "grain_session=s0; "+identity.SessionCookie+"=hub-session; GCP_IAP_UID=123; __Host-GCP_IAP_LS_TOKEN=tok")
 	r.Header.Set("Authorization", "Bearer hub-token")
 	r.Header.Set("X-Forwarded-User", "mallory@example.com")
 	r.Header.Set(identity.IAPHeader, "the-assertion")
+	r.Header.Set("X-Goog-Authenticated-User-Email", "accounts.google.com:alice@example.com")
+	r.Header.Set("X-Goog-Authenticated-User-ID", "accounts.google.com:123")
 	resp, body := h.do(t, r, host, "alice@example.com")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/hello: %d %q", resp.StatusCode, body)
 	}
-	want := `host=ws-1.nodes.hub.test path=/api/hello query=a=1 cookie="grain_session=s0" authz="" user="" xff=true iap="the-assertion"`
+	want := `host=ws-1.nodes.hub.test path=/api/hello query=a=1 cookie="grain_session=s0" authz="" user="" xff=true iap=""`
 	if body != want {
 		t.Fatalf("the node saw\n %s\nwant\n %s", body, want)
 	}
-	if m := <-asked; m.Node != "ws-1" || m.Viewer != "alice@example.com" {
+	if m := <-asked; m.Node != "ws-1" || m.Viewer != "alice@example.com" || m.Role != RoleOwner {
 		t.Fatalf("the node was asked %+v", m)
 	}
-	if got := resp.Header.Values("Set-Cookie"); len(got) != 1 || !strings.HasPrefix(got[0], "grain_session=s1") {
-		t.Fatalf("the viewer was sent cookies %q: want the node's own, not one for its domain", got)
+	if got := resp.Header.Values("Set-Cookie"); len(got) != 1 || !strings.HasPrefix(got[0], "grain_session=s1") || !strings.Contains(got[0], "SameSite=Lax") {
+		t.Fatalf("the viewer was sent cookies %q: want the node's own with SameSite=Lax, not one for its domain", got)
+	}
+	if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("Referrer-Policy = %q, want no-referrer", got)
+	}
+	if got := resp.Header.Get("Cross-Origin-Opener-Policy"); got != "same-origin" {
+		t.Fatalf("Cross-Origin-Opener-Policy = %q, want same-origin", got)
 	}
 
 	r, _ = http.NewRequest("POST", "http://x/api/echo", strings.NewReader("a body"))
@@ -337,5 +356,152 @@ func TestWebSocket(t *testing.T) {
 	if ws, err := dial("http://ws-2." + domain); err == nil {
 		ws.Close()
 		t.Fatal("a WebSocket from another origin was let through")
+	}
+}
+
+func TestTeamAdminAndRegistrationValidation(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	dir := h.ui.Directory.Store
+	check(t, dir.CreateTeam(ctx, "infra", "Infra"))
+	check(t, dir.SetMember(ctx, "infra", "user:alice@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:tadmin@example.com", directory.Admin))
+	check(t, dir.SetMember(ctx, "infra", "user:tmember@example.com", directory.Member))
+	check(t, dir.AssignRepo(ctx, "infra", "org/infra-repo"))
+
+	check(t, dir.CreateTeam(ctx, "other", "Other"))
+	check(t, dir.SetMember(ctx, "other", "user:alice@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "other", "user:oadmin@example.com", directory.Admin))
+	check(t, dir.AssignRepo(ctx, "other", "org/other-repo"))
+
+	// 1. Valid ui.team: owner is in "infra" and "infra" owns every repo.
+	_, asked := h.connectNode(t, registry.Node{
+		ID:    "ws-team",
+		Repos: []string{"org/infra-repo"},
+		UI:    &registry.NodeUI{Offered: true, Team: "infra", Access: "read-only"},
+	}, "alice@example.com", nodeUI(nil))
+
+	if e, ok := h.ui.Registry.Get("ws-team"); !ok || e.UI == nil || !e.UI.Offered || e.UI.Team != "infra" || e.UI.Reason != "" {
+		t.Fatalf("ws-team entry = %+v, UI = %+v", e, e.UI)
+	}
+
+	// Owner gets 200 with role: "owner", team: "infra".
+	if resp, _ := h.get(t, "ws-team."+domain, "/api/hello", "alice@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("owner: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleOwner || m.Team != "infra" || m.Viewer != "alice@example.com" {
+		t.Fatalf("owner handshake = %+v", m)
+	}
+
+	// Team admin of "infra" gets 200 with role: "team-admin", team: "infra".
+	if resp, _ := h.get(t, "ws-team."+domain, "/api/hello", "tadmin@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("team-admin: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleTeamAdmin || m.Team != "infra" || m.Viewer != "tadmin@example.com" {
+		t.Fatalf("team-admin handshake = %+v", m)
+	}
+
+	// Regular team member, other team's admin, and hub admin all get 404.
+	for _, viewer := range []string{"tmember@example.com", "oadmin@example.com", "hubadmin@example.com", "stranger@example.com"} {
+		if resp, _ := h.get(t, "ws-team."+domain, "/api/hello", viewer); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("viewer %s on ws-team: got %d, want 404", viewer, resp.StatusCode)
+		}
+	}
+
+	// 2. Mixed repos: node serves a repo owned by "other" while claiming ui.team="infra".
+	// Registration succeeds, but ui.team is dropped with ui.reason, falling back to owner-only.
+	_, askedMixed := h.connectNode(t, registry.Node{
+		ID:    "ws-mixed",
+		Repos: []string{"org/infra-repo", "org/other-repo"},
+		UI:    &registry.NodeUI{Offered: true, Team: "infra", Access: "read-only"},
+	}, "alice@example.com", nodeUI(nil))
+
+	if e, ok := h.ui.Registry.Get("ws-mixed"); !ok || e.UI == nil || !e.UI.Offered || e.UI.Team != "" || !strings.Contains(e.UI.Reason, "org/other-repo") {
+		t.Fatalf("ws-mixed UI = %+v; want Offered=true, Team=\"\", Reason mentioning org/other-repo", e.UI)
+	}
+	if resp, _ := h.get(t, "ws-mixed."+domain, "/api/hello", "tadmin@example.com"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("team-admin on ws-mixed: got %d, want 404", resp.StatusCode)
+	}
+	if resp, _ := h.get(t, "ws-mixed."+domain, "/api/hello", "alice@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("owner on ws-mixed: got %d, want 200", resp.StatusCode)
+	}
+	if m := <-askedMixed; m.Role != RoleOwner || m.Team != "" {
+		t.Fatalf("owner handshake on ws-mixed = %+v", m)
+	}
+
+	// 3. Owner not a member of ui.team: ui.team is dropped with ui.reason.
+	check(t, dir.CreateTeam(ctx, "secret", "Secret"))
+	check(t, dir.SetMember(ctx, "secret", "user:sadmin@example.com", directory.Admin))
+	h.connectNode(t, registry.Node{
+		ID: "ws-notmember",
+		UI: &registry.NodeUI{Offered: true, Team: "secret"},
+	}, "alice@example.com", nodeUI(nil))
+	if e, ok := h.ui.Registry.Get("ws-notmember"); !ok || e.UI == nil || !e.UI.Offered || e.UI.Team != "" || !strings.Contains(e.UI.Reason, "not a member") {
+		t.Fatalf("ws-notmember UI = %+v; want Team=\"\" with not-a-member reason", e.UI)
+	}
+	if resp, _ := h.get(t, "ws-notmember."+domain, "/api/hello", "sadmin@example.com"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("sadmin on ws-notmember: got %d, want 404", resp.StatusCode)
+	}
+
+	// 4. Punycode and non-DNS-label node IDs: registration succeeds, ui.offered is dropped with ui.reason.
+	h.connectNode(t, registry.Node{
+		ID: "xn--ws-1",
+		UI: &registry.NodeUI{Offered: true, Team: "infra"},
+	}, "alice@example.com", nodeUI(nil))
+	if e, ok := h.ui.Registry.Get("xn--ws-1"); !ok || e.UI == nil || e.UI.Offered || !strings.Contains(e.UI.Reason, "punycode") {
+		t.Fatalf("xn--ws-1 UI = %+v; want Offered=false with punycode reason", e.UI)
+	}
+	if resp, _ := h.get(t, "xn--ws-1."+domain, "/api/hello", "alice@example.com"); resp.StatusCode != http.StatusTeapot {
+		// Node(host) rejects xn--ws-1, so Hosts passes it to the hub handler (418 in harness), never proxying to the node.
+		t.Fatalf("xn--ws-1 host: got %d, want 418 (not a node UI host)", resp.StatusCode)
+	}
+	r, _ := http.NewRequest("GET", "http://xn--ws-1."+domain+"/api/hello", nil)
+	r.Host = "xn--ws-1." + domain
+	r.Header.Set("X-User", "alice@example.com")
+	w := httptest.NewRecorder()
+	h.ui.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("direct ServeHTTP on xn--ws-1: got %d, want 404", w.Code)
+	}
+
+	h.connectNode(t, registry.Node{
+		ID: "WS_bad",
+		UI: &registry.NodeUI{Offered: true},
+	}, "alice@example.com", nodeUI(nil))
+	if e, ok := h.ui.Registry.Get("WS_bad"); !ok || e.UI == nil || e.UI.Offered || e.UI.Reason == "" {
+		t.Fatalf("WS_bad UI = %+v; want Offered=false with DNS label reason", e.UI)
+	}
+}
+
+func TestCookieAndHeaderHardening(t *testing.T) {
+	h := newHarness(t)
+	customUI := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, v := range []string{
+			"grain_ok=1; Path=/; Secure",
+			"grain_nosecure=1; Path=/",
+			"silo_session=forged; Path=/; Secure",
+			"silo_oidc_flow=forged; Path=/; Secure",
+			"__Host-evil=1; Path=/; Secure",
+			"GCP_IAP_UID=forged; Path=/; Secure",
+			"domain_cookie=1; Domain=" + domain + "; Path=/; Secure",
+		} {
+			w.Header().Add("Set-Cookie", v)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	h.connect(t, "ws-sec", "alice@example.com", customUI)
+
+	r, _ := http.NewRequest("GET", "http://x/test", nil)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	resp, _ := h.do(t, r, "ws-sec."+domain, "alice@example.com")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	got := resp.Header.Values("Set-Cookie")
+	if len(got) != 1 || !strings.HasPrefix(got[0], "grain_ok=1") || !strings.Contains(got[0], "Secure") || !strings.Contains(got[0], "SameSite=Lax") {
+		t.Fatalf("HTTPS Set-Cookie = %q; want only grain_ok=1 with Secure and SameSite=Lax", got)
+	}
+	if resp.Header.Get("Referrer-Policy") != "no-referrer" || resp.Header.Get("Cross-Origin-Opener-Policy") != "same-origin" {
+		t.Fatalf("security headers = %v", resp.Header)
 	}
 }

@@ -24,11 +24,14 @@ grain nodes ──WSS───>  (static IP,  Exact /v1/nodes/connect > Service 
 ```
 
 The node path is outside IAP and the hub checks each node's token
-itself, as is `/v1/claims/keys`, the public keys nodes check the hub's
-task claims with (hub.md §6.4), which go to the same Service; every other path is behind IAP, and the hub checks IAP's
-signed assertion too (hub.md §5.2.1). The nodes' UI hosts
-(`<node>.nodes.<domain>`, §8) have a route of their own, every path on
-them to the `silo-hub` Service and so behind the same IAP.
+itself, as are `/v1/claims/keys` (the public keys nodes check the hub's
+task claims with, hub.md §6.4), `/v1/webhooks/github` (verified by
+`X-Hub-Signature-256` HMAC), and `/v1/grainfiles/content` (authenticated
+by a node's `Bearer silo-node_...` token), which all go to the
+`silo-hub-nodes` Service as exact paths; every other path is behind IAP,
+and the hub checks IAP's signed assertion too (hub.md §5.2.1). The
+nodes' UI hosts (`<node>.nodes.<domain>`, §8) have a route of their
+own, every path on them to the `silo-hub` Service and so behind IAP.
 
 The store is **PostgreSQL on Cloud SQL**, in every deployment, one
 replica or several: Cloud SQL's managed backups, point-in-time
@@ -194,6 +197,9 @@ Fill in the overlay, `deploy/kubernetes/hub/bsalmon-gke-dev/kustomization.yaml`
   An entry with no prefix is taken as `user:` and logged as a warning
   at start-up; a group must be written `group:`, even one named like an
   email (hub.md §5.3).
+- `SILO_HUB_GITHUB_APP_ID`: the GitHub App ID whose private key is in
+  `silo-hub-github`, used by the hub to fetch grainfiles and referenced
+  files from source repositories.
 - `SILO_HUB_IAP_AUDIENCE` is filled in after the first apply, below.
 
 The terraform's names (the `silo-hub` static IP, certificate map and
@@ -202,7 +208,7 @@ service account) are the manifests' defaults; if `name` or
 `networking.gke.io/certmap` annotation and the service account's
 annotation to match.
 
-Then create the three Secrets and apply. `silo-hub-db` holds both
+Then create the Secrets and apply. `silo-hub-db` holds both
 database URLs: `url`, the hub's (its IAM user, no password), and
 `migrate-url`, the schema owner's (with its password), which only the
 `migrate` init container is given. `silo-hub-internal` holds the key the
@@ -210,7 +216,12 @@ hub's pods share for their internal listeners (hub.md §2.2.3), random
 and at least 32 bytes. `silo-hub-claims` holds the private key the hub
 signs task claims with (hub.md §6.4), an EC P-256 key in PEM; set
 `SILO_HUB_CLAIMS_ISSUER` in the overlay to `https://<domain>`, which
-nodes name as `silo_issuer`. The pod does not start without either:
+nodes name as `silo_issuer`. `silo-hub-github` holds `webhook-secret`
+(`SILO_HUB_WEBHOOK_SECRET_FILE`), the HMAC secret verifying
+`X-Hub-Signature-256` on `/v1/webhooks/github` (`silo hub serve`
+refuses to start on Kubernetes without one, `server.CheckWebhookSecret`),
+and `app-key` (`SILO_HUB_GITHUB_APP_KEY_FILE`), the GitHub App's PEM
+private key:
 
 ```sh
 eval "$(terraform -chdir=deploy/terraform/hub output -raw get_credentials)"
@@ -222,6 +233,9 @@ kubectl -n silo-hub create secret generic silo-hub-iap --from-literal=key=<the O
 kubectl -n silo-hub create secret generic silo-hub-internal --from-literal=key="$(openssl rand -hex 32)"
 (umask 077; openssl ecparam -name prime256v1 -genkey -noout -out claims.pem)
 kubectl -n silo-hub create secret generic silo-hub-claims --from-file=key=claims.pem && rm claims.pem
+kubectl -n silo-hub create secret generic silo-hub-github \
+  --from-literal=webhook-secret="$(openssl rand -hex 32)" \
+  --from-file=app-key=github-app.pem
 kubectl apply -k deploy/kubernetes/hub/bsalmon-gke-dev
 kubectl -n silo-hub rollout status deploy/silo-hub
 kubectl -n silo-hub get gateway silo-hub   # PROGRAMMED True, with the static IP, after a few minutes
@@ -250,9 +264,10 @@ IAP-protected app there too; it is off by default.)
 **Checking it.**
 
 ```sh
-curl -sI https://<domain>/v1/me              # 302 to Google sign-in: IAP is on
-curl -s  https://<domain>/v1/nodes/connect   # 401 unauthenticated: the node path reaches the hub, past IAP
-curl -s  https://<domain>/v1/claims/keys     # {"keys":[...]}: the claims keys, past IAP, for nodes' silo_keys_url
+curl -sI https://<domain>/v1/me                  # 302 to Google sign-in: IAP is on
+curl -s  https://<domain>/v1/nodes/connect       # 401 unauthenticated: the node path reaches the hub, past IAP
+curl -s  https://<domain>/v1/claims/keys         # {"keys":[...]}: the claims keys, past IAP, for nodes' silo_keys_url
+curl -s  https://<domain>/v1/grainfiles/content  # 401 unauthenticated: node content fetches reach the hub, past IAP
 ```
 
 In a browser, `https://<domain>/v1/me` shows the signed-in principal.
@@ -425,9 +440,13 @@ existing connection. It is off until the hub is told the domain.
 - **They need IAP.** Behind an OIDC hub (hub.md §5.1) the node hosts
   sign nobody in: its session cookie belongs to the hub's host, and no
   node host can set one. Turn them on only for a hub behind IAP, as
-  this one is. Who may pass IAP is the same `iap_members`; the hub then
-  admits only each node's owner (others get 404), and a node checking
-  the assertion itself uses the hub's `SILO_HUB_IAP_AUDIENCE`.
+  this one is. Who may pass IAP is the same `iap_members` (or a dedicated
+  IAP-enabled backend service when `SILO_HUB_NODE_UI_IAP_AUDIENCE` /
+  `-node-ui-iap-audience` is set); the hub then admits only each node's
+  owner and team admins of the node's validated `ui.team` (others get
+  404), strips `X-Goog-IAP-*` headers and `GCP_IAP_*` cookies before
+  proxying to the node, and passes the verified viewer and role in the
+  stream handshake ([grain-ui-proxy.md](grain-ui-proxy.md)).
 - **Prefer a domain of its own.** `nodes.<domain>` is the same *site*
   as the hub (one registrable domain), so a node's UI page, which is
   the Grain's own content, gets the hub's `SameSite` cookies on its

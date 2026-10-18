@@ -91,6 +91,13 @@ type Server struct {
 	// AdmitSubscriptions, when set, checks whether owner may claim the
 	// recipient identities and repository subscriptions in sub.
 	AdmitSubscriptions func(ctx context.Context, owner string, sub grainfiles.Subscriptions) error
+	// ValidateUI, when set, validates node.UI (such as ui.team membership
+	// and repository ownership) during registration, dropping ui.team with
+	// a ui.reason when the check fails without refusing the node.
+	ValidateUI func(ctx context.Context, owner string, n *registry.Node) error
+	// ObserveGrainfileEvents, when set, is called with each batch of
+	// emitted grainfile events for the hub's metrics.
+	ObserveGrainfileEvents func(evs []grainfiles.Event)
 	// Bus, when set, broadcasts grainfile event wake-ups across hub pods
 	// so nodes connected to other pods receive notifications.
 	Bus *notify.Bus
@@ -199,7 +206,9 @@ func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 			nodes[i].Folders = mergeStrings(nodes[i].Folders, sub.Folders)
 			nodes[i].Grainfiles = mergeStrings(nodes[i].Grainfiles, sub.Grainfiles)
 		}
-		offered := nodes[i].Supports(registry.FeatureNodeUI) || (nodes[i].UI != nil && nodes[i].UI.Offered)
+		offered := ((nodes[i].UI != nil && nodes[i].UI.Offered) ||
+			(nodes[i].UI == nil && nodes[i].Supports(registry.FeatureNodeUI))) &&
+			registry.ValidNodeUILabel(nodes[i].ID)
 		if offered {
 			if nodes[i].UI == nil {
 				nodes[i].UI = &registry.NodeUI{Offered: true}
@@ -334,6 +343,12 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	if err != nil {
 		refuse(err)
 		return
+	}
+	if s.ValidateUI != nil {
+		if err := s.ValidateUI(ctx, owner, &node); err != nil {
+			s.logf("rendezvous: could not validate UI for node %q of %s: %s", hello.Node.ID, owner, logsafe.Quote(err.Error()))
+			return
+		}
 	}
 	lease, err := s.Registry.Register(node, owner)
 	if err != nil && !errors.Is(err, registry.ErrOwner) && !errors.Is(err, registry.ErrInvalid) {
@@ -897,6 +912,9 @@ func (s *Server) deliverNodeGrainfileEvents(ctx context.Context, nc *nodeConn) {
 // NotifyGrainfiles wakes all locally connected nodes to deliver any new
 // matching grainfile events, and posts a cross-pod notice on Bus when set.
 func (s *Server) NotifyGrainfiles(evs ...grainfiles.Event) {
+	if s.ObserveGrainfileEvents != nil && len(evs) > 0 {
+		s.ObserveGrainfileEvents(evs)
+	}
 	s.wakeLocalGrainfiles()
 	if s.Bus != nil {
 		var maxSeq int64 = 1

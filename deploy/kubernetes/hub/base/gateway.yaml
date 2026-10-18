@@ -20,12 +20,12 @@ spec:
         namespaces:
           from: Same
 ---
-# Only the node WebSocket, and the public keys nodes check the hub's
-# task claims against (docs/hub.md §6.4), go to the backend without
-# IAP: exact matches, so no other path is reachable there. Everything
-# else is behind IAP. The hub checks a node token on the WebSocket,
-# nothing on the keys, which are public, and an IAP assertion on the
-# rest, whichever backend a request came through.
+# Only the node WebSocket, the public keys nodes check the hub's task
+# claims against (docs/hub.md §6.4), GitHub webhooks (verified by
+# X-Hub-Signature-256 HMAC), and node grainfile content fetches
+# (authenticated by a node token) go to the backend without IAP: exact
+# matches, so no other path is reachable there. Everything else is
+# behind IAP.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -47,6 +47,20 @@ spec:
         - path:
             type: Exact
             value: /v1/claims/keys
+      backendRefs:
+        - name: silo-hub-nodes
+          port: 80
+    - matches:
+        - path:
+            type: Exact
+            value: /v1/webhooks/github
+      backendRefs:
+        - name: silo-hub-nodes
+          port: 80
+    - matches:
+        - path:
+            type: Exact
+            value: /v1/grainfiles/content
       backendRefs:
         - name: silo-hub-nodes
           port: 80

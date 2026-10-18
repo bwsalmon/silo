@@ -171,6 +171,13 @@ spec:
             # SILO_HUB_CLAIMS_ISSUER, from the config map.
             - name: SILO_HUB_CLAIMS_KEY_FILE
               value: /var/run/secrets/silo-hub-claims/key
+            # The GitHub webhook HMAC secret and GitHub App private key
+            # (docs/deploy.md). The hub refuses to start on Kubernetes
+            # without a webhook secret (server.CheckWebhookSecret).
+            - name: SILO_HUB_WEBHOOK_SECRET_FILE
+              value: /var/run/secrets/silo-hub-github/webhook-secret
+            - name: SILO_HUB_GITHUB_APP_KEY_FILE
+              value: /var/run/secrets/silo-hub-github/app-key
             # This pod's name in the shared registry, and the address
             # the hub's other pods reach its internal listener at
             # (docs/hub.md §2.2.2), from the downward API.
@@ -190,6 +197,9 @@ spec:
               readOnly: true
             - name: claims-key
               mountPath: /var/run/secrets/silo-hub-claims
+              readOnly: true
+            - name: github
+              mountPath: /var/run/secrets/silo-hub-github
               readOnly: true
           ports:
             - name: http
@@ -228,3 +238,6 @@ spec:
         - name: claims-key
           secret:
             secretName: silo-hub-claims
+        - name: github
+          secret:
+            secretName: silo-hub-github

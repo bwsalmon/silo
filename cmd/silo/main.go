@@ -181,6 +181,8 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 	doMigrate := migrateFlag(fs)
 	iap := fs.String("iap-audience", env("SILO_HUB_IAP_AUDIENCE", ""),
 		"sign humans in behind IAP: the backend service's audience, /projects/NUMBER/global/backendServices/ID [SILO_HUB_IAP_AUDIENCE]")
+	nodeUIIAP := fs.String("node-ui-iap-audience", env("SILO_HUB_NODE_UI_IAP_AUDIENCE", ""),
+		"optional IAP audience for node UI hosts (*.<node-ui-domain>), falling back to -iap-audience when unset [SILO_HUB_NODE_UI_IAP_AUDIENCE]")
 	issuer := fs.String("oidc-issuer", env("SILO_HUB_OIDC_ISSUER", ""), "sign humans in with OIDC: the provider's issuer URL [SILO_HUB_OIDC_ISSUER]")
 	clientID := fs.String("oidc-client-id", env("SILO_HUB_OIDC_CLIENT_ID", ""), "the OIDC client ID [SILO_HUB_OIDC_CLIENT_ID]")
 	redirect := fs.String("oidc-redirect-url", env("SILO_HUB_OIDC_REDIRECT_URL", ""), "the hub's OIDC callback URL [SILO_HUB_OIDC_REDIRECT_URL]")
@@ -258,6 +260,9 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 		}
 		whSecret = strings.TrimSpace(string(b))
 	}
+	if err := server.CheckWebhookSecret(whSecret, os.Getenv); err != nil {
+		return "", server.Config{}, err
+	}
 	ghToken := strings.TrimSpace(*githubToken)
 	if *githubTokenFile != "" {
 		b, err := os.ReadFile(*githubTokenFile)
@@ -278,11 +283,12 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 		ghAppKey = b
 	}
 	cfg := server.Config{
-		Database:     *db,
-		NoMigrate:    !*doMigrate,
-		IAPAudience:  *iap,
-		OIDCIssuer:   *issuer,
-		OIDCClientID: *clientID,
+		Database:          *db,
+		NoMigrate:         !*doMigrate,
+		IAPAudience:       *iap,
+		NodeUIIAPAudience: strings.TrimSpace(*nodeUIIAP),
+		OIDCIssuer:        *issuer,
+		OIDCClientID:      *clientID,
 		// Secrets come only from the environment, never a flag, so
 		// they do not show in the process list.
 		OIDCClientSecret:    os.Getenv("SILO_HUB_OIDC_CLIENT_SECRET"),

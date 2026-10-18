@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/tasks"
 )
@@ -117,6 +118,13 @@ func TestMetrics(t *testing.T) {
 		`silo_hub_store_errors_total{store="database"} 0`,
 		`silo_hub_dispatch_events_total{event="lost_requeued"} 0`,
 		`silo_hub_subscribers 0`,
+		`silo_hub_db_open_connections{store="grainfiles"}`,
+		`silo_hub_db_in_use_connections{store="grainfiles"}`,
+		`silo_hub_grainfiles_indexed{kind="task"} 0`,
+		`silo_hub_grainfiles_indexed{kind="process"} 0`,
+		`silo_hub_grainfiles_indexed{kind="draft"} 0`,
+		`silo_hub_grainfile_subscriptions 0`,
+		`silo_hub_grainfile_events_total{type="task_ready"} 0`,
 		`go_goroutines`,
 	} {
 		if !strings.Contains(body, want) {
@@ -197,4 +205,124 @@ func TestMonitoringNamesMetrics(t *testing.T) {
 	}
 	sort.Strings(unused)
 	t.Logf("metrics neither alerted on nor charted: %v", unused)
+}
+
+type metricsRepoFetcher struct {
+	files map[string][]byte
+}
+
+func (f *metricsRepoFetcher) FetchFile(_ context.Context, _, _, path string) ([]byte, error) {
+	if b, ok := f.files[path]; ok {
+		return b, nil
+	}
+	return nil, grainfiles.ErrNotFound
+}
+
+func TestGrainfileAndNodeUIMetrics(t *testing.T) {
+	ctx := context.Background()
+	h, err := New(ctx, Config{
+		Database:         "sqlite::memory:",
+		DevUserHeader:    userHeader,
+		HubAdmins:        []string{"admin@example.com"},
+		WebhookSecret:    "wh-secret",
+		GrainfileFetcher: &metricsRepoFetcher{files: map[string][]byte{"tasks/a.task.md": []byte("---\ntitle: Task A\nrecipient: https://github.com/bwsalmon/silo\n---\nBody\n")}},
+		Logf:             logf(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	// 1. Index 1 active task, 1 active process, and 1 draft task.
+	gfTask, err := grainfiles.Parse("tasks/a.task.md", []byte("---\ntitle: Task A\nrecipient: https://github.com/bwsalmon/silo\n---\nBody\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gfTask.Repo, gfTask.Ref, gfTask.Commit = "https://github.com/bwsalmon/silo", "main", "1111111111111111111111111111111111111111"
+	if _, err := h.Grainfiles.IndexGrainfile(ctx, gfTask); err != nil {
+		t.Fatal(err)
+	}
+	gfProc, err := grainfiles.Parse("processes/p.process.md", []byte("---\ntitle: Process P\nrecipient: https://github.com/bwsalmon/silo\non:\n  push:\n    branches:\n      - main\n---\nBody\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gfProc.Repo, gfProc.Ref, gfProc.Commit = "https://github.com/bwsalmon/silo", "main", "1111111111111111111111111111111111111111"
+	if _, err := h.Grainfiles.IndexGrainfile(ctx, gfProc); err != nil {
+		t.Fatal(err)
+	}
+	gfDraft, err := grainfiles.Parse("tasks/d.task.md", []byte("---\ntitle: Draft D\nrecipient: https://github.com/bwsalmon/silo\ndraft: true\n---\nBody\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gfDraft.Repo, gfDraft.Ref, gfDraft.Commit = "https://github.com/bwsalmon/silo", "main", "1111111111111111111111111111111111111111"
+	if _, err := h.Grainfiles.IndexGrainfile(ctx, gfDraft); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Register a Grainfile subscription.
+	if _, err := h.Grainfiles.SetSubscriptions(ctx, grainfiles.Subscriptions{
+		NodeID:     "ws-1",
+		Owner:      "alice@example.com",
+		Recipients: []string{"https://github.com/bwsalmon/silo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Deliver webhooks: one unauthorized, one bad_request, one accepted (which emits task_ready).
+	unauthReq, _ := http.NewRequest("POST", srv.URL+grainfiles.GitHubWebhookPath, strings.NewReader(`{}`))
+	unauthReq.Header.Set("X-GitHub-Event", "push")
+	resp, err := http.DefaultClient.Do(unauthReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	badBody := `{"not":"valid`
+	badReq, _ := http.NewRequest("POST", srv.URL+grainfiles.GitHubWebhookPath, strings.NewReader(badBody))
+	badReq.Header.Set("X-GitHub-Event", "push")
+	badReq.Header.Set("X-Hub-Signature-256", signGitHubWebhook("wh-secret", []byte(badBody)))
+	resp, err = http.DefaultClient.Do(badReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	pushBody := `{"ref":"refs/heads/main","after":"2222222222222222222222222222222222222222","repository":{"html_url":"https://github.com/bwsalmon/silo"},"commits":[{"added":["tasks/a.task.md"]}]}`
+	okReq, _ := http.NewRequest("POST", srv.URL+grainfiles.GitHubWebhookPath, strings.NewReader(pushBody))
+	okReq.Header.Set("X-GitHub-Event", "push")
+	okReq.Header.Set("X-Hub-Signature-256", signGitHubWebhook("wh-secret", []byte(pushBody)))
+	resp, err = http.DefaultClient.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 4. Call /v1/grainfiles/content unauthenticated (401).
+	cReq, _ := http.NewRequest("GET", srv.URL+grainfiles.ContentPath+"?url=https://github.com/bwsalmon/silo/blob/main/tasks/a.task.md", nil)
+	resp, err = http.DefaultClient.Do(cReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	body := scrape(t, h)
+	for _, want := range []string{
+		`silo_hub_grainfiles_indexed{kind="task"} 1`,
+		`silo_hub_grainfiles_indexed{kind="process"} 1`,
+		`silo_hub_grainfiles_indexed{kind="draft"} 1`,
+		`silo_hub_grainfile_subscriptions 1`,
+		`silo_hub_webhooks_total{event="push",result="unauthorized"} 1`,
+		`silo_hub_webhooks_total{event="push",result="bad_request"} 1`,
+		`silo_hub_webhooks_total{event="push",result="accepted"} 1`,
+		`silo_hub_grainfile_events_total{type="task_ready"} 1`,
+		`silo_hub_content_requests_total{code="401"} 1`,
+		`silo_hub_db_open_connections{store="grainfiles"}`,
+		`silo_hub_db_in_use_connections{store="grainfiles"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape missing %s\nfull body:\n%s", want, body)
+		}
+	}
 }
