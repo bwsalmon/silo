@@ -193,6 +193,11 @@ func startHub(t *testing.T, o options) *hub {
 		cancel()
 		<-done
 		h.Close()
+		// A failure the suite cannot reproduce locally is read from
+		// what the hub said while it happened.
+		if t.Failed() && !testing.Verbose() {
+			t.Logf("hub log:\n%s", lg.all())
+		}
 		lg.mu.Lock()
 		lg.done = true
 		lg.mu.Unlock()
