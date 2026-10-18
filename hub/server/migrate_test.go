@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,9 +60,23 @@ func TestMigrateThenServeLeastPrivileged(t *testing.T) {
 	if err := Migrate(ctx, owner, "silo-hub@p.iam"); err != nil {
 		t.Fatal(err)
 	}
-	// Again, as each start of the pod does.
-	if err := Migrate(ctx, owner, "silo-hub@p.iam"); err != nil {
-		t.Fatalf("migrating again: %v", err)
+	// Again, as each start of the pod does, including when multiple
+	// replicas run their migrate init container concurrently.
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := Migrate(ctx, owner, "silo-hub@p.iam"); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("migrating concurrently: %v", err)
 	}
 
 	// The hub serves as the runtime role: each store reads and writes,

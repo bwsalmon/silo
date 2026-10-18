@@ -1,0 +1,58 @@
+# The hub on a local or CI kind cluster (deploy/kubernetes/hub/e2e-kind.sh,
+# docs/deploy.md). It builds directly on ../base, replacing only the
+# GCP-specific cloud-sql-proxy sidecar with the in-cluster PostgreSQL
+# service (postgres.yaml) while preserving the 2-replica Deployment,
+# the migrate init container (`silo hub migrate` with
+# SILO_HUB_RUNTIME_ROLE=silo_runtime), and the hardened distroless hub
+# container (SILO_HUB_MIGRATE=false, runAsNonRoot: true,
+# runAsUser: 65532, readOnlyRootFilesystem: true).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: silo-hub
+resources:
+  - ../base
+  - postgres.yaml
+images:
+  - name: silo-hub
+    newName: silo-hub
+    newTag: ci
+configMapGenerator:
+  - name: silo-hub-config
+    behavior: replace
+    literals:
+      - SILO_HUB_IAP_AUDIENCE=
+      - SILO_HUB_OIDC_ISSUER=http://github-mock.silo-hub.svc.cluster.local:8080
+      - SILO_HUB_OIDC_CLIENT_ID=silo-hub-kind
+      - SILO_HUB_OIDC_REDIRECT_URL=https://silo-hub.kind.test/auth/callback
+      - SILO_HUB_OIDC_SESSION_KEY=0123456789abcdef0123456789abcdef
+      - SILO_HUB_ADMINS=user:admin@kind.test
+      - SILO_HUB_CLAIMS_ISSUER=https://silo-hub.kind.test
+      - SILO_HUB_GITHUB_APP_ID=42
+      - SILO_HUB_GITHUB_API_URL=http://github-mock.silo-hub.svc.cluster.local:8080
+      - SILO_HUB_NODE_UI_DOMAIN=nodes.silo-hub.kind.test
+      - CLOUD_SQL_INSTANCE=
+      - SILO_HUB_RUNTIME_ROLE=silo_runtime
+patches:
+  - target:
+      kind: Deployment
+      name: silo-hub
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/initContainers/0
+      - op: replace
+        path: /spec/template/spec/topologySpreadConstraints/1/whenUnsatisfiable
+        value: ScheduleAnyway
+  - target:
+      kind: HTTPRoute
+      name: silo-hub
+    patch: |-
+      - op: replace
+        path: /spec/hostnames/0
+        value: silo-hub.kind.test
+  - target:
+      kind: HTTPRoute
+      name: silo-hub-node-ui
+    patch: |-
+      - op: replace
+        path: /spec/hostnames/0
+        value: "*.nodes.silo-hub.kind.test"
