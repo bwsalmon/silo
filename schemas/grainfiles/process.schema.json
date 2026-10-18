@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/process.schema.json",
+  "title": "A process grainfile (docs/grainfiles-spec.md §7.2)",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requestor": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/requestor"
+    },
+    "recipient": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deploymentIdentity"
+    },
+    "created_at": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
+    },
+    "depends_on": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
+    },
+    "trigger_with": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/triggerWith"
+    },
+    "references": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
+    },
+    "on": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/on"
+    },
+    "gate": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "title",
+    "requestor",
+    "recipient"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "on"
+      ]
+    },
+    {
+      "required": [
+        "trigger_with"
+      ]
+    }
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false
+}

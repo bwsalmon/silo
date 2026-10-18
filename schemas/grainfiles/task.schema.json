@@ -1,76 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/task.schema.json",
-  "title": "A task definition (docs/grainfiles-spec.md §7.1)",
+  "title": "A task grainfile (docs/grainfiles-spec.md §7.1)",
   "type": "object",
   "properties": {
     "title": {
       "type": "string",
       "minLength": 1
     },
-    "submitter": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/identity"
+    "requestor": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/requestor"
+    },
+    "recipient": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deploymentIdentity"
     },
     "created_at": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/time"
     },
-    "inputs": {
-      "type": "array",
-      "items": {
-        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/inputDecl"
-      }
-    },
-    "context": {
-      "type": "array",
-      "items": {
-        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/contextEntry"
-      }
-    },
-    "capabilities": {
-      "type": "array",
-      "items": {
-        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-      }
-    },
     "depends_on": {
-      "type": "array",
-      "items": {
-        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-      }
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     },
-    "implements": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "ref": {
-            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-          },
-          "hash": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "ref"
-        ]
-      }
+    "trigger_with": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/triggerWith"
     },
-    "lifecycle": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-    },
-    "supersedes": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-    },
-    "settings": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/settings"
+    "references": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     }
   },
   "required": [
     "title",
-    "submitter",
-    "created_at"
+    "requestor",
+    "recipient"
   ],
   "patternProperties": {
     "^x_": {}

@@ -1,5 +1,0 @@
-*  @owner
-/tasks/  @acme/hub
-/tasks/**/thread/  *(create)
-/tasks/:capabilities  @acme/security
-/records/  @bot

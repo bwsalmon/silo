@@ -1,112 +1,154 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grain.dev/schemas/grainfiles/common.schema.json",
-  "title": "Definitions shared by every kind (docs/grainfiles-spec.md §6)",
+  "title": "Common definitions for Grainfiles (docs/grainfiles-spec.md §6)",
   "$defs": {
     "ref": {
       "type": "string",
       "minLength": 1,
       "pattern": "^[^\\s\\\\]+$"
     },
-    "pinnedRef": {
+    "userIdentity": {
       "type": "string",
-      "pattern": "^git::(https|file)://[^\\s?#]+\\?ref=[0-9a-f]{40}(#[A-Za-z0-9_.-]+)?$"
+      "pattern": "^[^<>\\s][^<>]*\\s+<[^<>\\s@]+@[^<>\\s@]+\\.[^<>\\s@]+>$"
     },
-    "identity": {
+    "deploymentIdentity": {
       "type": "string",
-      "pattern": "^@([a-z0-9.-]+:)?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$"
+      "minLength": 1,
+      "pattern": "^[^\\s\\\\<>@#]+$"
+    },
+    "requestor": {
+      "oneOf": [
+        {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/userIdentity"
+        },
+        {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/deploymentIdentity"
+        }
+      ]
     },
     "time": {
       "type": "string",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
     },
-    "sha": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{40}$"
+    "refList": {
+      "type": "array",
+      "items": {
+        "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+      }
     },
-    "settings": {
-      "type": "object",
-      "description": "Opaque, executor-owned (§6.4): never validated."
-    },
-    "category": {
-      "enum": [
-        "proposed",
-        "ready",
-        "active",
-        "waiting",
-        "done",
-        "cancelled"
-      ]
-    },
-    "inputDecl": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_]*$"
-        },
-        "type": {
-          "enum": [
-            "string",
-            "integer",
-            "boolean",
-            "enum",
-            "list",
-            "ref"
-          ]
-        },
-        "required": {
-          "type": "boolean"
-        },
-        "default": {},
-        "options": {
-          "type": "array",
-          "items": {}
-        },
-        "description": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "name"
-      ]
-    },
-    "contextEntry": {
-      "type": "object",
-      "properties": {
-        "ref": {
-          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
-        },
-        "input": {
-          "type": "string"
-        },
-        "mode": {
-          "enum": [
-            "read",
-            "write"
-          ]
-        },
-        "path": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
+    "triggerWith": {
       "oneOf": [
         {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+          }
+        }
+      ]
+    },
+    "eventFilter": {
+      "type": "object",
+      "properties": {
+        "branches": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "anyOf": [
+        {
           "required": [
-            "ref"
+            "branches"
           ]
         },
         {
           "required": [
-            "input"
+            "paths"
           ]
         }
-      ]
+      ],
+      "additionalProperties": false
+    },
+    "on": {
+      "type": "object",
+      "properties": {
+        "schedule": {
+          "type": "object",
+          "properties": {
+            "cron": {
+              "type": "string",
+              "minLength": 1
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "cron"
+          ],
+          "additionalProperties": false
+        },
+        "push": {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+        },
+        "merge": {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+        },
+        "pull_request": {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+        },
+        "manual": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "scenario": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "description"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "minProperties": 1
     }
   }
 }

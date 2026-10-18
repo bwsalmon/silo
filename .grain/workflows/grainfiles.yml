@@ -1,8 +1,8 @@
 # The Grainfile Format's reference linter (docs/grainfiles-spec.md):
 # lints the worked example in examples/grainfiles, checks that every broken
 # fixture under tools/grainfiles/testdata fails with exactly its expected
-# lint codes, and checks that the spec's lint-code table, kinds and state
-# categories agree with schemas/grainfiles and the linter, so the three
+# lint codes, and checks that the spec's lint-code table, kinds and trigger
+# sources agree with schemas/grainfiles and the linter, so the three
 # cannot drift apart.
 name: grainfiles
 

@@ -1,4 +1,0 @@
-*                         @acme/widgets
-/tasks/**/thread/         *(create)
-/tasks/:capabilities  @acme/security
-/designs/                 @acme/widgets-leads

@@ -1,6 +1,6 @@
 ---
 title: T
-submitter: "@alice"
-created_at: "2026-10-16T09:00:00Z"
+requestor: "Bruce Salmon <bsalmon@google.com>"
+recipient: "git::https://github.com/acme/grain-eu.git"
 ---
-Do it.
+Run the task.
