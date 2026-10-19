@@ -89,20 +89,48 @@ stays visible for the disabled button.
 
 ## 4. Who may open it (the hub, as PDP)
 
-`nodeui.Server` replaces "owner only" with:
+`nodeui.Server` resolves the signed-in caller's effective role on the
+deployment (`directory.Access.NodeUIRole`) and allows any caller with one
+of the 5 roles below to open `https://<node>.<node-ui-domain>/`:
 
-- **owner**: `e.Owner` equals the viewer, as built. Role `owner`.
-- **team-admin**: `acc.Teams[ui.team] == directory.Admin`. This reads
-  the store's role directly, **not `AdminOf`**, which is also true for
-  hub admins. A hub admin gets in only by being a team admin in the
-  directory, as built today ("a node's UI is its owner's grain").
+- **owner** (`owner`): `e.Owner != ""` and equals `acc.Email`. Full
+  read-write access (`access: "read-write"`).
+- **admin** (`team-admin` / `admin`): `acc.Teams[ui.team] == directory.Admin`.
+  Full read-write access unless the node explicitly capped non-owners to
+  `ui.access: "read-only"`.
+- **member** (`member`): `acc.Teams[ui.team] == directory.Member`.
+  Read-write task and interactive session access (file tasks, chat with
+  the deployment's standing Director or interactive sessions, reply to
+  questions/approvals, cancel/requeue tasks, and approve/reject
+  `proposed` tasks except self-approval; when `require_approval: true`,
+  newly filed tasks land in state `proposed`), while deployment-admin
+  settings/secrets/capabilities mutations (`PUT`/`POST` `/api/settings*`,
+  `/api/secrets*`, `/api/capabilities*`) return `403 Forbidden`.
+- **proposer** (`proposer`): `acc.Teams[ui.team] == directory.Proposer`,
+  or `acc.Teams[ui.team] == ""` when the owning team's
+  `TeamSettings.AnyoneMayPropose == true`. Read access (`GET`/`HEAD`/`OPTIONS`)
+  plus permission to submit/propose tasks (`POST /api/tasks`,
+  `POST /v1/tasks`, `POST /tasks` — which land in state `proposed`
+  awaiting approval from a `member`/`admin`); all other state-mutating
+  requests return `403 Forbidden`.
+- **viewer** (`viewer`): `acc.Teams[ui.team] == directory.Viewer`.
+  Strictly read-only (`GET`/`HEAD`/`OPTIONS` on safe routes; all
+  `POST`/`PUT`/`PATCH`/`DELETE` requests return `403 Forbidden`).
 - Anyone else gets **404**, the same answer as for an unknown node, so
   the host does not confirm that a node exists. A node that has not
   offered a UI also gets 404. An offline node gets **503** (§7).
 
-Team members who are not admins stay out. This resolves for admins the
-question hub.md §10 left open: it no longer waits on a role in grain,
-because read-only is now the Grain's own default (§6).
+When a node offers a UI (`ui.offered` or `FeatureNodeUI`) and omits
+`ui.team`, `directory.Store.ValidateNodeUI` automatically infers
+`ui.team` if all of `e.Repos` are owned by a single team in
+`hub/directory` and `e.Owner` is a `member` or `admin` of that team.
+
+In addition to `viewer`, `role`, `team`, and `access`, the `http` stream
+(`nodeui.Message`) carries `require_approval` (from the owning team's
+`TeamSettings.RequireApproval`) and `theme` (`"light"` or `"dark"`,
+resolved by the Hub UI and persisted via `PUT /v1/me/theme`), which
+`nodeui.Serve` passes as `X-Grain-Hub-UI-Require-Approval` and
+`X-Grain-Hub-UI-Theme` headers and exposes on `/api/me`.
 
 ## 5. The separate origin
 

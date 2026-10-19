@@ -339,3 +339,76 @@ func TestReferenceNodeSupportU3U5U7G2G4(t *testing.T) {
 		t.Errorf("LocalUIHandler accepted request with leaked X-Goog-Authenticated-User-Email header")
 	}
 }
+
+func TestRefgrainFiveRolePermissionsAndTheme(t *testing.T) {
+	g := &Grain{
+		ID:        "ws-ref",
+		UIOffered: true,
+		UITeam:    "infra",
+	}
+	// 1. Proposer: GET /api/me returns theme="dark", POST /api/tasks creates proposed task, approve returns 403.
+	propH := g.LocalUIHandler(nodeui.Message{
+		Viewer:          "pete@example.com",
+		Role:            nodeui.RoleProposer,
+		Team:            "infra",
+		RequireApproval: true,
+		Theme:           "dark",
+	})
+	rec := httptest.NewRecorder()
+	propH.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/me", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proposer GET /api/me: %d %s", rec.Code, rec.Body.String())
+	}
+	var me map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me["theme"] != "dark" || me["role"] != "proposer" || me["require_approval"] != true {
+		t.Fatalf("unexpected refgrain /api/me = %+v", me)
+	}
+
+	rec = httptest.NewRecorder()
+	propH.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(`{"title":"propose fix"}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("proposer POST /api/tasks: %d %s", rec.Code, rec.Body.String())
+	}
+	var propTask TaskStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &propTask); err != nil {
+		t.Fatal(err)
+	}
+	if propTask.State != tasks.Proposed || propTask.Proposer != "pete@example.com" {
+		t.Fatalf("proposer task = %+v, want state=proposed", propTask)
+	}
+
+	// 2. Member: can approve pete's task, cannot self-approve own proposed task, gets 403 on PUT /api/settings.
+	memH := g.LocalUIHandler(nodeui.Message{
+		Viewer:          "dave@example.com",
+		Role:            nodeui.RoleMember,
+		Team:            "infra",
+		RequireApproval: true,
+		Theme:           "light",
+	})
+	rec = httptest.NewRecorder()
+	memH.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/tasks/"+propTask.ID+"/approve", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member approve pete task: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	memH.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/settings", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("member PUT /api/settings: %d, want 403", rec.Code)
+	}
+
+	// 3. Viewer: GET /api/tasks allowed, POST /api/tasks blocked with 403.
+	viewH := g.LocalUIHandler(nodeui.Message{
+		Viewer: "vera@example.com",
+		Role:   nodeui.RoleViewer,
+		Team:   "infra",
+		Theme:  "dark",
+	})
+	rec = httptest.NewRecorder()
+	viewH.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/tasks", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer POST /api/tasks: %d, want 403", rec.Code)
+	}
+}

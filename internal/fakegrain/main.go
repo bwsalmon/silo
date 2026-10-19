@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -46,18 +47,20 @@ import (
 )
 
 type task struct {
-	ID        string          `json:"id"`
-	NodeTask  string          `json:"node_task"`
-	HubTaskID string          `json:"hub_task_id"`
-	HubURL    string          `json:"hub_url"`
-	Repo      string          `json:"repo,omitempty"`
-	Kind      string          `json:"kind,omitempty"`
-	Title     string          `json:"title,omitempty"`
-	State     tasks.State     `json:"state,omitempty"`
-	Received  []tasks.Message `json:"received"`
-	seq       int64
-	stream    *tasks.Stream
-	approveCh chan tasks.Message
+	ID         string          `json:"id"`
+	NodeTask   string          `json:"node_task"`
+	HubTaskID  string          `json:"hub_task_id"`
+	HubURL     string          `json:"hub_url"`
+	Repo       string          `json:"repo,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Title      string          `json:"title,omitempty"`
+	State      tasks.State     `json:"state,omitempty"`
+	Proposer   string          `json:"proposer,omitempty"`
+	ApprovedBy string          `json:"approved_by,omitempty"`
+	Received   []tasks.Message `json:"received"`
+	seq        int64
+	stream     *tasks.Stream
+	approveCh  chan tasks.Message
 }
 
 type grain struct {
@@ -80,10 +83,38 @@ type grain struct {
 }
 
 func normalizeUIAccess(raw string) string {
-	if strings.EqualFold(strings.TrimSpace(raw), "read-write") {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "read-only":
+		return "read-only"
+	case "read-write":
 		return "read-write"
+	default:
+		return ""
 	}
-	return "read-only"
+}
+
+func effectiveUIAccess(role, explicitAccess string) string {
+	if role != nodeui.RoleOwner && strings.EqualFold(strings.TrimSpace(explicitAccess), "read-only") {
+		return "read-only"
+	}
+	switch role {
+	case nodeui.RoleOwner, nodeui.RoleAdmin, nodeui.RoleTeamAdmin:
+		if strings.EqualFold(strings.TrimSpace(explicitAccess), "read-write") {
+			return "read-write"
+		}
+		return "admin"
+	case nodeui.RoleMember:
+		return "read-write"
+	case nodeui.RoleProposer:
+		return "propose"
+	case nodeui.RoleViewer:
+		return "read-only"
+	default:
+		if explicitAccess != "" {
+			return explicitAccess
+		}
+		return "read-only"
+	}
 }
 
 func hubTaskURL(hub, id string) string {
@@ -114,8 +145,8 @@ func main() {
 	slots := flag.Int("slots", 2, "the node's slots")
 	interactive := flag.Bool("interactive", false, "list the interactive feature")
 	nodeuiFlag := flag.Bool("nodeui", false, "list the nodeui feature")
-	uiTeam := flag.String("ui-team", "", "the team whose admins may open the node UI")
-	uiAccess := flag.String("ui-access", "read-only", "the access level for the node UI (read-only or read-write)")
+	uiTeam := flag.String("ui-team", "", "the team whose members may open the node UI")
+	uiAccess := flag.String("ui-access", "", "the access level for the node UI (read-only, read-write, or role-accorded when empty)")
 	control := flag.String("control", "127.0.0.1:0", "the address to serve the control API on")
 	addrFile := flag.String("addr-file", "", "write the control API's address here once it listens")
 	flag.Parse()
@@ -486,10 +517,13 @@ func (g *grain) routes() http.Handler {
 }
 
 const (
-	headerHubUIUser   = "X-Grain-Hub-UI-User"
-	headerHubUIRole   = "X-Grain-Hub-UI-Role"
-	headerHubUITeam   = "X-Grain-Hub-UI-Team"
-	headerHubUIAccess = "X-Grain-Hub-UI-Access"
+	headerHubUIViewer          = nodeui.HeaderViewer
+	headerHubUIUser            = nodeui.HeaderUser
+	headerHubUIRole            = nodeui.HeaderRole
+	headerHubUITeam            = nodeui.HeaderTeam
+	headerHubUIRequireApproval = nodeui.HeaderRequireApproval
+	headerHubUITheme           = nodeui.HeaderTheme
+	headerHubUIAccess          = nodeui.HeaderAccess
 )
 
 func hasLeakedHubCredentials(r *http.Request) (string, bool) {
@@ -522,8 +556,37 @@ func (g *grain) serveNodeUI(c net.Conn, m nodeui.Message) {
 }
 
 func (g *grain) uiHandler(m nodeui.Message) http.Handler {
-	access := normalizeUIAccess(g.uiAccess)
+	explicitAccess := normalizeUIAccess(g.uiAccess)
+	if explicitAccess == "" && m.Access != "" {
+		explicitAccess = normalizeUIAccess(m.Access)
+	}
 	mux := http.NewServeMux()
+	nodeID := m.Node
+	if nodeID == "" && g.cl != nil {
+		nodeID = g.cl.Node.ID
+	}
+	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
+		viewer := r.Header.Get(headerHubUIViewer)
+		if viewer == "" {
+			viewer = r.Header.Get(headerHubUIUser)
+		}
+		role := r.Header.Get(headerHubUIRole)
+		theme := r.Header.Get(headerHubUITheme)
+		if theme != "dark" {
+			theme = "light"
+		}
+		reqApproval := r.Header.Get(headerHubUIRequireApproval) == "true"
+		writeJSON(w, map[string]any{
+			"node":             nodeID,
+			"viewer":           viewer,
+			"email":            viewer,
+			"role":             role,
+			"team":             r.Header.Get(headerHubUITeam),
+			"access":           r.Header.Get(headerHubUIAccess),
+			"require_approval": reqApproval,
+			"theme":            theme,
+		})
+	})
 	tasksHandler := func(w http.ResponseWriter, _ *http.Request) {
 		g.mu.Lock()
 		ts := make([]*task, 0, len(g.order))
@@ -543,10 +606,142 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 		}
 		writeJSON(w, t)
 	}
+	createTaskHandler := func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Repo   string `json:"repo"`
+			Kind   string `json:"kind"`
+			Title  string `json:"title"`
+			Prompt string `json:"prompt"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		viewer := r.Header.Get(headerHubUIViewer)
+		if viewer == "" {
+			viewer = r.Header.Get(headerHubUIUser)
+		}
+		role := r.Header.Get(headerHubUIRole)
+		reqApproval := r.Header.Get(headerHubUIRequireApproval) == "true"
+		st := tasks.Queued
+		if role == nodeui.RoleProposer || reqApproval {
+			st = tasks.Proposed
+		}
+		g.mu.Lock()
+		if g.tasks == nil {
+			g.tasks = map[string]*task{}
+		}
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			id = fmt.Sprintf("t-local-%d", len(g.tasks)+1)
+		}
+		title := req.Title
+		if title == "" {
+			title = req.Prompt
+		}
+		tk := &task{
+			ID:        id,
+			NodeTask:  fmt.Sprintf("local-%d", len(g.tasks)+1),
+			HubTaskID: id,
+			Repo:      req.Repo,
+			Kind:      req.Kind,
+			Title:     title,
+			State:     st,
+			Proposer:  viewer,
+			Received:  []tasks.Message{},
+		}
+		g.tasks[id] = tk
+		g.order = append(g.order, id)
+		g.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(tk)
+	}
+	approveTaskHandler := func(approve bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			viewer := r.Header.Get(headerHubUIViewer)
+			if viewer == "" {
+				viewer = r.Header.Get(headerHubUIUser)
+			}
+			role := r.Header.Get(headerHubUIRole)
+			g.mu.Lock()
+			t := g.tasks[r.PathValue("id")]
+			if t == nil {
+				g.mu.Unlock()
+				http.NotFound(w, r)
+				return
+			}
+			if role == nodeui.RoleMember && t.Proposer != "" && strings.EqualFold(t.Proposer, viewer) {
+				g.mu.Unlock()
+				http.Error(w, "forbidden: members cannot self-approve their own proposed tasks", http.StatusForbidden)
+				return
+			}
+			if approve {
+				t.State = tasks.Queued
+				t.ApprovedBy = viewer
+			} else {
+				t.State = tasks.Cancelled
+			}
+			cp := *t
+			g.mu.Unlock()
+			writeJSON(w, cp)
+		}
+	}
+	mutateTaskHandler := func(nextState tasks.State) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			g.mu.Lock()
+			t := g.tasks[r.PathValue("id")]
+			if t == nil {
+				g.mu.Unlock()
+				http.NotFound(w, r)
+				return
+			}
+			if nextState != "" {
+				t.State = nextState
+			}
+			cp := *t
+			g.mu.Unlock()
+			writeJSON(w, cp)
+		}
+	}
 	mux.HandleFunc("GET /tasks", tasksHandler)
 	mux.HandleFunc("GET /api/tasks", tasksHandler)
+	mux.HandleFunc("GET /v1/tasks", tasksHandler)
+	mux.HandleFunc("POST /tasks", createTaskHandler)
+	mux.HandleFunc("POST /api/tasks", createTaskHandler)
+	mux.HandleFunc("POST /v1/tasks", createTaskHandler)
 	mux.HandleFunc("GET /tasks/{id}", taskByIDHandler)
 	mux.HandleFunc("GET /api/tasks/{id}", taskByIDHandler)
+	mux.HandleFunc("GET /v1/tasks/{id}", taskByIDHandler)
+	mux.HandleFunc("POST /tasks/{id}/approve", approveTaskHandler(true))
+	mux.HandleFunc("POST /api/tasks/{id}/approve", approveTaskHandler(true))
+	mux.HandleFunc("POST /v1/tasks/{id}/approve", approveTaskHandler(true))
+	mux.HandleFunc("POST /tasks/{id}/reject", approveTaskHandler(false))
+	mux.HandleFunc("POST /api/tasks/{id}/reject", approveTaskHandler(false))
+	mux.HandleFunc("POST /v1/tasks/{id}/reject", approveTaskHandler(false))
+	mux.HandleFunc("POST /tasks/{id}/cancel", mutateTaskHandler(tasks.Cancelled))
+	mux.HandleFunc("POST /api/tasks/{id}/cancel", mutateTaskHandler(tasks.Cancelled))
+	mux.HandleFunc("POST /tasks/{id}/requeue", mutateTaskHandler(tasks.Queued))
+	mux.HandleFunc("POST /api/tasks/{id}/requeue", mutateTaskHandler(tasks.Queued))
+	mux.HandleFunc("POST /tasks/{id}/reply", mutateTaskHandler(""))
+	mux.HandleFunc("POST /api/tasks/{id}/reply", mutateTaskHandler(""))
+	mux.HandleFunc("POST /tasks/{id}/messages", mutateTaskHandler(""))
+	mux.HandleFunc("POST /api/tasks/{id}/messages", mutateTaskHandler(""))
+	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"node":   nodeID,
+			"team":   r.Header.Get(headerHubUITeam),
+			"access": r.Header.Get(headerHubUIAccess),
+		})
+	})
+	for _, p := range []string{"/api/settings", "/api/secrets", "/api/capabilities"} {
+		mux.HandleFunc("PUT "+p, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, map[string]any{"ok": true})
+		})
+		mux.HandleFunc("POST "+p, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, map[string]any{"ok": true})
+		})
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		ts := make([]*task, 0, len(g.order))
@@ -554,14 +749,25 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 			ts = append(ts, g.tasks[id])
 		}
 		g.mu.Unlock()
+		viewer := r.Header.Get(headerHubUIViewer)
+		if viewer == "" {
+			viewer = r.Header.Get(headerHubUIUser)
+		}
+		theme := r.Header.Get(headerHubUITheme)
+		if theme != "dark" {
+			theme = "light"
+		}
 		writeJSON(w, map[string]any{
-			"method": r.Method,
-			"path":   r.URL.Path,
-			"viewer": r.Header.Get(headerHubUIUser),
-			"role":   r.Header.Get(headerHubUIRole),
-			"team":   r.Header.Get(headerHubUITeam),
-			"access": r.Header.Get(headerHubUIAccess),
-			"tasks":  ts,
+			"node":             nodeID,
+			"method":           r.Method,
+			"path":             r.URL.Path,
+			"viewer":           viewer,
+			"role":             r.Header.Get(headerHubUIRole),
+			"team":             r.Header.Get(headerHubUITeam),
+			"access":           r.Header.Get(headerHubUIAccess),
+			"require_approval": r.Header.Get(headerHubUIRequireApproval) == "true",
+			"theme":            theme,
+			"tasks":            ts,
 		})
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -569,8 +775,13 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 			http.Error(w, "forbidden: hub credential leaked to node handler: "+leaked, http.StatusBadRequest)
 			return
 		}
-		if m.Viewer != "" && r.Header.Get(headerHubUIUser) == "" {
-			r.Header.Set(headerHubUIUser, m.Viewer)
+		if m.Viewer != "" {
+			if r.Header.Get(headerHubUIViewer) == "" {
+				r.Header.Set(headerHubUIViewer, m.Viewer)
+			}
+			if r.Header.Get(headerHubUIUser) == "" {
+				r.Header.Set(headerHubUIUser, m.Viewer)
+			}
 		}
 		if m.Role != "" && r.Header.Get(headerHubUIRole) == "" {
 			r.Header.Set(headerHubUIRole, m.Role)
@@ -578,13 +789,23 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 		if m.Team != "" && r.Header.Get(headerHubUITeam) == "" {
 			r.Header.Set(headerHubUITeam, m.Team)
 		}
-		if r.Header.Get(headerHubUIAccess) == "" {
-			r.Header.Set(headerHubUIAccess, access)
+		if r.Header.Get(headerHubUIRequireApproval) == "" {
+			r.Header.Set(headerHubUIRequireApproval, strconv.FormatBool(m.RequireApproval))
 		}
+		theme := m.Theme
+		if theme == "" {
+			theme = r.Header.Get(headerHubUITheme)
+		}
+		if theme != "dark" {
+			theme = "light"
+		}
+		r.Header.Set(headerHubUITheme, theme)
 		role := r.Header.Get(headerHubUIRole)
-		if role == nodeui.RoleTeamAdmin && access == "read-only" {
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
-				http.Error(w, "forbidden: team-admin access is read-only", http.StatusForbidden)
+		access := effectiveUIAccess(role, explicitAccess)
+		r.Header.Set(headerHubUIAccess, access)
+		if role != "" {
+			if err := nodeui.CheckRoleRequest(role, explicitAccess, r.Method, r.URL.Path); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
 		}

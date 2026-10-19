@@ -44,8 +44,9 @@ const (
 //
 // A team the caller is not in answers 404, as one that does not exist.
 type API struct {
-	Store *Store
-	Auth  identity.Authenticator
+	Store    *Store
+	Registry *registry.Registry
+	Auth     identity.Authenticator
 	// HubAdmins are the principals, user:<email> or group:<name>, who
 	// hold the hub-wide admin role: they create teams and see
 	// everything. An entry with no prefix is a user
@@ -130,6 +131,17 @@ func (a *API) Visible(r *http.Request) (func(registry.Entry) bool, error) {
 	return acc.SeesNode, nil
 }
 
+// ResolveEntries is rendezvous.Server.ResolveEntries: the node directory,
+// filtered to the nodes the caller may see and annotated with viewer_role
+// and require_approval.
+func (a *API) ResolveEntries(r *http.Request) (func(registry.Entry) (registry.Entry, bool), error) {
+	acc, err := a.Access(r)
+	if err != nil {
+		return nil, err
+	}
+	return acc.ResolveEntry, nil
+}
+
 // Handler serves the API's paths. A write a browser sent from anywhere
 // but the hub's own origin, or with a body that is not JSON, is refused
 // before it is signed in (identity.SameOrigin).
@@ -148,6 +160,9 @@ func (a *API) Handler() http.Handler {
 		})
 	}
 	h("GET "+MePath, a.me)
+	h("PUT "+MePath+"/theme", a.setMyTheme)
+	h("GET "+MePath+"/inbox", a.getMyInbox)
+	h("PUT "+MePath+"/inbox", a.setMyInbox)
 	h("GET "+TeamsPath, a.listTeams)
 	h("POST "+TeamsPath, a.createTeam)
 	h("GET "+TeamsPath+"/{team}", a.getTeam)
@@ -222,12 +237,116 @@ func teamAdmin(r *http.Request, acc *Access) (string, error) {
 }
 
 func (a *API) me(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	prefs, err := a.Store.UserPreferences(r.Context(), acc.Email)
+	if err != nil {
+		return err
+	}
+	inboxNodes := prefs.InboxNodes
+	if !prefs.InboxConfigured {
+		var entries []registry.Entry
+		if a.Registry != nil {
+			entries = a.Registry.List()
+		}
+		inboxNodes = acc.DefaultInboxNodes(entries)
+	}
+	if inboxNodes == nil {
+		inboxNodes = []string{}
+	}
 	return writeJSON(w, http.StatusOK, struct {
 		identity.Principal
-		HubAdmin    bool            `json:"hub_admin"`
-		CanHubAdmin bool            `json:"can_hub_admin"`
-		Teams       map[string]Role `json:"teams"`
-	}{acc.Principal, acc.HubAdmin, acc.CanHubAdmin, acc.Teams})
+		HubAdmin        bool            `json:"hub_admin"`
+		CanHubAdmin     bool            `json:"can_hub_admin"`
+		Teams           map[string]Role `json:"teams"`
+		Theme           string          `json:"theme"`
+		InboxNodes      []string        `json:"inbox_nodes"`
+		InboxConfigured bool            `json:"inbox_configured"`
+	}{
+		Principal:       acc.Principal,
+		HubAdmin:        acc.HubAdmin,
+		CanHubAdmin:     acc.CanHubAdmin,
+		Teams:           acc.Teams,
+		Theme:           prefs.Theme,
+		InboxNodes:      inboxNodes,
+		InboxConfigured: prefs.InboxConfigured,
+	})
+}
+
+func (a *API) setMyTheme(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	var req struct {
+		Theme string `json:"theme"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return err
+	}
+	theme, err := a.Store.SetUserTheme(r.Context(), acc.Email, req.Theme)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, struct {
+		Theme string `json:"theme"`
+	}{Theme: theme})
+}
+
+func (a *API) getMyInbox(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	var entries []registry.Entry
+	if a.Registry != nil {
+		entries = a.Registry.List()
+	}
+	nodes, configured, err := acc.EffectiveInboxNodes(r.Context(), entries)
+	if err != nil {
+		return err
+	}
+	if nodes == nil {
+		nodes = []string{}
+	}
+	return writeJSON(w, http.StatusOK, struct {
+		Nodes      []string `json:"nodes"`
+		Configured bool     `json:"configured"`
+	}{Nodes: nodes, Configured: configured})
+}
+
+func (a *API) setMyInbox(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	var req struct {
+		Nodes []string `json:"nodes"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		return err
+	}
+	for _, rawID := range req.Nodes {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		allowed := false
+		if a.Registry != nil {
+			if e, ok := a.Registry.Get(id); ok {
+				if resolved, visible := acc.ResolveEntry(e); visible && (resolved.ViewerRole != "" || acc.HubAdmin) {
+					allowed = true
+				}
+			}
+		}
+		if !allowed && a.Store != nil {
+			if toks, err := a.Store.NodeTokens(r.Context(), acc.Email); err == nil {
+				for _, t := range toks {
+					if t.Node == id && t.Revoked == nil && t.Released == nil {
+						allowed = true
+						break
+					}
+				}
+			}
+		}
+		if !allowed {
+			return errForbidden
+		}
+	}
+	saved, err := a.Store.SetUserInboxNodes(r.Context(), acc.Email, req.Nodes)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, struct {
+		Nodes      []string `json:"nodes"`
+		Configured bool     `json:"configured"`
+	}{Nodes: saved, Configured: true})
 }
 
 func (a *API) listTeams(w http.ResponseWriter, r *http.Request, acc *Access) error {
