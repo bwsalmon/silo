@@ -1506,3 +1506,200 @@ Investigate workflow run.
 		}
 	}
 }
+
+func TestMultiRepoWhenGateTriggerEdgeCases(t *testing.T) {
+	// 1. Path traversal & encoded path hazards in both Parse and runtime MatchPathPattern / MatchedEventPaths.
+	for _, badRaw := range []string{
+		"---\ngrainfile: v1\ntitle: P\ngate: true\nwhen:\n  push:\n    paths: [\"../secret.go\"]\n---\n",
+		"---\ngrainfile: v1\ntitle: P\ngate: true\nwhen:\n  push:\n    paths: [\"src/%2e%2e/secret.go\"]\n---\n",
+		"---\ngrainfile: v1\ntitle: P\ngate: true\nwhen:\n  push:\n    paths: [\"src\\\\auth\\\\login.go\"]\n---\n",
+		"---\ngrainfile: v1\ntitle: P\ngate: true\nwhen:\n  push:\n    paths: [\"src/\"]\n    ignore: [\"src/%2e%2e/secret.go\"]\n---\n",
+	} {
+		if _, err := Parse(".grain/processes/bad.process.grain.md", []byte(badRaw)); err == nil {
+			t.Errorf("expected Parse to reject invalid when path in:\n%s", badRaw)
+		}
+	}
+
+	for _, traversalPath := range []string{
+		"../src/auth/login.go",
+		"../../etc/passwd",
+		"docs/../../src/auth/login.go",
+		"docs/../src/auth/login.go",
+		"src/auth/../../src/auth/login.go",
+		"src/%2e%2e/auth/login.go",
+		"src/auth%2flogin.go",
+		`src\auth\login.go`,
+		"..",
+		"../",
+	} {
+		if MatchPathPattern("src/auth/", traversalPath) {
+			t.Errorf("MatchPathPattern(src/auth/, %q) = true, want false for traversal/hazard path", traversalPath)
+		}
+		if MatchPathPattern("/", traversalPath) {
+			t.Errorf("MatchPathPattern(/, %q) = true, want false for traversal/hazard path", traversalPath)
+		}
+		if MatchPathPattern(traversalPath, "src/auth/login.go") {
+			t.Errorf("MatchPathPattern(%q, src/auth/login.go) = true, want false for traversal/hazard pattern", traversalPath)
+		}
+	}
+
+	// 2. Glob boundaries:
+	//    - Folder pattern `dir/` or `/dir` matches `dir/a.go` and `dir/sub/b.go`,
+	//      but never `dir_other/a.go`, `dir-2/a.go`, or `other/dir/a.go`.
+	//    - File glob `*.go` or `src/*.go` matches `main.go` / `src/main.go`,
+	//      but never a file inside a directory named `foo.go/bar.txt`.
+	boundaryCases := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		{"dir/", "dir/file.go", true},
+		{"dir/", "dir/sub/file.go", true},
+		{"dir/", "dir_other/file.go", false},
+		{"dir/", "other/dir/file.go", false},
+		{"/dir", "dir/file.go", true},
+		{"/dir", "dir/sub/file.go", true},
+		{"/dir", "dir_other/file.go", false},
+		{"/dir", "other/dir/file.go", false},
+		{"*.go", "main.go", true},
+		{"*.go", "foo.go/bar.txt", false},
+		{"src/*.go", "src/main.go", true},
+		{"src/*.go", "src/foo.go/bar.txt", false},
+		{"src/*.go", "src/sub/main.go", false},
+	}
+	for _, tc := range boundaryCases {
+		if got := MatchPathPattern(tc.pattern, tc.path); got != tc.want {
+			t.Errorf("MatchPathPattern(%q, %q) = %v, want %v", tc.pattern, tc.path, got, tc.want)
+		}
+	}
+
+	// 3. Case-sensitivity:
+	//    - File paths, folder names, and branch names are strictly case-sensitive.
+	//    - Repository URLs (scheme/host/owner/repo) are case-insensitive.
+	// 4. `ignore` precedence over `paths` folders (`dir/` vs `/dir` and full URLs).
+	gateRaw := []byte(`---
+grainfile: v1
+title: Multi-repo folder and ignore precedence gate
+gate: true
+when:
+  pull_request:
+    - repos:
+        - acme/payments
+        - https://GitHub.com/Acme/Billing
+      branches: ["main", "release/*"]
+      paths:
+        - dir/
+        - /pkg/service
+        - https://github.com/acme/payments/blob/main/schemas/v2.sql
+      ignore:
+        - /dir/ignored_sub
+        - pkg/service/testdata/
+        - /pkg/service/generated
+    - repo: acme/WholeDirIgnored
+      branches: ["main"]
+      paths:
+        - dir/
+      ignore:
+        - /dir
+    - repo: acme/RootedDirIgnored
+      branches: ["main"]
+      paths:
+        - /dir
+      ignore:
+        - dir/
+---
+Run gate check.
+`)
+	gateGF, err := Parse(".grain/processes/edge-gate.process.grain.md", gateRaw)
+	if err != nil {
+		t.Fatalf("Parse edge-gate: %v", err)
+	}
+	if err := gateGF.ResolveSource(Source{
+		RepoURL: "https://github.com/acme/grain-eu",
+		Ref:     "refs/heads/main",
+		Commit:  "c-edge-1",
+		Path:    ".grain/processes/edge-gate.process.grain.md",
+	}); err != nil {
+		t.Fatalf("ResolveSource edge-gate: %v", err)
+	}
+
+	// Case-sensitive branch: "Main" does not match "main"
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "Main",
+		ChangedPaths: []string{"dir/handler.go"},
+	}) {
+		t.Errorf("expected branch 'Main' not to match case-sensitive 'main'")
+	}
+
+	// Case-sensitive path: "Dir/handler.go" and "PKG/service/api.go" do not match "dir/" or "/pkg/service"
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "main",
+		ChangedPaths: []string{"Dir/handler.go", "PKG/service/api.go"},
+	}) {
+		t.Errorf("expected case-mismatched paths 'Dir/handler.go' and 'PKG/service/api.go' not to match")
+	}
+
+	// Case-insensitive repo URL matches "https://GITHUB.COM/ACME/BILLING", while case-sensitive path matches
+	if !gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://GITHUB.COM/ACME/BILLING",
+		Branch:       "main",
+		ChangedPaths: []string{"pkg/service/api.go"},
+	}) {
+		t.Errorf("expected case-insensitive repo URL https://GITHUB.COM/ACME/BILLING with exact-case path to match")
+	}
+
+	// Blob URL `https://github.com/acme/payments/blob/main/schemas/v2.sql` matches exact file,
+	// and does NOT match a nested path `schemas/v2.sql/extra.sql`
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "main",
+		ChangedPaths: []string{"schemas/v2.sql/extra.sql"},
+	}) {
+		t.Errorf("expected blob URL not to match nested file under schemas/v2.sql/extra.sql")
+	}
+
+	// `ignore` precedence over `paths` folders:
+	// - `/dir/ignored_sub` (without trailing slash) ignores `dir/ignored_sub/a.go` under `paths: ["dir/"]`
+	// - `pkg/service/testdata/` (with trailing slash) ignores `pkg/service/testdata/b.go` under `paths: ["/pkg/service"]`
+	// - URL ignore `https://github.com/acme/billing/tree/main/pkg/service/generated` ignores `pkg/service/generated/c.go` on acme/billing
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "main",
+		ChangedPaths: []string{"dir/ignored_sub/a.go", "pkg/service/testdata/b.go"},
+	}) {
+		t.Errorf("expected ignored subfolders /dir/ignored_sub and pkg/service/testdata/ to take precedence over paths")
+	}
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/billing",
+		Branch:       "main",
+		ChangedPaths: []string{"pkg/service/generated/c.go"},
+	}) {
+		t.Errorf("expected full tree URL in ignore to suppress match on acme/billing")
+	}
+
+	// `ignore: ["/dir"]` suppresses `paths: ["dir/"]`, and `ignore: ["dir/"]` suppresses `paths: ["/dir"]`
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/wholedirignored",
+		Branch:       "main",
+		ChangedPaths: []string{"dir/sub/file.go"},
+	}) {
+		t.Errorf("expected ignore: [/dir] to take precedence over paths: [dir/]")
+	}
+	if gateGF.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/rooteddirignored",
+		Branch:       "main",
+		ChangedPaths: []string{"dir/sub/file.go"},
+	}) {
+		t.Errorf("expected ignore: [dir/] to take precedence over paths: [/dir]")
+	}
+}

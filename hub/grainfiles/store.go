@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1534,7 +1535,10 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				if !candGF.ActiveAt(at) {
 					continue
 				}
-				canCoTrigger := candidate.When.IsZero() || candidate.When.Manual != nil || (candidate.Repo != canonRepo && candGF.MatchesEvent(ev))
+				if candidate.Gate && !IsSameRepo(candidate.Repo, canonRepo) && !s.sameTeamForCrossRepo(ctx, candidate.Repo, canonRepo) {
+					continue
+				}
+				canCoTrigger := candidate.When.IsZero() || candidate.When.Manual != nil || (candidate.Repo != canonRepo && s.sameTeamForCrossRepo(ctx, candidate.Repo, canonRepo) && candGF.MatchesEvent(ev))
 				if !canCoTrigger {
 					continue
 				}
@@ -1883,7 +1887,7 @@ func (s *Store) RecordDependencyCompletedByNode(ctx context.Context, nodeID, com
 				break
 			}
 		}
-		if !matchedByGF && s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
+		if !matchedByGF && !isTeamHostedRepoForNode(rec.Repo, sub.NodeID) && s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
 			return nil, fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, sub.Owner, rec.Repo)
 		}
 		authorized = true
@@ -2292,6 +2296,9 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 				}
 			}
 			for _, u := range out.Repos {
+				if isTeamHostedRepoForNode(u, nodeID) {
+					continue
+				}
 				if !s.AuthorizeOwnerRepo(ctx, out.Owner, u) {
 					return fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, out.Owner, u)
 				}
@@ -2507,9 +2514,10 @@ func (s *Store) CatchupNode(ctx context.Context, nodeID string, advance bool) ([
 	return events, newCursor, nil
 }
 
-// ReplayForNode resets nodeID's subscription delivery cursor to 0 (and clears
-// any prior owner binding so a replacement or reinstalled host can reconnect)
-// and replays all active .process.grain.md (process_updated) and active
+// ReplayForNode resets nodeID's subscription delivery cursor to the current
+// high-water mark before replay (and clears any prior owner binding so a
+// replacement or reinstalled host can reconnect) and emits fresh replay events
+// for all active .process.grain.md (process_updated) and active uncompleted
 // .task.grain.md (task_ready) Grainfiles targeted at nodeID.
 func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, error) {
 	nodeID = strings.TrimSpace(nodeID)
@@ -2520,6 +2528,10 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 	var replayed []Event
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		replayed = nil
+		var maxSeq int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM grainfile_events`).Scan(&maxSeq); err != nil {
+			return err
+		}
 		var sub Subscriptions
 		row := tx.QueryRowContext(ctx, s.q(`SELECT node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
 			FROM grainfile_subscriptions WHERE node_id = ?`), nodeID)
@@ -2534,15 +2546,15 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 			recJSON, _ := json.Marshal(recs)
 			_, err = tx.ExecContext(ctx, s.q(`INSERT INTO grainfile_subscriptions (
 				node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
-			) VALUES (?, '', ?, '[]', '[]', '[]', 0, 1, ?)`),
-				nodeID, string(recJSON), now.UnixMilli())
+			) VALUES (?, '', ?, '[]', '[]', '[]', ?, 1, ?)`),
+				nodeID, string(recJSON), maxSeq, now.UnixMilli())
 			if err != nil {
 				return err
 			}
 			sub = Subscriptions{
 				NodeID:     nodeID,
 				Recipients: recs,
-				Cursor:     0,
+				Cursor:     maxSeq,
 				Revision:   1,
 				UpdatedAt:  now,
 			}
@@ -2550,12 +2562,18 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 			return err
 		} else {
 			sub = loaded
-			sub.Cursor = 0
+			if s.HubURL != "" {
+				if u := CanonicalDeploymentURL(s.HubURL, nodeID); u != "" && strings.HasPrefix(u, "https://") && !slices.Contains(sub.Recipients, u) {
+					sub.Recipients = append(sub.Recipients, u)
+				}
+			}
+			recJSON, _ := json.Marshal(sub.Recipients)
+			sub.Cursor = maxSeq
 			sub.Owner = ""
 			sub.Revision = loaded.Revision + 1
 			sub.UpdatedAt = now
-			_, err = tx.ExecContext(ctx, s.q(`UPDATE grainfile_subscriptions SET owner = '', cursor = 0, revision = ?, updated_at = ? WHERE node_id = ?`),
-				sub.Revision, now.UnixMilli(), nodeID)
+			_, err = tx.ExecContext(ctx, s.q(`UPDATE grainfile_subscriptions SET owner = '', recipients = ?, cursor = ?, revision = ?, updated_at = ? WHERE node_id = ?`),
+				string(recJSON), maxSeq, sub.Revision, now.UnixMilli(), nodeID)
 			if err != nil {
 				return err
 			}
@@ -2563,24 +2581,6 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 
 		allRecords, err := s.loadLatestIndexQ(tx, ctx, "")
 		if err != nil {
-			return err
-		}
-
-		// Load existing events so we only insert a new event if none exists yet for a matching record.
-		evRows, err := tx.QueryContext(ctx, `SELECT `+selectEventCols+` FROM grainfile_events ORDER BY seq ASC`)
-		if err != nil {
-			return err
-		}
-		var existingEvents []Event
-		for evRows.Next() {
-			ev, sErr := scanEvent(evRows)
-			if sErr != nil {
-				evRows.Close()
-				return sErr
-			}
-			existingEvents = append(existingEvents, ev)
-		}
-		if err := evRows.Close(); err != nil {
 			return err
 		}
 
@@ -2600,22 +2600,17 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 				if done {
 					continue
 				}
+				cancelled, cErr := s.isTaskCancelledTx(tx, ctx, rec.Repo, rec.Path)
+				if cErr != nil {
+					return cErr
+				}
+				if cancelled {
+					continue
+				}
 			}
 			wantType := EventTaskReady
 			if rec.Kind == KindProcess {
 				wantType = EventProcessUpdated
-			}
-			var found *Event
-			for i := len(existingEvents) - 1; i >= 0; i-- {
-				ev := existingEvents[i]
-				if ev.Type == wantType && IsSameRepo(ev.Repo, rec.Repo) && ev.Path == rec.Path && ev.CommitSHA == rec.CommitSHA {
-					found = &existingEvents[i]
-					break
-				}
-			}
-			if found != nil {
-				replayed = append(replayed, *found)
-				continue
 			}
 			ins, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 wantType,
@@ -2668,7 +2663,8 @@ func (sub Subscriptions) EffectiveRecipients(hubURL string) []string {
 
 // MatchesRecord reports whether sub subscribes to rec by recipient URL
 // (including canonical Hub deployment URLs /deployments/<node_id>),
-// repository URL, folder prefix, or explicit Grainfile URL.
+// repository URL (including Hub-hosted /team/<node_id> repos), folder prefix,
+// or explicit Grainfile URL.
 func (sub Subscriptions) MatchesRecord(rec IndexRecord) bool {
 	if rec.Recipient != "" {
 		if slices.Contains(sub.Recipients, rec.Recipient) {
@@ -2683,8 +2679,11 @@ func (sub Subscriptions) MatchesRecord(rec IndexRecord) bool {
 			}
 		}
 	}
+	if sub.NodeID != "" && isTeamHostedRepoForNode(rec.Repo, sub.NodeID) {
+		return true
+	}
 	for _, r := range sub.Repos {
-		if IsSameRepo(r, rec.Repo) {
+		if IsSameRepo(r, rec.Repo) || isSameTeamHostedRepo(r, rec.Repo) {
 			return true
 		}
 	}
@@ -2785,12 +2784,58 @@ func normalizeSubscriptionList(items []string, normFn func(string) (string, erro
 	return out, nil
 }
 
+func isTeamHostedRepoForNode(repoURL, nodeID string) bool {
+	if repoURL == "" || nodeID == "" {
+		return false
+	}
+	team := teamFromHostedRepo(repoURL)
+	return team != "" && strings.EqualFold(team, strings.TrimSpace(nodeID))
+}
+
+func isSameTeamHostedRepo(a, b string) bool {
+	ta := teamFromHostedRepo(a)
+	tb := teamFromHostedRepo(b)
+	return ta != "" && strings.EqualFold(ta, tb)
+}
+
+func teamFromHostedRepo(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var p string
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		p = u.Path
+	} else {
+		p = raw
+	}
+	p = strings.Trim(p, "/")
+	if rest, ok := strings.CutPrefix(p, "v1/grainfiles/team/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return strings.ToLower(rest)
+	}
+	if rest, ok := strings.CutPrefix(p, "team/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return strings.ToLower(rest)
+	}
+	return ""
+}
+
 func normalizeSubRepoURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("empty repository URL")
 	}
-	if !strings.Contains(raw, "://") && strings.Count(raw, "/") == 1 {
+	if team := teamFromHostedRepo(raw); team != "" {
+		if !strings.Contains(raw, "://") {
+			raw = "https://hub.local/team/" + team
+		} else if u, err := url.Parse(raw); err == nil {
+			u.Path = "/team/" + team
+			raw = u.String()
+		}
+	} else if !strings.Contains(raw, "://") && strings.Count(raw, "/") == 1 {
 		raw = "https://github.com/" + raw
 	}
 	return CanonicalRepoURL(raw)
