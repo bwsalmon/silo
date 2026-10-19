@@ -88,6 +88,17 @@ describe('the API layer’s writes', () => {
     ['assignRepo, history', () => api.assignRepo('infra', 'acme/app', true), 'PUT', '/v1/teams/infra/repos/acme/app', { history: true }],
     ['releaseRepo', () => api.releaseRepo('infra', 'acme/app'), 'DELETE', '/v1/teams/infra/repos/acme/app', undefined],
     ['setTeamSettings', () => api.setTeamSettings('infra', { lost_requeue_after_seconds: 60 }), 'PUT', '/v1/teams/infra/settings', { lost_requeue_after_seconds: 60 }],
+    ['setUser', () => api.setUser('dev@example.com', true), 'PUT', '/v1/users/dev%40example.com', { sys_admin: true }],
+    ['deleteUser', () => api.deleteUser('dev@example.com'), 'DELETE', '/v1/users/dev%40example.com', undefined],
+    ['createDeployment', () => api.createDeployment('payments-prod', 'Payments'), 'POST', '/v1/deployments', { id: 'payments-prod', name: 'Payments' }],
+    ['deleteDeployment', () => api.deleteDeployment('payments-prod'), 'DELETE', '/v1/deployments/payments-prod', undefined],
+    ['setDeploymentMember', () => api.setDeploymentMember('payments-prod', 'user:a@example.com', 'admin'), 'PUT', '/v1/deployments/payments-prod/members/user%3Aa%40example.com', { role: 'admin' }],
+    ['removeDeploymentMember', () => api.removeDeploymentMember('payments-prod', 'group:ops'), 'DELETE', '/v1/deployments/payments-prod/members/group%3Aops', undefined],
+    ['assignDeploymentRepo', () => api.assignDeploymentRepo('payments-prod', 'acme/pay', false), 'PUT', '/v1/deployments/payments-prod/repos/acme/pay', undefined],
+    ['releaseDeploymentRepo', () => api.releaseDeploymentRepo('payments-prod', 'acme/pay'), 'DELETE', '/v1/deployments/payments-prod/repos/acme/pay', undefined],
+    ['setDeploymentSettings', () => api.setDeploymentSettings('payments-prod', { lost_requeue_after_seconds: 30 }), 'PUT', '/v1/deployments/payments-prod/settings', { lost_requeue_after_seconds: 30 }],
+    ['mintDeploymentToken', () => api.mintDeploymentToken('payments-prod', { replace_host: true }), 'POST', '/v1/deployments/payments-prod/token', { replace_host: true }],
+    ['replaceDeploymentHost', () => api.replaceDeploymentHost('payments-prod'), 'POST', '/v1/deployments/payments-prod/replace-host', undefined],
     ['mintNodeToken', () => api.mintNodeToken('ws-1'), 'POST', '/v1/node-tokens', { node: 'ws-1' }],
     ['revokeNodeToken', () => api.revokeNodeToken('tok-1'), 'DELETE', '/v1/node-tokens/tok-1', undefined],
   ];
@@ -452,5 +463,124 @@ describe('hub admin mode toggle', () => {
     await screen.findByText('Infra (infra)');
     expect(screen.queryByLabelText('Admin mode')).toBeNull();
     expect(screen.queryByTestId('admin-mode-marker')).toBeNull();
+  });
+});
+
+describe('self-service deployments, canonical URLs, accepted users, and host replacement', () => {
+  const payments = {
+    id: 'payments-prod',
+    name: 'Payments Production',
+    url: 'https://hub.example.com/deployments/payments-prod',
+    recipient_url: 'https://hub.example.com/deployments/payments-prod',
+    members: { 'user:alice@example.com': 'admin' },
+    repos: ['acme/payments'],
+  };
+
+  it('lets any accepted user create a deployment and opens its canonical deployment page', async () => {
+    const calls = stubHub({
+      'GET /v1/me': () => me('alice@example.com', { 'payments-prod': 'admin' }, false),
+      'GET /v1/deployments': () => Response.json({ deployments: [] }),
+      'POST /v1/deployments': (b) =>
+        Response.json(
+          {
+            ...payments,
+            id: (b as { id: string }).id,
+            name: (b as { name?: string }).name || (b as { id: string }).id,
+          },
+          { status: 201 },
+        ),
+      'GET /v1/deployments/payments-prod': () => Response.json(payments),
+      'GET /v1/deployments/payments-prod/settings': () => Response.json({ lost_requeue_after_seconds: 0 }),
+    });
+    open('/deployments');
+    fireEvent.change(await screen.findByLabelText('Deployment ID'), { target: { value: 'payments-prod' } });
+    fireEvent.change(screen.getByLabelText('Display name (optional)'), { target: { value: 'Payments Production' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create deployment' }));
+
+    await waitFor(() => expect(window.location.pathname).toBe('/deployments/payments-prod'));
+    expect((await screen.findByTestId('canonical-deployment-url')).textContent).toBe('https://hub.example.com/deployments/payments-prod');
+    expect(writes(calls).map((c) => [c.method, c.url, c.body])).toEqual([
+      ['POST', '/v1/deployments', { id: 'payments-prod', name: 'Payments Production' }],
+    ]);
+  });
+
+  it('lets a deployment admin claim an open repository and replace the host with reclaimed tasks and replayed events', async () => {
+    const calls = stubHub({
+      'GET /v1/me': () => me('alice@example.com', { 'payments-prod': 'admin' }, false),
+      'GET /v1/nodes': () =>
+        Response.json({
+          nodes: [
+            {
+              id: 'payments-prod',
+              owner: 'alice@example.com',
+              status: 'online',
+              slots: 2,
+              free: 2,
+              claimed: 0,
+              repos: ['acme/payments'],
+              ui: { offered: true, team: 'payments-prod' },
+              ui_url: 'https://payments-prod.nodes.hub.example.com/',
+              connected_at: '2026-10-18T12:00:00Z',
+              last_seen: '2026-10-18T12:01:00Z',
+            },
+          ],
+        }),
+      'GET /v1/deployments/payments-prod': () => Response.json(payments),
+      'GET /v1/deployments/payments-prod/settings': () => Response.json({ lost_requeue_after_seconds: 0 }),
+      'PUT /v1/deployments/payments-prod/repos/acme/checkout': () => new Response(null, { status: 204 }),
+      'POST /v1/deployments/payments-prod/replace-host': () =>
+        Response.json(
+          {
+            token: 'silo-node_replace_123',
+            node_token: { id: 'tok-rep', owner: 'alice@example.com', node: 'payments-prod', created: '2026-10-18T12:05:00Z' },
+            replaced_host: true,
+            reclaimed_tasks: ['t-101', 't-102'],
+            replayed_events: 3,
+          },
+          { status: 201 },
+        ),
+    });
+
+    open('/deployments/payments-prod');
+    expect((await screen.findByTestId('canonical-deployment-url')).textContent).toBe('https://hub.example.com/deployments/payments-prod');
+    expect((await screen.findByTestId('open-deployment-grain-ui')).getAttribute('href')).toBe('https://payments-prod.nodes.hub.example.com/');
+
+    fireEvent.change(screen.getByLabelText('Repository'), { target: { value: 'acme/checkout' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Assign' }));
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Replace host' }));
+    expect((await screen.findByTestId('minted-token')).textContent).toBe('silo-node_replace_123');
+    expect((await screen.findByTestId('replace-host-summary')).textContent).toContain('2 in-flight task(s) reclaimed (t-101, t-102)');
+    expect((await screen.findByTestId('replace-host-summary')).textContent).toContain('3 Grainfile event(s) queued for replay');
+  });
+
+  it('lets a sys admin manage accepted users and shows 409 when demoting the last sys admin', async () => {
+    const calls = stubHub({
+      'GET /v1/me': () => me('root@example.com', {}, true),
+      'GET /v1/deployments': () => Response.json({ deployments: [payments] }),
+      'GET /v1/users': () =>
+        Response.json({
+          users: [{ email: 'root@example.com', sys_admin: true, added_by: 'bootstrap', created_at: '2026-10-18T12:00:00Z' }],
+        }),
+      'PUT /v1/users/dev%40example.com': () =>
+        Response.json({ email: 'dev@example.com', sys_admin: false, added_by: 'root@example.com', created_at: '2026-10-18T12:05:00Z' }),
+      'PUT /v1/users/root%40example.com': () =>
+        new Response('directory: cannot remove or demote the last sys admin\n', { status: 409 }),
+    });
+
+    open('/deployments');
+    await screen.findByTestId('accepted-users-section');
+    fireEvent.change(screen.getByLabelText('User email'), { target: { value: 'dev@example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add accepted user' }));
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0]).toMatchObject({
+      method: 'PUT',
+      url: '/v1/users/dev%40example.com',
+      body: { sys_admin: false },
+    });
+
+    fireEvent.click(screen.getByLabelText('Sys admin for root@example.com'));
+    expect(await screen.findByText('Conflict (409): directory: cannot remove or demote the last sys admin')).toBeTruthy();
   });
 });

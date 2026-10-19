@@ -85,6 +85,8 @@ test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, file
     ['the inbox', '/', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
     ['the backlog', '/backlog', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
     ["a team's backlog", `/teams/${world.team}`, () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
+    ['the deployments', '/deployments', () => page.getByText(world.team).first().waitFor()],
+    ['a deployment', `/deployments/${world.team}`, () => page.getByTestId('canonical-deployment-url').waitFor()],
     ['the teams', '/teams', () => page.getByText(world.team).first().waitFor()],
     ["a team's members", `/teams/${world.team}/members`, () => page.getByText(world.member).first().waitFor()],
     ['the file form', `/teams/${world.team}/file`, () => expect(page.getByRole('combobox', { name: 'Repository' })).not.toHaveAttribute('aria-disabled', 'true')],

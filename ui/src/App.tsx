@@ -44,6 +44,7 @@ import { Nodes, nodeUIHref } from './pages/Nodes';
 import { FileTask } from './pages/FileTask';
 import { Teams } from './pages/Teams';
 import { TeamPage } from './pages/TeamPage';
+import { Deployments, DeploymentPage } from './pages/Deployments';
 import { Proposals } from './pages/Proposals';
 
 export const ADMIN_MODE_STORAGE_KEY = 'silo.adminMode';
@@ -260,6 +261,9 @@ export function App() {
             <Button color="inherit" onClick={() => navigate('/grainfiles')}>
               Grainfiles
             </Button>
+            <Button color="inherit" onClick={() => navigate('/deployments')}>
+              Deployments
+            </Button>
             <Button color="inherit" onClick={() => navigate('/teams')}>
               Teams
             </Button>
@@ -347,6 +351,12 @@ export function App() {
               {route.page === 'file' && <FileTask me={effectiveMe} team={route.team} />}
               {route.page === 'teams' && <Teams me={effectiveMe} />}
               {route.page === 'team' && <TeamPage me={effectiveMe} team={route.team} />}
+              {route.page === 'deployments' && (
+                <Deployments me={effectiveMe} nodes={nodes.data} onChanged={() => { me.reload(); nodes.reload(); }} />
+              )}
+              {route.page === 'deployment' && (
+                <DeploymentPage id={route.id} me={effectiveMe} nodes={nodes.data} onChanged={() => { me.reload(); nodes.reload(); }} />
+              )}
               {route.page === 'proposals' && <Proposals me={effectiveMe} team={route.team} />}
               {route.page === 'notfound' && <Alert severity="warning">No page at {route.path}.</Alert>}
             </Box>

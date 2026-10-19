@@ -120,7 +120,7 @@ func TestAPI(t *testing.T) {
 	// history transfer requires a hub admin, and claiming another team's repo is 409.
 	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil)
 	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", map[string]bool{"history": true}, admins)
-	h.want(t, 409, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil) // infra's
+	h.want(t, 409, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil)          // infra's
 	h.want(t, 409, root, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil, admins) // infra's
 	h.want(t, 400, root, "PUT", TeamsPath+"/web/repos/bwsalmon/x", map[string]any{"transfer": true}, admins)
 	h.want(t, 404, root, "PUT", TeamsPath+"/nope/repos/bwsalmon/x", nil, admins)

@@ -440,6 +440,7 @@ export const test = base.extend<
       await hub.must(hubAdmin, 'POST', '/v1/teams', { id: w.team, name: `Team ${n}` });
       await hub.must(hubAdmin, 'PUT', `/v1/teams/${w.team}/members/user:${w.admin}`, { role: 'admin' });
       await hub.must(hubAdmin, 'PUT', `/v1/teams/${w.team}/members/user:${w.member}`, { role: 'member' });
+      await hub.must(hubAdmin, 'PUT', `/v1/users/${encodeURIComponent(w.outsider)}`, { sys_admin: false });
       await hub.must(hubAdmin, 'PUT', `/v1/teams/${w.team}/repos/${w.repo}`);
       return w;
     });
