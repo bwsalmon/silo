@@ -23,6 +23,11 @@ def process(extra="when:\n  manual: {}\n", body="Run the process.\n", title="P")
             % (title, extra, body))
 
 
+def capability(extra="", body="Describe the capability.\n", title="C"):
+    return ('---\ngrainfile: v1\ntitle: %s\n%s---\n%s'
+            % (title, extra, body))
+
+
 def put(top, fs):
     for p, s in fs.items():
         f = top / p
@@ -101,6 +106,9 @@ case("gf020-bad-schedule-timezone", ["GF020"], {
 case("gf020-bad-workflow-trigger", ["GF020"], {
     "r/processes/p.process.grain.md": process(extra='when:\n  workflow:\n    branches: ["main"]\n'),
 })
+case("gf020-capability-forbidden-field", ["GF020"], {
+    "r/capabilities/c.capability.grain.md": capability(extra='recipient: "%s"\n' % DEP),
+})
 case("gf022-unknown-field", ["GF022"], {
     "r/tasks/a.task.grain.md": task("colour: blue\nx_note: allowed\n", requestor=None),
 })
@@ -122,6 +130,14 @@ case("gf032-task-depends-on-process", ["GF032"], {
 case("gf032-depends-on-template", ["GF032"], {
     "r/tasks/tmpl.task.grain.md.jinja2": task(title='Rollout {{ region | default("eu") }}'),
     "r/tasks/a.task.grain.md": task("depends_on: [./tmpl.task.grain.md.jinja2]\n"),
+})
+case("gf032-capabilities-wrong-kind", ["GF032"], {
+    "r/tasks/b.task.grain.md": A,
+    "r/tasks/a.task.grain.md": task("capabilities: [./b.task.grain.md]\n"),
+})
+case("gf032-capabilities-template", ["GF032"], {
+    "r/capabilities/c.capability.grain.md.jinja2": capability(title='Cap {{ name | default("gcp") }}'),
+    "r/tasks/a.task.grain.md": task("capabilities: [../capabilities/c.capability.grain.md.jinja2]\n"),
 })
 case("gf032-recipient-is-file", ["GF032"], {
     "r/tasks/b.task.grain.md": A,

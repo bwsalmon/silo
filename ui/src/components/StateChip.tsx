@@ -39,6 +39,7 @@ export function NodeStatusChip({ status }: { status: string }) {
 const grainfileKindColors: Record<GrainfileKind, ChipProps['color']> = {
   task: 'info',
   process: 'primary',
+  capability: 'secondary',
 };
 
 export function GrainfileKindChip({ kind }: { kind: GrainfileKind }) {

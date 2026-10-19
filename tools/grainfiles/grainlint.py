@@ -34,6 +34,7 @@ VERSIONS = {
             "common": "schemas/grainfiles/common.schema.json",
             "task": "schemas/grainfiles/task.schema.json",
             "process": "schemas/grainfiles/process.schema.json",
+            "capability": "schemas/grainfiles/capability.schema.json",
         },
     },
 }
@@ -46,7 +47,7 @@ def resolve_version(version=None):
     return dict(VERSIONS[v])
 
 
-KINDS = ["task", "process"]
+KINDS = ["task", "process", "capability"]
 SOURCES = ["schedule", "push", "merge", "pull_request", "workflow", "manual", "scenario"]
 SEVERITY = {"GF005": "warning", "GF022": "warning"}
 CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
@@ -122,6 +123,8 @@ def valid_iana_timezone(tz):
 
 EXPECTS = {
     ("task", "depends_on"): ("task",),
+    ("task", "capabilities"): ("capability",),
+    ("process", "capabilities"): ("capability",),
 }
 MAX_FILE_BYTES = 1024 * 1024
 MAX_FM_BYTES = 64 * 1024
@@ -595,6 +598,8 @@ class Schemas:
                     out.append(Finding("GF020", path, "%s is only valid on .task.grain.md files" % k))
                 elif kind == "task" and k in ("when", "on", "gate"):
                     out.append(Finding("GF020", path, "%s is only valid on .process.grain.md files" % k))
+                elif kind == "capability" and k in ("recipient", "requestor", "depends_on", "capabilities", "when", "on", "gate"):
+                    out.append(Finding("GF020", path, "%s is not valid on .capability.grain.md files" % k))
                 else:
                     out.append(Finding("GF022", path, "unknown field %r" % k))
                 del data[k]
@@ -613,7 +618,7 @@ class Schemas:
         v = jsonschema.Draft202012Validator(s, resolver=jsonschema.RefResolver.from_schema(s, store=self.store))
         for e in sorted(v.iter_errors(data), key=lambda e: list(e.path)):
             p = list(e.path)
-            if p and p[0] in ("references", "depends_on") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
+            if p and p[0] in ("references", "depends_on", "capabilities") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
                 continue
             if p == ["from_template"] and isinstance(e.instance, str):
                 continue
@@ -891,7 +896,12 @@ class Linter:
         def add(field, v):
             if isinstance(v, str):
                 out.append((field, v))
-        fields = ("depends_on", "references") if it.kind == "task" else ("references",)
+        if it.kind == "task":
+            fields = ("depends_on", "capabilities", "references")
+        elif it.kind == "process":
+            fields = ("capabilities", "references")
+        else:
+            fields = ("references",)
         for f in fields:
             val = fm.get(f)
             if isinstance(val, list):
@@ -956,7 +966,7 @@ class Linter:
                 continue
             want = EXPECTS.get((it.kind, field))
             if want and isinstance(t, Item) and t.is_template:
-                self.add("GF032", where, "%s: %r is an unrendered .jinja2 template, expected a concrete .task.grain.md file" % (field, s))
+                self.add("GF032", where, "%s: %r is an unrendered .jinja2 template, expected a concrete .%s.grain.md file" % (field, s, want[0]))
             elif want and isinstance(t, Item) and t.kind not in want:
                 self.add("GF032", where, "%s: %r is a %s, expected %s" % (field, s, t.kind, " or ".join(want)))
             elif want and t in ("asset", "folder"):

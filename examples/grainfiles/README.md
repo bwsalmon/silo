@@ -19,6 +19,7 @@ See [`docs/grainfile-v1.md`](../../docs/grainfile-v1.md) and [`docs/grainfiles-s
 - `.grain/processes/ci-triage.process.grain.md`: a reusable process triggered via `when.workflow` (`triggered`, `succeeded`, `failed` across `"grain CI"`, `"e2e-*"`, and `".github/workflows/release.yml"`) and a multi-timezone `when.schedule` (`America/Los_Angeles` and `Europe/Berlin`).
 - `.grain/processes/release-cut-check.process.grain.md`: a reusable process triggered via `when:` on a `scenario` condition and `manual: {}`.
 - `.grain/processes/branch-audit.process.grain.md.jinja2`: a self-contained Jinja2 process template parameterizing `title`, `when.push.branches`, `gate`, and the audit prompt (`template_vars`: `enforce_gate`, `target_branch`).
+- `.grain/capabilities/gcp-key.capability.grain.md`: a capability definition (`grainfile: v1`, `kind = "capability"`) describing the `gcp-key` sandbox credential grant and referenced via `capabilities:` by `2026-10-16-widget-schema-v2.task.grain.md` and `schema-security-review.process.grain.md`.
 
 ## `grain-eu/`: a deployment repository (`https://github.com/acme/grain-eu`)
 

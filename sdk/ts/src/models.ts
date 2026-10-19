@@ -163,9 +163,9 @@ export interface NodeEntry {
   last_seen: string;
 }
 
-export type GrainfileKind = 'task' | 'process';
+export type GrainfileKind = 'task' | 'process' | 'capability';
 
-export const GRAINFILE_KINDS: GrainfileKind[] = ['task', 'process'];
+export const GRAINFILE_KINDS: GrainfileKind[] = ['task', 'process', 'capability'];
 
 export interface ScheduleTrigger {
   cron: string;
@@ -272,6 +272,7 @@ export interface Grainfile {
   references?: string[];
   authorized_references?: string[];
   depends_on?: string[];
+  capabilities?: string[];
   when?: GrainfileTriggers;
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
@@ -300,6 +301,8 @@ export type GrainfileEventType =
   | 'process_updated'
   | 'process_triggered'
   | 'process_removed'
+  | 'capability_updated'
+  | 'capability_removed'
   | 'dependency_completed'
   | (string & {});
 
@@ -309,6 +312,8 @@ export const GRAINFILE_EVENT_TYPES: GrainfileEventType[] = [
   'process_updated',
   'process_triggered',
   'process_removed',
+  'capability_updated',
+  'capability_removed',
   'dependency_completed',
 ];
 
@@ -337,6 +342,7 @@ export interface GrainfileEvent {
   references?: string[];
   authorized_references?: string[];
   depends_on?: string[];
+  capabilities?: string[];
   when?: GrainfileTriggers;
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
