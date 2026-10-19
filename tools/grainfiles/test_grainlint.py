@@ -437,6 +437,145 @@ class TestGrainlint(unittest.TestCase):
             )
             self.assertEqual([f.code for f in grainlint.lint(root)], ["GF020"])
 
+    def test_capability_kind_and_capabilities_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "docs").mkdir()
+            (root / "docs" / "guide.md").write_text("# Setup\n\nProvisioning details.\n", encoding="utf-8")
+            (root / "caps").mkdir()
+            (root / "caps" / "tmpl.capability.grain.md.jinja2").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: 'Capability {{ cap_name | default(\"gcp-key\") }}'\n"
+                "references:\n"
+                "  - /docs/guide.md#setup\n"
+                "---\n"
+                "# Provisioning\n\nGrants {{ cap_name | default('gcp-key') }}.\n",
+                encoding="utf-8",
+            )
+            (root / "caps" / "gcp-key.capability.grain.md").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: Short-lived GCP service account key\n"
+                "from_template: ./tmpl.capability.grain.md.jinja2\n"
+                "references:\n"
+                "  - /docs/guide.md#setup\n"
+                "x_provider: gcp\n"
+                "---\n"
+                "# Agent Usage\n\nUse ADC.\n",
+                encoding="utf-8",
+            )
+            (root / "deploy.task.grain.md").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: Deploy service with GCP key\n"
+                "capabilities:\n"
+                "  - /caps/gcp-key.capability.grain.md#agent-usage\n"
+                "  - ./caps/gcp-key.capability.grain.md\n"
+                "  - https://github.com/acme/shared/blob/main/.grain/caps/vault.capability.grain.md\n"
+                "---\n"
+                "Run deploy.\n",
+                encoding="utf-8",
+            )
+            (root / "gate.process.grain.md").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: Gate on integration check with GCP key\n"
+                "gate: true\n"
+                "capabilities:\n"
+                "  - ./caps/gcp-key.capability.grain.md#agent-usage\n"
+                "when:\n"
+                "  manual: {}\n"
+                "---\n"
+                "Run gate.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(grainlint.lint(root), [])
+
+        # Forbidden fields on .capability.grain.md -> GF020
+        for forbidden_line in (
+            "recipient: /",
+            "requestor: Bruce Salmon <bsalmon@google.com>",
+            "depends_on: [./other.task.grain.md]",
+            "capabilities: [./other.capability.grain.md]",
+            "when:\n  manual: {}",
+            "gate: true",
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                (root / "bad.capability.grain.md").write_text(
+                    f"---\ngrainfile: v1\ntitle: Bad Cap\n{forbidden_line}\n---\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual([f.code for f in grainlint.lint(root)], ["GF020"], msg=forbidden_line)
+
+        # Wrong from_template suffix on .capability.grain.md -> GF035
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "t.task.grain.md.jinja2").write_text(
+                "---\ngrainfile: v1\ntitle: T {{ x | default('1') }}\n---\n",
+                encoding="utf-8",
+            )
+            (root / "bad.capability.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Cap\nfrom_template: ./t.task.grain.md.jinja2\n---\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF035"])
+
+        # capabilities pointing to wrong target kind -> GF032
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "doc.md").write_text("# Doc\n", encoding="utf-8")
+            (root / "other.task.grain.md").write_text("---\ngrainfile: v1\ntitle: Other\n---\n", encoding="utf-8")
+            (root / "proc.process.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Proc\nwhen:\n  manual: {}\n---\n",
+                encoding="utf-8",
+            )
+            (root / "tmpl.capability.grain.md.jinja2").write_text(
+                "---\ngrainfile: v1\ntitle: Tmpl {{ a | default('x') }}\n---\n",
+                encoding="utf-8",
+            )
+            for bad_cap in (
+                "./other.task.grain.md",
+                "./proc.process.grain.md",
+                "./tmpl.capability.grain.md.jinja2",
+                "./doc.md",
+                "/",
+                "https://github.com/acme/shared/blob/main/other.task.grain.md",
+                "https://github.com/acme/shared/tree/main/caps",
+            ):
+                (root / "caller.task.grain.md").write_text(
+                    f"---\ngrainfile: v1\ntitle: Caller\ncapabilities:\n  - {bad_cap}\n---\n",
+                    encoding="utf-8",
+                )
+                codes = [f.code for f in grainlint.lint(root)]
+                self.assertEqual(codes, ["GF032"], msg=bad_cap)
+
+        # Missing capability file or anchor -> GF030; path climbing out of repo -> GF036
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "c.capability.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Cap\n---\n# Real Heading\n",
+                encoding="utf-8",
+            )
+            (root / "missing-file.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - ./nonexistent.capability.grain.md\n---\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF030"])
+
+            (root / "missing-file.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - ./c.capability.grain.md#missing-anchor\n---\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF030"])
+
+            (root / "missing-file.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - ../../outside.capability.grain.md\n---\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF036"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,8 @@ grainfile: v1
 title: Add version header to the widget binary schema
 requestor: Bruce Salmon <bsalmon@google.com>
 recipient: https://github.com/acme/grain-eu
+capabilities:
+  - /.grain/capabilities/gcp-key.capability.grain.md#agent-usage
 references:
   - /docs/widget-schema.md#schema-version-header
   - /src/widget.go

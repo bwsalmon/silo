@@ -31,6 +31,8 @@ const (
 	EventProcessUpdated      = "process_updated"
 	EventProcessTriggered    = "process_triggered"
 	EventProcessRemoved      = "process_removed"
+	EventCapabilityUpdated   = "capability_updated"
+	EventCapabilityRemoved   = "capability_removed"
 	EventDependencyCompleted = "dependency_completed"
 )
 
@@ -175,6 +177,7 @@ CREATE TABLE IF NOT EXISTS grainfile_index (
 	"references" TEXT NOT NULL DEFAULT '[]',
 	authorized_references TEXT NOT NULL DEFAULT '[]',
 	depends_on TEXT NOT NULL DEFAULT '[]',
+	capabilities TEXT NOT NULL DEFAULT '[]',
 	trigger_with TEXT NOT NULL DEFAULT '[]',
 	on_spec TEXT NOT NULL DEFAULT '{}',
 	gate INTEGER NOT NULL DEFAULT 0,
@@ -227,6 +230,7 @@ var added = []dbaccess.Column{
 	{Table: "grainfile_index", Name: "created_at", Add: `ALTER TABLE grainfile_index ADD COLUMN created_at BIGINT NOT NULL DEFAULT 0`},
 	{Table: "grainfile_index", Name: "authorized_references", Add: `ALTER TABLE grainfile_index ADD COLUMN authorized_references TEXT NOT NULL DEFAULT '[]'`},
 	{Table: "grainfile_index", Name: "depends_on", Add: `ALTER TABLE grainfile_index ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'`},
+	{Table: "grainfile_index", Name: "capabilities", Add: `ALTER TABLE grainfile_index ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'`},
 	{Table: "grainfile_index", Name: "trigger_with", Add: `ALTER TABLE grainfile_index ADD COLUMN trigger_with TEXT NOT NULL DEFAULT '[]'`},
 	{Table: "grainfile_index", Name: "on_spec", Add: `ALTER TABLE grainfile_index ADD COLUMN on_spec TEXT NOT NULL DEFAULT '{}'`},
 	{Table: "grainfile_index", Name: "gate", Add: `ALTER TABLE grainfile_index ADD COLUMN gate INTEGER NOT NULL DEFAULT 0`},
@@ -336,6 +340,7 @@ type IndexRecord struct {
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
+	Capabilities         []string  `json:"capabilities,omitempty"`
 	When                 Triggers  `json:"when,omitempty,omitzero"`
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
@@ -375,29 +380,31 @@ func (r IndexRecord) ToGrainfile() *Grainfile {
 		triggers = r.OnSpec
 	}
 	return &Grainfile{
-		Grainfile:       ver,
-		SpecSummaryPath: specSummary,
-		SpecPath:        specPath,
-		Kind:            r.Kind,
-		Path:            r.Path,
-		URL:             r.URL,
-		Repo:            r.Repo,
-		Ref:             r.Ref,
-		Commit:          r.CommitSHA,
-		Title:           r.Title,
-		Recipient:       r.Recipient,
-		Requestor:       r.Requestor,
-		FromTemplate:    r.FromTemplate,
-		Draft:           r.Draft,
-		NotBefore:       r.NotBefore,
-		CreatedAt:       r.CreatedAt,
-		References:      slices.Clone(r.References),
-		DependsOn:       slices.Clone(r.DependsOn),
-		When:            triggers,
-		On:              triggers,
-		Gate:            r.Gate,
-		IsTemplate:      r.IsTemplate,
-		TemplateVars:    slices.Clone(r.TemplateVars),
+		Grainfile:            ver,
+		SpecSummaryPath:      specSummary,
+		SpecPath:             specPath,
+		Kind:                 r.Kind,
+		Path:                 r.Path,
+		URL:                  r.URL,
+		Repo:                 r.Repo,
+		Ref:                  r.Ref,
+		Commit:               r.CommitSHA,
+		Title:                r.Title,
+		Recipient:            r.Recipient,
+		Requestor:            r.Requestor,
+		FromTemplate:         r.FromTemplate,
+		Draft:                r.Draft,
+		NotBefore:            r.NotBefore,
+		CreatedAt:            r.CreatedAt,
+		References:           slices.Clone(r.References),
+		DependsOn:            slices.Clone(r.DependsOn),
+		Capabilities:         slices.Clone(r.Capabilities),
+		ResolvedCapabilities: slices.Clone(r.Capabilities),
+		When:                 triggers,
+		On:                   triggers,
+		Gate:                 r.Gate,
+		IsTemplate:           r.IsTemplate,
+		TemplateVars:         slices.Clone(r.TemplateVars),
 	}
 }
 
@@ -445,6 +452,7 @@ type Event struct {
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
 	DependsOn            []string  `json:"depends_on,omitempty"`
+	Capabilities         []string  `json:"capabilities,omitempty"`
 	When                 Triggers  `json:"when,omitempty,omitzero"`
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
@@ -464,6 +472,9 @@ type Event struct {
 	CreatedAt            time.Time `json:"created_at,omitzero"`
 }
 
+// GrainfileEvent is an alias for Event.
+type GrainfileEvent = Event
+
 type eventPayload struct {
 	Action               string   `json:"action,omitempty"`
 	Grainfile            string   `json:"grainfile,omitempty"`
@@ -482,6 +493,7 @@ type eventPayload struct {
 	References           []string `json:"references,omitempty"`
 	AuthorizedReferences []string `json:"authorized_references,omitempty"`
 	DependsOn            []string `json:"depends_on,omitempty"`
+	Capabilities         []string `json:"capabilities,omitempty"`
 	OnSpec               Triggers `json:"on_spec,omitempty"`
 	IsTemplate           bool     `json:"is_template,omitempty"`
 	TemplateVars         []string `json:"template_vars,omitempty"`
@@ -516,7 +528,14 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			cp.Recipient = CanonicalDeploymentURL(s.HubURL, depID)
 		}
 	}
-	if cp.URL == "" || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) || (cp.FromTemplate != "" && !strings.Contains(cp.FromTemplate, "://")) {
+	hasLocalRef := false
+	for _, c := range cp.Capabilities {
+		if !strings.Contains(c, "://") {
+			hasLocalRef = true
+			break
+		}
+	}
+	if cp.URL == "" || hasLocalRef || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) || (cp.FromTemplate != "" && !strings.Contains(cp.FromTemplate, "://")) {
 		if err := cp.ResolveSource(Source{
 			RepoURL: cp.Repo,
 			Ref:     cp.Ref,
@@ -553,6 +572,13 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	deps := cp.DependsOn
 	if deps == nil {
 		deps = []string{}
+	}
+	caps := cp.Capabilities
+	if len(caps) == 0 && len(cp.ResolvedCapabilities) > 0 {
+		caps = slices.Clone(cp.ResolvedCapabilities)
+	}
+	if caps == nil {
+		caps = []string{}
 	}
 	if IsTemplatePath(cp.Path) {
 		cp.IsTemplate = true
@@ -610,6 +636,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		References:           refs,
 		AuthorizedReferences: authRefs,
 		DependsOn:            deps,
+		Capabilities:         caps,
 		When:                 triggers,
 		On:                   triggers,
 		OnSpec:               triggers,
@@ -630,6 +657,10 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		return IndexRecord{}, err
 	}
 	depsJSON, err := json.Marshal(rec.DependsOn)
+	if err != nil {
+		return IndexRecord{}, err
+	}
+	capsJSON, err := json.Marshal(rec.Capabilities)
 	if err != nil {
 		return IndexRecord{}, err
 	}
@@ -705,9 +736,9 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO grainfile_index (
 			repo, path, commit_sha, ref, url, kind, title, recipient, requestor, from_template,
 			draft, not_before, created_at, "references", authorized_references,
-			depends_on, trigger_with, on_spec, gate, is_template, template_vars,
+			depends_on, capabilities, trigger_with, on_spec, gate, is_template, template_vars,
 			ready_emitted, removed, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, 0, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, 0, ?)
 		ON CONFLICT (repo, path, commit_sha) DO UPDATE SET
 			ref = EXCLUDED.ref,
 			url = EXCLUDED.url,
@@ -722,6 +753,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			"references" = EXCLUDED."references",
 			authorized_references = EXCLUDED.authorized_references,
 			depends_on = EXCLUDED.depends_on,
+			capabilities = EXCLUDED.capabilities,
 			trigger_with = EXCLUDED.trigger_with,
 			on_spec = EXCLUDED.on_spec,
 			gate = EXCLUDED.gate,
@@ -733,7 +765,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			rec.Repo, rec.Path, rec.CommitSHA, rec.Ref, rec.URL, string(rec.Kind),
 			rec.Title, rec.Recipient, rec.Requestor, rec.FromTemplate, boolToInt(rec.Draft),
 			notBeforeMS, createdAtMS, string(refsJSON), string(authRefsJSON),
-			string(depsJSON), string(onJSON), boolToInt(rec.Gate),
+			string(depsJSON), string(capsJSON), string(onJSON), boolToInt(rec.Gate),
 			boolToInt(rec.IsTemplate), string(tvarsJSON),
 			readyFlag, rec.UpdatedAt.UnixMilli())
 		if err != nil {
@@ -763,6 +795,31 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		}
 
 		if hasPrevLatest && prevLatestDraft == 0 && rec.Draft {
+			if rec.Kind == KindCapability {
+				_, err = s.insertEventTx(tx, ctx, Event{
+					Type:                 EventCapabilityRemoved,
+					Action:               "removed",
+					Grainfile:            rec.Grainfile,
+					SpecSummaryPath:      rec.SpecSummaryPath,
+					SpecPath:             rec.SpecPath,
+					Repo:                 rec.Repo,
+					Path:                 rec.Path,
+					CommitSHA:            rec.CommitSHA,
+					Ref:                  rec.Ref,
+					GrainfileURL:         rec.URL,
+					Kind:                 rec.Kind,
+					Title:                rec.Title,
+					FromTemplate:         rec.FromTemplate,
+					NotBefore:            rec.NotBefore,
+					References:           rec.References,
+					AuthorizedReferences: rec.AuthorizedReferences,
+					IsTemplate:           rec.IsTemplate,
+					TemplateVars:         rec.TemplateVars,
+					Reason:               "capability grainfile marked draft",
+					CreatedAt:            now,
+				})
+				return err
+			}
 			if rec.Kind == KindProcess {
 				_, err = s.insertEventTx(tx, ctx, Event{
 					Type:                 EventProcessRemoved,
@@ -782,6 +839,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 					References:           rec.References,
 					AuthorizedReferences: rec.AuthorizedReferences,
 					DependsOn:            rec.DependsOn,
+					Capabilities:         rec.Capabilities,
 					When:                 rec.When,
 					OnSpec:               rec.OnSpec,
 					Gate:                 rec.Gate,
@@ -817,6 +875,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 					References:           rec.References,
 					AuthorizedReferences: rec.AuthorizedReferences,
 					DependsOn:            rec.DependsOn,
+					Capabilities:         rec.Capabilities,
 					IsTemplate:           rec.IsTemplate,
 					TemplateVars:         rec.TemplateVars,
 					DependencyURL:        rec.URL,
@@ -831,8 +890,11 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 
 		if emitNow {
 			evType := EventTaskReady
-			if rec.Kind == KindProcess {
+			switch rec.Kind {
+			case KindProcess:
 				evType = EventProcessUpdated
+			case KindCapability:
+				evType = EventCapabilityUpdated
 			}
 			_, err = s.insertEventTx(tx, ctx, Event{
 				Type:                 evType,
@@ -853,6 +915,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
+				Capabilities:         rec.Capabilities,
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
@@ -953,6 +1016,31 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 		if scanErr != nil || latest.Draft {
 			return nil
 		}
+		if latest.Kind == KindCapability {
+			_, err = s.insertEventTx(tx, ctx, Event{
+				Type:                 EventCapabilityRemoved,
+				Action:               "removed",
+				Grainfile:            latest.Grainfile,
+				SpecSummaryPath:      latest.SpecSummaryPath,
+				SpecPath:             latest.SpecPath,
+				Repo:                 latest.Repo,
+				Path:                 latest.Path,
+				CommitSHA:            latest.CommitSHA,
+				Ref:                  latest.Ref,
+				GrainfileURL:         latest.URL,
+				Kind:                 latest.Kind,
+				Title:                latest.Title,
+				NotBefore:            latest.NotBefore,
+				FromTemplate:         latest.FromTemplate,
+				References:           latest.References,
+				AuthorizedReferences: latest.AuthorizedReferences,
+				IsTemplate:           latest.IsTemplate,
+				TemplateVars:         latest.TemplateVars,
+				Reason:               "capability grainfile deleted",
+				CreatedAt:            now,
+			})
+			return err
+		}
 		if latest.Kind == KindProcess {
 			_, err = s.insertEventTx(tx, ctx, Event{
 				Type:                 EventProcessRemoved,
@@ -972,6 +1060,7 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 				References:           latest.References,
 				AuthorizedReferences: latest.AuthorizedReferences,
 				DependsOn:            latest.DependsOn,
+				Capabilities:         latest.Capabilities,
 				When:                 latest.When,
 				OnSpec:               latest.OnSpec,
 				Gate:                 latest.Gate,
@@ -1017,6 +1106,7 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 			References:           latest.References,
 			AuthorizedReferences: latest.AuthorizedReferences,
 			DependsOn:            latest.DependsOn,
+			Capabilities:         latest.Capabilities,
 			IsTemplate:           latest.IsTemplate,
 			TemplateVars:         latest.TemplateVars,
 			DependencyURL:        latest.URL,
@@ -1104,8 +1194,11 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				}
 			}
 			evType := EventTaskReady
-			if rec.Kind == KindProcess {
+			switch rec.Kind {
+			case KindProcess:
 				evType = EventProcessUpdated
+			case KindCapability:
+				evType = EventCapabilityUpdated
 			}
 			ev, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 evType,
@@ -1126,6 +1219,7 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
+				Capabilities:         rec.Capabilities,
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
@@ -1149,24 +1243,24 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 
 const selectIndexCols = `repo, path, commit_sha, ref, url, kind, title, recipient, requestor,
 	draft, not_before, created_at, from_template, "references", authorized_references,
-	depends_on, trigger_with, on_spec, gate, is_template, template_vars, ready_emitted, removed, updated_at`
+	depends_on, capabilities, trigger_with, on_spec, gate, is_template, template_vars, ready_emitted, removed, updated_at`
 
 func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	var (
-		rec                             IndexRecord
-		kindStr                         string
-		draftInt, gateInt               int
-		isTemplateInt                   int
-		readyInt, removedInt            int
-		notBeforeMS, createdMS, updatMS int64
-		refsStr, authRefsStr            string
-		depsStr, twStr, onStr, tvarsStr string
+		rec                                      IndexRecord
+		kindStr                                  string
+		draftInt, gateInt                        int
+		isTemplateInt                            int
+		readyInt, removedInt                     int
+		notBeforeMS, createdMS, updatMS          int64
+		refsStr, authRefsStr                     string
+		depsStr, capsStr, twStr, onStr, tvarsStr string
 	)
 	if err := r.Scan(
 		&rec.Repo, &rec.Path, &rec.CommitSHA, &rec.Ref, &rec.URL, &kindStr,
 		&rec.Title, &rec.Recipient, &rec.Requestor,
 		&draftInt, &notBeforeMS, &createdMS, &rec.FromTemplate, &refsStr, &authRefsStr,
-		&depsStr, &twStr, &onStr, &gateInt, &isTemplateInt, &tvarsStr,
+		&depsStr, &capsStr, &twStr, &onStr, &gateInt, &isTemplateInt, &tvarsStr,
 		&readyInt, &removedInt, &updatMS,
 	); err != nil {
 		return IndexRecord{}, err
@@ -1190,6 +1284,7 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	_ = json.Unmarshal([]byte(refsStr), &rec.References)
 	_ = json.Unmarshal([]byte(authRefsStr), &rec.AuthorizedReferences)
 	_ = json.Unmarshal([]byte(depsStr), &rec.DependsOn)
+	_ = json.Unmarshal([]byte(capsStr), &rec.Capabilities)
 	_ = json.Unmarshal([]byte(onStr), &rec.OnSpec)
 	_ = json.Unmarshal([]byte(tvarsStr), &rec.TemplateVars)
 	rec.When = rec.OnSpec
@@ -1665,6 +1760,7 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				References:           curr.rec.References,
 				AuthorizedReferences: curr.rec.AuthorizedReferences,
 				DependsOn:            curr.rec.DependsOn,
+				Capabilities:         curr.rec.Capabilities,
 				When:                 curr.rec.When,
 				OnSpec:               curr.rec.OnSpec,
 				Gate:                 curr.rec.Gate,
@@ -1784,6 +1880,7 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 				References:           dep.References,
 				AuthorizedReferences: dep.AuthorizedReferences,
 				DependsOn:            dep.DependsOn,
+				Capabilities:         dep.Capabilities,
 				When:                 dep.When,
 				OnSpec:               dep.OnSpec,
 				Gate:                 dep.Gate,
@@ -1973,7 +2070,7 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 	ev.When = ev.OnSpec
 	ev.On = ev.OnSpec
 
-	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
+	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved || ev.Type == EventCapabilityRemoved) {
 		ev.Action = "removed"
 	}
 
@@ -1990,6 +2087,7 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 		References:           ev.References,
 		AuthorizedReferences: ev.AuthorizedReferences,
 		DependsOn:            ev.DependsOn,
+		Capabilities:         ev.Capabilities,
 		OnSpec:               ev.OnSpec,
 		IsTemplate:           ev.IsTemplate,
 		TemplateVars:         ev.TemplateVars,
@@ -2061,6 +2159,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.References = pl.References
 		ev.AuthorizedReferences = pl.AuthorizedReferences
 		ev.DependsOn = pl.DependsOn
+		ev.Capabilities = pl.Capabilities
 		ev.OnSpec = pl.OnSpec
 		ev.When = pl.OnSpec
 		ev.On = pl.OnSpec
@@ -2078,7 +2177,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.WorkflowURL = pl.WorkflowURL
 		ev.Reason = pl.Reason
 	}
-	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
+	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved || ev.Type == EventCapabilityRemoved) {
 		ev.Action = "removed"
 	}
 	if ev.Grainfile == "" {
@@ -2609,8 +2708,11 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 				}
 			}
 			wantType := EventTaskReady
-			if rec.Kind == KindProcess {
+			switch rec.Kind {
+			case KindProcess:
 				wantType = EventProcessUpdated
+			case KindCapability:
+				wantType = EventCapabilityUpdated
 			}
 			ins, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 wantType,
@@ -2631,6 +2733,7 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
+				Capabilities:         rec.Capabilities,
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,

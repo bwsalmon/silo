@@ -10,12 +10,13 @@ import (
 	"unicode/utf8"
 )
 
-// IsTemplatePath reports whether relPath is a .task.grain.md.jinja2 or
-// .process.grain.md.jinja2 template path.
+// IsTemplatePath reports whether relPath is a .task.grain.md.jinja2,
+// .process.grain.md.jinja2, or .capability.grain.md.jinja2 template path.
 func IsTemplatePath(relPath string) bool {
 	norm := strings.ToLower(strings.TrimSpace(relPath))
 	return strings.HasSuffix(norm, ".task.grain.md.jinja2") ||
-		strings.HasSuffix(norm, ".process.grain.md.jinja2")
+		strings.HasSuffix(norm, ".process.grain.md.jinja2") ||
+		strings.HasSuffix(norm, ".capability.grain.md.jinja2")
 }
 
 // StripTemplateSuffix strips a trailing ".jinja2" suffix if relPath ends with

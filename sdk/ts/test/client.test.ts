@@ -323,7 +323,20 @@ describe('Grainfiles and node subscriptions', () => {
         references: ['/docs/arch.md'],
         authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
         depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.md'],
+        capabilities: ['https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md'],
         updated_at: '2026-10-18T10:05:00Z',
+      },
+      {
+        repo: 'https://github.com/acme/app',
+        path: '.grain/capabilities/gcp-key.capability.grain.md',
+        commit_sha: '1111111',
+        ref: 'main',
+        url: 'https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md',
+        kind: 'capability',
+        title: 'GCP service-account key',
+        draft: false,
+        references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
+        updated_at: '2026-10-18T10:05:30Z',
       },
       {
         repo: 'https://github.com/acme/app',
@@ -406,6 +419,9 @@ describe('Grainfiles and node subscriptions', () => {
     expect(tasks[0].from_template).toBe('https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2');
     expect(tasks[0].requestor).toBe('Alice <alice@example.com>');
     expect(tasks[0].depends_on).toEqual(['https://github.com/acme/app/blob/main/tasks/00-prep.task.md']);
+    expect(tasks[0].capabilities).toEqual([
+      'https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md',
+    ]);
   });
 
   it('inspects a grainfile’s metadata, normalized on triggers, and recent events', async () => {

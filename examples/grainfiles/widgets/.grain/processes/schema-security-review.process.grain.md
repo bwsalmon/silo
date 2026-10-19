@@ -10,6 +10,8 @@ when:
     branches: ["main"]
     paths: ["src/**"]
 gate: true
+capabilities:
+  - /.grain/capabilities/gcp-key.capability.grain.md
 references:
   - /docs/widget-schema.md
   - /src/widget.go

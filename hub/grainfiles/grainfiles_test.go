@@ -79,9 +79,16 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if !reflect.DeepEqual(v2.References, wantV2Refs) {
 		t.Errorf("v2.References = %v, want %v", v2.References, wantV2Refs)
 	}
+	wantV2Caps := []string{
+		"https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage",
+	}
+	if !reflect.DeepEqual(v2.Capabilities, wantV2Caps) || !reflect.DeepEqual(v2.ResolvedCapabilities, wantV2Caps) {
+		t.Errorf("v2.Capabilities = %v (ResolvedCapabilities = %v), want %v", v2.Capabilities, v2.ResolvedCapabilities, wantV2Caps)
+	}
+	wantV2AuthRefs := append(slices.Clone(wantV2Refs), wantV2Caps...)
 	sameRefs, crossRefs := v2.AuthorizedReferences("https://github.com/acme/widgets")
-	if !reflect.DeepEqual(sameRefs, wantV2Refs) || len(crossRefs) != 0 {
-		t.Errorf("v2.AuthorizedReferences = (%v, %v), want (%v, nil)", sameRefs, crossRefs, wantV2Refs)
+	if !reflect.DeepEqual(sameRefs, wantV2AuthRefs) || len(crossRefs) != 0 {
+		t.Errorf("v2.AuthorizedReferences = (%v, %v), want (%v, nil)", sameRefs, crossRefs, wantV2AuthRefs)
 	}
 	if !v2.AuthorizesReference("https://github.com/acme/widgets", "/docs/widget-schema.md") {
 		t.Errorf("expected v2 to authorize /docs/widget-schema.md")
@@ -89,8 +96,33 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if !v2.AuthorizesReference("https://github.com/acme/widgets", "/src/widget.go") {
 		t.Errorf("expected v2 to authorize /src/widget.go")
 	}
+	if !v2.AuthorizesReference("https://github.com/acme/widgets", "/.grain/capabilities/gcp-key.capability.grain.md") {
+		t.Errorf("expected v2 to authorize /.grain/capabilities/gcp-key.capability.grain.md via capabilities")
+	}
 	if v2.AuthorizesReference("https://github.com/acme/widgets", "/src/other.go") {
 		t.Errorf("expected v2 not to authorize /src/other.go")
+	}
+
+	// 2b. Test widgets/gcp-key.capability.grain.md
+	capPath := filepath.Join(examplesDir, "widgets", ".grain", "capabilities", "gcp-key.capability.grain.md")
+	capGF, err := ParseFile(capPath)
+	if err != nil {
+		t.Fatalf("ParseFile(gcp-key.capability.grain.md): %v", err)
+	}
+	if capGF.Kind != KindCapability {
+		t.Errorf("capGF.Kind = %q, want %q", capGF.Kind, KindCapability)
+	}
+	if capGF.Name != "gcp-key" {
+		t.Errorf("capGF.Name = %q, want gcp-key", capGF.Name)
+	}
+	if capGF.Title != "Provision a short-lived GCP service-account key in the sandbox" {
+		t.Errorf("capGF.Title = %q", capGF.Title)
+	}
+	if err := capGF.Resolve("https://github.com/acme/widgets", "main", ".grain/capabilities/gcp-key.capability.grain.md"); err != nil {
+		t.Fatalf("capGF.Resolve: %v", err)
+	}
+	if capGF.URL != "https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md" {
+		t.Errorf("capGF.URL = %q", capGF.URL)
 	}
 
 	// 3. Test widgets/2026-10-16-widget-schema-v2-migration.task.grain.md (no requestor, depends_on, RFC 3339 not_before)
@@ -598,6 +630,42 @@ Check the release branch.
 				path: "processes/p.process.grain.md",
 				body: "---\ngrainfile: v1\ntitle: P\nfrom_template: /templates/t.task.grain.md.jinja2\nwhen:\n  manual: {}\n---\n",
 				code: CodeMalformedRef,
+			},
+			{
+				name: "from_template wrong suffix on capability",
+				path: "capabilities/c.capability.grain.md",
+				body: "---\ngrainfile: v1\ntitle: C\nfrom_template: /templates/t.task.grain.md.jinja2\n---\n",
+				code: CodeMalformedRef,
+			},
+			{
+				name: "forbidden recipient on capability",
+				path: "capabilities/c.capability.grain.md",
+				body: "---\ngrainfile: v1\ntitle: C\nrecipient: /\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "forbidden capabilities on capability",
+				path: "capabilities/c.capability.grain.md",
+				body: "---\ngrainfile: v1\ntitle: C\ncapabilities:\n  - ./other.capability.grain.md\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "forbidden when on capability",
+				path: "capabilities/c.capability.grain.md",
+				body: "---\ngrainfile: v1\ntitle: C\nwhen:\n  manual: {}\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "task capabilities points to task",
+				path: "tasks/a.task.grain.md",
+				body: "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - ./other.task.grain.md\n---\n",
+				code: CodeWrongTargetKind,
+			},
+			{
+				name: "process capabilities points to jinja2 template",
+				path: "processes/p.process.grain.md",
+				body: "---\ngrainfile: v1\ntitle: P\ncapabilities:\n  - ./cap.capability.grain.md.jinja2\nwhen:\n  manual: {}\n---\n",
+				code: CodeWrongTargetKind,
 			},
 			{
 				name: "when.push empty filter object",

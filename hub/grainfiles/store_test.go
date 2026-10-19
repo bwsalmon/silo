@@ -1266,3 +1266,90 @@ Authorized same-team co-trigger.
 		}
 	})
 }
+
+func TestCapabilityIndexingAndEvents(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+		s.Now = func() time.Time { return time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC) }
+
+		// 1. Index a .capability.grain.md file -> emits capability_updated.
+		capRaw := []byte("---\ngrainfile: v1\ntitle: GCP service-account key\nreferences:\n  - /docs/widget-schema.md\n---\nGrants GOOGLE_APPLICATION_CREDENTIALS.\n")
+		capGF, err := Parse(".grain/capabilities/gcp-key.capability.grain.md", capRaw)
+		if err != nil {
+			t.Fatalf("Parse capability: %v", err)
+		}
+		capGF.Repo = "https://github.com/acme/widgets"
+		capGF.Ref = "refs/heads/main"
+		capGF.Commit = "cap-sha-1"
+		capRec, err := s.IndexGrainfile(ctx, capGF)
+		if err != nil {
+			t.Fatalf("IndexGrainfile(capability): %v", err)
+		}
+		if capRec.Kind != KindCapability {
+			t.Fatalf("capRec.Kind = %q, want %q", capRec.Kind, KindCapability)
+		}
+
+		// 2. Index a .task.grain.md and .process.grain.md referencing the capability.
+		taskRaw := []byte("---\ngrainfile: v1\ntitle: Task with capability\nrecipient: https://github.com/acme/grain-eu\ncapabilities:\n  - /.grain/capabilities/gcp-key.capability.grain.md#agent-usage\n---\nTask body.\n")
+		taskGF, err := Parse(".grain/tasks/use-cap.task.grain.md", taskRaw)
+		if err != nil {
+			t.Fatalf("Parse task: %v", err)
+		}
+		taskGF.Repo = "https://github.com/acme/widgets"
+		taskGF.Ref = "refs/heads/main"
+		taskGF.Commit = "task-sha-1"
+		taskRec, err := s.IndexGrainfile(ctx, taskGF)
+		if err != nil {
+			t.Fatalf("IndexGrainfile(task): %v", err)
+		}
+		wantCapURL := "https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage"
+		wantPinnedCapURL := "https://github.com/acme/widgets/blob/task-sha-1/.grain/capabilities/gcp-key.capability.grain.md#agent-usage"
+		if !reflect.DeepEqual(taskRec.Capabilities, []string{wantCapURL}) {
+			t.Fatalf("taskRec.Capabilities = %v, want [%s]", taskRec.Capabilities, wantCapURL)
+		}
+		if !slices.Contains(taskRec.AuthorizedReferences, wantPinnedCapURL) {
+			t.Fatalf("taskRec.AuthorizedReferences = %v, want to include %s", taskRec.AuthorizedReferences, wantPinnedCapURL)
+		}
+
+		// 3. Mark capability as draft -> emits capability_removed.
+		capDraftGF := *capGF
+		capDraftGF.Commit = "cap-sha-2"
+		capDraftGF.Draft = true
+		if _, err := s.IndexGrainfile(ctx, &capDraftGF); err != nil {
+			t.Fatalf("IndexGrainfile(capability draft): %v", err)
+		}
+
+		// 4. Re-activate capability and then delete via RemoveGrainfile -> emits capability_updated then capability_removed.
+		capActiveGF := *capGF
+		capActiveGF.Commit = "cap-sha-3"
+		capActiveGF.Draft = false
+		if _, err := s.IndexGrainfile(ctx, &capActiveGF); err != nil {
+			t.Fatalf("IndexGrainfile(capability re-active): %v", err)
+		}
+		if err := s.RemoveGrainfile(ctx, "https://github.com/acme/widgets", ".grain/capabilities/gcp-key.capability.grain.md"); err != nil {
+			t.Fatalf("RemoveGrainfile(capability): %v", err)
+		}
+
+		evs, err := s.EventsSince(ctx, 0)
+		if err != nil {
+			t.Fatalf("EventsSince: %v", err)
+		}
+		var types []string
+		for _, ev := range evs {
+			types = append(types, ev.Type)
+			if ev.Type == EventTaskReady && !reflect.DeepEqual(ev.Capabilities, []string{wantCapURL}) {
+				t.Errorf("task_ready event Capabilities = %v, want [%s]", ev.Capabilities, wantCapURL)
+			}
+		}
+		wantTypes := []string{
+			EventCapabilityUpdated,
+			EventTaskReady,
+			EventCapabilityRemoved,
+			EventCapabilityUpdated,
+			EventCapabilityRemoved,
+		}
+		if !reflect.DeepEqual(types, wantTypes) {
+			t.Fatalf("event types = %v, want %v", types, wantTypes)
+		}
+	})
+}

@@ -441,5 +441,34 @@ test('Grainfile v1 .process.grain.md.jinja2 templates, RFC 3339 offset not_befor
   await expect(detail.getByRole('link', { name: canonicalDeployUrl })).toHaveAttribute('href', canonicalDeployUrl);
   await expect(detail.getByText('Authorized (same-repo)')).toBeVisible();
   await expect(detail.getByText('task_ready').first()).toBeVisible();
+
+  // 4. Author a .capability.grain.md file in the Hub-hosted Grainfile editor modal and filter by Capabilities.
+  const capTitle = `GCP key capability ${world.n}`;
+  await page.getByTestId('open-grainfile-editor-btn').click();
+  await expect(modal).toBeVisible();
+  await modal.getByLabel('Grainfile kind').click();
+  await page.getByRole('option', { name: 'Capability (.capability.grain.md)' }).click();
+  await modal.getByTestId('grainfile-editor-path').fill('capabilities/gcp-key.capability.grain.md');
+  await modal.getByTestId('grainfile-editor-content').fill(
+    [
+      '---',
+      'grainfile: v1',
+      `title: "${capTitle}"`,
+      '---',
+      'Provides short-lived GCP credentials.',
+    ].join('\n'),
+  );
+  await modal.getByTestId('grainfile-editor-ref-path').fill('');
+  await modal.getByTestId('grainfile-editor-ref-content').fill('');
+  await modal.getByTestId('save-grainfile-btn').click();
+
+  await expect(modal).toHaveCount(0);
+  await page.getByLabel('Kind').click();
+  await page.getByRole('option', { name: 'Capabilities (.capability.grain.md)' }).click();
+  await expect(table.getByText(capTitle)).toBeVisible();
+  await table.getByText(capTitle).click();
+  await expect(detail.getByRole('heading', { name: capTitle })).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^capability$/ })).toBeVisible();
+  await expect(detail.getByText('capability_updated').first()).toBeVisible();
 });
 

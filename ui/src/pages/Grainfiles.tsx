@@ -218,15 +218,36 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorScope, setEditorScope] = useState<'personal' | 'team'>('personal');
+  const [editorKind, setEditorKind] = useState<GrainfileKind>('task');
   const [editorTeam, setEditorTeam] = useState('');
   const [editorPath, setEditorPath] = useState('tasks/example.task.grain.md');
   const [editorContent, setEditorContent] = useState(
-    '---\nversion: v1\ntitle: "Example task"\nrecipient: "https://hub.local/deployments/example"\n---\n',
+    '---\ngrainfile: v1\ntitle: "Example task"\nrecipient: "https://hub.local/deployments/example"\n---\n',
   );
   const [editorRefPath, setEditorRefPath] = useState('');
   const [editorRefContent, setEditorRefContent] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
+
+  const handleEditorKindChange = (nextKind: GrainfileKind) => {
+    setEditorKind(nextKind);
+    if (nextKind === 'capability') {
+      setEditorPath('capabilities/example.capability.grain.md');
+      setEditorContent(
+        '---\ngrainfile: v1\ntitle: "Example capability"\n---\nDescribe the capability grant and how agents use it.\n',
+      );
+    } else if (nextKind === 'process') {
+      setEditorPath('processes/example.process.grain.md');
+      setEditorContent(
+        '---\ngrainfile: v1\ntitle: "Example process"\nwhen:\n  manual: {}\n---\nDescribe the recurring process.\n',
+      );
+    } else {
+      setEditorPath('tasks/example.task.grain.md');
+      setEditorContent(
+        '---\ngrainfile: v1\ntitle: "Example task"\nrecipient: "https://hub.local/deployments/example"\n---\n',
+      );
+    }
+  };
 
   const saveHostedGrainfile = async () => {
     setEditorBusy(true);
@@ -308,7 +329,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
         <Box>
           <Typography variant="h5">Grainfiles &amp; Processes</Typography>
           <Typography variant="body2" color="text.secondary">
-            Indexed <code>.task.grain.md</code> tasks and <code>.process.grain.md</code> standing processes across watched repositories.
+            Indexed <code>.task.grain.md</code> tasks, <code>.process.grain.md</code> standing processes, and <code>.capability.grain.md</code> capabilities across watched repositories.
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
@@ -342,6 +363,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
             <MenuItem value="all">All kinds</MenuItem>
             <MenuItem value="task">Tasks (.task.grain.md)</MenuItem>
             <MenuItem value="process">Processes (.process.grain.md)</MenuItem>
+            <MenuItem value="capability">Capabilities (.capability.grain.md)</MenuItem>
           </TextField>
           <TextField
             select
@@ -495,11 +517,24 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                           />
                         </Box>
                       ))}
-                      {(!g.depends_on || g.depends_on.length === 0) && (
-                        <Typography variant="caption" color="text.secondary">
-                          —
-                        </Typography>
-                      )}
+                      {g.capabilities?.map((cap) => (
+                        <Box key={`cap-${cap}`}>
+                          <Typography variant="caption" color="text.secondary">
+                            capabilities:{' '}
+                          </Typography>
+                          <SafeExternalLink
+                            url={cap}
+                            label={shortTargetLabel(cap)}
+                            sx={{ fontFamily: mono, fontSize: 12 }}
+                          />
+                        </Box>
+                      ))}
+                      {(!g.depends_on || g.depends_on.length === 0) &&
+                        (!g.capabilities || g.capabilities.length === 0) && (
+                          <Typography variant="caption" color="text.secondary">
+                            —
+                          </Typography>
+                        )}
                     </Stack>
                   </TableCell>
                 </TableRow>
@@ -692,6 +727,18 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                     </Stack>
                   </Box>
                 )}
+                {selected.capabilities && selected.capabilities.length > 0 && (
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">
+                      capabilities
+                    </Typography>
+                    <Stack spacing={0.25}>
+                      {selected.capabilities.map((cap) => (
+                        <SafeExternalLink key={cap} url={cap} sx={{ fontFamily: mono, fontSize: 12 }} />
+                      ))}
+                    </Stack>
+                  </Box>
+                )}
               </Stack>
             </Stack>
 
@@ -809,6 +856,19 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
               >
                 <MenuItem value="personal">Personal</MenuItem>
                 <MenuItem value="team">Deployment</MenuItem>
+              </TextField>
+              <TextField
+                select
+                size="small"
+                label="Grainfile kind"
+                value={editorKind}
+                onChange={(e) => handleEditorKindChange(e.target.value as GrainfileKind)}
+                inputProps={{ 'data-testid': 'grainfile-editor-kind' }}
+                sx={{ minWidth: 190 }}
+              >
+                <MenuItem value="task">Task (.task.grain.md)</MenuItem>
+                <MenuItem value="process">Process (.process.grain.md)</MenuItem>
+                <MenuItem value="capability">Capability (.capability.grain.md)</MenuItem>
               </TextField>
               {editorScope === 'team' && (
                 <TextField

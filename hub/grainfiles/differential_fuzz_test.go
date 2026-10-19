@@ -255,6 +255,21 @@ Undefined var renders empty: [{{ missing_var }}]
 			},
 		},
 		{
+			Name: "capability-template-and-references",
+			Path: "gcp-key.capability.grain.md.jinja2",
+			Raw: `---
+grainfile: v1
+title: "GCP key for {{ project | default('widgets-ci') }}"
+references:
+  - /docs/spec.md#schema-version-header
+---
+Provides GCP credentials for {{ project | upper }}.
+`,
+			Vars: map[string]string{
+				"project": "widgets-prod",
+			},
+		},
+		{
 			Name: "comments-and-whitespace-trimming",
 			Path: "comments.task.grain.md.jinja2",
 			Raw:  "---\r\ntitle: \"Comment test\"\r\nrecipient: https://github.com/acme/grain-eu\r\n---\r\nHello {# untrimmed comment #}{%- if flag %}World{% endif %}\r\nTrimmed {#- trimmed comment -#}   Tight\r\n",
@@ -569,6 +584,85 @@ Task body.
 			},
 		},
 		{
+			Name: "capability-kind-and-capabilities-refs",
+			Files: map[string]string{
+				"docs/spec.md": "# Spec\n\n## Agent Usage\nHow to use.\n",
+				"capabilities/gcp-key.capability.grain.md": `---
+grainfile: v1
+title: GCP service account key
+references:
+  - /docs/spec.md#agent-usage
+---
+## Agent Usage
+Use GOOGLE_APPLICATION_CREDENTIALS.
+`,
+				"capabilities/tmpl.capability.grain.md.jinja2": `---
+grainfile: v1
+title: "Capability {{ cap_name | default('vault') }}"
+---
+Vault capability body.
+`,
+				"capabilities/inst.capability.grain.md": `---
+grainfile: v1
+title: Instantiated capability
+from_template: ./tmpl.capability.grain.md.jinja2
+---
+Instantiated body.
+`,
+				"tasks/use-cap.task.grain.md": `---
+grainfile: v1
+title: Task requesting capability
+capabilities:
+  - ../capabilities/gcp-key.capability.grain.md#agent-usage
+  - https://github.com/acme/shared/blob/main/capabilities/aws.capability.grain.md
+---
+Run with GCP key.
+`,
+				"processes/use-cap.process.grain.md": `---
+grainfile: v1
+title: Process requesting capability
+capabilities:
+  - /capabilities/gcp-key.capability.grain.md
+when:
+  manual: {}
+---
+Run process with GCP key.
+`,
+			},
+		},
+		{
+			Name: "capabilities-wrong-target-and-forbidden-keys",
+			Files: map[string]string{
+				"docs/readme.md": "# Readme\n",
+				"capabilities/bad-cap.capability.grain.md": `---
+grainfile: v1
+title: Bad capability with task and process fields
+recipient: /
+capabilities:
+  - ./gcp-key.capability.grain.md
+from_template: ./tmpl.task.grain.md.jinja2
+---
+Body.
+`,
+				"capabilities/tmpl.capability.grain.md.jinja2": `---
+grainfile: v1
+title: "{{ name }}"
+---
+Body.
+`,
+				"tasks/t.task.grain.md": `---
+grainfile: v1
+title: T
+capabilities:
+  - ../docs/readme.md
+  - ../capabilities/tmpl.capability.grain.md.jinja2
+  - https://github.com/acme/other/blob/main/tasks/other.task.grain.md
+---
+Body.
+`,
+			},
+		},
+		{
 			Name: "depends-on-3-node-cycle-gf034",
 			Files: map[string]string{
 				"tasks/a.task.grain.md": "---\ngrainfile: v1\ntitle: A\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./b.task.grain.md\n---\nBody A.\n",
@@ -817,6 +911,12 @@ func FuzzDifferentialGrainfileAndJinja2(f *testing.F) {
 			varVal:     "a",
 			ref:        "https://gitlab.com/acme/group/proj/-/tree/main/src",
 		},
+		{
+			isTemplate: false,
+			raw:        "---\ngrainfile: v1\ntitle: GCP Capability\nreferences:\n  - /docs/spec.md\n---\nCapability body.\n",
+			varVal:     "gcp-key",
+			ref:        "https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage",
+		},
 	}
 	for _, s := range seeds {
 		f.Add(s.isTemplate, s.raw, s.varVal, s.ref)
@@ -829,10 +929,13 @@ func FuzzDifferentialGrainfileAndJinja2(f *testing.F) {
 		// Always exercise Go parser/renderer/ref parser to check for panics or hangs.
 		vars := map[string]string{"title": varVal, "x": varVal}
 		path := "fuzz.task.grain.md"
+		capPath := "fuzz.capability.grain.md"
 		if isTemplate {
 			path = "fuzz.task.grain.md.jinja2"
+			capPath = "fuzz.capability.grain.md.jinja2"
 		}
 		_, _ = ParseWithVars(path, []byte(raw), vars)
+		_, _ = ParseWithVars(capPath, []byte(raw), vars)
 		_, _ = ParseRef(ref)
 
 		// When running the deterministic seed corpus (or when input is valid UTF-8 without NUL),

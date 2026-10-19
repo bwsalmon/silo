@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grain.dev/schemas/grainfiles/capability.schema.json",
+  "title": "A capability grainfile (<name>.capability.grain.md, docs/grainfiles-spec.md §7.3)",
+  "type": "object",
+  "properties": {
+    "grainfile": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/grainfile"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "draft": {
+      "type": "boolean",
+      "default": false
+    },
+    "not_before": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/notBefore"
+    },
+    "references": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
+    },
+    "from_template": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
+    }
+  },
+  "required": [
+    "grainfile",
+    "title"
+  ],
+  "patternProperties": {
+    "^x_": {}
+  },
+  "additionalProperties": false
+}

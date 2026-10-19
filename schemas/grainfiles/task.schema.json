@@ -28,6 +28,9 @@
     "depends_on": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     },
+    "capabilities": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
+    },
     "references": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     },
