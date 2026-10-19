@@ -135,6 +135,27 @@ describe('Shared Chat Sessions UI (/chats and /chats/:id)', () => {
         currentChat = { ...currentChat, ...patch };
         return new Response(JSON.stringify(currentChat), { status: 200 });
       },
+      'PUT /v1/chats/c-0102030405060708/bindings/google-chat': (body) => {
+        const req = body as { space_name: string; thread_name?: string };
+        currentChat = {
+          ...currentChat,
+          external_bindings: [
+            {
+              provider: 'google_chat',
+              external_id: req.space_name,
+              thread_id: req.thread_name,
+            },
+          ],
+        };
+        return new Response(JSON.stringify(currentChat), { status: 200 });
+      },
+      'DELETE /v1/chats/c-0102030405060708/bindings/google-chat': () => {
+        currentChat = {
+          ...currentChat,
+          external_bindings: [],
+        };
+        return new Response(JSON.stringify(currentChat), { status: 200 });
+      },
     });
 
     open('/chats/c-0102030405060708');
@@ -165,6 +186,35 @@ describe('Shared Chat Sessions UI (/chats and /chats/:id)', () => {
       const patchCall = calls.find((c) => c.method === 'PATCH' && c.url === '/v1/chats/c-0102030405060708');
       expect(patchCall).toBeDefined();
       expect((patchCall?.body as { reply_mode?: string })?.reply_mode).toBe('all');
+    });
+
+    // Verify Google Chat badge and configuration dialog
+    const gchatBadge = screen.getByTestId('google-chat-badge');
+    expect(gchatBadge.textContent).toContain('Google Chat: spaces/AAA123');
+    fireEvent.click(gchatBadge);
+
+    expect((await screen.findByTestId('google-chat-link-command')).textContent).toContain('/grain link c-0102030405060708');
+    expect(screen.getByTestId('google-chat-current-binding').textContent).toContain('spaces/AAA123');
+
+    // Update space + thread via Bind Google Chat button
+    fireEvent.change(screen.getByTestId('google-chat-dialog-space'), { target: { value: 'spaces/BBB999' } });
+    fireEvent.change(screen.getByTestId('google-chat-dialog-thread'), { target: { value: 'spaces/BBB999/threads/t7' } });
+    fireEvent.click(screen.getByTestId('bind-google-chat-btn'));
+
+    await waitFor(() => {
+      const putCall = calls.find((c) => c.method === 'PUT' && c.url === '/v1/chats/c-0102030405060708/bindings/google-chat');
+      expect(putCall).toBeDefined();
+      expect(putCall?.body).toEqual({
+        space_name: 'spaces/BBB999',
+        thread_name: 'spaces/BBB999/threads/t7',
+      });
+    });
+
+    // Unbind Google Chat via Unbind button
+    fireEvent.click(screen.getByTestId('unbind-google-chat-btn'));
+    await waitFor(() => {
+      const delCall = calls.find((c) => c.method === 'DELETE' && c.url === '/v1/chats/c-0102030405060708/bindings/google-chat');
+      expect(delCall).toBeDefined();
     });
   });
 });

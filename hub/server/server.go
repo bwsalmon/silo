@@ -56,6 +56,7 @@ import (
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/directory"
+	"github.com/bwsalmon/silo/hub/gchat"
 	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/lease"
@@ -219,6 +220,24 @@ type Config struct {
 	// GitHubFetcher configured from GitHubToken / GitHubApp* is used.
 	GrainfileFetcher grainfiles.RepoFetcher
 
+	// GoogleChatAudience is the expected JWT audience (project number or
+	// webhook URL) for inbound Google Chat webhook requests on
+	// POST /v1/integrations/google-chat/events.
+	GoogleChatAudience string
+	// GoogleChatCertsURL overrides Google Chat's published JWK set URL
+	// for verifying inbound webhook JWTs.
+	GoogleChatCertsURL string
+	// GoogleChatKeys, when set, are the keys Google Chat webhook JWTs are
+	// checked against; nil fetches keys from GoogleChatCertsURL. For tests.
+	GoogleChatKeys *identity.KeySet
+	// GoogleChatServiceAccount is the path to a Google Cloud service account
+	// JSON key file (or inline JSON) used for outbound Google Chat REST API
+	// calls.
+	GoogleChatServiceAccount string
+	// GoogleChatSender overrides the outbound Google Chat sender. When nil
+	// and GoogleChatServiceAccount is set, an HTTPSender is constructed.
+	GoogleChatSender gchat.Sender
+
 	// Logf, when set, receives the hub's log lines.
 	Logf func(format string, args ...any)
 }
@@ -363,6 +382,7 @@ type Hub struct {
 	Dispatcher    *tasks.Dispatcher
 	Live          *live.Hub
 	GrainfilesAPI *grainfiles.API
+	GoogleChat    *gchat.Handler
 	NodeUI        *nodeui.Server
 
 	handler  http.Handler
@@ -691,6 +711,30 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		tasksAPI.OnTaskEvent(e.Task, e.Event)
 	}
 	filer.OnFiled = tasksAPI.OnTaskFiled
+	gchatSender := cfg.GoogleChatSender
+	if gchatSender == nil && strings.TrimSpace(cfg.GoogleChatServiceAccount) != "" {
+		hs, err := gchat.NewHTTPSender(cfg.GoogleChatServiceAccount)
+		if err != nil {
+			return fail(fmt.Errorf("server: google chat service account: %w", err))
+		}
+		gchatSender = hs
+	}
+	h.GoogleChat = &gchat.Handler{
+		TasksAPI:   tasksAPI,
+		Store:      h.Backlog,
+		Directory:  dirAPI,
+		Dispatcher: h.Dispatcher,
+		Requests:   h.Events,
+		Registry:   h.Registry,
+		Sender:     gchatSender,
+		Audience:   strings.TrimSpace(cfg.GoogleChatAudience),
+		CertsURL:   strings.TrimSpace(cfg.GoogleChatCertsURL),
+		Keys:       cfg.GoogleChatKeys,
+		HubURL:     hubURL,
+		Logf:       cfg.Logf,
+	}
+	tasksAPI.OnChatMessagePosted = h.GoogleChat.OnWebMessage
+	tasksAPI.OnChatTaskEvent = h.GoogleChat.OnChatTaskEvent
 	fetcher := cfg.GrainfileFetcher
 	if fetcher == nil {
 		fetcher = &grainfiles.GitHubFetcher{
@@ -778,6 +822,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	m.Handle(tasks.ChatsPath+"/", tk)
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
+	gc := h.GoogleChat.Handler()
+	m.Handle("POST "+gchat.EventsPath, gc)
 	gf := h.GrainfilesAPI.Handler()
 	gfSameOrigin := route.Wrap(gf.(route.Lister), identity.SameOrigin(gf))
 	m.Handle("POST "+grainfiles.GitHubWebhookPath, h.metrics.wrapWebhooks(gf))

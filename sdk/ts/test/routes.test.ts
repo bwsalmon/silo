@@ -73,6 +73,8 @@ const cases: Record<string, Case> = {
   createChat: ['POST', '/v1/chats', (h) => h.createChat({ title: 'Ops Room', deployment: 'infra' })],
   getChat: ['GET', '/v1/chats/{id}', (h) => h.getChat('c-1')],
   updateChat: ['PATCH', '/v1/chats/{id}', (h) => h.updateChat('c-1', { reply_mode: 'all' })],
+  bindGoogleChat: ['PUT', '/v1/chats/{id}/bindings/google-chat', (h) => h.bindGoogleChat('c-1', { space_name: 'spaces/AAA', thread_name: 'spaces/AAA/threads/t1' })],
+  unbindGoogleChat: ['DELETE', '/v1/chats/{id}/bindings/google-chat', (h) => h.unbindGoogleChat('c-1')],
   postChatMessage: ['POST', '/v1/chats/{id}/messages', (h) => h.postChatMessage('c-1', { text: 'hello' })],
   subscribeChatEvents: ['GET', '/v1/chats/{id}/events', (h) => h.subscribeChatEvents('c-1', { onEvent: () => {} }).done],
 };

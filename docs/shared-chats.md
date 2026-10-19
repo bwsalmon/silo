@@ -43,6 +43,9 @@ Each `ChatSession` (`c-<16hex>`) is backed by a standing interactive Hub task (`
 | `POST /v1/chats` | Create a shared chat session and its backing interactive task. Requires membership in `deployment`. |
 | `GET /v1/chats/{id}` | Get session metadata, merged participants, external bindings, proposed tasks, and transcript. |
 | `PATCH /v1/chats/{id}` | Update `title`, `reply_mode`, `linked_deployments`, `participants`, `repos`, `references`, or `external_bindings`. |
-| `POST /v1/chats/{id}/messages` | Post `{id, text, attachments, trigger_agent}` as the authenticated caller (`acc.Email`), broadcast over SSE, and wake the backing agent when triggered. |
+| `PUT /v1/chats/{id}/bindings/google-chat` | Bind a Google Chat space (`space_name`) and optional `thread_name` to the shared chat session ([`docs/google-chat.md`](google-chat.md)). |
+| `DELETE /v1/chats/{id}/bindings/google-chat` | Remove the Google Chat binding from the shared chat session. |
+| `POST /v1/chats/{id}/messages` | Post `{id, text, attachments, trigger_agent}` as the authenticated caller (`acc.Email`), broadcast over SSE, mirror to any bound Google Chat space/thread, and wake the backing agent when triggered. |
 | `GET /v1/chats/{id}/events` | Live SSE stream (`message`, `transcript`, `awaiting_reply`, `approval_request`, `task_proposed`, `chat_updated`). |
+| `POST /v1/integrations/google-chat/events` | Inbound Google Chat webhook (`ADDED_TO_SPACE`, `/grain` slash commands, `MESSAGE`, and interactive `CARD_CLICKED` approvals; see [`docs/google-chat.md`](google-chat.md)). |
 | `GET /v1/inbox` | Surfaces `awaiting_reply`, `approval_request`, and `chat_mention` items (with `chat_id`) in participants' Unified Inbox. |

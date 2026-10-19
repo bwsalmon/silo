@@ -231,6 +231,12 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 		"GitHub App ID for minting installation tokens when fetching Grainfiles [SILO_HUB_GITHUB_APP_ID]")
 	githubAppKeyFile := fs.String("github-app-key-file", env("SILO_HUB_GITHUB_APP_KEY_FILE", env("SILO_HUB_GITHUB_APP_PRIVATE_KEY_FILE", "")),
 		"file holding the PEM private key for the GitHub App [SILO_HUB_GITHUB_APP_KEY_FILE]")
+	googleChatAudience := fs.String("google-chat-audience", env("SILO_HUB_GOOGLE_CHAT_AUDIENCE", env("SILO_GOOGLE_CHAT_AUDIENCE", "")),
+		"expected JWT audience (Cloud project number or webhook URL) for /v1/integrations/google-chat/events [SILO_HUB_GOOGLE_CHAT_AUDIENCE]")
+	googleChatCertsURL := fs.String("google-chat-certs-url", env("SILO_HUB_GOOGLE_CHAT_CERTS_URL", env("SILO_GOOGLE_CHAT_CERTS_URL", "")),
+		"JWK set URL used to verify Google Chat webhook JWTs [SILO_HUB_GOOGLE_CHAT_CERTS_URL]")
+	googleChatServiceAccount := fs.String("google-chat-service-account", env("SILO_HUB_GOOGLE_CHAT_SERVICE_ACCOUNT", env("SILO_GOOGLE_CHAT_SERVICE_ACCOUNT", "")),
+		"service account JSON key file path (or inline JSON) for outbound Google Chat API calls [SILO_HUB_GOOGLE_CHAT_SERVICE_ACCOUNT]")
 	if err := fs.Parse(args); err != nil {
 		return "", server.Config{}, err
 	}
@@ -306,30 +312,33 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 		OIDCClientID:      *clientID,
 		// Secrets come only from the environment, never a flag, so
 		// they do not show in the process list.
-		OIDCClientSecret:    os.Getenv("SILO_HUB_OIDC_CLIENT_SECRET"),
-		OIDCRedirectURL:     *redirect,
-		OIDCSessionKey:      []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
-		DevUserHeader:       *devHeader,
-		HubAdmins:           allAdmins,
-		AcceptedUsers:       allAccepted,
-		HubURL:              strings.TrimSpace(*hubURL),
-		NodeUIDomain:        *nodeUI,
-		ShutdownGrace:       *grace,
-		Heartbeat:           *heartbeat,
-		DispatchRetry:       *retry,
-		MetricsAddr:         *metricsAddr,
-		Pod:                 *pod,
-		PodAddr:             *podAddr,
-		InternalAddr:        *internalAddr,
-		InternalKey:         key,
-		ClaimsIssuer:        *claimsIssuer,
-		ClaimsKeys:          pems,
-		WebhookSecret:       whSecret,
-		GitHubToken:         ghToken,
-		GitHubAPIURL:        strings.TrimSpace(*githubAPIURL),
-		GitHubAppID:         *githubAppID,
-		GitHubAppPrivateKey: ghAppKey,
-		Logf:                log.Printf,
+		OIDCClientSecret:         os.Getenv("SILO_HUB_OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:          *redirect,
+		OIDCSessionKey:           []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
+		DevUserHeader:            *devHeader,
+		HubAdmins:                allAdmins,
+		AcceptedUsers:            allAccepted,
+		HubURL:                   strings.TrimSpace(*hubURL),
+		NodeUIDomain:             *nodeUI,
+		ShutdownGrace:            *grace,
+		Heartbeat:                *heartbeat,
+		DispatchRetry:            *retry,
+		MetricsAddr:              *metricsAddr,
+		Pod:                      *pod,
+		PodAddr:                  *podAddr,
+		InternalAddr:             *internalAddr,
+		InternalKey:              key,
+		ClaimsIssuer:             *claimsIssuer,
+		ClaimsKeys:               pems,
+		WebhookSecret:            whSecret,
+		GitHubToken:              ghToken,
+		GitHubAPIURL:             strings.TrimSpace(*githubAPIURL),
+		GitHubAppID:              *githubAppID,
+		GitHubAppPrivateKey:      ghAppKey,
+		GoogleChatAudience:       strings.TrimSpace(*googleChatAudience),
+		GoogleChatCertsURL:       strings.TrimSpace(*googleChatCertsURL),
+		GoogleChatServiceAccount: strings.TrimSpace(*googleChatServiceAccount),
+		Logf:                     log.Printf,
 	}
 	return *addr, cfg, nil
 }

@@ -206,6 +206,45 @@ func TestBuildServeConfigGrainfilesFlagsAndEnv(t *testing.T) {
 			t.Errorf("NodeUIIAPAudience = %q", cfg.NodeUIIAPAudience)
 		}
 	})
+
+	t.Run("google chat flags and env", func(t *testing.T) {
+		t.Setenv("SILO_HUB_GOOGLE_CHAT_AUDIENCE", "123456789")
+		t.Setenv("SILO_HUB_GOOGLE_CHAT_CERTS_URL", "https://certs.example.com/jwk")
+		t.Setenv("SILO_HUB_GOOGLE_CHAT_SERVICE_ACCOUNT", "/etc/silo/gchat-sa.json")
+		_, cfg, err := buildServeConfig([]string{"-database", "sqlite::memory:", "-dev"})
+		if err != nil {
+			t.Fatalf("buildServeConfig from env: %v", err)
+		}
+		if cfg.GoogleChatAudience != "123456789" {
+			t.Errorf("GoogleChatAudience = %q", cfg.GoogleChatAudience)
+		}
+		if cfg.GoogleChatCertsURL != "https://certs.example.com/jwk" {
+			t.Errorf("GoogleChatCertsURL = %q", cfg.GoogleChatCertsURL)
+		}
+		if cfg.GoogleChatServiceAccount != "/etc/silo/gchat-sa.json" {
+			t.Errorf("GoogleChatServiceAccount = %q", cfg.GoogleChatServiceAccount)
+		}
+
+		_, cfg, err = buildServeConfig([]string{
+			"-database", "sqlite::memory:",
+			"-dev",
+			"--google-chat-audience", "987654321",
+			"--google-chat-certs-url", "https://certs2.example.com/jwk",
+			"--google-chat-service-account", "/etc/silo/gchat-sa2.json",
+		})
+		if err != nil {
+			t.Fatalf("buildServeConfig from flags: %v", err)
+		}
+		if cfg.GoogleChatAudience != "987654321" {
+			t.Errorf("GoogleChatAudience = %q", cfg.GoogleChatAudience)
+		}
+		if cfg.GoogleChatCertsURL != "https://certs2.example.com/jwk" {
+			t.Errorf("GoogleChatCertsURL = %q", cfg.GoogleChatCertsURL)
+		}
+		if cfg.GoogleChatServiceAccount != "/etc/silo/gchat-sa2.json" {
+			t.Errorf("GoogleChatServiceAccount = %q", cfg.GoogleChatServiceAccount)
+		}
+	})
 }
 
 func TestServeRefusesMissingWebhookSecretOnKubernetes(t *testing.T) {

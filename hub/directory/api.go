@@ -188,6 +188,51 @@ func (a *API) IsAcceptedUser(ctx context.Context, email string) (bool, error) {
 	return len(acc.Teams) > 0, nil
 }
 
+// AccessForEmail resolves the Access record for a verified email address
+// (e.g. from a Google Chat event), enforcing accepted_users and resolving
+// HubAdmin / sys_admin status.
+func (a *API) AccessForEmail(ctx context.Context, email string) (*Access, error) {
+	email = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(email)), UserPrefix)
+	if email == "" || !strings.Contains(email, "@") {
+		return nil, ErrNotAcceptedUser
+	}
+	ok, err := a.IsAcceptedUser(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrNotAcceptedUser
+	}
+	p := identity.Principal{Email: email}
+	cfgAdmin := a.isHubAdmin(p)
+	var dbSysAdmin bool
+	if a.Store != nil {
+		_, sysAdmin, _, err := a.Store.CheckAcceptedUser(ctx, email)
+		if err != nil {
+			return nil, err
+		}
+		if a.Store.EnforceAcceptedUsers() {
+			cfgAdmin = a.isHubAdminGroup(p)
+		}
+		dbSysAdmin = sysAdmin
+	}
+	canAdmin := cfgAdmin || dbSysAdmin
+	if a.Store == nil {
+		return &Access{
+			Principal:   p,
+			HubAdmin:    canAdmin,
+			CanHubAdmin: canAdmin,
+			Teams:       map[string]Role{},
+		}, nil
+	}
+	acc, err := a.Store.Access(ctx, p, canAdmin)
+	if err != nil {
+		return nil, err
+	}
+	acc.CanHubAdmin = canAdmin
+	return acc, nil
+}
+
 func (a *API) isHubAdminGroup(p identity.Principal) bool {
 	for _, adm := range a.HubAdmins {
 		adm, _ = HubAdminPrincipal(adm)

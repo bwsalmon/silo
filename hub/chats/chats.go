@@ -11,18 +11,20 @@ const (
 	ReplyModeAll        = tasks.ReplyModeAll
 	ChatRoleParticipant = tasks.ChatRoleParticipant
 	ChatRoleViewer      = tasks.ChatRoleViewer
+	ProviderGoogleChat  = tasks.ProviderGoogleChat
 )
 
 type (
-	Store                  = tasks.Store
-	ChatParticipant        = tasks.ChatParticipant
-	ChatExternalBinding    = tasks.ChatExternalBinding
-	ChatMessage            = tasks.ChatMessage
-	ChatSession            = tasks.ChatSession
-	ChatEvent              = tasks.ChatEvent
-	CreateChatOptions      = tasks.CreateChatOptions
-	UpdateChatOptions      = tasks.UpdateChatOptions
-	PostChatMessageOptions = tasks.PostChatMessageOptions
+	Store                    = tasks.Store
+	ChatParticipant          = tasks.ChatParticipant
+	ChatExternalBinding      = tasks.ChatExternalBinding
+	GoogleChatBindingRequest = tasks.GoogleChatBindingRequest
+	ChatMessage              = tasks.ChatMessage
+	ChatSession              = tasks.ChatSession
+	ChatEvent                = tasks.ChatEvent
+	CreateChatOptions        = tasks.CreateChatOptions
+	UpdateChatOptions        = tasks.UpdateChatOptions
+	PostChatMessageOptions   = tasks.PostChatMessageOptions
 )
 
 var (

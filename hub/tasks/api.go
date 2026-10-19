@@ -89,6 +89,13 @@ type API struct {
 	// TaskEvents, when set, returns a task's stored and in-memory live events
 	// for shared chat transcripts.
 	TaskEvents func(ctx context.Context, taskID string) ([]events.Event, error)
+	// OnChatMessagePosted, when set, is called when a human posts a message in
+	// the Hub web UI (POST /v1/chats/{id}/messages) so external chat bridges
+	// (e.g. Google Chat) can mirror it.
+	OnChatMessagePosted func(chat ChatSession, msg ChatMessage)
+	// OnChatTaskEvent, when set, is called when a backing task emits a live
+	// event or proposes a child task in a shared chat session.
+	OnChatTaskEvent func(chat ChatSession, ev ChatEvent)
 
 	chatMu   sync.Mutex
 	chatSubs map[string]map[chan ChatEvent]struct{}
@@ -155,6 +162,8 @@ func (a *API) Handler() http.Handler {
 	h("POST "+ChatsPath, a.createChat)
 	h("GET "+ChatsPath+"/{id}", a.getChat)
 	h("PATCH "+ChatsPath+"/{id}", a.updateChat)
+	h("PUT "+ChatsPath+"/{id}/bindings/google-chat", a.bindGoogleChat)
+	h("DELETE "+ChatsPath+"/{id}/bindings/google-chat", a.unbindGoogleChat)
 	h("POST "+ChatsPath+"/{id}/messages", a.postChatMessage)
 	h("GET "+ChatsPath+"/{id}/events", a.chatEvents)
 	h("POST "+TasksPath, a.submit)
@@ -435,7 +444,8 @@ func (a *API) approve(w http.ResponseWriter, r *http.Request, acc *directory.Acc
 	if err != nil {
 		return err
 	}
-	if !member(acc, t) || strings.EqualFold(t.Submitter, acc.Email) {
+	_, isChatOrigin, _ := a.Store.GetChatByTask(r.Context(), t.OriginTask)
+	if !member(acc, t) || (!isChatOrigin && strings.EqualFold(t.Submitter, acc.Email)) {
 		return &httpError{http.StatusForbidden, "forbidden: only a member of team " + t.Team + " other than its submitter may approve the task"}
 	}
 	if t, err = a.Store.Approve(r.Context(), t.ID, acc.Email); err != nil {
@@ -452,7 +462,8 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 	if err != nil {
 		return err
 	}
-	if !member(acc, t) || strings.EqualFold(t.Submitter, acc.Email) {
+	_, isChatOrigin, _ := a.Store.GetChatByTask(r.Context(), t.OriginTask)
+	if !member(acc, t) || (!isChatOrigin && strings.EqualFold(t.Submitter, acc.Email)) {
 		return &httpError{http.StatusForbidden, "forbidden: only a member of team " + t.Team + " other than its submitter may reject the task"}
 	}
 	var req struct {

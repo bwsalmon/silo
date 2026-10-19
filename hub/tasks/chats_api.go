@@ -60,6 +60,32 @@ func (a *API) chatCanUpdate(acc *directory.Access, chat ChatSession) bool {
 	return a.chatCanPost(acc, chat) || (acc != nil && acc.HubAdmin)
 }
 
+// ChatSees reports whether acc may view chat.
+func (a *API) ChatSees(acc *directory.Access, chat ChatSession) bool {
+	return a.chatSees(acc, chat)
+}
+
+// ChatCanPost reports whether acc may post messages and answer approvals in chat.
+func (a *API) ChatCanPost(acc *directory.Access, chat ChatSession) bool {
+	return a.chatCanPost(acc, chat)
+}
+
+// ChatCanUpdate reports whether acc may update metadata or bindings on chat.
+func (a *API) ChatCanUpdate(acc *directory.Access, chat ChatSession) bool {
+	return a.chatCanUpdate(acc, chat)
+}
+
+// EnrichChat populates chat's merged participants, awaiting_reply, pending_approvals,
+// and optionally its merged transcript.
+func (a *API) EnrichChat(ctx context.Context, chat *ChatSession, includeTranscript bool) error {
+	return a.enrichChat(ctx, chat, includeTranscript)
+}
+
+// PublishChatEvent broadcasts ev to all live SSE subscribers of chatID.
+func (a *API) PublishChatEvent(chatID string, ev ChatEvent) {
+	a.publishChatEvent(chatID, ev)
+}
+
 func (a *API) validateAcceptedParticipants(ctx context.Context, participants []ChatParticipant) error {
 	if a.Directory == nil {
 		return nil
@@ -400,6 +426,58 @@ func (a *API) updateChat(w http.ResponseWriter, r *http.Request, acc *directory.
 	return writeJSON(w, http.StatusOK, updated)
 }
 
+func (a *API) bindGoogleChat(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	ctx := r.Context()
+	chat, err := a.loadChat(r, acc)
+	if err != nil {
+		return err
+	}
+	if !a.chatCanUpdate(acc, chat) {
+		return &httpError{http.StatusForbidden, "forbidden: viewers cannot modify a shared chat session"}
+	}
+	var req GoogleChatBindingRequest
+	if err := readJSON(r, &req); err != nil {
+		return err
+	}
+	updated, err := a.Store.BindGoogleChat(ctx, chat.ID, req.SpaceName, req.ThreadName, req.Metadata)
+	if err != nil {
+		return err
+	}
+	_ = a.enrichChat(ctx, &updated, true)
+	a.publishChatEvent(updated.ID, ChatEvent{
+		Type:   "chat_updated",
+		Time:   updated.UpdatedAt,
+		ChatID: updated.ID,
+		TaskID: updated.TaskID,
+		Chat:   &updated,
+	})
+	return writeJSON(w, http.StatusOK, updated)
+}
+
+func (a *API) unbindGoogleChat(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	ctx := r.Context()
+	chat, err := a.loadChat(r, acc)
+	if err != nil {
+		return err
+	}
+	if !a.chatCanUpdate(acc, chat) {
+		return &httpError{http.StatusForbidden, "forbidden: viewers cannot modify a shared chat session"}
+	}
+	updated, err := a.Store.UnbindGoogleChat(ctx, chat.ID)
+	if err != nil {
+		return err
+	}
+	_ = a.enrichChat(ctx, &updated, true)
+	a.publishChatEvent(updated.ID, ChatEvent{
+		Type:   "chat_updated",
+		Time:   updated.UpdatedAt,
+		ChatID: updated.ID,
+		TaskID: updated.TaskID,
+		Chat:   &updated,
+	})
+	return writeJSON(w, http.StatusOK, updated)
+}
+
 func (a *API) postChatMessage(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
 	ctx := r.Context()
 	chat, err := a.loadChat(r, acc)
@@ -428,6 +506,9 @@ func (a *API) postChatMessage(w http.ResponseWriter, r *http.Request, acc *direc
 		TaskID:  chat.TaskID,
 		Message: &msg,
 	})
+	if a.OnChatMessagePosted != nil {
+		a.OnChatMessagePosted(chat, msg)
+	}
 	if taskMsg != nil && a.Dispatcher != nil {
 		a.Dispatcher.Posted(ctx, chat.TaskID)
 	}
@@ -486,6 +567,9 @@ func (a *API) OnTaskEvent(taskID string, e events.Event) {
 		}
 	}
 	a.publishChatEvent(chat.ID, ce)
+	if a.OnChatTaskEvent != nil {
+		a.OnChatTaskEvent(chat, ce)
+	}
 }
 
 // OnTaskFiled notifies connected subscribers of a shared chat session when a
@@ -499,13 +583,17 @@ func (a *API) OnTaskFiled(t Task) {
 		return
 	}
 	cp := t
-	a.publishChatEvent(chat.ID, ChatEvent{
+	ce := ChatEvent{
 		Type:         "task_proposed",
 		Time:         t.Created,
 		ChatID:       chat.ID,
 		TaskID:       chat.TaskID,
 		ProposedTask: &cp,
-	})
+	}
+	a.publishChatEvent(chat.ID, ce)
+	if a.OnChatTaskEvent != nil {
+		a.OnChatTaskEvent(chat, ce)
+	}
 }
 
 func (a *API) chatEvents(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {

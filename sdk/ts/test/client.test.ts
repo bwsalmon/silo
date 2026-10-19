@@ -468,3 +468,52 @@ describe('Grainfiles and node subscriptions', () => {
     expect(nodes[0].ui_url).toBe('https://ws-eu-1.nodes.hub.example.com/');
   });
 });
+
+describe('Google Chat bindings on shared chat sessions', () => {
+  it('binds and unbinds Google Chat space/thread on /v1/chats/{id}/bindings/google-chat', async () => {
+    const f = stub(
+      200,
+      JSON.stringify({
+        id: 'c-42',
+        task_id: 't-42',
+        title: 'Incident War Room',
+        deployment: 'infra',
+        linked_deployments: [],
+        reply_mode: 'mention',
+        participants: [],
+        repos: [],
+        references: [],
+        external_bindings: [
+          {
+            provider: 'google_chat',
+            external_id: 'spaces/AAA123',
+            thread_id: 'spaces/AAA123/threads/t99',
+          },
+        ],
+        awaiting_reply: false,
+        created_by: 'alice@example.com',
+        created_at: '2026-10-19T12:00:00Z',
+        updated_at: '2026-10-19T12:05:00Z',
+      }),
+    );
+    const h = new HubClient({ fetch: f });
+    const bound = await h.bindGoogleChat('c-42', {
+      space_name: 'spaces/AAA123',
+      thread_name: 'spaces/AAA123/threads/t99',
+    });
+    expect(f.mock.calls[0][0]).toBe('/v1/chats/c-42/bindings/google-chat');
+    expect(f.mock.calls[0][1]?.method).toBe('PUT');
+    expect(JSON.parse(String(f.mock.calls[0][1]?.body))).toEqual({
+      space_name: 'spaces/AAA123',
+      thread_name: 'spaces/AAA123/threads/t99',
+    });
+    expect(bound.external_bindings).toHaveLength(1);
+    expect(bound.external_bindings[0].provider).toBe('google_chat');
+    expect(bound.external_bindings[0].external_id).toBe('spaces/AAA123');
+    expect(bound.external_bindings[0].thread_id).toBe('spaces/AAA123/threads/t99');
+
+    await h.unbindGoogleChat('c-42');
+    expect(f.mock.calls[1][0]).toBe('/v1/chats/c-42/bindings/google-chat');
+    expect(f.mock.calls[1][1]?.method).toBe('DELETE');
+  });
+});
