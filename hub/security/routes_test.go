@@ -215,6 +215,12 @@ func matrix() []row {
 		{route: pub("POST " + grainfiles.GitHubWebhookPath), method: "POST", path: grainfiles.GitHubWebhookPath, body: body(map[string]string{"repo": "acme/app"}), want: everyone(http.StatusUnauthorized)},
 		{route: pub("GET " + grainfiles.ContentPath), method: "GET", path: grainfiles.ContentPath + "?grainfile_url=https://github.com/acme/app/blob/main/tasks/fix.task.md", want: grainfileContent},
 		{route: pub("GET " + grainfiles.GrainfilesPath), method: "GET", path: grainfiles.GrainfilesPath, want: human(200, 200, 200, 200)},
+		{route: pub("GET " + grainfiles.PersonalGrainfilesPath), method: "GET", path: "/v1/grainfiles/personal/missing.md", want: human(404, 404, 404, 404)},
+		{route: pub("PUT " + grainfiles.PersonalGrainfilesPath), method: "PUT", path: "/v1/grainfiles/personal/notes.md", body: body(map[string]string{"content": "# Notes\n"}), want: human(200, 200, 200, 200), check: noStore},
+		{route: pub("DELETE " + grainfiles.PersonalGrainfilesPath), method: "DELETE", path: "/v1/grainfiles/personal/notes.md", want: human(200, 200, 200, 200), check: noStore},
+		{route: pub("GET " + grainfiles.TeamGrainfilesPath), method: "GET", path: "/v1/grainfiles/team/team-a/missing.md", want: human(404, 404, 404, 404)},
+		{route: pub("PUT " + grainfiles.TeamGrainfilesPath), method: "PUT", path: "/v1/grainfiles/team/team-a/notes.md", body: body(map[string]string{"content": "# Team Notes\n"}), want: human(404, 200, 200, 404), check: noStore},
+		{route: pub("DELETE " + grainfiles.TeamGrainfilesPath), method: "DELETE", path: "/v1/grainfiles/team/team-a/notes.md", want: human(404, 200, 200, 404), check: noStore},
 
 		// Nodes: a node token, never a human's sign-on.
 		{route: pub("GET " + rendezvous.ConnectPath), method: "GET", path: rendezvous.ConnectPath, upgrade: true, want: connect},
