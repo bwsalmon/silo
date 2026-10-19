@@ -11,7 +11,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ConflictError, HubClient, NotFoundError, type HubEvent, type Task } from '../../src/index.js';
+import { ConflictError, ForbiddenError, HubClient, NotFoundError, type HubEvent, type Task } from '../../src/index.js';
 import { binDir } from './paths.js';
 
 const userHeader = 'X-Silo-Sdk-User';
@@ -201,6 +201,7 @@ beforeAll(async () => {
 
   // The directory, through the SDK as a hub admin.
   const a = as(admin);
+  await a.setUser(outsider, false);
   await a.createTeam(team, 'SDK');
   await a.setMember(team, `user:${alice}`, 'admin');
   await a.assignRepo(team, repo);
@@ -238,6 +239,7 @@ describe('the SDK against silo hub serve', () => {
 
   it('refuses as the API does', async () => {
     await expect(as(outsider).getTask(task.id)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(as('unaccepted@sdk.test').getTask(task.id)).rejects.toBeInstanceOf(ForbiddenError);
   });
 
   it('follows the task’s events, and resumes from its cursor', async () => {

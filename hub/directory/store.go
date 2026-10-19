@@ -782,12 +782,19 @@ func (s *Store) SetMember(ctx context.Context, team, principal string, role Role
 			ON CONFLICT (team, principal) DO UPDATE SET role = excluded.role`), team, p, string(role)); err != nil {
 			return err
 		}
-		if strings.HasPrefix(p, UserPrefix) && s.enforceAcceptedUsers.Load() {
-			email := strings.TrimPrefix(p, UserPrefix)
-			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
-				VALUES (?, 0, 'team-member', ?)
-				ON CONFLICT (email) DO NOTHING`), email, s.now().UnixMilli()); err != nil {
-				return err
+		if strings.HasPrefix(p, UserPrefix) {
+			enforce := s.enforceAcceptedUsers.Load()
+			if !enforce {
+				var one int
+				enforce = tx.QueryRowContext(ctx, `SELECT 1 FROM accepted_users LIMIT 1`).Scan(&one) == nil
+			}
+			if enforce {
+				email := strings.TrimPrefix(p, UserPrefix)
+				if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
+					VALUES (?, 0, 'team-member', ?)
+					ON CONFLICT (email) DO NOTHING`), email, s.now().UnixMilli()); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

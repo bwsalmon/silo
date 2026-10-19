@@ -168,6 +168,93 @@ describe('writes', () => {
     expect(items[0].kind).toBe('proposal');
     expect(f.mock.calls[3][0]).toBe('/v1/inbox?nodes=ws-1&kind=proposal');
   });
+
+  it('manages accepted users, deployments, canonical URLs, and host replacement', async () => {
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/v1/users' && (!init?.method || init.method === 'GET')) {
+        return new Response(
+          JSON.stringify({
+            users: [{ email: 'root@example.com', sys_admin: true, added_by: 'bootstrap', created_at: '2026-10-18T12:00:00Z' }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === '/v1/users/dev%40example.com' && init?.method === 'PUT') {
+        return new Response(
+          JSON.stringify({ email: 'dev@example.com', sys_admin: false, added_by: 'root@example.com', created_at: '2026-10-18T12:05:00Z' }),
+          { status: 200 },
+        );
+      }
+      if (url === '/v1/users/dev%40example.com' && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+      if (url === '/v1/deployments' && init?.method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            id: 'payments-prod',
+            name: 'payments-prod',
+            url: 'https://hub.example.com/deployments/payments-prod',
+            recipient_url: 'https://hub.example.com/deployments/payments-prod',
+            members: { 'user:dev@example.com': 'admin' },
+            repos: [],
+          }),
+          { status: 201 },
+        );
+      }
+      if (url === '/v1/deployments' && (!init?.method || init.method === 'GET')) {
+        return new Response(
+          JSON.stringify({
+            deployments: [
+              {
+                id: 'payments-prod',
+                name: 'payments-prod',
+                url: 'https://hub.example.com/deployments/payments-prod',
+                recipient_url: 'https://hub.example.com/deployments/payments-prod',
+                members: { 'user:dev@example.com': 'admin' },
+                repos: ['acme/payments'],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === '/v1/deployments/payments-prod/replace-host' && init?.method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            token: 'silo-node_new',
+            node_token: { id: 'tok-2', owner: 'dev@example.com', node: 'payments-prod', created: '2026-10-18T12:10:00Z' },
+            replaced_host: true,
+            reclaimed_tasks: ['task-1'],
+            replayed_events: 2,
+          }),
+          { status: 201 },
+        );
+      }
+      return new Response(null, { status: 204 });
+    });
+    const h = new HubClient({ fetch: f });
+    const users = await h.listUsers();
+    expect(users).toHaveLength(1);
+    expect(users[0].sys_admin).toBe(true);
+
+    const added = await h.setUser('dev@example.com', false);
+    expect(added.email).toBe('dev@example.com');
+    await h.deleteUser('dev@example.com');
+
+    const dep = await h.createDeployment('payments-prod');
+    expect(dep.url).toBe('https://hub.example.com/deployments/payments-prod');
+    expect(dep.recipient_url).toBe('https://hub.example.com/deployments/payments-prod');
+
+    const list = await h.listDeployments();
+    expect(list).toHaveLength(1);
+    expect(list[0].id).toBe('payments-prod');
+
+    await h.assignDeploymentRepo('payments-prod', 'acme/payments');
+    const replaced = await h.replaceDeploymentHost('payments-prod');
+    expect(replaced.replaced_host).toBe(true);
+    expect(replaced.reclaimed_tasks).toEqual(['task-1']);
+    expect(replaced.replayed_events).toBe(2);
+  });
 });
 
 describe('errors', () => {
