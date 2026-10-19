@@ -213,13 +213,11 @@ func TestRepoSquatting(t *testing.T) {
 	repo := "/v1/teams/%s/repos/bwsalmon/silo"
 	at := func(team string) string { return strings.Replace(repo, "%s", team, 1) }
 
-	// infra releases it, for a transfer to web.
+	// While infra owns it, Mallory cannot claim it; once infra releases it,
+	// Mallory still cannot claim it with history (403) or see infra's task.
+	want(http.StatusConflict, "mallory@example.com", "PUT", at("squat"), nil)
 	want(http.StatusNoContent, "alice@example.com", "DELETE", at("infra"), nil)
-	// Mallory, an admin of an unrelated team, cannot claim it, nor can
-	// infra's or web's own admins.
-	want(http.StatusForbidden, "mallory@example.com", "PUT", at("squat"), nil)
 	want(http.StatusForbidden, "mallory@example.com", "PUT", at("squat"), map[string]bool{"history": true})
-	want(http.StatusForbidden, "alice@example.com", "PUT", at("infra"), nil)
 	if owner, _ := h.dir.RepoOwner(ctx, "bwsalmon/silo"); owner != "" {
 		t.Fatalf("bwsalmon/silo was claimed by %s", owner)
 	}
@@ -227,9 +225,10 @@ func TestRepoSquatting(t *testing.T) {
 		t.Errorf("mallory sees infra's task")
 	}
 
-	// The hub admin assigns it to web: web files tasks in it from now
-	// on, but infra's tasks stay infra's.
+	// A member (not admin) of web cannot claim it; the hub admin (or team admin) assigns it to web.
+	want(http.StatusForbidden, "bob@example.com", "PUT", at("web"), nil)
 	want(http.StatusNoContent, "root@example.com", "PUT", at("web"), nil)
+	want(http.StatusConflict, "mallory@example.com", "PUT", at("squat"), nil)
 	want(http.StatusConflict, "root@example.com", "PUT", at("squat"), nil)
 	mine := h.submit(t, "bob@example.com", map[string]any{"repo": "bwsalmon/silo", "prompt": "b"})
 	if mine.Team != "web" || !sees("bob@example.com", mine) {

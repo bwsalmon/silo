@@ -254,7 +254,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	acc, err := s.Directory.Access(r)
 	if err != nil {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		directory.WriteAccessError(w, err)
 		return
 	}
 	e, ok := s.Registry.Get(id)

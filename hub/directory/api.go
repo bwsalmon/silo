@@ -1,6 +1,7 @@
 package directory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,31 +19,18 @@ const (
 	// TeamsPath lists teams (the caller's own, or all for a hub admin)
 	// and, under it, manages one team's members and repositories.
 	TeamsPath = "/v1/teams"
+	// DeploymentsPath is the unified deployments API (/v1/deployments),
+	// backed by the same store as TeamsPath (/v1/teams).
+	DeploymentsPath = "/v1/deployments"
+	// UsersPath manages the Hub's accepted users list and dynamic sys admins.
+	UsersPath = "/v1/users"
 	// NodeTokensPath mints, lists and revokes node tokens.
 	NodeTokensPath = "/v1/node-tokens"
 )
 
-// API is the team directory over HTTP, for humans signed in through
-// Auth (docs/hub.md §5). Everything it answers is filtered by the
-// caller's teams:
-//
-//	GET    /v1/me
-//	GET    /v1/teams                                  the caller's teams; every team for a hub admin
-//	POST   /v1/teams {"id","name"}                    hub admin
-//	GET    /v1/teams/{team}                           its members, and a hub admin
-//	DELETE /v1/teams/{team}                           hub admin
-//	PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin
-//	DELETE /v1/teams/{team}/members/{principal}       team admin
-//	PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history"}]   hub admin
-//	DELETE /v1/teams/{team}/repos/{owner}/{name}      team admin
-//	GET    /v1/teams/{team}/settings                  its members
-//	PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds"}   team admin
-//	GET    /v1/node-tokens                            the caller's; every owner's for a hub admin
-//	POST   /v1/node-tokens {"node"}                   mint one for the caller: grain hub login
-//	DELETE /v1/node-tokens/{id}                       its owner, or a hub admin
-//	DELETE /v1/node-tokens/nodes/{node}               release the node ID: the caller's claim, or every owner's for a hub admin
-//
-// A team the caller is not in answers 404, as one that does not exist.
+// API is the team/deployment directory over HTTP, for humans signed in
+// through Auth (docs/hub.md §5). Everything it answers is filtered by the
+// caller's deployments/teams.
 type API struct {
 	Store    *Store
 	Registry *registry.Registry
@@ -52,6 +40,12 @@ type API struct {
 	// everything. An entry with no prefix is a user
 	// (HubAdminPrincipal).
 	HubAdmins []string
+	// EnforceAcceptedUsers, when true, requires every signing-in principal
+	// to be present in accepted_users (or match HubAdmins).
+	EnforceAcceptedUsers bool
+	// HubURL, when set, is the canonical base URL of the Hub used to construct
+	// canonical deployment URLs (https://<hub-host>/deployments/<id>).
+	HubURL string
 	// Disconnect, when set, ends a node's connection when its token is
 	// revoked: rendezvous.Server.Disconnect.
 	Disconnect func(nodeID string) bool
@@ -59,6 +53,12 @@ type API struct {
 	// that the node registry forgets the owner it bound the ID to:
 	// registry.Registry.Unbind.
 	Unbind func(nodeID string) error
+	// ReclaimTasks, when set, immediately transitions any in-flight tasks
+	// on nodeID back to queued when its host is replaced.
+	ReclaimTasks func(ctx context.Context, nodeID, reason string) ([]string, error)
+	// ReplayGrainfiles, when set, resets nodeID's Grainfile delivery cursor
+	// and replays active standing processes and tasks when its host is replaced.
+	ReplayGrainfiles func(ctx context.Context, nodeID string) (int, error)
 	// Logf, when set, receives the audit lines of changes to which team
 	// owns what: deleting a team, assigning and releasing a repository.
 	Logf func(format string, args ...any)
@@ -77,13 +77,36 @@ func (a *API) audit(acc *Access, format string, args ...any) {
 // request. When omitted, a configured hub admin keeps HubAdmin true.
 const AdminModeHeader = "X-Silo-Admin-Mode"
 
+// WriteAccessError writes 403 Forbidden when err is ErrNotAcceptedUser
+// and 401 Unauthorized for any other authentication error.
+func WriteAccessError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNotAcceptedUser) {
+		http.Error(w, ErrNotAcceptedUser.Error(), http.StatusForbidden)
+		return
+	}
+	http.Error(w, "unauthenticated", http.StatusUnauthorized)
+}
+
 // Access authenticates r and loads what its caller may see.
 func (a *API) Access(r *http.Request) (*Access, error) {
 	p, err := a.Auth.Principal(r)
 	if err != nil {
 		return nil, err
 	}
-	canAdmin := a.isHubAdmin(p)
+	cfgAdmin := a.isHubAdmin(p)
+	var dbSysAdmin bool
+	if a.Store != nil {
+		accepted, sysAdmin, hasAnyUsers, err := a.Store.CheckAcceptedUser(r.Context(), p.Email)
+		if err != nil {
+			return nil, err
+		}
+		enforce := hasAnyUsers || a.Store.EnforceAcceptedUsers() || a.EnforceAcceptedUsers
+		if enforce && !accepted && !cfgAdmin {
+			return nil, ErrNotAcceptedUser
+		}
+		dbSysAdmin = sysAdmin
+	}
+	canAdmin := cfgAdmin || dbSysAdmin
 	acc, err := a.Store.Access(r.Context(), p, canAdmin)
 	if err != nil {
 		return nil, err
@@ -151,7 +174,7 @@ func (a *API) Handler() http.Handler {
 		m.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			acc, err := a.Access(r)
 			if err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				WriteAccessError(w, err)
 				return
 			}
 			if err := f(w, r, acc); err != nil {
@@ -163,6 +186,9 @@ func (a *API) Handler() http.Handler {
 	h("PUT "+MePath+"/theme", a.setMyTheme)
 	h("GET "+MePath+"/inbox", a.getMyInbox)
 	h("PUT "+MePath+"/inbox", a.setMyInbox)
+	h("GET "+UsersPath, a.listUsers)
+	h("PUT "+UsersPath+"/{email}", a.setUser)
+	h("DELETE "+UsersPath+"/{email}", a.deleteUser)
 	h("GET "+TeamsPath, a.listTeams)
 	h("POST "+TeamsPath, a.createTeam)
 	h("GET "+TeamsPath+"/{team}", a.getTeam)
@@ -173,6 +199,18 @@ func (a *API) Handler() http.Handler {
 	h("DELETE "+TeamsPath+"/{team}/repos/{owner}/{name}", a.releaseRepo)
 	h("GET "+TeamsPath+"/{team}/settings", a.getSettings)
 	h("PUT "+TeamsPath+"/{team}/settings", a.setSettings)
+	h("GET "+DeploymentsPath, a.listTeams)
+	h("POST "+DeploymentsPath, a.createTeam)
+	h("GET "+DeploymentsPath+"/{id}", a.getTeam)
+	h("DELETE "+DeploymentsPath+"/{id}", a.deleteTeam)
+	h("PUT "+DeploymentsPath+"/{id}/members/{principal}", a.setMember)
+	h("DELETE "+DeploymentsPath+"/{id}/members/{principal}", a.removeMember)
+	h("PUT "+DeploymentsPath+"/{id}/repos/{owner}/{name}", a.assignRepo)
+	h("DELETE "+DeploymentsPath+"/{id}/repos/{owner}/{name}", a.releaseRepo)
+	h("GET "+DeploymentsPath+"/{id}/settings", a.getSettings)
+	h("PUT "+DeploymentsPath+"/{id}/settings", a.setSettings)
+	h("POST "+DeploymentsPath+"/{id}/token", a.mintDeploymentToken)
+	h("POST "+DeploymentsPath+"/{id}/replace-host", a.replaceDeploymentHost)
 	h("GET "+NodeTokensPath, a.listTokens)
 	h("POST "+NodeTokensPath, a.mintToken)
 	h("DELETE "+NodeTokensPath+"/{id}", a.revokeToken)
@@ -201,7 +239,7 @@ func writeError(w http.ResponseWriter, err error) {
 		code = he.code
 	case errors.Is(err, ErrNotFound):
 		code = http.StatusNotFound
-	case errors.Is(err, ErrExists), errors.Is(err, ErrOwned), errors.Is(err, ErrNodeOwner):
+	case errors.Is(err, ErrExists), errors.Is(err, ErrOwned), errors.Is(err, ErrNodeOwner), errors.Is(err, ErrLastSysAdmin):
 		code = http.StatusConflict
 	case errors.Is(err, ErrInvalid):
 		code = http.StatusBadRequest
@@ -224,9 +262,33 @@ func readJSON(r *http.Request, v any) error {
 	return nil
 }
 
-// teamAdmin checks the caller manages the request's team.
+func teamParam(r *http.Request) string {
+	if id := r.PathValue("id"); id != "" {
+		return id
+	}
+	return r.PathValue("team")
+}
+
+func (a *API) effectiveHubURL(r *http.Request) string {
+	if u := strings.TrimRight(strings.TrimSpace(a.HubURL), "/"); u != "" {
+		return u
+	}
+	if r != nil && strings.TrimSpace(r.Host) != "" {
+		return "https://" + strings.TrimSpace(r.Host)
+	}
+	return ""
+}
+
+func (a *API) decorateTeam(r *http.Request, t Team) Team {
+	u := CanonicalDeploymentURL(a.effectiveHubURL(r), t.ID)
+	t.URL = u
+	t.RecipientURL = u
+	return t
+}
+
+// teamAdmin checks the caller manages the request's team / deployment.
 func teamAdmin(r *http.Request, acc *Access) (string, error) {
-	team := r.PathValue("team")
+	team := teamParam(r)
 	if !acc.SeesTeam(team) {
 		return "", errNoTeam
 	}
@@ -234,6 +296,63 @@ func teamAdmin(r *http.Request, acc *Access) (string, error) {
 		return "", errForbidden
 	}
 	return team, nil
+}
+
+func (a *API) listUsers(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	if !acc.HubAdmin {
+		return errForbidden
+	}
+	users, err := a.Store.Users(r.Context())
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, http.StatusOK, struct {
+		Users []AcceptedUser `json:"users"`
+	}{Users: users})
+}
+
+func (a *API) setUser(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	if !acc.HubAdmin {
+		return errForbidden
+	}
+	var req struct {
+		SysAdmin bool `json:"sys_admin"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			return err
+		}
+	}
+	rawEmail := r.PathValue("email")
+	if err := a.Store.SetUser(r.Context(), rawEmail, req.SysAdmin, acc.Email); err != nil {
+		return err
+	}
+	norm, _ := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(rawEmail)), UserPrefix))
+	a.audit(acc, "added/updated accepted user %s (sys_admin: %t)", norm, req.SysAdmin)
+	users, err := a.Store.Users(r.Context())
+	if err == nil {
+		for _, u := range users {
+			if u.Email == norm {
+				return writeJSON(w, http.StatusOK, u)
+			}
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (a *API) deleteUser(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	if !acc.HubAdmin {
+		return errForbidden
+	}
+	rawEmail := r.PathValue("email")
+	if err := a.Store.DeleteUser(r.Context(), rawEmail); err != nil {
+		return err
+	}
+	norm, _ := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(rawEmail)), UserPrefix))
+	a.audit(acc, "removed accepted user %s", norm)
+	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 func (a *API) me(w http.ResponseWriter, r *http.Request, acc *Access) error {
@@ -357,18 +476,19 @@ func (a *API) listTeams(w http.ResponseWriter, r *http.Request, acc *Access) err
 	teams := []Team{}
 	for _, t := range all {
 		if acc.SeesTeam(t.ID) {
-			teams = append(teams, t)
+			teams = append(teams, a.decorateTeam(r, t))
 		}
 	}
 	return writeJSON(w, http.StatusOK, struct {
-		Teams []Team `json:"teams"`
-	}{teams})
+		Teams       []Team `json:"teams"`
+		Deployments []Team `json:"deployments"`
+	}{Teams: teams, Deployments: teams})
 }
 
-// getTeam answers one team, as listTeams would: its members, roles and
+// getTeam answers one team / deployment, as listTeams would: its members, roles and
 // repositories, to anyone who sees it.
 func (a *API) getTeam(w http.ResponseWriter, r *http.Request, acc *Access) error {
-	id := r.PathValue("team")
+	id := teamParam(r)
 	if !acc.SeesTeam(id) {
 		return errNoTeam
 	}
@@ -378,16 +498,13 @@ func (a *API) getTeam(w http.ResponseWriter, r *http.Request, acc *Access) error
 	}
 	for _, t := range all {
 		if t.ID == id {
-			return writeJSON(w, http.StatusOK, t)
+			return writeJSON(w, http.StatusOK, a.decorateTeam(r, t))
 		}
 	}
 	return errNoTeam
 }
 
 func (a *API) createTeam(w http.ResponseWriter, r *http.Request, acc *Access) error {
-	if !acc.HubAdmin {
-		return errForbidden
-	}
 	var req struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -395,30 +512,41 @@ func (a *API) createTeam(w http.ResponseWriter, r *http.Request, acc *Access) er
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
-	if err := a.Store.CreateTeam(r.Context(), req.ID, req.Name); err != nil {
+	if err := a.Store.CreateDeployment(r.Context(), req.ID, req.Name, acc.Email); err != nil {
 		return err
 	}
-	w.WriteHeader(http.StatusCreated)
-	return nil
+	a.audit(acc, "created deployment %s", req.ID)
+	name := req.Name
+	if name == "" {
+		name = req.ID
+	}
+	members := map[string]Role{}
+	if strings.TrimSpace(acc.Email) != "" {
+		members[UserPrefix+strings.ToLower(strings.TrimSpace(acc.Email))] = Admin
+	}
+	return writeJSON(w, http.StatusCreated, a.decorateTeam(r, Team{
+		ID:      req.ID,
+		Name:    name,
+		Members: members,
+		Repos:   []string{},
+	}))
 }
 
 func (a *API) deleteTeam(w http.ResponseWriter, r *http.Request, acc *Access) error {
-	if !acc.HubAdmin {
-		if acc.SeesTeam(r.PathValue("team")) {
-			return errForbidden
-		}
-		return errNoTeam
-	}
-	if err := a.Store.DeleteTeam(r.Context(), r.PathValue("team")); err != nil {
+	id, err := teamAdmin(r, acc)
+	if err != nil {
 		return err
 	}
-	a.audit(acc, "deleted team %s, leaving its repositories unowned", r.PathValue("team"))
+	if err := a.Store.DeleteTeam(r.Context(), id); err != nil {
+		return err
+	}
+	a.audit(acc, "deleted team %s, leaving its repositories unowned", id)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
 func (a *API) getSettings(w http.ResponseWriter, r *http.Request, acc *Access) error {
-	team := r.PathValue("team")
+	team := teamParam(r)
 	if !acc.SeesTeam(team) {
 		return errNoTeam
 	}
@@ -474,19 +602,10 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request, acc *Access) 
 	return nil
 }
 
-// assignRepo is a hub admin's: a team admin who could assign
-// repositories could claim any one no team owned at that moment, one
-// released for a transfer or left by a deleted team, and with it the
-// work of its nodes and the rightful team's 409 (SA1-M2). {"history":
-// true} also gives the team the tasks earlier teams filed in it
-// (Store.TransferRepo); without it, they stay with those teams.
 func (a *API) assignRepo(w http.ResponseWriter, r *http.Request, acc *Access) error {
-	team := r.PathValue("team")
-	if !acc.HubAdmin {
-		if acc.SeesTeam(team) {
-			return errForbidden
-		}
-		return errNoTeam
+	team, err := teamAdmin(r, acc)
+	if err != nil {
+		return err
 	}
 	var req struct {
 		History bool `json:"history"`
@@ -496,12 +615,17 @@ func (a *API) assignRepo(w http.ResponseWriter, r *http.Request, acc *Access) er
 			return err
 		}
 	}
-	repo := r.PathValue("owner") + "/" + r.PathValue("name")
-	assign := a.Store.AssignRepo
-	if req.History {
-		assign = a.Store.TransferRepo
+	if req.History && !acc.HubAdmin {
+		return errForbidden
 	}
-	if err := assign(r.Context(), team, repo); err != nil {
+	repo := r.PathValue("owner") + "/" + r.PathValue("name")
+	allowedSourceTeams := map[string]bool{}
+	for t, role := range acc.Teams {
+		if role == Admin {
+			allowedSourceTeams[t] = true
+		}
+	}
+	if err := a.Store.TransferRepoByAdmin(r.Context(), team, repo, req.History, allowedSourceTeams, false); err != nil {
 		return err
 	}
 	a.audit(acc, "assigned repository %s to team %s (history: %t)", strings.ToLower(repo), team, req.History)
@@ -539,25 +663,109 @@ func (a *API) listTokens(w http.ResponseWriter, r *http.Request, acc *Access) er
 
 func (a *API) mintToken(w http.ResponseWriter, r *http.Request, acc *Access) error {
 	var req struct {
-		Node string `json:"node"`
+		Node        string `json:"node"`
+		ReplaceHost bool   `json:"replace_host"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
-	tok, rec, revoked, err := a.Store.mintNodeToken(r.Context(), acc.Email, req.Node)
+	hasTeam, err := a.Store.HasTeam(r.Context(), req.Node)
 	if err != nil {
 		return err
 	}
-	// Minting again is how a stolen token is recovered from, so the
-	// connection an earlier token holds ends with it, as on revoke.
-	if revoked > 0 && a.Disconnect != nil {
+	if hasTeam && !acc.AdminOf(req.Node) {
+		return ErrNodeOwner
+	}
+	forceOwner := acc.AdminOf(req.Node)
+	return a.issueNodeToken(w, r, acc, req.Node, forceOwner, req.ReplaceHost)
+}
+
+func (a *API) mintDeploymentToken(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	id, err := teamAdmin(r, acc)
+	if err != nil {
+		return err
+	}
+	hasTeam, err := a.Store.HasTeam(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	if !hasTeam {
+		return errNoTeam
+	}
+	var req struct {
+		ReplaceHost bool `json:"replace_host"`
+	}
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			return err
+		}
+	}
+	return a.issueNodeToken(w, r, acc, id, true, req.ReplaceHost)
+}
+
+func (a *API) replaceDeploymentHost(w http.ResponseWriter, r *http.Request, acc *Access) error {
+	id, err := teamAdmin(r, acc)
+	if err != nil {
+		return err
+	}
+	hasTeam, err := a.Store.HasTeam(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	if !hasTeam {
+		return errNoTeam
+	}
+	if r.ContentLength != 0 {
+		var req struct{}
+		if err := readJSON(r, &req); err != nil {
+			return err
+		}
+	}
+	return a.issueNodeToken(w, r, acc, id, true, true)
+}
+
+func (a *API) issueNodeToken(w http.ResponseWriter, r *http.Request, acc *Access, node string, forceOwner, replaceHost bool) error {
+	tok, rec, revoked, err := a.Store.MintDeploymentToken(r.Context(), acc.Email, node, forceOwner)
+	if err != nil {
+		return err
+	}
+	if (revoked > 0 || forceOwner || replaceHost) && a.Disconnect != nil {
 		a.Disconnect(rec.Node)
+	}
+	if (forceOwner || replaceHost) && a.Unbind != nil {
+		_ = a.Unbind(rec.Node)
+	}
+	var reclaimed []string
+	var replayed int
+	if replaceHost {
+		if a.ReclaimTasks != nil {
+			reclaimed, err = a.ReclaimTasks(r.Context(), rec.Node, "deployment host replaced")
+			if err != nil {
+				return err
+			}
+		}
+		if a.ReplayGrainfiles != nil {
+			replayed, err = a.ReplayGrainfiles(r.Context(), rec.Node)
+			if err != nil {
+				return err
+			}
+		}
+		a.audit(acc, "replaced host for deployment %s (reclaimed_tasks: %d, replayed_events: %d)", rec.Node, len(reclaimed), replayed)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	return writeJSON(w, http.StatusCreated, struct {
-		Token     string    `json:"token"`
-		NodeToken NodeToken `json:"node_token"`
-	}{tok, rec})
+		Token          string    `json:"token"`
+		NodeToken      NodeToken `json:"node_token"`
+		ReplacedHost   bool      `json:"replaced_host,omitempty"`
+		ReclaimedTasks []string  `json:"reclaimed_tasks,omitempty"`
+		ReplayedEvents int       `json:"replayed_events,omitempty"`
+	}{
+		Token:          tok,
+		NodeToken:      rec,
+		ReplacedHost:   replaceHost,
+		ReclaimedTasks: reclaimed,
+		ReplayedEvents: replayed,
+	})
 }
 
 func (a *API) revokeToken(w http.ResponseWriter, r *http.Request, acc *Access) error {

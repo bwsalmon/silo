@@ -184,6 +184,7 @@ func startHub(t *testing.T, o options) *hub {
 		IAPAudience:      audience,
 		IAPKeys:          &identity.KeySet{URL: ks.URL},
 		HubAdmins:        []string{"user:" + root},
+		AcceptedUsers:    []string{alice, dave, zed, carol, bob, nina, pat, "mallory@example.com"},
 		NodeUIDomain:     nodeDomain,
 		InternalKey:      bytes.Repeat([]byte("k"), rendezvous.MinInternalKey),
 		ClaimsIssuer:     "https://hub.test",
@@ -320,9 +321,8 @@ func eventually(t *testing.T, what string, cond func() bool) {
 func (hb *hub) teams() {
 	hb.t.Helper()
 	r := hb.user(root)
-	for _, tm := range []string{teamA, teamB} {
-		hb.must(r, "POST", "/v1/teams", map[string]string{"id": tm, "name": tm}, http.StatusCreated, nil)
-	}
+	hb.must(hb.user(alice), "POST", "/v1/teams", map[string]string{"id": teamA, "name": teamA}, http.StatusCreated, nil)
+	hb.must(hb.user(carol), "POST", "/v1/teams", map[string]string{"id": teamB, "name": teamB}, http.StatusCreated, nil)
 	for _, m := range []struct{ team, who, role string }{
 		{teamA, alice, "admin"}, {teamA, dave, "member"}, {teamA, zed, "member"},
 		{teamB, carol, "admin"}, {teamB, bob, "member"},

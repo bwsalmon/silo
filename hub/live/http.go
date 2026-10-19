@@ -63,7 +63,7 @@ func (h *Hub) Handler() http.Handler {
 func (h *Hub) task(w http.ResponseWriter, r *http.Request) (tasks.Task, bool) {
 	acc, err := h.Directory.Access(r)
 	if err != nil {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		directory.WriteAccessError(w, err)
 		return tasks.Task{}, false
 	}
 	t, err := h.Tasks.Get(r.Context(), r.PathValue("id"))

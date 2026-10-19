@@ -106,6 +106,7 @@ Run post-deploy verification once 01-deploy.task.md completes.
 		Database:      dbURL,
 		DevUserHeader: userHeader,
 		HubAdmins:     []string{"user:root@example.com"},
+		AcceptedUsers: []string{"alice@example.com", "bob@example.com", "carol@example.com", "outsider@example.com"},
 		WebhookSecret: webhookSecret,
 		GitHubToken:   githubToken,
 		GitHubAPIURL:  forge.URL,

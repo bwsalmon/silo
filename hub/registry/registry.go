@@ -72,6 +72,11 @@ type Node struct {
 	// UIURL is the direct URL to open the node's tunneled local Grain UI
 	// when offered and NodeUIDomain is configured on the hub.
 	UIURL string `json:"ui_url,omitempty"`
+	// URL is the canonical Hub URL for this deployment (https://<hub-host>/deployments/<id>).
+	URL string `json:"url,omitempty"`
+	// RecipientURL is the canonical Grainfile recipient URL for this deployment
+	// (https://<hub-host>/deployments/<id>).
+	RecipientURL string `json:"recipient_url,omitempty"`
 }
 
 // NodeUI describes a node's tunneled local Grain web UI status.

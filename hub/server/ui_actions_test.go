@@ -25,6 +25,7 @@ func TestWebUIActions(t *testing.T) {
 		Database:      "sqlite::memory:",
 		DevUserHeader: userHeader,
 		HubAdmins:     []string{"user:" + root},
+		AcceptedUsers: []string{alice, bob, carol},
 		Logf:          logf(t),
 	})
 	if err != nil {
@@ -91,27 +92,26 @@ func TestWebUIActions(t *testing.T) {
 		}
 	}
 
-	// Teams: only a hub admin creates one (the Teams page's form).
+	// Teams / Deployments: any accepted user creates one, becoming its admin.
+	alicePath := "/v1/teams/infra/members/user%3Aalice%40example.com"
+	bobPath := "/v1/teams/infra/members/user%3Abob%40example.com"
 	refused("POST", "/v1/teams", map[string]string{"id": "infra", "name": "Infra"})
-	ui(403, alice, "POST", "/v1/teams", map[string]string{"id": "infra", "name": "Infra"})
-	ui(201, root, "POST", "/v1/teams", map[string]string{"id": "infra", "name": "Infra"})
+	ui(404, alice, "PUT", alicePath, map[string]string{"role": "admin"})
+	ui(201, alice, "POST", "/v1/teams", map[string]string{"id": "infra", "name": "Infra"})
 	ui(409, root, "POST", "/v1/teams", map[string]string{"id": "infra", "name": "Infra"})
 
 	// Members and roles: a team admin's, or a hub admin's.
-	alicePath := "/v1/teams/infra/members/user%3Aalice%40example.com"
-	bobPath := "/v1/teams/infra/members/user%3Abob%40example.com"
 	refused("PUT", alicePath, map[string]string{"role": "admin"})
-	ui(404, alice, "PUT", alicePath, map[string]string{"role": "admin"})
 	ui(204, root, "PUT", alicePath, map[string]string{"role": "admin"})
 	ui(204, alice, "PUT", bobPath, map[string]string{"role": "admin"})
 	ui(204, alice, "PUT", bobPath, map[string]string{"role": "member"})
 	ui(403, bob, "PUT", "/v1/teams/infra/members/user%3Acarol%40example.com", map[string]string{"role": "member"})
 
-	// Repositories: a hub admin assigns, with or without history; a team
-	// admin releases.
+	// Repositories: a team admin or hub admin assigns; a hub admin assigns with history; a team admin releases.
 	refused("PUT", "/v1/teams/infra/repos/acme/app", nil)
-	ui(403, alice, "PUT", "/v1/teams/infra/repos/acme/app", nil)
-	ui(204, root, "PUT", "/v1/teams/infra/repos/acme/app", nil)
+	ui(403, bob, "PUT", "/v1/teams/infra/repos/acme/app", nil)
+	ui(204, alice, "PUT", "/v1/teams/infra/repos/acme/app", nil)
+	ui(403, alice, "PUT", "/v1/teams/infra/repos/acme/lib", map[string]bool{"history": true})
 	ui(204, root, "PUT", "/v1/teams/infra/repos/acme/lib", map[string]bool{"history": true})
 	ui(403, bob, "DELETE", "/v1/teams/infra/repos/acme/lib", nil)
 	refused("DELETE", "/v1/teams/infra/repos/acme/lib", nil)
@@ -221,11 +221,11 @@ func TestWebUIActions(t *testing.T) {
 	ui(404, carol, "DELETE", tokPath, nil)
 	ui(204, bob, "DELETE", tokPath, nil)
 
-	// Members out, and the team gone: a hub admin's.
+	// Members out, and the team gone: a team admin's or a hub admin's.
+	refused("DELETE", "/v1/teams/infra", nil)
+	ui(403, bob, "DELETE", "/v1/teams/infra", nil)
 	refused("DELETE", bobPath, nil)
 	ui(204, alice, "DELETE", bobPath, nil)
-	refused("DELETE", "/v1/teams/infra", nil)
-	ui(403, alice, "DELETE", "/v1/teams/infra", nil)
-	ui(204, root, "DELETE", "/v1/teams/infra", nil)
+	ui(204, alice, "DELETE", "/v1/teams/infra", nil)
 	ui(404, alice, "GET", "/v1/teams/infra", nil)
 }

@@ -125,6 +125,15 @@ type Config struct {
 	// HubAdmins hold the hub-wide admin role (directory.API.HubAdmins):
 	// user:<email> or group:<name>.
 	HubAdmins []string
+	// AcceptedUsers are seeded into the accepted_users allowlist on startup
+	// with sys_admin = false.
+	AcceptedUsers []string
+	// HubURL is the canonical public base URL of this Hub (e.g.
+	// "https://hub.example.com"), used to construct canonical deployment
+	// URLs ("<HubURL>/deployments/<id>"). When empty, it falls back to
+	// ClaimsIssuer when ClaimsIssuer is an https:// URL, or is derived
+	// from the incoming request's Host header.
+	HubURL string
 
 	// NodeUIDomain, when set, serves each node's own UI to its owner at
 	// <node>.<NodeUIDomain> (nodeui.Server.Domain): a domain whose
@@ -430,8 +439,24 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			cfg.logf("hub: hub admin %q has no user: or group: prefix; treating it as %s (write group:NAME if a group was meant)", adm, p)
 		}
 	}
-	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins, Logf: cfg.Logf, Registry: h.Registry}
+	if err := h.Directory.SeedUsers(ctx, cfg.HubAdmins, cfg.AcceptedUsers); err != nil {
+		return fail(fmt.Errorf("server: seeding accepted users: %w", err))
+	}
+	hubURL := strings.TrimRight(strings.TrimSpace(cfg.HubURL), "/")
+	if hubURL == "" && strings.HasPrefix(strings.TrimSpace(cfg.ClaimsIssuer), "https://") {
+		hubURL = strings.TrimRight(strings.TrimSpace(cfg.ClaimsIssuer), "/")
+	}
+	dirAPI := &directory.API{
+		Store:                h.Directory,
+		Auth:                 auth,
+		HubAdmins:            cfg.HubAdmins,
+		EnforceAcceptedUsers: len(cfg.HubAdmins) > 0 || len(cfg.AcceptedUsers) > 0,
+		HubURL:               hubURL,
+		Logf:                 cfg.Logf,
+		Registry:             h.Registry,
+	}
 	h.Grainfiles.TeamResolver = h.Directory
+	h.Grainfiles.HubURL = hubURL
 	h.Grainfiles.SameTeam = func(ctx context.Context, ownerA, ownerB string) bool {
 		if strings.EqualFold(ownerA, ownerB) {
 			return true
@@ -510,6 +535,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Grainfiles:   h.Grainfiles,
 		Bus:          h.Bus,
 		NodeUIDomain: cfg.NodeUIDomain,
+		HubURL:       hubURL,
 	}
 	dirAPI.Disconnect = h.Rendezvous.Disconnect
 	dirAPI.Unbind = h.Registry.Unbind
@@ -524,6 +550,24 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Bus:       h.Bus,
 
 		LostRequeueAfter: h.Directory.LostRequeueAfter,
+	}
+	dirAPI.ReclaimTasks = func(ctx context.Context, node, reason string) ([]string, error) {
+		reclaimed, err := h.Backlog.ReclaimForNode(ctx, node, reason)
+		var ids []string
+		for _, t := range reclaimed {
+			ids = append(ids, t.ID)
+		}
+		if err == nil && len(ids) > 0 && h.Dispatcher != nil {
+			h.Dispatcher.Wake()
+		}
+		return ids, err
+	}
+	dirAPI.ReplayGrainfiles = func(ctx context.Context, node string) (int, error) {
+		evs, err := h.Grainfiles.ReplayForNode(ctx, node)
+		if err == nil && len(evs) > 0 && h.Rendezvous != nil {
+			h.Rendezvous.NotifyGrainfiles(evs...)
+		}
+		return len(evs), err
 	}
 	if cfg.ClaimsIssuer != "" || len(cfg.ClaimsKeys) > 0 {
 		if h.Dispatcher.Claims, err = claims.NewSigner(cfg.ClaimsIssuer, cfg.ClaimsKeys...); err != nil {
@@ -675,7 +719,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	m.Handle(rendezvous.ConnectPath, rv)
 	m.Handle(rendezvous.DirectoryPath, rv)
 	dir := dirAPI.Handler()
-	for _, p := range []string{directory.MePath, directory.TeamsPath, directory.NodeTokensPath} {
+	for _, p := range []string{directory.MePath, directory.TeamsPath, directory.DeploymentsPath, directory.UsersPath, directory.NodeTokensPath} {
 		m.Handle(p, dir)
 		m.Handle(p+"/", dir)
 	}

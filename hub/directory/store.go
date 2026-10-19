@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwsalmon/silo/hub/dbaccess"
@@ -83,14 +84,42 @@ var (
 	ErrNodeOwner = errors.New("directory: node belongs to another owner")
 	// ErrInvalid is a malformed team ID, repository or role.
 	ErrInvalid = errors.New("directory: invalid")
+	// ErrLastSysAdmin is an attempt to remove or demote the last Hub sys admin.
+	ErrLastSysAdmin = errors.New("cannot remove or demote the last hub sys admin")
+	// ErrNotAcceptedUser is a sign-in from a user who is not on the Hub's accepted users list.
+	ErrNotAcceptedUser = errors.New("user is not on the hub accepted users list")
 )
 
-// Team is one team, with its members and repositories.
+// AcceptedUser is a user on the Hub's accepted users list.
+type AcceptedUser struct {
+	Email     string    `json:"email"`
+	SysAdmin  bool      `json:"sys_admin"`
+	AddedBy   string    `json:"added_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Team is one team / deployment, with its members and repositories.
 type Team struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Members map[string]Role `json:"members"`
-	Repos   []string        `json:"repos"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	URL          string          `json:"url,omitempty"`
+	RecipientURL string          `json:"recipient_url,omitempty"`
+	Members      map[string]Role `json:"members"`
+	Repos        []string        `json:"repos"`
+}
+
+// CanonicalDeploymentURL returns the canonical Hub URL for deployment id
+// ("<normalized-hub-url>/deployments/<id>").
+func CanonicalDeploymentURL(hubURL, id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(hubURL), "/")
+	if base == "" {
+		return "/deployments/" + id
+	}
+	return base + "/deployments/" + id
 }
 
 // maxConns caps the directory's PostgreSQL connections, all of which it
@@ -100,10 +129,22 @@ const maxConns = 8
 
 // Store is the team directory.
 type Store struct {
-	db       *sql.DB
-	postgres bool
+	db                   *sql.DB
+	postgres             bool
+	enforceAcceptedUsers atomic.Bool
 	// Now, when set, is the clock tokens are stamped with.
 	Now func() time.Time
+}
+
+// SetEnforceAcceptedUsers enables or disables strict accepted_users enforcement
+// even when the table is currently empty.
+func (s *Store) SetEnforceAcceptedUsers(v bool) {
+	s.enforceAcceptedUsers.Store(v)
+}
+
+// EnforceAcceptedUsers reports whether strict accepted_users enforcement is enabled.
+func (s *Store) EnforceAcceptedUsers() bool {
+	return s.enforceAcceptedUsers.Load()
 }
 
 // Open opens the directory at url: "postgres://..." (or
@@ -119,7 +160,7 @@ func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, ur
 func OpenExisting(ctx context.Context, url string) (*Store, error) { return open(ctx, url, false) }
 
 // Tables are the directory's tables.
-var Tables = []string{"teams", "team_members", "team_repos", "node_tokens", "team_settings", "user_preferences"}
+var Tables = []string{"teams", "team_members", "team_repos", "node_tokens", "team_settings", "user_preferences", "accepted_users"}
 
 func open(ctx context.Context, url string, create bool) (*Store, error) {
 	var (
@@ -211,6 +252,12 @@ CREATE TABLE IF NOT EXISTS user_preferences (
 	inbox_configured INTEGER NOT NULL DEFAULT 0,
 	updated_at BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS accepted_users (
+	email TEXT PRIMARY KEY,
+	sys_admin INTEGER NOT NULL DEFAULT 0,
+	added_by TEXT NOT NULL DEFAULT '',
+	created_at BIGINT NOT NULL
+);
 `
 
 // liveTokens lets a node have one live token at a time, however two
@@ -291,7 +338,7 @@ func (s *Store) tx(ctx context.Context, f func(*sql.Tx) error) error {
 	return dbaccess.InTx(ctx, s.db, f)
 }
 
-var teamID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var teamID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // repoName is "owner/name", as package registry normalises it.
 var repoName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9._-]+$`)
@@ -371,10 +418,196 @@ func isUnique(err error) bool {
 	return strings.Contains(m, "unique") || strings.Contains(m, "duplicate key") || strings.Contains(m, "primary key")
 }
 
-// CreateTeam creates a team. Its ID is 1-63 characters of [a-z0-9-].
+// SeedUsers populates accepted_users from configured hubAdmins (with sys_admin = 1)
+// and acceptedUsers (with sys_admin = 0). Existing sys_admin privileges are never
+// downgraded by seeding.
+func (s *Store) SeedUsers(ctx context.Context, hubAdmins, acceptedUsers []string) error {
+	if len(hubAdmins) > 0 || len(acceptedUsers) > 0 {
+		s.SetEnforceAcceptedUsers(true)
+	}
+	type seedEntry struct {
+		email    string
+		sysAdmin int
+	}
+	var entries []seedEntry
+	seen := map[string]int{}
+	add := func(raw string, sysAdmin int) {
+		e := strings.ToLower(strings.TrimSpace(raw))
+		if strings.HasPrefix(e, GroupPrefix) {
+			return
+		}
+		e = strings.TrimPrefix(e, UserPrefix)
+		norm, err := normEmail(e)
+		if err != nil || norm == "" {
+			return
+		}
+		if idx, ok := seen[norm]; ok {
+			if sysAdmin > entries[idx].sysAdmin {
+				entries[idx].sysAdmin = sysAdmin
+			}
+			return
+		}
+		seen[norm] = len(entries)
+		entries = append(entries, seedEntry{email: norm, sysAdmin: sysAdmin})
+	}
+	for _, adm := range hubAdmins {
+		p, _ := HubAdminPrincipal(adm)
+		if strings.HasPrefix(p, UserPrefix) {
+			add(strings.TrimPrefix(p, UserPrefix), 1)
+		}
+	}
+	for _, u := range acceptedUsers {
+		add(u, 0)
+	}
+	if len(hubAdmins) > 0 || len(acceptedUsers) > 0 {
+		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT principal FROM team_members`)
+		if err == nil {
+			for rows.Next() {
+				var p string
+				if rows.Scan(&p) == nil && strings.HasPrefix(p, UserPrefix) {
+					add(strings.TrimPrefix(p, UserPrefix), 0)
+				}
+			}
+			rows.Close()
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	now := s.now().UnixMilli()
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		for _, ent := range entries {
+			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
+				VALUES (?, ?, 'bootstrap', ?)
+				ON CONFLICT (email) DO UPDATE SET sys_admin = CASE WHEN excluded.sys_admin > accepted_users.sys_admin THEN excluded.sys_admin ELSE accepted_users.sys_admin END`),
+				ent.email, ent.sysAdmin, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// Users returns all accepted users ordered by email.
+func (s *Store) Users(ctx context.Context) ([]AcceptedUser, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT email, sys_admin, added_by, created_at FROM accepted_users ORDER BY email ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AcceptedUser{}
+	for rows.Next() {
+		var (
+			u        AcceptedUser
+			sysAdmin int
+			created  int64
+		)
+		if err := rows.Scan(&u.Email, &sysAdmin, &u.AddedBy, &created); err != nil {
+			return nil, err
+		}
+		u.SysAdmin = sysAdmin != 0
+		u.CreatedAt = time.UnixMilli(created).UTC()
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// SetUser adds or updates email in accepted_users. It returns ErrLastSysAdmin
+// if demoting an existing sys admin would leave zero sys admins in accepted_users.
+func (s *Store) SetUser(ctx context.Context, email string, sysAdmin bool, addedBy string) error {
+	e, err := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(email)), UserPrefix))
+	if err != nil {
+		return err
+	}
+	addedBy = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(addedBy)), UserPrefix)
+	sysInt := 0
+	if sysAdmin {
+		sysInt = 1
+	}
+	now := s.now().UnixMilli()
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if !sysAdmin {
+			var curSys int
+			err := tx.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&curSys)
+			if err == nil && curSys != 0 {
+				var count int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accepted_users WHERE sys_admin <> 0`).Scan(&count); err != nil {
+					return err
+				}
+				if count <= 1 {
+					return ErrLastSysAdmin
+				}
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (email) DO UPDATE SET sys_admin = excluded.sys_admin`),
+			e, sysInt, addedBy, now)
+		return err
+	})
+}
+
+// DeleteUser removes email from accepted_users. It returns ErrNotFound if email
+// is not in accepted_users, and ErrLastSysAdmin if removing email would leave
+// zero sys admins in accepted_users.
+func (s *Store) DeleteUser(ctx context.Context, email string) error {
+	e, err := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(email)), UserPrefix))
+	if err != nil {
+		return err
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		var curSys int
+		err := tx.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&curSys)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: user %s", ErrNotFound, e)
+		}
+		if err != nil {
+			return err
+		}
+		if curSys != 0 {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accepted_users WHERE sys_admin <> 0`).Scan(&count); err != nil {
+				return err
+			}
+			if count <= 1 {
+				return ErrLastSysAdmin
+			}
+		}
+		_, err = tx.ExecContext(ctx, s.q(`DELETE FROM accepted_users WHERE email = ?`), e)
+		return err
+	})
+}
+
+// CheckAcceptedUser checks whether email is in accepted_users, whether they have
+// sys_admin = 1, and whether accepted_users has any rows at all.
+func (s *Store) CheckAcceptedUser(ctx context.Context, email string) (accepted bool, sysAdmin bool, hasAnyUsers bool, err error) {
+	e := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(email)), UserPrefix)
+	var sysInt int
+	qErr := s.db.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&sysInt)
+	if qErr == nil {
+		return true, sysInt != 0, true, nil
+	}
+	if !errors.Is(qErr, sql.ErrNoRows) {
+		return false, false, false, qErr
+	}
+	var one int
+	anyErr := s.db.QueryRowContext(ctx, `SELECT 1 FROM accepted_users LIMIT 1`).Scan(&one)
+	if anyErr == nil {
+		return false, false, true, nil
+	}
+	if errors.Is(anyErr, sql.ErrNoRows) {
+		return false, false, false, nil
+	}
+	return false, false, false, anyErr
+}
+
+// CreateTeam creates a team. Its ID is a valid DNS-safe deployment slug
+// (^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$).
 func (s *Store) CreateTeam(ctx context.Context, id, name string) error {
 	if !teamID.MatchString(id) {
-		return fmt.Errorf("%w team ID %q: want 1-63 of [a-z0-9-]", ErrInvalid, id)
+		return fmt.Errorf("%w team ID %q: want DNS-safe slug ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", ErrInvalid, id)
 	}
 	if name == "" {
 		name = id
@@ -384,6 +617,42 @@ func (s *Store) CreateTeam(ctx context.Context, id, name string) error {
 		return fmt.Errorf("%w: team %s", ErrExists, id)
 	}
 	return err
+}
+
+// CreateDeployment atomically creates a deployment (team) with a DNS-safe slug id
+// and inserts creatorEmail ("user:<email>") as Admin of that deployment.
+func (s *Store) CreateDeployment(ctx context.Context, id, name, creatorEmail string) error {
+	if !teamID.MatchString(id) {
+		return fmt.Errorf("%w deployment ID %q: want DNS-safe slug ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", ErrInvalid, id)
+	}
+	if name == "" {
+		name = id
+	}
+	var creatorPrincipal string
+	if strings.TrimSpace(creatorEmail) != "" {
+		e, err := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(creatorEmail)), UserPrefix))
+		if err != nil {
+			return err
+		}
+		creatorPrincipal = UserPrefix + e
+	}
+	now := s.now().UnixMilli()
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)`), id, name, now)
+		if isUnique(err) {
+			return fmt.Errorf("%w: deployment %s", ErrExists, id)
+		}
+		if err != nil {
+			return err
+		}
+		if creatorPrincipal != "" {
+			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_members (team, principal, role) VALUES (?, ?, ?)
+				ON CONFLICT (team, principal) DO UPDATE SET role = excluded.role`), id, creatorPrincipal, string(Admin)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // DeleteTeam deletes a team, its memberships and its repositories,
@@ -482,6 +751,18 @@ func (s *Store) teamExists(ctx context.Context, q interface {
 	return err
 }
 
+// HasTeam reports whether a team / deployment with id exists.
+func (s *Store) HasTeam(ctx context.Context, id string) (bool, error) {
+	err := s.teamExists(ctx, s.db, id)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // SetMember adds principal, "user:<email>" or "group:<name>" for a
 // group the identity provider reports, to team with role, or changes
 // their role.
@@ -497,9 +778,19 @@ func (s *Store) SetMember(ctx context.Context, team, principal string, role Role
 		if err := s.teamExists(ctx, tx, team); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_members (team, principal, role) VALUES (?, ?, ?)
-			ON CONFLICT (team, principal) DO UPDATE SET role = excluded.role`), team, p, string(role))
-		return err
+		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_members (team, principal, role) VALUES (?, ?, ?)
+			ON CONFLICT (team, principal) DO UPDATE SET role = excluded.role`), team, p, string(role)); err != nil {
+			return err
+		}
+		if strings.HasPrefix(p, UserPrefix) && s.enforceAcceptedUsers.Load() {
+			email := strings.TrimPrefix(p, UserPrefix)
+			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
+				VALUES (?, 0, 'team-member', ?)
+				ON CONFLICT (email) DO NOTHING`), email, s.now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -562,6 +853,44 @@ func (s *Store) assignRepo(ctx context.Context, team, repo string, history bool)
 			return err
 		case err == nil:
 			return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, r, owner)
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO team_repos (repo, team, history) VALUES (?, ?, ?)`), r, team, h)
+		if isUnique(err) {
+			return fmt.Errorf("%w: %s", ErrOwned, r)
+		}
+		return err
+	})
+}
+
+// TransferRepoByAdmin assigns repo to team if it is unowned, or transfers it
+// from its existing owner if that owner is in allowedSourceTeams (or allowedAll is true).
+func (s *Store) TransferRepoByAdmin(ctx context.Context, team, repo string, history bool, allowedSourceTeams map[string]bool, allowedAll bool) error {
+	r, err := normRepo(repo)
+	if err != nil {
+		return err
+	}
+	h := 0
+	if history {
+		h = 1
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if err := s.teamExists(ctx, tx, team); err != nil {
+			return err
+		}
+		var owner string
+		err := tx.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&owner)
+		switch {
+		case err == nil && owner == team:
+			_, err = tx.ExecContext(ctx, s.q(`UPDATE team_repos SET history = ? WHERE repo = ?`), h, r)
+			return err
+		case err == nil:
+			if !allowedAll && !allowedSourceTeams[owner] {
+				return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, r, owner)
+			}
+			_, err = tx.ExecContext(ctx, s.q(`UPDATE team_repos SET team = ?, history = ? WHERE repo = ?`), team, h, r)
+			return err
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}

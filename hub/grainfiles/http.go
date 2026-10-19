@@ -2507,6 +2507,10 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 	if a.Access != nil {
 		v, err := a.Access(r)
 		if err != nil {
+			if strings.Contains(err.Error(), "not on the hub accepted users list") {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
