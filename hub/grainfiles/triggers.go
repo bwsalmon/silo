@@ -1,7 +1,6 @@
 package grainfiles
 
 import (
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -222,7 +221,7 @@ func matchSingleFilterRule(rule EventFilter, defaultRepo, eventRepo, branch stri
 			if p == "" {
 				continue
 			}
-			if matchesAnyPathPattern(rule.Ignore, p) {
+			if matchesAnyRulePath(rule.Ignore, true, canonDefault, canonEvent, normBranch, p) {
 				continue
 			}
 			if matchesAnyRulePath(rule.Paths, len(explicitRepos) > 0, canonDefault, canonEvent, normBranch, p) {
@@ -250,7 +249,7 @@ func matchSingleFilterRule(rule EventFilter, defaultRepo, eventRepo, branch stri
 			if p == "" {
 				continue
 			}
-			if !matchesAnyPathPattern(rule.Ignore, p) {
+			if !matchesAnyRulePath(rule.Ignore, true, canonDefault, canonEvent, normBranch, p) {
 				if !slices.Contains(matched, p) {
 					matched = append(matched, p)
 				}
@@ -267,6 +266,9 @@ func matchSingleFilterRule(rule EventFilter, defaultRepo, eventRepo, branch stri
 		if p := normalizeRepoRelPath(rawPath); p != "" && !slices.Contains(matched, p) {
 			matched = append(matched, p)
 		}
+	}
+	if len(changedPaths) > 0 && len(matched) == 0 {
+		return false, nil
 	}
 	return true, matched
 }
@@ -295,6 +297,12 @@ func matchesAnyRulePath(patterns []string, hasExplicitRepo bool, canonDefault, c
 				}
 				continue
 			}
+			if r.Mode == "blob" {
+				if MatchGlob(subPath, filePath) {
+					return true
+				}
+				continue
+			}
 			if MatchPathPattern(subPath, filePath) {
 				return true
 			}
@@ -317,14 +325,20 @@ func normalizeBranchName(b string) string {
 }
 
 func normalizeRepoRelPath(p string) string {
-	p = filepath.ToSlash(strings.TrimSpace(p))
+	p = strings.TrimSpace(p)
+	if p == "" || strings.ContainsAny(p, "\\\x00") || hasEncodedPathHazard(p) {
+		return ""
+	}
 	p = strings.TrimPrefix(p, "./")
 	p = strings.TrimPrefix(p, "/")
 	if p == "" || p == "." {
 		return ""
 	}
+	if _, hasDotDot := hasDotSegment(p); hasDotDot {
+		return ""
+	}
 	cleaned := cleanPosixPath(p)
-	if cleaned == "." {
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return ""
 	}
 	return cleaned
@@ -348,8 +362,8 @@ func MatchPathPattern(pattern, filePath string) bool {
 	if val == "" {
 		return false
 	}
-	rawPat := filepath.ToSlash(strings.TrimSpace(pattern))
-	if rawPat == "" {
+	rawPat := strings.TrimSpace(pattern)
+	if rawPat == "" || strings.ContainsAny(rawPat, "\\\x00") || hasEncodedPathHazard(rawPat) {
 		return false
 	}
 	if rawPat == "/" || rawPat == "./" {
@@ -358,7 +372,7 @@ func MatchPathPattern(pattern, filePath string) bool {
 	isExplicitFolder := strings.HasSuffix(rawPat, "/")
 	pat := normalizeRepoRelPath(rawPat)
 	if pat == "" {
-		return isExplicitFolder
+		return false
 	}
 	if isExplicitFolder {
 		return MatchGlob(pat+"/**", val)
@@ -366,7 +380,10 @@ func MatchPathPattern(pattern, filePath string) bool {
 	if MatchGlob(pat, val) {
 		return true
 	}
-	return MatchGlob(pat+"/**", val)
+	if !strings.ContainsAny(pat, "*?[") {
+		return MatchGlob(pat+"/**", val)
+	}
+	return false
 }
 
 // MatchGlob reports whether name matches the glob pattern, supporting `*`

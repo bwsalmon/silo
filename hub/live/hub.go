@@ -389,6 +389,9 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		} else if e.Task != t.id {
 			h.logf("live: node %q sent task %s's event on task %s's stream", nodeID, logsafe.Quote(e.Task), t.id)
 			return
+		} else if err := h.holds(streamTask); err != nil {
+			h.logf("live: refused node %q's event stream: %s", nodeID, logsafe.Quote(err.Error()))
+			return
 		}
 		if e.Message != nil {
 			m, ok, err := h.message(ctx, e.Task, e.Message.ID)
@@ -426,6 +429,12 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			h.announce(t.id, e.Seq)
 		}
 		if fresh && e.Type == events.TypeResult && e.Result != nil {
+			latest, gerr := h.Tasks.Get(ctx, t.id)
+			if gerr != nil || latest.Node != nodeID || h.holds(latest) != nil {
+				h.logf("live: ignoring result on task %s from replaced or reclaimed node %q", t.id, nodeID)
+				return
+			}
+			streamTask = latest
 			meta := ExtractRunMeta(line, e)
 			if streamTask.GrainfileURL == "" && meta.GrainfileURL != "" {
 				streamTask.GrainfileURL = meta.GrainfileURL
@@ -433,17 +442,14 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 			if streamTask.CommitSHA == "" && meta.CommitSHA != "" {
 				streamTask.CommitSHA = meta.CommitSHA
 			}
-			if streamTask.GrainfileURL == "" {
-				if latest, gerr := h.Tasks.Get(ctx, t.id); gerr == nil {
-					streamTask = latest
-				}
-			}
 			state, rawState, reason := resultStateReason(e.Result)
 			if completer, ok := h.Tasks.(interface {
 				CompleteRun(ctx context.Context, id string, state tasks.State, reason string) (tasks.Task, error)
 			}); ok {
 				if updated, cerr := completer.CompleteRun(ctx, t.id, state, reason); cerr == nil {
 					streamTask = updated
+				} else {
+					return
 				}
 			}
 			if h.OnResult != nil {
