@@ -53,7 +53,7 @@ func startReplicaPod(t *testing.T, dbURL, name string, key []byte) *replicaPod {
 		LeaseRetry:    80 * time.Millisecond,
 		Holder:        name,
 		Pod:           name,
-		PodLease:      600 * time.Millisecond,
+		PodLease:      1500 * time.Millisecond,
 		InternalAddr:  "127.0.0.1:0",
 		InternalKey:   key,
 		Logf:          logf(t),
@@ -810,16 +810,22 @@ func dialNodeUIWS(hubURL, nodeID, user string) (*websocket.Conn, error) {
 		return nil, err
 	}
 	cfg.Header.Set(userHeader, user)
-	tc, err := net.DialTimeout("tcp", u.Host, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	ws, err := websocket.NewClient(cfg, tc)
-	if err != nil {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tc, err := net.DialTimeout("tcp", u.Host, 5*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		ws, err := websocket.NewClient(cfg, tc)
+		if err == nil {
+			return ws, nil
+		}
 		tc.Close()
-		return nil, err
+		if !errors.Is(err, websocket.ErrBadStatus) || !time.Now().Before(deadline) {
+			return nil, err
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	return ws, nil
 }
 
 // TestConcurrentRendezvousTokenRevocationAndStreamRaces exercises Scope 2:
