@@ -691,6 +691,14 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		if err != nil {
 			return err
 		}
+		if hasPrevLatest && prevLatestCommit != rec.CommitSHA {
+			if rec.Kind != KindTask || rec.Ref == "" || isDefaultOrProtectedBranch(rec.Ref, "") {
+				if _, err := tx.ExecContext(ctx, s.q(`UPDATE grainfile_index SET ready_emitted = 1 WHERE LOWER(repo) = LOWER(?) AND path = ? AND commit_sha <> ?`),
+					rec.Repo, rec.Path, rec.CommitSHA); err != nil {
+					return err
+				}
+			}
+		}
 
 		if hasPrevLatest && prevLatestDraft == 0 && rec.Draft {
 			if rec.Kind == KindProcess {
@@ -1115,27 +1123,28 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 
 // GetIndex returns the indexed Grainfile metadata for (repo, path, commitSHA).
 // When commitSHA is empty, it returns the most recently updated non-removed
-// record for (repo, path).
+// record for (repo, path). When commitSHA is non-empty, it requires the latest
+// non-removed record for (repo, path) to match commitSHA so superseded commits
+// cannot bypass draft transitions or reference removals.
 func (s *Store) GetIndex(ctx context.Context, repo, filePath, commitSHA string) (IndexRecord, error) {
 	canonRepo, err := canonicalRepoFromAnyRef(repo)
 	if err != nil {
 		return IndexRecord{}, err
 	}
 	cleanPath := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(filePath), "/"))
-	var row *sql.Row
-	if commitSHA != "" {
-		normRef := normalizeURLRef(commitSHA, "")
-		row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND (commit_sha = ? OR ref = ? OR ref = ?) AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
-			canonRepo, cleanPath, commitSHA, commitSHA, normRef)
-	} else {
-		row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
-			canonRepo, cleanPath)
-	}
+	row := s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC, commit_sha DESC LIMIT 1`),
+		canonRepo, cleanPath)
 	rec, err := scanIndexRecord(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return IndexRecord{}, ErrNotFound
 	}
-	return rec, err
+	if err != nil {
+		return IndexRecord{}, err
+	}
+	if commitSHA != "" && !refMatchesIndexRecord(commitSHA, rec) {
+		return IndexRecord{}, ErrNotFound
+	}
+	return rec, nil
 }
 
 func refMatchesIndexRecord(refOrSHA string, rec IndexRecord) bool {
@@ -1152,31 +1161,13 @@ func refMatchesIndexRecord(refOrSHA string, rec IndexRecord) bool {
 }
 
 // GetIndexByURL looks up an indexed Grainfile by its canonical URL (or by the
-// (repo, path) parsed from rawURL) and optional commitSHA.
+// (repo, path) parsed from rawURL) and optional commitSHA, verifying against
+// the latest non-removed record for (repo, path).
 func (s *Store) GetIndexByURL(ctx context.Context, rawURL, commitSHA string) (IndexRecord, error) {
 	parsed, err := ParseRef(rawURL)
 	if err == nil && parsed.Form == RefRemote {
-		canonURL := parsed.CanonicalURL()
-		var row *sql.Row
-		if commitSHA != "" {
-			normRef := normalizeURLRef(commitSHA, "")
-			row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND (commit_sha = ? OR ref = ? OR ref = ?) AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
-				canonURL, commitSHA, commitSHA, normRef)
-		} else {
-			row = s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND removed = 0 ORDER BY updated_at DESC LIMIT 1`),
-				canonURL)
-		}
-		if rec, scanErr := scanIndexRecord(row); scanErr == nil {
-			if refMatchesIndexRecord(parsed.GitRef, rec) && refMatchesIndexRecord(commitSHA, rec) {
-				return rec, nil
-			}
-		}
 		if parsed.Repo != "" && parsed.Path != "" {
-			lookupRef := commitSHA
-			if lookupRef == "" {
-				lookupRef = parsed.GitRef
-			}
-			rec, getErr := s.GetIndex(ctx, parsed.Repo, parsed.Path, lookupRef)
+			rec, getErr := s.GetIndex(ctx, parsed.Repo, parsed.Path, "")
 			if getErr != nil {
 				return IndexRecord{}, getErr
 			}
@@ -1184,6 +1175,14 @@ func (s *Store) GetIndexByURL(ctx context.Context, rawURL, commitSHA string) (In
 				return IndexRecord{}, ErrNotFound
 			}
 			return rec, nil
+		}
+		canonURL := parsed.CanonicalURL()
+		row := s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND removed = 0 ORDER BY updated_at DESC, commit_sha DESC LIMIT 1`),
+			canonURL)
+		if rec, scanErr := scanIndexRecord(row); scanErr == nil {
+			if refMatchesIndexRecord(parsed.GitRef, rec) && refMatchesIndexRecord(commitSHA, rec) {
+				return rec, nil
+			}
 		}
 	}
 	return IndexRecord{}, ErrNotFound
@@ -1683,6 +1682,9 @@ func (s *Store) RecordDependencyCompletedByNode(ctx context.Context, nodeID, com
 		return nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
 	}
 	rec, err := s.GetIndexByURL(ctx, completedURL, commitSHA)
+	if errors.Is(err, ErrNotFound) && commitSHA != "" {
+		rec, err = s.GetIndexByURL(ctx, completedURL, "")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1729,17 +1731,34 @@ func (s *Store) DependenciesSatisfied(ctx context.Context, grainfileURL string) 
 	if len(rec.DependsOn) == 0 {
 		return true, nil
 	}
-	events, err := s.EventsSince(ctx, 0)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT grainfile_url, dependency_url, dependency_state FROM grainfile_events WHERE type = ? ORDER BY seq ASC`), EventDependencyCompleted)
 	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	type compEntry struct {
+		gfURL  string
+		depURL string
+		state  string
+	}
+	var completed []compEntry
+	for rows.Next() {
+		var e compEntry
+		if err := rows.Scan(&e.gfURL, &e.depURL, &e.state); err != nil {
+			return false, err
+		}
+		completed = append(completed, e)
+	}
+	if err := rows.Err(); err != nil {
 		return false, err
 	}
 	for _, depURL := range rec.DependsOn {
 		done := false
-		for _, ev := range events {
-			if ev.Type != EventDependencyCompleted || ev.DependencyState != "done" {
+		for _, ev := range completed {
+			if ev.state != "done" && ev.state != "completed" && ev.state != "success" {
 				continue
 			}
-			if sameURLOrRepoPath(ev.DependencyURL, depURL) || sameURLOrRepoPath(ev.GrainfileURL, depURL) {
+			if sameURLOrRepoPath(ev.depURL, depURL) || sameURLOrRepoPath(ev.gfURL, depURL) {
 				done = true
 				break
 			}
@@ -2082,7 +2101,12 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 				for _, wanted := range out.Recipients {
 					for _, claimed := range cl.recipients {
 						if strings.EqualFold(wanted, claimed) || IsSameRepo(wanted, claimed) {
-							if !sameTeamOwners[strings.ToLower(cl.owner)] {
+							sameTeam, cached := sameTeamOwners[strings.ToLower(cl.owner)]
+							if !cached && s.SameTeam != nil {
+								sameTeam = s.SameTeam(ctx, out.Owner, cl.owner)
+								sameTeamOwners[strings.ToLower(cl.owner)] = sameTeam
+							}
+							if !sameTeam {
 								return fmt.Errorf("%w: recipient %q is already claimed by another owner", ErrUnauthorized, wanted)
 							}
 						}

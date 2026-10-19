@@ -87,6 +87,7 @@ FORBIDDEN_JINJA2_NODES = (
     jinja2.nodes.Import,
     jinja2.nodes.FromImport,
 )
+ALLOWED_JINJA2_FILTERS = frozenset(("default", "d", "lower", "upper", "trim", "replace"))
 
 
 class Finding(Exception):
@@ -117,27 +118,108 @@ def _mapping(loader, node, deep=False):
 
 
 Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
-for _ch in "yYnN":  # §5.3: YAML 1.2 booleans only
-    Loader.yaml_implicit_resolvers.pop(_ch, None)
+for _ch in "yYnNoO":  # §5.3: YAML 1.2 booleans only (preserve null resolver on n/N)
+    Loader.yaml_implicit_resolvers[_ch] = [
+        r for r in Loader.yaml_implicit_resolvers.get(_ch, [])
+        if r[0] != "tag:yaml.org,2002:bool"
+    ]
 for _ch, _rs in list(Loader.yaml_implicit_resolvers.items()):
     Loader.yaml_implicit_resolvers[_ch] = [r for r in _rs if r[0] != "tag:yaml.org,2002:timestamp"]
-Loader.yaml_implicit_resolvers["o"] = [r for r in Loader.yaml_implicit_resolvers.get("o", [])
-                                       if r[0] != "tag:yaml.org,2002:bool"]
-Loader.yaml_implicit_resolvers["O"] = [r for r in Loader.yaml_implicit_resolvers.get("O", [])
-                                       if r[0] != "tag:yaml.org,2002:bool"]
+
+
+def _strip_yaml_quoted_and_comments(src):
+    """Replace contents of YAML quoted strings and comments with spaces for GF004 scanning."""
+    out = []
+    in_single = False
+    in_double = False
+    in_comment = False
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch == "\n":
+            in_comment = False
+            out.append("\n")
+            i += 1
+            continue
+        if in_comment:
+            out.append(" ")
+            i += 1
+            continue
+        if in_single:
+            if ch == "'":
+                if i + 1 < n and src[i + 1] == "'":
+                    out.append("  ")
+                    i += 2
+                    continue
+                in_single = False
+                out.append("'")
+            else:
+                out.append(" ")
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                out.append("  ")
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+                out.append('"')
+            else:
+                out.append(" ")
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            out.append("'")
+        elif ch == '"':
+            in_double = True
+            out.append('"')
+        elif ch == "#" and (i == 0 or src[i - 1] in (" ", "\t", "\n", "\r")):
+            in_comment = True
+            out.append(" ")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def render_template(raw_text, path="<template>", cli_vars=None):
     """Render a sandboxed .grain.md.jinja2 template -> (rendered_text, template_vars) or raises Finding."""
-    env = jinja2.sandbox.ImmutableSandboxedEnvironment(loader=None)
+    if isinstance(raw_text, bytes):
+        if len(raw_text) > MAX_FILE_BYTES:
+            raise Finding("GF006", path, "grainfile template exceeds 1 MiB")
+        try:
+            raw_text = raw_text.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Finding("GF003", path, "not UTF-8")
+    elif len(raw_text.encode("utf-8")) > MAX_FILE_BYTES:
+        raise Finding("GF006", path, "grainfile template exceeds 1 MiB")
+    raw_text = raw_text.replace("\r\n", "\n")
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(loader=None, keep_trailing_newline=True)
     try:
         ast = env.parse(raw_text)
     except jinja2.TemplateSyntaxError as e:
         raise Finding("GF033", path, "Jinja2 syntax error: %s" % e)
     for node in ast.find_all(FORBIDDEN_JINJA2_NODES):
         raise Finding("GF034", path, "forbidden Jinja2 tag %s in sandboxed grainfile template" % type(node).__name__.lower())
-    template_vars = sorted(jinja2.meta.find_undeclared_variables(ast))
+    for fnode in ast.find_all(jinja2.nodes.Filter):
+        if fnode.name not in ALLOWED_JINJA2_FILTERS:
+            raise Finding("GF033", path, "unsupported Jinja2 filter %r" % fnode.name)
+    for mnode in ast.find_all((
+        jinja2.nodes.Add,
+        jinja2.nodes.Sub,
+        jinja2.nodes.Mul,
+        jinja2.nodes.Div,
+        jinja2.nodes.FloorDiv,
+        jinja2.nodes.Mod,
+        jinja2.nodes.Pow,
+        jinja2.nodes.Concat,
+    )):
+        raise Finding("GF033", path, "unsupported Jinja2 operator %s" % type(mnode).__name__.lower())
     try:
+        template_vars = sorted(jinja2.meta.find_undeclared_variables(ast))
         rendered = env.from_string(raw_text).render(**(cli_vars or {}))
     except jinja2.TemplateError as e:
         raise Finding("GF033", path, "Jinja2 render error: %s" % e)
@@ -150,16 +232,21 @@ def render_template(raw_text, path="<template>", cli_vars=None):
 
 def parse_text(text, path):
     """Parse decoded Grainfile text -> (front matter, body) or raises Finding."""
+    text = text.replace("\r\n", "\n")
     lines = text.split("\n")
     if lines[0].rstrip() != "---":
         raise Finding("GF003", path, "no front matter")
     end = next((i for i in range(1, len(lines)) if lines[i].rstrip() == "---"), None)
     if end is None:
         raise Finding("GF003", path, "unclosed front matter")
+    for fm_line in lines[1:end]:
+        if fm_line.strip() == "...":
+            raise Finding("GF004", path, "multiple YAML documents are not allowed in front matter")
     src = "\n".join(lines[1:end])
     if len(src.encode("utf-8")) > MAX_FM_BYTES:
         raise Finding("GF006", path, "front matter exceeds 64 KiB")
-    if re.search(r"(^|[\s\[{,:])[&*][A-Za-z0-9_-]+|<<\s*:|(^|\s)!", src, re.M):
+    stripped_src = _strip_yaml_quoted_and_comments(src)
+    if re.search(r"(^|[\s\[{,:])[&*][A-Za-z0-9_-]+|<<\s*:|(^|[\s\[{,:])!", stripped_src, re.M):
         raise Finding("GF004", path, "anchors, aliases, merge keys and tags are not allowed")
     try:
         fm = yaml.load(src, Loader=Loader)
@@ -235,10 +322,24 @@ def canon_repo(url):
     return "%s://%s%s" % (u.scheme, host, path)
 
 
+REPO_SEG_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _has_encoded_path_hazard(s):
+    low = s.lower()
+    return "%2e" in low or "%2f" in low or "%5c" in low or "%00" in low
+
+
+def _valid_repo_seg(seg):
+    return bool(seg) and seg not in (".", "..") and bool(REPO_SEG_RE.match(seg))
+
+
 def parse_ref(s):
-    """-> Ref, or raises Finding('GF035') (§8.1)."""
+    """-> Ref, or raises Finding('GF035') / Finding('GF036') (§8.1)."""
     if not isinstance(s, str) or not s or re.search(r"[\s\\]", s):
         raise Finding("GF035", "", "a reference must be a non-empty string without whitespace or backslashes")
+    if _has_encoded_path_hazard(s):
+        raise Finding("GF035", "", "encoded path traversal or separator sequences are not allowed in references (%r)" % s)
     if "#" in s:
         s, _, anchor = s.partition("#")
         if not anchor or not ANCHOR_RE.match(anchor):
@@ -257,7 +358,7 @@ def parse_ref(s):
         if not (s.startswith("https://") or s.startswith("file://")):
             raise Finding("GF035", "", "unsupported reference scheme in %r (only https:// is allowed)" % s)
         u = urllib.parse.urlsplit(s)
-        if u.username or u.password:
+        if u.username or u.password or "@" in (u.netloc or ""):
             raise Finding("GF035", "", "credentials are not allowed in reference URLs (%r)" % s)
         if "//" in u.path:
             raise Finding("GF035", "", "'//' path separators are not allowed; use standard forge /blob/<ref>/ or /tree/<ref>/ URLs (%r)" % s)
@@ -286,8 +387,16 @@ def parse_ref(s):
                 if any(seg.endswith(".git") for seg in segs[:-1]):
                     raise Finding("GF035", "", "sub-path in repository URL must use /blob/<ref>/ or /tree/<ref>/: %r" % s)
                 repo_segs, mode, gitref, sub_segs = segs, None, None, []
+            if any(not _valid_repo_seg(seg) for seg in repo_segs):
+                raise Finding("GF035", "", "invalid repository path segment in %r" % s)
+            if gitref is not None and (not gitref or gitref in (".", "..") or "@" in gitref or "\\" in gitref):
+                raise Finding("GF035", "", "invalid git ref in %r" % s)
             if mode == "blob" and (not sub_segs or trailing):
                 raise Finding("GF035", "", "blob URL must name a file path: %r" % s)
+            if any(seg == ".." for seg in sub_segs):
+                raise Finding("GF036", "", "reference path climbs above repository root: %r" % s)
+            if any(seg == "." for seg in sub_segs):
+                raise Finding("GF035", "", "dot path segments are not allowed in remote reference URLs: %r" % s)
             host = u.hostname.lower()
             if u.port and u.port != 443:
                 host += ":%d" % u.port
@@ -310,8 +419,14 @@ def parse_ref(s):
                 repo_name, mode, gitref, sub_segs = segs[0], None, None, segs[1:]
             if mode == "blob" and (not sub_segs or trailing):
                 raise Finding("GF035", "", "blob URL must name a file path: %r" % s)
+            if any(seg == ".." for seg in sub_segs):
+                raise Finding("GF036", "", "reference path climbs above repository root: %r" % s)
+            if any(seg == "." for seg in sub_segs):
+                raise Finding("GF035", "", "dot path segments are not allowed in remote reference URLs: %r" % s)
             sub = "/".join(sub_segs) + (trailing if sub_segs else "")
             return Ref("remote", repo="file://" + repo_name, path=sub, gitref=gitref, anchor=anchor, mode=mode)
+    if "//" in s:
+        raise Finding("GF035", "", "'//' path separators are not allowed in references (%r)" % s)
     if s.startswith("/"):
         return Ref("rooted", path=s[1:], anchor=anchor)
     return Ref("relative", path=s, anchor=anchor)
@@ -480,7 +595,7 @@ class Linter:
         try:
             r = parse_ref(s)
         except Finding as e:
-            raise Finding("GF035", "", "%s: %s" % (field, e.msg))
+            raise Finding(e.code, "", "%s: %s" % (field, e.msg))
         repo = it.repo
         if r.form == "remote":
             stub = self.stubs.get(r.repo)
@@ -540,7 +655,7 @@ class Linter:
         try:
             r = parse_ref(s)
         except Finding as e:
-            self.add("GF035", where, "%s: %s" % (field, e.msg))
+            self.add(e.code, where, "%s: %s" % (field, e.msg))
             return
         if r.anchor:
             self.add("GF035", where, "%s: deployment identity %r may not carry an anchor" % (field, s))

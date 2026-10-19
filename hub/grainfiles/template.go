@@ -58,6 +58,7 @@ func renderTemplateAtPath(path, raw string, vars map[string]string) (string, []s
 	if !utf8.ValidString(raw) {
 		return "", nil, Errors{newFinding(CodeMalformedFile, path, "not UTF-8")}
 	}
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 
 	tokens, fErr := lexTemplate(path, raw)
 	if fErr != nil {
@@ -157,15 +158,14 @@ func lexTemplate(path, src string) ([]tmplToken, *Finding) {
 		inner := strings.TrimSpace(src[bodyStart:bodyEnd])
 		switch openKind {
 		case "{#":
-			// Comment is stripped, but preserve trim flags using an empty statement marker if needed.
-			if trimL || trimR {
-				rawTokens = append(rawTokens, tmplToken{
-					kind:      tokStmt,
-					content:   "",
-					trimLeft:  trimL,
-					trimRight: trimR,
-				})
-			}
+			// Comment is stripped, but keep a placeholder token during the whitespace
+			// trim pass so a following {%- or {{- does not trim text across the comment.
+			rawTokens = append(rawTokens, tmplToken{
+				kind:      tokStmt,
+				content:   "",
+				trimLeft:  trimL,
+				trimRight: trimR,
+			})
 		case "{{":
 			if inner == "" {
 				f := newFinding(CodeTemplateSyntax, path, "empty Jinja2 expression {{ }}")
@@ -561,7 +561,7 @@ type atomExpr struct {
 
 type filterCall struct {
 	name string
-	args []*atomExpr
+	args []*pipelineExpr
 }
 
 type pipelineExpr struct {
@@ -588,6 +588,14 @@ func parsePipelineExpr(path, s string, recordVar func(string)) (*pipelineExpr, *
 		pe.filters = append(pe.filters, fc)
 	}
 	return pe, nil
+}
+
+func isLoopAttr(s string) bool {
+	switch s {
+	case "loop.index", "loop.index0", "loop.revindex", "loop.revindex0", "loop.first", "loop.last", "loop.length":
+		return true
+	}
+	return false
 }
 
 func parseAtomExpr(path, s string, recordVar func(string)) (*atomExpr, *Finding) {
@@ -640,6 +648,10 @@ func parseAtomExpr(path, s string, recordVar func(string)) (*atomExpr, *Finding)
 	if num, err := strconv.ParseFloat(s, 64); err == nil {
 		return &atomExpr{literal: tmplVal{defined: true, kind: valNumber, num: num}}, nil
 	}
+	if isLoopAttr(s) {
+		recordVar("loop")
+		return &atomExpr{isVar: true, varName: s}, nil
+	}
 	if isValidIdent(s) {
 		recordVar(s)
 		return &atomExpr{isVar: true, varName: s}, nil
@@ -671,24 +683,26 @@ func parseFilterCall(path, s string, recordVar func(string)) (filterCall, *Findi
 		f := newFinding(CodeTemplateSyntax, path, fmt.Sprintf("unsupported Jinja2 filter %q", name))
 		return filterCall{}, &f
 	}
-	var args []*atomExpr
+	var args []*pipelineExpr
 	if hasParens && argsStr != "" {
 		rawArgs, ok := splitTopLevel(argsStr, ',')
 		if !ok {
 			f := newFinding(CodeTemplateSyntax, path, fmt.Sprintf("malformed arguments in filter %q", s))
 			return filterCall{}, &f
 		}
-		for _, ra := range rawArgs {
+		for argIdx, ra := range rawArgs {
 			ra = strings.TrimSpace(ra)
 			// Support optional keyword `boolean=true` / `boolean=false` on default()
-			if (name == "default" || name == "d") && strings.HasPrefix(ra, "boolean=") {
-				ra = strings.TrimSpace(strings.TrimPrefix(ra, "boolean="))
+			if (name == "default" || name == "d") && argIdx == 1 {
+				if eqIdx := strings.IndexByte(ra, '='); eqIdx >= 0 && strings.TrimSpace(ra[:eqIdx]) == "boolean" {
+					ra = strings.TrimSpace(ra[eqIdx+1:])
+				}
 			}
-			ae, fErr := parseAtomExpr(path, ra, recordVar)
+			pe, fErr := parsePipelineExpr(path, ra, recordVar)
 			if fErr != nil {
 				return filterCall{}, fErr
 			}
-			args = append(args, ae)
+			args = append(args, pe)
 		}
 	}
 	switch name {
@@ -729,7 +743,77 @@ type condExpr struct {
 	val   *pipelineExpr
 }
 
+func stripOuterParens(s string) (string, bool) {
+	for {
+		s = strings.TrimSpace(s)
+		if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+			return s, true
+		}
+		inQuote := byte(0)
+		escaped := false
+		parenDepth := 0
+		bracketDepth := 0
+		wrapsAll := true
+		for i := 0; i < len(s); i++ {
+			ch := s[i]
+			if inQuote != 0 {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if ch == '\\' {
+					escaped = true
+					continue
+				}
+				if ch == inQuote {
+					inQuote = 0
+				}
+				continue
+			}
+			switch ch {
+			case '\'', '"':
+				inQuote = ch
+			case '(':
+				parenDepth++
+			case ')':
+				parenDepth--
+				if parenDepth < 0 {
+					return "", false
+				}
+				if parenDepth == 0 && i < len(s)-1 {
+					wrapsAll = false
+				}
+			case '[':
+				bracketDepth++
+			case ']':
+				bracketDepth--
+				if bracketDepth < 0 {
+					return "", false
+				}
+			}
+		}
+		if inQuote != 0 || parenDepth != 0 || bracketDepth != 0 {
+			return "", false
+		}
+		if !wrapsAll {
+			return s, true
+		}
+		inner := strings.TrimSpace(s[1 : len(s)-1])
+		if inner == "" {
+			return "", false
+		}
+		s = inner
+	}
+}
+
 func parseCondExpr(path, s string, recordVar func(string)) (*condExpr, *Finding) {
+	unwrapped, ok := stripOuterParens(s)
+	if !ok {
+		f := newFinding(CodeTemplateSyntax, path, fmt.Sprintf("malformed condition %q", s))
+		return nil, &f
+	}
+	s = unwrapped
+
 	orParts, ok := splitWordOperator(s, "or")
 	if !ok {
 		f := newFinding(CodeTemplateSyntax, path, fmt.Sprintf("malformed condition %q", s))
@@ -771,7 +855,7 @@ func parseCondExpr(path, s string, recordVar func(string)) (*condExpr, *Finding)
 	}
 
 	trimmed := strings.TrimSpace(s)
-	if strings.HasPrefix(trimmed, "not ") || strings.HasPrefix(trimmed, "not\t") {
+	if strings.HasPrefix(trimmed, "not ") || strings.HasPrefix(trimmed, "not\t") || strings.HasPrefix(trimmed, "not(") {
 		sub, fErr := parseCondExpr(path, strings.TrimSpace(trimmed[3:]), recordVar)
 		if fErr != nil {
 			return nil, fErr
@@ -840,8 +924,25 @@ func evalNodes(path string, nodes []astNode, env map[string]tmplVal, out *string
 			}
 			items := iterValToList(iterVal)
 			prev, hadPrev := env[node.loopVar]
-			for _, item := range items {
+			loopKeys := []string{"loop.index", "loop.index0", "loop.revindex", "loop.revindex0", "loop.first", "loop.last", "loop.length"}
+			savedLoop := make(map[string]tmplVal, len(loopKeys))
+			hadLoopKey := make(map[string]bool, len(loopKeys))
+			for _, k := range loopKeys {
+				if v, ok := env[k]; ok {
+					savedLoop[k] = v
+					hadLoopKey[k] = true
+				}
+			}
+			total := len(items)
+			for idx, item := range items {
 				env[node.loopVar] = item
+				env["loop.index"] = tmplVal{defined: true, kind: valNumber, num: float64(idx + 1)}
+				env["loop.index0"] = tmplVal{defined: true, kind: valNumber, num: float64(idx)}
+				env["loop.revindex"] = tmplVal{defined: true, kind: valNumber, num: float64(total - idx)}
+				env["loop.revindex0"] = tmplVal{defined: true, kind: valNumber, num: float64(total - 1 - idx)}
+				env["loop.first"] = tmplVal{defined: true, kind: valBool, b: idx == 0}
+				env["loop.last"] = tmplVal{defined: true, kind: valBool, b: idx == total-1}
+				env["loop.length"] = tmplVal{defined: true, kind: valNumber, num: float64(total)}
 				if fErr := evalNodes(path, node.body, env, out); fErr != nil {
 					return fErr
 				}
@@ -850,6 +951,13 @@ func evalNodes(path string, nodes []astNode, env map[string]tmplVal, out *string
 				env[node.loopVar] = prev
 			} else {
 				delete(env, node.loopVar)
+			}
+			for _, k := range loopKeys {
+				if hadLoopKey[k] {
+					env[k] = savedLoop[k]
+				} else {
+					delete(env, k)
+				}
 			}
 		}
 	}
@@ -975,7 +1083,7 @@ func evalPipeline(path string, pe *pipelineExpr, env map[string]tmplVal) (tmplVa
 	for _, fc := range pe.filters {
 		var argVals []tmplVal
 		for _, a := range fc.args {
-			av, fErr := evalAtom(path, a, env)
+			av, fErr := evalPipeline(path, a, env)
 			if fErr != nil {
 				return tmplVal{}, fErr
 			}
@@ -1218,6 +1326,8 @@ func unquoteJinjaString(s string) (string, bool) {
 			default:
 				out.WriteByte(s[i])
 			}
+		} else if s[i] == quote {
+			return "", false
 		} else {
 			out.WriteByte(s[i])
 		}
