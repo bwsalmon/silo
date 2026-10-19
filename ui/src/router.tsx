@@ -6,6 +6,7 @@ import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
 import { Link as MuiLink, type LinkProps } from '@mui/material';
 
 export type Route =
+  | { page: 'inbox'; path?: '/' | '/inbox' }
   | { page: 'backlog'; team?: string }
   | { page: 'task'; id: string }
   | { page: 'grainfiles' }
@@ -18,7 +19,9 @@ export type Route =
 
 export function parseRoute(path: string): Route {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
-  if (parts.length === 0) return { page: 'backlog' };
+  if (parts.length === 0) return { page: 'inbox' };
+  if (parts[0] === 'inbox' && parts.length === 1) return { page: 'inbox', path: '/inbox' };
+  if (parts[0] === 'backlog' && parts.length === 1) return { page: 'backlog' };
   if (parts[0] === 'teams' && parts.length === 1) return { page: 'teams' };
   if (parts[0] === 'teams' && parts.length === 2) return { page: 'backlog', team: parts[1] };
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'members') return { page: 'team', team: parts[1] };
@@ -33,8 +36,10 @@ export function parseRoute(path: string): Route {
 
 export function routePath(r: Route): string {
   switch (r.page) {
+    case 'inbox':
+      return r.path ?? '/';
     case 'backlog':
-      return r.team ? `/teams/${encodeURIComponent(r.team)}` : '/';
+      return r.team ? `/teams/${encodeURIComponent(r.team)}` : '/backlog';
     case 'task':
       return `/tasks/${encodeURIComponent(r.id)}`;
     case 'grainfiles':

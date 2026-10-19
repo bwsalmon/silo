@@ -82,7 +82,8 @@ test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, file
 
   const page = await pageAs(world.admin);
   const pages: [string, string, () => Promise<unknown>][] = [
-    ['the backlog', '/', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
+    ['the inbox', '/', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
+    ['the backlog', '/backlog', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
     ["a team's backlog", `/teams/${world.team}`, () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
     ['the teams', '/teams', () => page.getByText(world.team).first().waitFor()],
     ["a team's members", `/teams/${world.team}/members`, () => page.getByText(world.member).first().waitFor()],

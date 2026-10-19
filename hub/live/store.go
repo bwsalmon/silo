@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/dbaccess"
@@ -254,4 +255,49 @@ func (s *Store) ApprovalRequest(ctx context.Context, task, id string) (events.Ap
 		}
 	}
 	return events.ApprovalRequest{}, false, rows.Err()
+}
+
+// TaskInboxState inspects task's kept awaiting_reply, message, and
+// approval_request events, reporting whether its latest awaiting_reply
+// state is still waiting and returning all approval_request events in
+// sequence order.
+func (s *Store) TaskInboxState(ctx context.Context, task string) (awaiting bool, question string, awaitingAt time.Time, approvals []events.ApprovalRequest, approvalTimes []time.Time, err error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND type IN (?, ?, ?) ORDER BY seq`),
+		task, events.TypeAwaitingReply, events.TypeMessage, events.TypeApprovalRequest)
+	if err != nil {
+		return false, "", time.Time{}, nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return false, "", time.Time{}, nil, nil, err
+		}
+		var e Event
+		if err := json.Unmarshal([]byte(body), &e); err != nil {
+			return false, "", time.Time{}, nil, nil, fmt.Errorf("live: task %s's event: %w", task, err)
+		}
+		switch e.Type {
+		case events.TypeAwaitingReply:
+			if ar := e.AwaitingReply; ar != nil {
+				if ar.State == events.AwaitingWaiting {
+					awaiting = true
+					question = ar.Question
+					awaitingAt = e.Time
+				} else {
+					awaiting = false
+					question = ""
+				}
+			}
+		case events.TypeMessage:
+			awaiting = false
+			question = ""
+		case events.TypeApprovalRequest:
+			if a := e.ApprovalRequest; a != nil {
+				approvals = append(approvals, *a)
+				approvalTimes = append(approvalTimes, e.Time)
+			}
+		}
+	}
+	return awaiting, question, awaitingAt, approvals, approvalTimes, rows.Err()
 }

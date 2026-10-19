@@ -119,7 +119,7 @@ func Open(ctx context.Context, url string) (*Store, error) { return open(ctx, ur
 func OpenExisting(ctx context.Context, url string) (*Store, error) { return open(ctx, url, false) }
 
 // Tables are the directory's tables.
-var Tables = []string{"teams", "team_members", "team_repos", "node_tokens", "team_settings"}
+var Tables = []string{"teams", "team_members", "team_repos", "node_tokens", "team_settings", "user_preferences"}
 
 func open(ctx context.Context, url string, create bool) (*Store, error) {
 	var (
@@ -203,6 +203,13 @@ CREATE TABLE IF NOT EXISTS team_settings (
 	lost_requeue_seconds BIGINT NOT NULL DEFAULT 0,
 	anyone_may_propose INTEGER NOT NULL DEFAULT 1,
 	require_approval INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS user_preferences (
+	email TEXT PRIMARY KEY,
+	theme TEXT NOT NULL DEFAULT 'light',
+	inbox_nodes TEXT NOT NULL DEFAULT '[]',
+	inbox_configured INTEGER NOT NULL DEFAULT 0,
+	updated_at BIGINT NOT NULL
 );
 `
 

@@ -558,9 +558,37 @@ the API's), and released from a tag by a workflow with the credential.
 `hub/ui/static/placeholder.html`, `ui/src/App.tsx`) is branded **Grain
 Hub**, retaining the shared Grain MUI theme (`ui/src/theme.ts`) and
 shared leaf components (`Markdown.tsx`, `DiffView.tsx`, `StateChip.tsx`,
-`Timeline.tsx`). The top navigation bar includes **Grainfiles**
-(`/grainfiles`) alongside **Backlog** (`/`), **Teams** (`/teams`),
-**Nodes** (`/nodes`), and **File a task** (`/file`).
+`Timeline.tsx`). The top `AppBar` includes:
+
+- **Deployment Switcher** (`data-testid="deployment-switcher"`): defaults
+  to `Grain Hub (All deployments)` and lists every Grain deployment
+  (`NodeEntry` from `GET /v1/nodes`) the signed-in user may access, with
+  its online/offline indicator, owning team, and role chip (`viewer_role`:
+  `owner`, `admin`, `member`, `proposer`, `viewer`). Selecting an online
+  deployment opens its proxied single-tenant Grain UI (`ui_url`).
+- **Streamlined Hub navigation tabs**: **Inbox** (`/` and `/inbox`, with
+  `data-testid="inbox-count-badge"` showing the count of actionable items
+  across selected deployments), **Grainfiles** (`/grainfiles`), **Teams**
+  (`/teams`), and **Nodes** (`/nodes`).
+- **Theme Switcher** (`data-testid="theme-mode-select"`): switches
+  between `light`, `dark`, and `auto` (resolving `auto` via
+  `prefers-color-scheme: dark` into `"light"` or `"dark"` and syncing the
+  resolved theme to `PUT /v1/me/theme` so `hub/nodeui` propagates
+  `theme: "light"|"dark"` to every deployment's Grain UI).
+
+**Unified Inbox (`/` and `/inbox`, `ui/src/pages/Inbox.tsx`, `hub/tasks`, `hub/directory`).**
+Aggregates actionable items (`GET /v1/inbox`) across the user's selected
+Grain deployments (`GET /v1/me/inbox`, `PUT /v1/me/inbox`):
+
+- Deployment selector (`data-testid="inbox-deployment-selector"`) lets
+  the user choose which accessible deployments feed their inbox
+  (defaulting to all deployments where the caller is `owner`, `admin`, or
+  `member`).
+- Filterable by kind (`all`, `awaiting_reply`, `approval_request`,
+  `proposal`, `failed`), with inline quick actions (Reply for
+  `awaiting_reply`, Allow/Deny for `approval_request`, Approve/Reject for
+  `proposal`, and Requeue for `failed`) and direct `"Open in <node> Grain UI"`
+  links (`data-testid="open-in-node-ui"`, also shown on `/tasks/{id}`).
 
 **Hub Admin mode toggle and visual marker (`ui/src/App.tsx`, `sdk/ts`, `hub/directory`).**
 Users configured in `SILO_HUB_ADMINS` (`directory.API.HubAdmins`) can

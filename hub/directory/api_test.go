@@ -52,11 +52,13 @@ func newTestHub(t *testing.T) *testHub {
 		Registry:     registry.New(),
 		Authenticate: s.Authenticate,
 		Admit:        s.Admit,
+		ValidateUI:   s.ValidateNodeUI,
 		Heartbeat:    time.Second,
 		Logf:         testlog.Logf(t),
 	}
-	api := &API{Store: s, Auth: headerAuth{}, HubAdmins: []string{"group:hub-admins@example.com"}, Disconnect: rv.Disconnect}
+	api := &API{Store: s, Auth: headerAuth{}, HubAdmins: []string{"group:hub-admins@example.com"}, Disconnect: rv.Disconnect, Registry: rv.Registry}
 	rv.Visible = api.Visible
+	rv.ResolveEntries = api.ResolveEntries
 	m := http.NewServeMux()
 	m.Handle(rendezvous.ConnectPath, rv.Handler())
 	m.Handle(rendezvous.DirectoryPath, rv.Handler())
@@ -552,5 +554,113 @@ func TestAPIViewerProposerAndSettings(t *testing.T) {
 		if !errors.Is(err, rendezvous.ErrRefused) {
 			t.Errorf("%s connecting node for infra repo: %v, want ErrRefused", user, err)
 		}
+	}
+}
+
+func TestUserThemeInboxPreferencesAndDirectoryRoles(t *testing.T) {
+	h := newTestHub(t)
+	const (
+		root     = "root@example.com"
+		alice    = "alice@example.com"    // owner of ws-infra, admin of infra
+		dave     = "dave@example.com"     // member of infra
+		vera     = "vera@example.com"     // viewer of infra
+		bob      = "bob@example.com"      // owner of ws-web, admin of web
+		outsider = "outsider@example.com" // in no team, gets proposer on infra via anyone_may_propose
+		admins   = "hub-admins@example.com"
+	)
+
+	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"}, admins)
+	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "web", "name": "Web"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+dave, map[string]string{"role": "member"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+vera, map[string]string{"role": "viewer"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/user:"+bob, map[string]string{"role": "admin"}, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil, admins)
+	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", nil, admins)
+
+	// Set web's anyone_may_propose = false, infra's anyone_may_propose = true & require_approval = true.
+	h.want(t, 200, alice, "PUT", TeamsPath+"/infra/settings", map[string]any{
+		"anyone_may_propose": true,
+		"require_approval":   true,
+	})
+	h.want(t, 200, bob, "PUT", TeamsPath+"/web/settings", map[string]any{
+		"anyone_may_propose": false,
+		"require_approval":   false,
+	})
+
+	// Register ws-infra (offers UI with inferred team "infra") and ws-web (offers UI for "web").
+	nodeInfra := registry.Node{
+		ID:    "ws-infra",
+		Repos: []string{"bwsalmon/silo"},
+		Slots: 2,
+		UI:    &registry.NodeUI{Offered: true},
+	}
+	if err := h.store.ValidateNodeUI(context.Background(), alice, &nodeInfra); err != nil {
+		t.Fatal(err)
+	}
+	leaseInfra, err := h.rv.Registry.Register(nodeInfra, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leaseInfra.Close()
+
+	nodeWeb := registry.Node{
+		ID:    "ws-web",
+		Repos: []string{"bwsalmon/web"},
+		Slots: 2,
+		UI:    &registry.NodeUI{Offered: true, Team: "web"},
+	}
+	if err := h.store.ValidateNodeUI(context.Background(), bob, &nodeWeb); err != nil {
+		t.Fatal(err)
+	}
+	leaseWeb, err := h.rv.Registry.Register(nodeWeb, bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leaseWeb.Close()
+
+	// 1. Theme defaults to "light" and updates via PUT /v1/me/theme.
+	var me struct {
+		Theme           string   `json:"theme"`
+		InboxNodes      []string `json:"inbox_nodes"`
+		InboxConfigured bool     `json:"inbox_configured"`
+	}
+	json.Unmarshal(h.want(t, 200, dave, "GET", MePath, nil), &me)
+	if me.Theme != "light" || me.InboxConfigured || len(me.InboxNodes) != 1 || me.InboxNodes[0] != "ws-infra" {
+		t.Fatalf("dave initial GET /v1/me = %+v", me)
+	}
+	h.want(t, 400, dave, "PUT", MePath+"/theme", map[string]string{"theme": "auto"})
+	h.want(t, 200, dave, "PUT", MePath+"/theme", map[string]string{"theme": "dark"})
+	json.Unmarshal(h.want(t, 200, dave, "GET", MePath, nil), &me)
+	if me.Theme != "dark" {
+		t.Fatalf("dave GET /v1/me after PUT theme = %q, want dark", me.Theme)
+	}
+
+	// 2. GET /v1/nodes returns viewer_role and require_approval; outsider sees ws-infra as proposer.
+	var nodesResp struct {
+		Nodes []registry.Entry `json:"nodes"`
+	}
+	json.Unmarshal(h.want(t, 200, dave, "GET", rendezvous.DirectoryPath, nil), &nodesResp)
+	if len(nodesResp.Nodes) != 1 || nodesResp.Nodes[0].ID != "ws-infra" || nodesResp.Nodes[0].ViewerRole != "member" || !nodesResp.Nodes[0].RequireApproval {
+		t.Fatalf("dave GET /v1/nodes = %+v", nodesResp.Nodes)
+	}
+	json.Unmarshal(h.want(t, 200, outsider, "GET", rendezvous.DirectoryPath, nil), &nodesResp)
+	if len(nodesResp.Nodes) != 1 || nodesResp.Nodes[0].ID != "ws-infra" || nodesResp.Nodes[0].ViewerRole != "proposer" || !nodesResp.Nodes[0].RequireApproval {
+		t.Fatalf("outsider GET /v1/nodes = %+v; want ws-infra with viewer_role=proposer", nodesResp.Nodes)
+	}
+
+	// 3. GET/PUT /v1/me/inbox: viewer defaults to empty inbox_nodes, can opt in to ws-infra, cannot select ws-web (403).
+	var inboxPrefs struct {
+		Nodes      []string `json:"nodes"`
+		Configured bool     `json:"configured"`
+	}
+	json.Unmarshal(h.want(t, 200, vera, "GET", MePath+"/inbox", nil), &inboxPrefs)
+	if inboxPrefs.Configured || len(inboxPrefs.Nodes) != 0 {
+		t.Fatalf("vera default inbox prefs = %+v, want empty unconfigured", inboxPrefs)
+	}
+	h.want(t, 403, vera, "PUT", MePath+"/inbox", map[string]any{"nodes": []string{"ws-web"}})
+	json.Unmarshal(h.want(t, 200, vera, "PUT", MePath+"/inbox", map[string]any{"nodes": []string{"ws-infra"}}), &inboxPrefs)
+	if !inboxPrefs.Configured || len(inboxPrefs.Nodes) != 1 || inboxPrefs.Nodes[0] != "ws-infra" {
+		t.Fatalf("vera saved inbox prefs = %+v", inboxPrefs)
 	}
 }

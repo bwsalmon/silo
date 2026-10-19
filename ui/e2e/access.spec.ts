@@ -9,7 +9,7 @@ test("a member sees only their team's backlog", async ({ world, newWorld, pageAs
   await fileTask(other.member, { repo: other.repo, title: `theirs ${other.n}`, prompt: 'x' });
 
   const page = await pageAs(world.member);
-  await page.goto('/');
+  await page.goto('/backlog');
   await expect(page.getByRole('banner').getByText(world.member)).toBeVisible();
   await expect(page.getByRole('link', { name: `ours ${world.n}` })).toBeVisible();
   await expect(page.getByRole('link', { name: `theirs ${other.n}` })).toHaveCount(0);
@@ -84,7 +84,7 @@ test('a hub admin starts with admin mode off, toggles it on to see all teams and
   await expect(page.getByRole('link', { name: new RegExp(other.team) })).toBeVisible();
 
   // On the backlog, both teams' tasks are visible while Admin mode is on, and only own team's when toggled back off.
-  await page.getByRole('banner').getByRole('button', { name: 'Backlog' }).click();
+  await page.goto('/backlog');
   await expect(page.getByRole('link', { name: `ours-admin ${world.n}` })).toBeVisible();
   await expect(page.getByRole('link', { name: `theirs-admin ${other.n}` })).toBeVisible();
 

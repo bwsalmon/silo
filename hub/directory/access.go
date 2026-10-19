@@ -200,14 +200,22 @@ func extractRepoSlug(raw string) string {
 // When that check fails, it drops ui.team (falling back to owner-only
 // access) and records ui.reason without refusing the node registration.
 func (s *Store) ValidateNodeUI(ctx context.Context, owner string, n *registry.Node) error {
-	if n == nil || n.UI == nil || !n.UI.Offered || strings.TrimSpace(n.UI.Team) == "" {
+	if n == nil {
+		return nil
+	}
+	if n.UI != nil && !n.UI.Offered {
+		return nil
+	}
+	if n.UI == nil && !n.Supports(registry.FeatureNodeUI) {
 		return nil
 	}
 	if s == nil {
-		uiCopy := *n.UI
-		uiCopy.Team = ""
-		uiCopy.Reason = "directory is unavailable"
-		n.UI = &uiCopy
+		if n.UI != nil && strings.TrimSpace(n.UI.Team) != "" {
+			uiCopy := *n.UI
+			uiCopy.Team = ""
+			uiCopy.Reason = "directory is unavailable"
+			n.UI = &uiCopy
+		}
 		return nil
 	}
 	a, err := s.Admission(ctx, []string{owner}, n.Repos)
@@ -218,16 +226,66 @@ func (s *Store) ValidateNodeUI(ctx context.Context, owner string, n *registry.No
 }
 
 // ValidateNodeUI is Store.ValidateNodeUI answered from an Admission
-// snapshot.
+// snapshot. When n offers a UI (n.UI.Offered or FeatureNodeUI) and omits
+// n.UI.Team, it infers ui.team if all of n.Repos are owned by a single
+// team in the directory and owner is a member or admin of that team.
 func (a *Admission) ValidateNodeUI(owner string, n *registry.Node) error {
-	if n == nil || n.UI == nil || !n.UI.Offered {
+	if n == nil {
 		return nil
 	}
-	team := strings.TrimSpace(n.UI.Team)
+	if n.UI != nil && !n.UI.Offered {
+		return nil
+	}
+	if n.UI == nil && !n.Supports(registry.FeatureNodeUI) {
+		return nil
+	}
+	var uiCopy registry.NodeUI
+	if n.UI != nil {
+		uiCopy = *n.UI
+	} else {
+		uiCopy = registry.NodeUI{Offered: true}
+	}
+	team := strings.TrimSpace(uiCopy.Team)
 	if team == "" {
+		if uiCopy.Reason != "" || len(n.Repos) == 0 {
+			if n.UI == nil {
+				n.UI = &uiCopy
+			}
+			return nil
+		}
+		u, err := userPrincipal(owner)
+		if err != nil {
+			return nil
+		}
+		o := strings.TrimPrefix(u, UserPrefix)
+		teams, ok := a.teams[u]
+		if !ok {
+			return fmt.Errorf("%w: owner %s", ErrNotRead, o)
+		}
+		inferred := ""
+		for _, repo := range n.Repos {
+			r, err := normRepo(repo)
+			if err != nil {
+				return nil
+			}
+			repoTeam, ok := a.repos[r]
+			if !ok {
+				return fmt.Errorf("%w: repository %s", ErrNotRead, r)
+			}
+			if repoTeam == "" || (inferred != "" && repoTeam != inferred) {
+				return nil
+			}
+			inferred = repoTeam
+		}
+		if inferred != "" {
+			if r := teams[inferred]; r == Member || r == Admin {
+				uiCopy.Offered = true
+				uiCopy.Team = inferred
+				n.UI = &uiCopy
+			}
+		}
 		return nil
 	}
-	uiCopy := *n.UI
 	u, err := userPrincipal(owner)
 	if err != nil {
 		uiCopy.Team = ""
@@ -287,6 +345,10 @@ type Access struct {
 	// repos maps each repository the principal's teams own to its
 	// ownership.
 	repos map[string]ownership
+	// teamSettings caches explicit team_settings rows for role/proposal
+	// resolution.
+	teamSettings map[string]Settings
+	store        *Store
 }
 
 // ownership is one team_repos row: the team that owns a repository, and
@@ -316,7 +378,19 @@ func (s *Store) Access(ctx context.Context, p identity.Principal, hubAdmin bool)
 	if err != nil {
 		return nil, err
 	}
-	return &Access{Principal: p, HubAdmin: hubAdmin, CanHubAdmin: hubAdmin, Teams: teams, repos: repos}, nil
+	teamSettings, err := s.AllTeamSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Access{
+		Principal:    p,
+		HubAdmin:     hubAdmin,
+		CanHubAdmin:  hubAdmin,
+		Teams:        teams,
+		repos:        repos,
+		teamSettings: teamSettings,
+		store:        s,
+	}, nil
 }
 
 // SeesTeam is whether the principal may see team and its tasks: a
@@ -372,16 +446,144 @@ func (a *Access) SeesTask(team, repo string) bool {
 	return ok && o.history
 }
 
-// SeesNode is whether the principal may see a node in the directory:
-// their own node, or one serving a repository of one of their teams.
-func (a *Access) SeesNode(e registry.Entry) bool {
-	if a.HubAdmin || strings.EqualFold(e.Owner, a.Email) {
-		return true
+// NodeUIRole resolves the caller's effective role on e's proxied Node UI
+// ("owner", "admin", "member", "proposer", "viewer", or "" if denied),
+// along with the validated/inferred ui.team and that team's
+// require_approval policy.
+func (a *Access) NodeUIRole(e registry.Entry) (role, team string, requireApproval bool) {
+	if a == nil || a.Email == "" {
+		return "", "", false
 	}
-	for _, r := range e.Repos {
-		if a.SeesRepo(r) {
-			return true
+	if e.UI != nil && !e.UI.Offered {
+		return "", "", false
+	}
+	offersUI := (e.UI != nil && e.UI.Offered) || (e.UI == nil && e.Supports(registry.FeatureNodeUI))
+	if offersUI && (e.UI == nil || (e.UI.Team == "" && e.UI.Reason == "")) && len(e.Repos) > 0 && a.store != nil {
+		_ = a.store.ValidateNodeUI(context.Background(), e.Owner, &e.Node)
+	}
+	if offersUI && e.UI != nil && e.UI.Team != "" {
+		team = e.UI.Team
+		requireApproval = TeamSettingsFrom(a.teamSettings, team).RequireApproval
+	}
+	if e.Owner != "" && strings.EqualFold(e.Owner, a.Email) {
+		return "owner", team, requireApproval
+	}
+	if !offersUI || team == "" {
+		return "", team, requireApproval
+	}
+	switch a.Teams[team] {
+	case Admin:
+		return "admin", team, requireApproval
+	case Member:
+		return "member", team, requireApproval
+	case Proposer:
+		return "proposer", team, requireApproval
+	case Viewer:
+		return "viewer", team, requireApproval
+	case "":
+		readOnlyCap := e.UI != nil && strings.EqualFold(strings.TrimSpace(e.UI.Access), "read-only")
+		if !readOnlyCap && TeamSettingsFrom(a.teamSettings, team).AnyoneMayPropose {
+			return "proposer", team, requireApproval
 		}
 	}
-	return false
+	return "", team, requireApproval
+}
+
+// ResolveEntry annotates e with the caller's ViewerRole, RequireApproval,
+// and inferred UI.Team, and reports whether the caller may see e in the
+// node directory.
+func (a *Access) ResolveEntry(e registry.Entry) (registry.Entry, bool) {
+	if a == nil {
+		return e, false
+	}
+	offersUI := (e.UI != nil && e.UI.Offered) || (e.UI == nil && e.Supports(registry.FeatureNodeUI))
+	if offersUI && (e.UI == nil || (e.UI.Team == "" && e.UI.Reason == "")) && len(e.Repos) > 0 && a.store != nil {
+		_ = a.store.ValidateNodeUI(context.Background(), e.Owner, &e.Node)
+	}
+	uiRole, uiTeam, reqApproval := a.NodeUIRole(e)
+	viewerRole := uiRole
+	if viewerRole == "" {
+		if e.Owner != "" && a.Email != "" && strings.EqualFold(e.Owner, a.Email) {
+			viewerRole = "owner"
+		} else {
+			var best Role
+			var bestTeam string
+			for _, r := range e.Repos {
+				if own, ok := a.repos[strings.ToLower(r)]; ok {
+					if role := a.Teams[own.team]; role.rank() > best.rank() {
+						best = role
+						bestTeam = own.team
+					}
+				}
+			}
+			if best != "" {
+				viewerRole = string(best)
+				if uiTeam == "" && bestTeam != "" {
+					reqApproval = TeamSettingsFrom(a.teamSettings, bestTeam).RequireApproval
+				}
+			}
+		}
+	}
+	e.ViewerRole = viewerRole
+	e.RequireApproval = reqApproval
+	visible := a.HubAdmin || strings.EqualFold(e.Owner, a.Email) || uiRole != ""
+	if !visible {
+		for _, r := range e.Repos {
+			if a.SeesRepo(r) {
+				visible = true
+				break
+			}
+		}
+	}
+	return e, visible
+}
+
+// SeesNode is whether the principal may see a node in the directory:
+// their own node, one serving a repository of one of their teams, or a
+// node whose validated ui.team allows them access (including org-wide
+// proposer access when anyone_may_propose is true).
+func (a *Access) SeesNode(e registry.Entry) bool {
+	_, ok := a.ResolveEntry(e)
+	return ok
+}
+
+// DefaultInboxNodes returns the IDs of all deployments in entries where
+// the caller's role is owner, admin, or member.
+func (a *Access) DefaultInboxNodes(entries []registry.Entry) []string {
+	out := []string{}
+	if a == nil {
+		return out
+	}
+	seen := map[string]bool{}
+	for _, raw := range entries {
+		e, ok := a.ResolveEntry(raw)
+		if !ok || seen[e.ID] {
+			continue
+		}
+		if e.ViewerRole == "owner" || e.ViewerRole == "admin" || e.ViewerRole == "member" {
+			seen[e.ID] = true
+			out = append(out, e.ID)
+		}
+	}
+	return out
+}
+
+// EffectiveInboxNodes returns the caller's active Unified Inbox deployment
+// IDs and whether they were explicitly configured by the user. When not yet
+// configured, it defaults to DefaultInboxNodes(entries).
+func (a *Access) EffectiveInboxNodes(ctx context.Context, entries []registry.Entry) ([]string, bool, error) {
+	if a == nil {
+		return []string{}, false, nil
+	}
+	if a.store == nil {
+		return a.DefaultInboxNodes(entries), false, nil
+	}
+	prefs, err := a.store.UserPreferences(ctx, a.Email)
+	if err != nil {
+		return nil, false, err
+	}
+	if !prefs.InboxConfigured {
+		return a.DefaultInboxNodes(entries), false, nil
+	}
+	return prefs.InboxNodes, true, nil
 }

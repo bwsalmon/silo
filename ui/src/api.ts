@@ -49,3 +49,7 @@ export const listGrainfiles = hub.listGrainfiles.bind(hub);
 export const inspectGrainfile = hub.inspectGrainfile.bind(hub);
 export const listGrainfileSubscriptions = hub.listGrainfileSubscriptions.bind(hub);
 export const listGrainfileEvents = hub.listGrainfileEvents.bind(hub);
+export const setTheme = hub.setTheme.bind(hub);
+export const getInboxPreferences = hub.getInboxPreferences.bind(hub);
+export const setInboxPreferences = hub.setInboxPreferences.bind(hub);
+export const listInbox = hub.listInbox.bind(hub);

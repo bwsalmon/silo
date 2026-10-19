@@ -57,6 +57,10 @@ type Server struct {
 	// the nodes of their own teams). An error is answered 401. Nil
 	// serves every entry to every caller.
 	Visible func(r *http.Request) (func(registry.Entry) bool, error)
+	// ResolveEntries, when set, authorizes a request for DirectoryPath,
+	// annotates each entry with viewer_role and require_approval, and says
+	// which entries its caller may see.
+	ResolveEntries func(r *http.Request) (func(registry.Entry) (registry.Entry, bool), error)
 	// NodeStream, when set, is handed each stream a node opens after its
 	// control stream, for the event streams of docs/hub.md §7. Nil
 	// resets them.
@@ -196,7 +200,20 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 	nodes := s.Registry.List()
-	if s.Visible != nil {
+	if s.ResolveEntries != nil {
+		resolve, err := s.ResolveEntries(r)
+		if err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		seen := nodes[:0]
+		for _, e := range nodes {
+			if resolved, ok := resolve(e); ok {
+				seen = append(seen, resolved)
+			}
+		}
+		nodes = seen
+	} else if s.Visible != nil {
 		keep, err := s.Visible(r)
 		if err != nil {
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)

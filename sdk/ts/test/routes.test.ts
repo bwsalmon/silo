@@ -16,6 +16,10 @@ type Case = [method: string, template: string, call: (h: HubClient) => unknown];
 
 const cases: Record<string, Case> = {
   getMe: ['GET', '/v1/me', (h) => h.getMe()],
+  setTheme: ['PUT', '/v1/me/theme', (h) => h.setTheme('dark')],
+  getInboxPreferences: ['GET', '/v1/me/inbox', (h) => h.getInboxPreferences()],
+  setInboxPreferences: ['PUT', '/v1/me/inbox', (h) => h.setInboxPreferences(['ws-1'])],
+  listInbox: ['GET', '/v1/inbox', (h) => h.listInbox({ nodes: ['ws-1'], kind: 'proposal' })],
   listTasks: ['GET', '/v1/tasks', (h) => h.listTasks({ team: 'infra' })],
   getTask: ['GET', '/v1/tasks/{id}', (h) => h.getTask('t-1')],
   submitTask: ['POST', '/v1/tasks', (h) => h.submitTask({ team: 'infra', title: 't', prompt: 'p' })],

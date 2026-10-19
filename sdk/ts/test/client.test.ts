@@ -128,6 +128,46 @@ describe('writes', () => {
       }),
     );
   });
+
+  it('syncs resolved theme and queries/updates unified inbox preferences', async () => {
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/v1/me/theme') {
+        return new Response(JSON.stringify({ theme: 'dark' }), { status: 200 });
+      }
+      if (url === '/v1/me/inbox' && init?.method === 'PUT') {
+        return new Response(JSON.stringify({ nodes: ['ws-1', 'ws-2'], configured: true }), { status: 200 });
+      }
+      if (url === '/v1/me/inbox') {
+        return new Response(JSON.stringify({ nodes: ['ws-1'], configured: false }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: 't-1:proposal',
+              kind: 'proposal',
+              task_id: 't-1',
+              node_id: 'ws-1',
+              team: 'infra',
+              title: 'Fix typo',
+              state: 'proposed',
+              updated_at: '2026-10-18T12:00:00Z',
+            },
+          ],
+          nodes: ['ws-1'],
+        }),
+        { status: 200 },
+      );
+    });
+    const h = new HubClient({ fetch: f });
+    expect(await h.setTheme('dark')).toEqual({ theme: 'dark' });
+    expect(await h.getInboxPreferences()).toEqual({ nodes: ['ws-1'], configured: false });
+    expect(await h.setInboxPreferences(['ws-1', 'ws-2'])).toEqual({ nodes: ['ws-1', 'ws-2'], configured: true });
+    const items = await h.listInbox({ nodes: ['ws-1'], kind: 'proposal' });
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe('proposal');
+    expect(f.mock.calls[3][0]).toBe('/v1/inbox?nodes=ws-1&kind=proposal');
+  });
 });
 
 describe('errors', () => {
