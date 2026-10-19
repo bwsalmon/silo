@@ -105,7 +105,23 @@ func TestLosingStandingRevokesNodeTokens(t *testing.T) {
 		}
 	})
 
+	t.Run("demoted deployment admin", func(t *testing.T) {
+		hb.must(hb.user(nina), "POST", "/v1/deployments", map[string]string{"id": "ops-demote"}, http.StatusCreated, nil)
+		hb.must(hb.user(nina), "PUT", "/v1/deployments/ops-demote/members/user:"+dave, map[string]string{"role": "admin"}, http.StatusNoContent, nil)
+		tok := hb.mintDeployment(dave, "ops-demote")
+		c, err := dial(t, hb, tok, "ops-demote")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hb.must(hb.user(nina), "PUT", "/v1/deployments/ops-demote/members/user:"+dave, map[string]string{"role": "viewer"}, http.StatusNoContent, nil)
+		waitDisconnected(t, c.Done(), "demoting its owner from deployment admin to viewer")
+		if _, err := dial(t, hb, tok, "ops-demote"); err == nil {
+			t.Fatal("a demoted admin's token connected again")
+		}
+	})
+
 	t.Run("removed accepted user", func(t *testing.T) {
+		hb.must(hb.user(nina), "PUT", "/v1/deployments/ops/members/user:"+pat, map[string]string{"role": "member"}, http.StatusNoContent, nil)
 		tok, _ := hb.mint(pat, "pat-laptop")
 		c, err := dial(t, hb, tok, "pat-laptop")
 		if err != nil {
@@ -116,6 +132,11 @@ func TestLosingStandingRevokesNodeTokens(t *testing.T) {
 		if _, err := dial(t, hb, tok, "pat-laptop"); err == nil {
 			t.Fatal("a removed user's token connected again")
 		}
+		// Re-running SeedUsers on startup must not resurrect a deleted user from stale team_members rows.
+		if err := hb.h.Directory.SeedUsers(context.Background(), []string{root}, nil); err != nil {
+			t.Fatal(err)
+		}
+		hb.must(hb.user(pat), "GET", "/v1/me", nil, http.StatusForbidden, nil)
 	})
 
 	t.Run("deleted deployment", func(t *testing.T) {

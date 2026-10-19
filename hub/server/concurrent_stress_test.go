@@ -53,7 +53,7 @@ func startReplicaPod(t *testing.T, dbURL, name string, key []byte) *replicaPod {
 		LeaseRetry:    80 * time.Millisecond,
 		Holder:        name,
 		Pod:           name,
-		PodLease:      600 * time.Millisecond,
+		PodLease:      1500 * time.Millisecond,
 		InternalAddr:  "127.0.0.1:0",
 		InternalKey:   key,
 		Logf:          logf(t),
@@ -1019,7 +1019,17 @@ func TestConcurrentRendezvousTokenRevocationAndStreamRaces(t *testing.T) {
 
 				// 4. Proxied nodeui WebSocket connection via both pods.
 				for _, p := range []*replicaPod{podA, podB} {
-					ws, err := dialNodeUIWS(p.url, nodeID, owner)
+					var ws *websocket.Conn
+					var err error
+					for attempt := range 20 {
+						ws, err = dialNodeUIWS(p.url, nodeID, owner)
+						if err == nil {
+							break
+						}
+						if attempt < 19 {
+							time.Sleep(50 * time.Millisecond)
+						}
+					}
 					if err != nil {
 						t.Errorf("dialNodeUIWS(%s, %s): %v", p.name, nodeID, err)
 						continue

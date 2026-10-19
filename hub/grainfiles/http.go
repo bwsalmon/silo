@@ -1400,13 +1400,12 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	//     definitions from the untrusted head; evaluate triggers against the
 	//     indexed .process.grain.md definitions.
 	//   - On push events to non-default/unprotected branches, never index or
-	//     execute .task.grain.md files.
-	if source != TriggerPullRequest && source != TriggerWorkflow {
+	//     remove Grainfile definitions (.task.grain.md, .process.grain.md, or
+	//     .capability.grain.md) in grainfile_index; evaluate when.push triggers
+	//     against the indexed base-branch .process.grain.md definitions.
+	if source != TriggerPullRequest && source != TriggerWorkflow && isDefaultBranch {
 		for _, remPath := range removedPaths {
-			if kind, _, isGF, _ := ClassifyPath(remPath); isGF {
-				if kind == KindTask && !isDefaultBranch {
-					continue
-				}
+			if _, _, isGF, _ := ClassifyPath(remPath); isGF {
 				if err := a.Store.RemoveGrainfile(r.Context(), canonRepo, remPath); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -1416,11 +1415,8 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 		webhookNow := a.Store.now()
 		for _, p := range upsertPaths {
-			kind, _, isGF, _ := ClassifyPath(p)
+			_, _, isGF, _ := ClassifyPath(p)
 			if !isGF {
-				continue
-			}
-			if kind == KindTask && !isDefaultBranch {
 				continue
 			}
 			if a.Fetcher == nil {

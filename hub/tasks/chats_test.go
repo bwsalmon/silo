@@ -308,3 +308,46 @@ func TestSharedChatsEndToEnd(t *testing.T) {
 		t.Fatalf("expected TriggeredAgent=true in 'all' reply mode")
 	}
 }
+
+func TestConcurrentPostChatMessageStress(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		chat, _, err := s.CreateChat(ctx, CreateChatOptions{
+			Title:      "Concurrent Stress Room",
+			Deployment: "payments",
+			ReplyMode:  ReplyModeAll,
+			CreatedBy:  "alice@example.com",
+		})
+		check(t, err)
+
+		const workers = 16
+		errs := make(chan error, workers)
+		for i := range workers {
+			go func(idx int) {
+				_, _, _, perr := s.PostChatMessage(ctx, chat.ID, PostChatMessageOptions{
+					ID:     "concurrent-msg-" + string(rune('a'+idx)),
+					Text:   "concurrent message for @payments",
+					Sender: "alice@example.com",
+				})
+				errs <- perr
+			}(i)
+		}
+		for range workers {
+			if perr := <-errs; perr != nil {
+				t.Fatalf("concurrent PostChatMessage failed: %v", perr)
+			}
+		}
+
+		msgs, err := s.ChatMessages(ctx, chat.ID, 0)
+		check(t, err)
+		if len(msgs) != workers {
+			t.Fatalf("len(msgs) = %d, want %d", len(msgs), workers)
+		}
+		for i, m := range msgs {
+			wantSeq := int64(i + 1)
+			if m.Seq != wantSeq {
+				t.Fatalf("msgs[%d].Seq = %d, want %d", i, m.Seq, wantSeq)
+			}
+		}
+	})
+}

@@ -555,13 +555,7 @@ func (s *Store) CreateChat(ctx context.Context, opt CreateChatOptions) (ChatSess
 		}
 	}
 
-	err = dbaccess.Retry(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-
+	err = s.chatTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO chat_sessions (
 			id, task_id, title, deployment, linked_deployments, reply_mode,
 			repos, refs, external_bindings, created_by, created_at, updated_at, last_agent_seq
@@ -587,7 +581,7 @@ func (s *Store) CreateChat(ctx context.Context, opt CreateChatOptions) (ChatSess
 			attJSON, _ := json.Marshal(initialMsg.Attachments)
 			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO chat_messages (
 				chat, seq, id, sender, role, text, attachments, triggered_agent, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (chat, seq) DO NOTHING`),
 				chatID, initialMsg.Seq, initialMsg.ID, initialMsg.Sender, initialMsg.Role,
 				initialMsg.Text, string(attJSON), boolInt(initialMsg.TriggeredAgent), initialMsg.CreatedAt.UnixMilli(),
 			); err != nil {
@@ -595,7 +589,7 @@ func (s *Store) CreateChat(ctx context.Context, opt CreateChatOptions) (ChatSess
 			}
 		}
 
-		return tx.Commit()
+		return nil
 	})
 	if err != nil {
 		return ChatSession{}, nil, err
@@ -836,13 +830,7 @@ func (s *Store) UpdateChat(ctx context.Context, id string, opt UpdateChatOptions
 	refsJSON, _ := json.Marshal(refs)
 	bindingsJSON, _ := json.Marshal(bindings)
 
-	err = dbaccess.Retry(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-
+	err = s.chatTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, s.q(`UPDATE chat_sessions
 			SET title = ?, reply_mode = ?, linked_deployments = ?, repos = ?, refs = ?, external_bindings = ?, updated_at = ?
 			WHERE id = ?`),
@@ -866,12 +854,55 @@ func (s *Store) UpdateChat(ctx context.Context, id string, opt UpdateChatOptions
 			}
 		}
 
-		return tx.Commit()
+		return nil
 	})
 	if err != nil {
 		return ChatSession{}, err
 	}
 	return s.GetChat(ctx, id)
+}
+
+func (s *Store) chatTx(ctx context.Context, f func(*sql.Tx) error) error {
+	s.chatTxMu.Lock()
+	defer s.chatTxMu.Unlock()
+	return s.chatTxLocked(ctx, f)
+}
+
+func (s *Store) chatTxLocked(ctx context.Context, f func(*sql.Tx) error) error {
+	const maxAttempts = 64
+	var err error
+	for attempt := range maxAttempts {
+		err = dbaccess.InTx(ctx, s.db, f)
+		if err == nil || !isRetryableChatTxError(err) || ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt%8+1) * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func isRetryableChatTxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrState) || errors.Is(err, ErrInvalid) || errors.Is(err, ErrNotFound) {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "23505") ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "40001") ||
+		strings.Contains(msg, "40P01") ||
+		strings.Contains(msg, "Aborted") ||
+		strings.Contains(msg, "serialization") ||
+		strings.Contains(msg, "deadlock") ||
+		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "database is locked")
 }
 
 const chatMessageColumns = `chat, seq, id, sender, role, text, attachments, triggered_agent, created_at`
@@ -921,6 +952,9 @@ func (s *Store) ChatMessages(ctx context.Context, chatID string, afterSeq int64)
 // or a deployment, batches all pending human messages since the agent's last turn
 // (with [sender]: text attribution) and posts them to the backing interactive task.
 func (s *Store) PostChatMessage(ctx context.Context, id string, opt PostChatMessageOptions) (_ ChatMessage, _ *TaskMessage, dup bool, err error) {
+	s.chatTxMu.Lock()
+	defer s.chatTxMu.Unlock()
+
 	chat, err := s.GetChat(ctx, id)
 	if err != nil {
 		return ChatMessage{}, nil, false, err
@@ -1016,13 +1050,26 @@ func (s *Store) PostChatMessage(ctx context.Context, id string, opt PostChatMess
 	}
 	attJSON, _ := json.Marshal(attachments)
 
-	var createdMsg ChatMessage
-	err = dbaccess.Retry(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
+	var (
+		createdMsg       ChatMessage
+		prevLastAgentSeq int64
+		dupExisting      *ChatMessage
+	)
+	err = s.chatTxLocked(ctx, func(tx *sql.Tx) error {
+		dupExisting = nil
+		if err := tx.QueryRowContext(ctx, s.q(`SELECT last_agent_seq FROM chat_sessions WHERE id = ?`), id).Scan(&prevLastAgentSeq); err != nil {
 			return err
 		}
-		defer tx.Rollback()
+
+		if existing, scanErr := scanChatMessage(tx.QueryRowContext(ctx, s.q(`SELECT `+chatMessageColumns+` FROM chat_messages WHERE chat = ? AND id = ?`), id, msgID)); scanErr == nil {
+			if existing.Sender != sender || existing.Text != text {
+				return fmt.Errorf("%w: chat %s already has a different message %s", ErrState, id, msgID)
+			}
+			dupExisting = &existing
+			return nil
+		} else if !errors.Is(scanErr, sql.ErrNoRows) {
+			return scanErr
+		}
 
 		var maxSeq sql.NullInt64
 		if err := tx.QueryRowContext(ctx, s.q(`SELECT MAX(seq) FROM chat_messages WHERE chat = ?`), id).Scan(&maxSeq); err != nil {
@@ -1068,22 +1115,25 @@ func (s *Store) PostChatMessage(ctx context.Context, id string, opt PostChatMess
 			}
 		}
 
-		return tx.Commit()
+		return nil
 	})
 	if err != nil {
 		return ChatMessage{}, nil, false, err
 	}
+	if dupExisting != nil {
+		return *dupExisting, nil, true, nil
+	}
 
 	var taskMsg *TaskMessage
 	if wakeAgent {
-		pending, perr := s.ChatMessages(ctx, id, chat.LastAgentSeq)
+		pending, perr := s.ChatMessages(ctx, id, prevLastAgentSeq)
 		if perr != nil || len(pending) == 0 {
 			pending = []ChatMessage{createdMsg}
 		}
 		var userPending []ChatMessage
 		var combinedAtt []events.Attachment
 		for _, pm := range pending {
-			if pm.Role == "user" {
+			if pm.Role == "user" && pm.Seq <= createdMsg.Seq {
 				userPending = append(userPending, pm)
 				combinedAtt = append(combinedAtt, pm.Attachments...)
 			}

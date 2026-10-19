@@ -529,9 +529,14 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		}
 	}
 	hasLocalRef := false
-	for _, c := range cp.Capabilities {
-		if !strings.Contains(c, "://") {
-			hasLocalRef = true
+	for _, list := range [][]string{cp.References, cp.DependsOn, cp.Capabilities} {
+		for _, c := range list {
+			if !strings.Contains(c, "://") {
+				hasLocalRef = true
+				break
+			}
+		}
+		if hasLocalRef {
 			break
 		}
 	}
