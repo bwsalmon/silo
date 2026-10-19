@@ -17,9 +17,12 @@
 import { check } from './errors.js';
 import { followEventSource, followFetch, type Connection, type EventStream, type FollowOptions, type Transport } from './events.js';
 import type {
+  AcceptedUser,
   Approval,
   ArtifactResult,
   Decision,
+  Deployment,
+  DeploymentSettings,
   Grainfile,
   GrainfileEvent,
   GrainfileInspection,
@@ -85,9 +88,11 @@ const enc = (s: string): string => {
 };
 const taskPath = (id: string) => `/v1/tasks/${enc(id)}`;
 const teamPath = (team: string) => `/v1/teams/${enc(team)}`;
+const deploymentPath = (id: string) => `/v1/deployments/${enc(id)}`;
 // repoPath keeps the slash between a repository's owner and name: the
 // API's route is /repos/{owner}/{name}.
 const repoPath = (team: string, repo: string) => `${teamPath(team)}/repos/${repo.split('/').map(enc).join('/')}`;
+const deploymentRepoPath = (id: string, repo: string) => `${deploymentPath(id)}/repos/${repo.split('/').map(enc).join('/')}`;
 
 function cleanTimestamp(ts?: string): string | undefined {
   if (!ts || ts.startsWith('0001-01-01')) return undefined;
@@ -498,6 +503,77 @@ export class HubClient {
 
   setTeamSettings(team: string, s: TeamSettings): Promise<TeamSettings> {
     return this.write<TeamSettings>('PUT', `${teamPath(team)}/settings`, s);
+  }
+
+  // Accepted users and dynamic sys admins (docs/hub.md §5.4).
+
+  async listUsers(signal?: AbortSignal): Promise<AcceptedUser[]> {
+    const r = await this.getJSON<{ users: AcceptedUser[] }>('/v1/users', signal);
+    return r.users ?? [];
+  }
+
+  setUser(email: string, sysAdmin = false): Promise<AcceptedUser> {
+    return this.write<AcceptedUser>('PUT', `/v1/users/${enc(email)}`, { sys_admin: sysAdmin });
+  }
+
+  deleteUser(email: string): Promise<void> {
+    return this.write('DELETE', `/v1/users/${enc(email)}`);
+  }
+
+  // Unified deployments (docs/hub.md §5.3).
+
+  async listDeployments(signal?: AbortSignal): Promise<Deployment[]> {
+    const r = await this.getJSON<{ deployments?: Deployment[]; teams?: Deployment[] }>('/v1/deployments', signal);
+    return r.deployments ?? r.teams ?? [];
+  }
+
+  getDeployment(id: string, signal?: AbortSignal): Promise<Deployment> {
+    return this.getJSON<Deployment>(deploymentPath(id), signal);
+  }
+
+  createDeployment(id: string, name?: string): Promise<Deployment> {
+    return this.write<Deployment>('POST', '/v1/deployments', name !== undefined ? { id, name } : { id });
+  }
+
+  deleteDeployment(id: string): Promise<void> {
+    return this.write('DELETE', deploymentPath(id));
+  }
+
+  setDeploymentMember(id: string, principal: string, role: Role): Promise<void> {
+    return this.write('PUT', `${deploymentPath(id)}/members/${enc(principal)}`, { role });
+  }
+
+  removeDeploymentMember(id: string, principal: string): Promise<void> {
+    return this.write('DELETE', `${deploymentPath(id)}/members/${enc(principal)}`);
+  }
+
+  assignDeploymentRepo(id: string, repo: string, history = false): Promise<void> {
+    return this.write('PUT', deploymentRepoPath(id, repo), history ? { history } : undefined);
+  }
+
+  releaseDeploymentRepo(id: string, repo: string): Promise<void> {
+    return this.write('DELETE', deploymentRepoPath(id, repo));
+  }
+
+  getDeploymentSettings(id: string, signal?: AbortSignal): Promise<DeploymentSettings> {
+    return this.getJSON<DeploymentSettings>(`${deploymentPath(id)}/settings`, signal);
+  }
+
+  setDeploymentSettings(id: string, s: DeploymentSettings): Promise<DeploymentSettings> {
+    return this.write<DeploymentSettings>('PUT', `${deploymentPath(id)}/settings`, s);
+  }
+
+  mintDeploymentToken(id: string, opts?: { replace_host?: boolean }): Promise<MintedToken> {
+    return this.write<MintedToken>(
+      'POST',
+      `${deploymentPath(id)}/token`,
+      opts?.replace_host ? { replace_host: true } : undefined,
+      { cache: 'no-store' },
+    );
+  }
+
+  replaceDeploymentHost(id: string): Promise<MintedToken> {
+    return this.write<MintedToken>('POST', `${deploymentPath(id)}/replace-host`, undefined, { cache: 'no-store' });
   }
 
   // Grainfile discovery, metadata inspection, and node subscriptions (docs/hub.md §6).

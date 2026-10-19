@@ -30,14 +30,14 @@ func TestInteractiveSession(t *testing.T) {
 		Database:      "sqlite:" + t.TempDir() + "/hub.db",
 		DevUserHeader: userHeader,
 		HubAdmins:     []string{admin},
+		AcceptedUsers: []string{alice, dave, carol},
 		Heartbeat:     time.Second,
 		DispatchRetry: time.Second,
 		Logf:          logf(t),
 	}, "127.0.0.1:0")
-	call(t, "POST", hub.url+"/v1/teams", admin, map[string]string{"id": "infra"}, &struct{}{})
-	call(t, "PUT", hub.url+"/v1/teams/infra/members/user:"+alice, admin, map[string]string{"role": "admin"}, &struct{}{})
-	call(t, "PUT", hub.url+"/v1/teams/infra/members/user:"+dave, admin, map[string]string{"role": "member"}, &struct{}{})
-	call(t, "PUT", hub.url+"/v1/teams/infra/repos/bwsalmon/silo", admin, nil, &struct{}{})
+	call(t, "POST", hub.url+"/v1/teams", alice, map[string]string{"id": "infra"}, &struct{}{})
+	call(t, "PUT", hub.url+"/v1/teams/infra/members/user:"+dave, alice, map[string]string{"role": "member"}, &struct{}{})
+	call(t, "PUT", hub.url+"/v1/teams/infra/repos/bwsalmon/silo", alice, nil, &struct{}{})
 	var minted struct {
 		Token string `json:"token"`
 	}

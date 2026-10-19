@@ -307,6 +307,8 @@ export class Grain {
     readonly id: string,
     readonly control: string,
     readonly proc: ChildProcess,
+    readonly hub?: Hub,
+    readonly owner?: string,
   ) {}
 
   private async call(method: string, path: string, body?: unknown): Promise<any> {
@@ -332,8 +334,16 @@ export class Grain {
   artifact(ref: string, content: string): Promise<void> {
     return this.call('PUT', `/artifacts/${encodeURIComponent(ref)}`, content);
   }
-  offline(): Promise<void> {
-    return this.call('POST', '/offline');
+  async offline(): Promise<void> {
+    await this.call('POST', '/offline');
+    await this.waitFor(`${this.id} offline`, (s) => !s.online);
+    if (this.hub && this.owner) {
+      await until(`${this.id} offline on hub`, async () => {
+        const res = await this.hub!.must(this.owner!, 'GET', '/v1/nodes');
+        const entry = (res.nodes ?? []).find((n: any) => n.id === this.id);
+        return (!entry || entry.status !== 'online') || undefined;
+      });
+    }
   }
   online(): Promise<void> {
     return this.call('POST', '/online');
@@ -440,6 +450,7 @@ export const test = base.extend<
       await hub.must(hubAdmin, 'POST', '/v1/teams', { id: w.team, name: `Team ${n}` });
       await hub.must(hubAdmin, 'PUT', `/v1/teams/${w.team}/members/user:${w.admin}`, { role: 'admin' });
       await hub.must(hubAdmin, 'PUT', `/v1/teams/${w.team}/members/user:${w.member}`, { role: 'member' });
+      await hub.must(hubAdmin, 'PUT', `/v1/users/${encodeURIComponent(w.outsider)}`, { sys_admin: false });
       await hub.must(hubAdmin, 'PUT', `/v1/teams/${w.team}/repos/${w.repo}`);
       return w;
     });
@@ -479,7 +490,7 @@ export const test = base.extend<
         if (proc.exitCode !== null) throw new Error(`fake grain ${id} exited ${proc.exitCode}`);
         return existsSync(join(dir, 'addr')) ? readFileSync(join(dir, 'addr'), 'utf8') : undefined;
       });
-      const g = new Grain(id, `http://${addr}`, proc);
+      const g = new Grain(id, `http://${addr}`, proc, hub, o.owner);
       await g.waitFor(`${id} online`, (s) => s.online);
       return g;
     });

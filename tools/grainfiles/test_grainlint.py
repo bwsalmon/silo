@@ -275,6 +275,36 @@ class TestGrainlint(unittest.TestCase):
             )
             self.assertEqual(grainlint.lint(root), [])
 
+    def test_optional_empty_body_and_canonical_deployment_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            # Empty body after --- (with and without trailing newline) for .task.grain.md and .process.grain.md
+            t1 = root / "empty-task.task.grain.md"
+            t1.write_text(
+                "---\ngrainfile: v1\ntitle: Empty body task\nrecipient: https://hub.example.com/deployments/payments-prod\n---\n",
+                encoding="utf-8",
+            )
+            t2 = root / "empty-task-no-nl.task.grain.md"
+            t2.write_text(
+                "---\ngrainfile: v1\ntitle: Empty body task without trailing newline\nrecipient: /deployments/payments-prod\n---",
+                encoding="utf-8",
+            )
+            p1 = root / "empty-process.process.grain.md"
+            p1.write_text(
+                "---\ngrainfile: v1\ntitle: Empty body process\nwhen:\n  manual: {}\n---\n",
+                encoding="utf-8",
+            )
+            fm1, body1, _ = grainlint.parse_grainfile(t1)
+            self.assertEqual(fm1["title"], "Empty body task")
+            self.assertEqual(body1, "")
+            fm2, body2, _ = grainlint.parse_grainfile(t2)
+            self.assertEqual(fm2["recipient"], "/deployments/payments-prod")
+            self.assertEqual(body2, "")
+            fmp, bodyp, _ = grainlint.parse_grainfile(p1)
+            self.assertEqual(fmp["title"], "Empty body process")
+            self.assertEqual(bodyp, "")
+            self.assertEqual(grainlint.lint(root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1202,3 +1202,68 @@ Verify auth and schema changes across repositories.
 		t.Errorf("expected unlisted repo acme/widgets not to match")
 	}
 }
+
+func TestOptionalEmptyMarkdownBodyAndCanonicalDeploymentRecipient(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		raw  string
+		kind Kind
+	}{
+		{
+			name: "task with completely empty body and canonical Hub deployment recipient",
+			path: ".grain/tasks/2026-10-20-rotate-keys.task.grain.md",
+			raw:  "---\ntitle: Rotate staging API signing keys and verify health checks\nrecipient: https://hub.example.com/deployments/payments-prod\n---\n",
+			kind: KindTask,
+		},
+		{
+			name: "task with whitespace-only body",
+			path: ".grain/tasks/2026-10-20-whitespace.task.grain.md",
+			raw:  "---\ntitle: Bump Go toolchain to 1.24.2 across all module files\n---\n   \n\t\n",
+			kind: KindTask,
+		},
+		{
+			name: "process with completely empty body",
+			path: ".grain/processes/smoke-check.process.grain.md",
+			raw:  "---\ntitle: Run go test ./... and verify zero linter warnings on every pull request\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n",
+			kind: KindProcess,
+		},
+		{
+			name: "process with whitespace-only body",
+			path: ".grain/processes/nightly-audit.process.grain.md",
+			raw:  "---\ntitle: Run govulncheck ./... nightly and file a task for any reported vulnerability\nwhen:\n  schedule:\n    cron: \"0 4 * * *\"\n---\n  \n",
+			kind: KindProcess,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := Parse(tc.path, []byte(tc.raw))
+			if err != nil {
+				t.Fatalf("Parse(%s): unexpected error: %v", tc.path, err)
+			}
+			if g.Kind != tc.kind {
+				t.Errorf("Kind = %q, want %q", g.Kind, tc.kind)
+			}
+			if strings.TrimSpace(g.Body) != "" {
+				t.Errorf("TrimSpace(Body) = %q, want empty string", g.Body)
+			}
+			if err := g.ResolveSource(Source{
+				RepoURL: "https://github.com/acme/widgets",
+				Ref:     "refs/heads/main",
+				Commit:  "abc1234",
+				Path:    tc.path,
+			}); err != nil {
+				t.Fatalf("ResolveSource(%s): %v", tc.path, err)
+			}
+		})
+	}
+
+	if got := DeploymentIDFromRecipient("https://hub.example.com/deployments/payments-prod"); got != "payments-prod" {
+		t.Errorf("DeploymentIDFromRecipient(https) = %q, want payments-prod", got)
+	}
+	if got := DeploymentIDFromRecipient("/deployments/payments-prod"); got != "payments-prod" {
+		t.Errorf("DeploymentIDFromRecipient(rooted) = %q, want payments-prod", got)
+	}
+	if got := CanonicalDeploymentURL("https://hub.example.com/", "payments-prod"); got != "https://hub.example.com/deployments/payments-prod" {
+		t.Errorf("CanonicalDeploymentURL = %q", got)
+	}
+}

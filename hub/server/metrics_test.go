@@ -36,7 +36,7 @@ func scrape(t *testing.T, h *Hub) string {
 func TestMetrics(t *testing.T) {
 	ctx := context.Background()
 	h, err := New(ctx, Config{Database: "sqlite::memory:", DevUserHeader: userHeader,
-		HubAdmins: []string{"admin@example.com"}, Logf: logf(t)})
+		HubAdmins: []string{"admin@example.com"}, AcceptedUsers: []string{"alice@example.com", "bob@example.com"}, Logf: logf(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1781,8 +1781,14 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 	// capability access to that recipient, provided the node's owner is
 	// admitted for the recipient repository (docs/grainfiles-spec.md §11.1, §11.2).
 	if rec.Recipient != "" {
+		if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.EqualFold(depID, sub.NodeID) {
+			return true
+		}
 		for _, r := range sub.Recipients {
-			if strings.EqualFold(r, rec.Recipient) || IsSameRepo(r, rec.Recipient) {
+			if sameRecipient(r, rec.Recipient) {
+				if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.EqualFold(depID, sub.NodeID) {
+					return true
+				}
 				recRepo, err := canonicalRepoFromAnyRef(rec.Recipient)
 				if err != nil {
 					return false
@@ -2501,6 +2507,10 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 	if a.Access != nil {
 		v, err := a.Access(r)
 		if err != nil {
+			if strings.Contains(err.Error(), "not on the hub accepted users list") {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
@@ -2621,10 +2631,10 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if filterGate != nil && rec.Gate != *filterGate {
 			continue
 		}
-		if filterRecipient != "" && rec.Recipient != filterRecipient {
+		if filterRecipient != "" && !sameRecipient(rec.Recipient, filterRecipient) {
 			continue
 		}
-		if filterRequestor != "" && rec.Requestor != filterRequestor && !strings.EqualFold(rec.Requestor, rawRequestor) {
+		if filterRequestor != "" && !sameRecipient(rec.Requestor, filterRequestor) && rec.Requestor != filterRequestor && !strings.EqualFold(rec.Requestor, rawRequestor) {
 			continue
 		}
 		if rawKind != "" && string(rec.Kind) != rawKind {
@@ -2659,8 +2669,20 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if rawNode != "" && sub.NodeID != rawNode {
 			continue
 		}
-		if filterRecipient != "" && !slices.Contains(sub.Recipients, filterRecipient) {
-			continue
+		if filterRecipient != "" {
+			matchedRec := false
+			if depID := DeploymentIDFromRecipient(filterRecipient); depID != "" && strings.EqualFold(depID, sub.NodeID) {
+				matchedRec = true
+			}
+			for _, r := range sub.Recipients {
+				if sameRecipient(r, filterRecipient) {
+					matchedRec = true
+					break
+				}
+			}
+			if !matchedRec {
+				continue
+			}
 		}
 		if filterRepo != "" && !subTouchesRepo(sub, filterRepo) {
 			continue
@@ -2696,13 +2718,13 @@ func (a *API) serveGrainfiles(w http.ResponseWriter, r *http.Request) {
 		if filterRepo != "" && !IsSameRepo(ev.Repo, filterRepo) {
 			continue
 		}
-		if filterRecipient != "" && ev.Recipient != filterRecipient {
+		if filterRecipient != "" && !sameRecipient(ev.Recipient, filterRecipient) {
 			continue
 		}
 		if filterGate != nil && ev.Gate != *filterGate {
 			continue
 		}
-		if filterRequestor != "" && ev.Requestor != "" && ev.Requestor != filterRequestor && !strings.EqualFold(ev.Requestor, rawRequestor) {
+		if filterRequestor != "" && ev.Requestor != "" && !sameRecipient(ev.Requestor, filterRequestor) && ev.Requestor != filterRequestor && !strings.EqualFold(ev.Requestor, rawRequestor) {
 			continue
 		}
 		if rawKind != "" && string(ev.Kind) != rawKind {

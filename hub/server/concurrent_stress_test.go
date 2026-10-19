@@ -377,6 +377,7 @@ func TestConcurrentMultiReplicaDispatchAndApprovalRaces(t *testing.T) {
 			call(t, "PUT", podA.url+"/v1/teams/infra/members/user:"+alice, admin, map[string]string{"role": "admin"}, &struct{}{})
 			call(t, "PUT", podB.url+"/v1/teams/infra/members/user:"+bob, admin, map[string]string{"role": "admin"}, &struct{}{})
 			call(t, "PUT", podC.url+"/v1/teams/infra/members/user:"+dave, admin, map[string]string{"role": "member"}, &struct{}{})
+			call(t, "PUT", podA.url+"/v1/users/"+erin, admin, map[string]bool{"sys_admin": false}, nil)
 			call(t, "PUT", podA.url+"/v1/teams/infra/repos/bwsalmon/silo", admin, nil, &struct{}{})
 
 			// Configure lost_requeue_after_seconds = 300 (scaled to 150ms in test) so disconnected nodes' tasks are reclaimed quickly.

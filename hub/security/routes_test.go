@@ -79,6 +79,13 @@ func newWorld(t *testing.T) *world {
 	t.Helper()
 	hb := startHub(t, options{})
 	hb.teams()
+	r := hb.user(root)
+	hb.must(r, "PUT", "/v1/teams/"+teamA+"/members/user:zed2@example.com", map[string]string{"role": "member"}, http.StatusNoContent, nil)
+	hb.must(r, "PUT", "/v1/teams/"+teamA+"/repos/acme/spare2", nil, http.StatusNoContent, nil)
+	for _, delID := range []string{"del-a", "del-dep-a"} {
+		hb.must(hb.user(alice), "POST", "/v1/teams", map[string]string{"id": delID, "name": delID}, http.StatusCreated, nil)
+		hb.must(hb.user(alice), "PUT", "/v1/teams/"+delID+"/members/user:"+dave, map[string]string{"role": "member"}, http.StatusNoContent, nil)
+	}
 	w := &world{hb: hb}
 
 	tokA, _ := hb.mint(alice, "ws-a")
@@ -213,18 +220,33 @@ func matrix() []row {
 		{route: pub("GET " + rendezvous.ConnectPath), method: "GET", path: rendezvous.ConnectPath, upgrade: true, want: connect},
 		{route: pub("GET " + rendezvous.DirectoryPath), method: "GET", path: rendezvous.DirectoryPath, want: human(200, 200, 200, 200)},
 
-		// The team directory.
+		// The team / deployment directory and user acceptance allowlist.
 		{route: pub("GET /v1/me"), method: "GET", path: "/v1/me", want: human(200, 200, 200, 200)},
 		{route: pub("PUT /v1/me/theme"), method: "PUT", path: "/v1/me/theme", body: body(map[string]string{"theme": "dark"}), want: human(200, 200, 200, 200)},
 		{route: pub("GET /v1/me/inbox"), method: "GET", path: "/v1/me/inbox", want: human(200, 200, 200, 200)},
 		{route: pub("PUT /v1/me/inbox"), method: "PUT", path: "/v1/me/inbox", body: body(map[string][]string{"nodes": {}}), want: human(200, 200, 200, 200)},
+		{route: pub("GET /v1/users"), method: "GET", path: "/v1/users", want: human(403, 403, 403, 403)},
+		{route: pub("PUT /v1/users/{email}"), method: "PUT", path: "/v1/users/new@example.com", body: body(map[string]bool{"sys_admin": false}), want: human(403, 403, 403, 403)},
+		{route: pub("DELETE /v1/users/{email}"), method: "DELETE", path: "/v1/users/" + nina, want: human(403, 403, 403, 403)},
+		{route: pub("GET /v1/deployments"), method: "GET", path: "/v1/deployments", want: human(200, 200, 200, 200)},
+		{route: pub("POST /v1/deployments"), method: "POST", path: "/v1/deployments", body: func(c string) any { return map[string]string{"id": "d-" + c} }, want: human(201, 201, 201, 201)},
+		{route: pub("GET /v1/deployments/{id}"), method: "GET", path: "/v1/deployments/team-a", want: human(404, 200, 200, 404)},
+		{route: pub("DELETE /v1/deployments/{id}"), method: "DELETE", path: "/v1/deployments/del-dep-a", want: human(404, 403, 204, 404)},
+		{route: pub("PUT /v1/deployments/{id}/members/{principal}"), method: "PUT", path: "/v1/deployments/team-a/members/user:yan@example.com", body: body(map[string]string{"role": "member"}), want: human(404, 403, 204, 404)},
+		{route: pub("DELETE /v1/deployments/{id}/members/{principal}"), method: "DELETE", path: "/v1/deployments/team-a/members/user:zed2@example.com", want: human(404, 403, 204, 404)},
+		{route: pub("PUT /v1/deployments/{id}/repos/{owner}/{name}"), method: "PUT", path: "/v1/deployments/team-a/repos/acme/new-dep", want: human(404, 403, 204, 404)},
+		{route: pub("DELETE /v1/deployments/{id}/repos/{owner}/{name}"), method: "DELETE", path: "/v1/deployments/team-a/repos/acme/spare2", want: human(404, 403, 204, 404)},
+		{route: pub("GET /v1/deployments/{id}/settings"), method: "GET", path: "/v1/deployments/team-a/settings", want: human(404, 200, 200, 404)},
+		{route: pub("PUT /v1/deployments/{id}/settings"), method: "PUT", path: "/v1/deployments/team-a/settings", body: body(map[string]int{"lost_requeue_after_seconds": 600}), want: human(404, 403, 200, 404)},
+		{route: pub("POST /v1/deployments/{id}/token"), method: "POST", path: "/v1/deployments/team-a/token", want: human(404, 403, 201, 404), check: noStore},
+		{route: pub("POST /v1/deployments/{id}/replace-host"), method: "POST", path: "/v1/deployments/team-a/replace-host", want: human(404, 403, 201, 404), check: noStore},
 		{route: pub("GET /v1/teams"), method: "GET", path: "/v1/teams", want: human(200, 200, 200, 200)},
-		{route: pub("POST /v1/teams"), method: "POST", path: "/v1/teams", body: func(c string) any { return map[string]string{"id": "t-" + c} }, want: human(403, 403, 403, 403)},
+		{route: pub("POST /v1/teams"), method: "POST", path: "/v1/teams", body: func(c string) any { return map[string]string{"id": "t-" + c} }, want: human(201, 201, 201, 201)},
 		{route: pub("GET /v1/teams/{team}"), method: "GET", path: "/v1/teams/team-a", want: human(404, 200, 200, 404)},
-		{route: pub("DELETE /v1/teams/{team}"), method: "DELETE", path: "/v1/teams/team-a", want: human(404, 403, 403, 404)},
+		{route: pub("DELETE /v1/teams/{team}"), method: "DELETE", path: "/v1/teams/del-a", want: human(404, 403, 204, 404)},
 		{route: pub("PUT /v1/teams/{team}/members/{principal}"), method: "PUT", path: "/v1/teams/team-a/members/user:yan@example.com", body: body(map[string]string{"role": "member"}), want: human(404, 403, 204, 404)},
 		{route: pub("DELETE /v1/teams/{team}/members/{principal}"), method: "DELETE", path: "/v1/teams/team-a/members/user:" + zed, want: human(404, 403, 204, 404)},
-		{route: pub("PUT /v1/teams/{team}/repos/{owner}/{name}"), method: "PUT", path: "/v1/teams/team-a/repos/acme/new", want: human(404, 403, 403, 404)},
+		{route: pub("PUT /v1/teams/{team}/repos/{owner}/{name}"), method: "PUT", path: "/v1/teams/team-a/repos/acme/new", want: human(404, 403, 204, 404)},
 		{route: pub("DELETE /v1/teams/{team}/repos/{owner}/{name}"), method: "DELETE", path: "/v1/teams/team-a/repos/" + spareA, want: human(404, 403, 204, 404)},
 		{route: pub("GET /v1/teams/{team}/settings"), method: "GET", path: "/v1/teams/team-a/settings", want: human(404, 200, 200, 404)},
 		{route: pub("PUT /v1/teams/{team}/settings"), method: "PUT", path: "/v1/teams/team-a/settings", body: body(map[string]int{"lost_requeue_after_seconds": 600}), want: human(404, 403, 200, 404)},

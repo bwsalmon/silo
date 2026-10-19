@@ -133,7 +133,7 @@ func (a *API) Handler() http.Handler {
 		m.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			acc, err := a.Directory.Access(r)
 			if err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				directory.WriteAccessError(w, err)
 				return
 			}
 			if err := f(w, r, acc); err != nil {

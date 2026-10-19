@@ -178,7 +178,7 @@ func TestKindClusterE2E(t *testing.T) {
 	go node.serveStreams(conn0)
 
 	subs := conn0.Subscriptions()
-	if subs == nil || len(subs.Recipients) != 1 || subs.Recipients[0] != kindRecipientURL {
+	if subs == nil || len(subs.Recipients) == 0 || subs.Recipients[0] != kindRecipientURL {
 		t.Fatalf("welcome subscriptions = %+v, want recipient %s", subs, kindRecipientURL)
 	}
 

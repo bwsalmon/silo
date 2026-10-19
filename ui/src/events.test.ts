@@ -14,7 +14,8 @@ describe('addEvent', () => {
 
 describe('routes', () => {
   it('round-trip', () => {
-    for (const p of ['/', '/inbox', '/backlog', '/grainfiles', '/teams/infra', '/tasks/t-1', '/nodes']) expect(routePath(parseRoute(p))).toBe(p);
+    for (const p of ['/', '/inbox', '/backlog', '/grainfiles', '/deployments', '/deployments/payments-prod', '/teams/infra', '/tasks/t-1', '/nodes'])
+      expect(routePath(parseRoute(p))).toBe(p);
     expect(parseRoute('/nope/x')).toEqual({ page: 'notfound', path: '/nope/x' });
   });
 });

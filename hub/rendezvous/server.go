@@ -126,6 +126,9 @@ type Server struct {
 	// nodes offering FeatureNodeUI have their tunneled local web UI served
 	// (https://<id>.<NodeUIDomain>/).
 	NodeUIDomain string
+	// HubURL, when set, is the canonical base URL of the Hub used to construct
+	// canonical deployment URLs (https://<hub-host>/deployments/<id>).
+	HubURL string
 
 	mu      sync.Mutex
 	conns   map[string]*nodeConn
@@ -199,11 +202,25 @@ func (s *Server) Handler() http.Handler {
 	return m
 }
 
+func (s *Server) effectiveHubURL(r *http.Request) string {
+	if u := strings.TrimRight(strings.TrimSpace(s.HubURL), "/"); u != "" {
+		return u
+	}
+	if r != nil && strings.TrimSpace(r.Host) != "" {
+		return "https://" + strings.TrimSpace(r.Host)
+	}
+	return ""
+}
+
 func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 	nodes := s.Registry.List()
 	if s.ResolveEntries != nil {
 		resolve, err := s.ResolveEntries(r)
 		if err != nil {
+			if strings.Contains(err.Error(), "not on the hub accepted users list") {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
@@ -217,6 +234,10 @@ func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 	} else if s.Visible != nil {
 		keep, err := s.Visible(r)
 		if err != nil {
+			if strings.Contains(err.Error(), "not on the hub accepted users list") {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
@@ -237,8 +258,13 @@ func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	hubURL := s.effectiveHubURL(r)
 	uiDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s.NodeUIDomain)), ".")
 	for i := range nodes {
+		if canonURL := grainfiles.CanonicalDeploymentURL(hubURL, nodes[i].ID); canonURL != "" {
+			nodes[i].URL = canonURL
+			nodes[i].RecipientURL = canonURL
+		}
 		if sub, ok := subsByNode[nodes[i].ID]; ok {
 			nodes[i].Recipients = mergeStrings(nodes[i].Recipients, sub.Recipients)
 			nodes[i].Folders = mergeStrings(nodes[i].Folders, sub.Folders)
@@ -771,7 +797,15 @@ func (s *Server) Open(ctx context.Context, nodeID string) (net.Conn, error) {
 	nc := s.conns[nodeID]
 	s.mu.Unlock()
 	if nc != nil {
-		return nc.m.OpenStream(ctx)
+		st, err := nc.m.OpenStream(ctx)
+		if err != nil {
+			select {
+			case <-nc.m.Done():
+				return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
+			default:
+			}
+		}
+		return st, err
 	}
 	if len(s.InternalKey) == 0 || s.Registry.Store == nil {
 		return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
@@ -1014,7 +1048,12 @@ func (s *Server) completeGrainfile(ctx context.Context, nc *nodeConn, msg Messag
 	}
 	sub, subErr := s.Grainfiles.GetSubscriptions(ctx, nc.id)
 	authorized := false
-	if subErr == nil {
+	if completedRec.Recipient != "" {
+		if depID := grainfiles.DeploymentIDFromRecipient(completedRec.Recipient); depID != "" && strings.EqualFold(depID, nc.id) {
+			authorized = true
+		}
+	}
+	if !authorized && subErr == nil {
 		if completedRec.Recipient != "" {
 			for _, r := range sub.Recipients {
 				if strings.EqualFold(r, completedRec.Recipient) || grainfiles.IsSameRepo(r, completedRec.Recipient) {
@@ -1246,9 +1285,6 @@ func (s *Server) deliverNodeGrainfileEvents(ctx context.Context, nc *nodeConn) b
 	sub, err := s.Grainfiles.GetSubscriptions(ctx, nc.id)
 	if err != nil {
 		return errors.Is(err, grainfiles.ErrNotFound)
-	}
-	if len(sub.Recipients) == 0 && len(sub.Repos) == 0 && len(sub.Folders) == 0 && len(sub.Grainfiles) == 0 {
-		return true
 	}
 	evs, err := s.Grainfiles.EventsForNode(ctx, nc.id, sub.Cursor)
 	if err != nil {

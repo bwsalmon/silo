@@ -247,7 +247,7 @@ func (a *Admission) ValidateNodeUI(owner string, n *registry.Node) error {
 	}
 	team := strings.TrimSpace(uiCopy.Team)
 	if team == "" {
-		if uiCopy.Reason != "" || len(n.Repos) == 0 {
+		if uiCopy.Reason != "" {
 			if n.UI == nil {
 				n.UI = &uiCopy
 			}
@@ -261,6 +261,16 @@ func (a *Admission) ValidateNodeUI(owner string, n *registry.Node) error {
 		teams, ok := a.teams[u]
 		if !ok {
 			return fmt.Errorf("%w: owner %s", ErrNotRead, o)
+		}
+		if len(n.Repos) == 0 {
+			if r := teams[n.ID]; r == Member || r == Admin {
+				uiCopy.Offered = true
+				uiCopy.Team = n.ID
+				n.UI = &uiCopy
+			} else if n.UI == nil {
+				n.UI = &uiCopy
+			}
+			return nil
 		}
 		inferred := ""
 		for _, repo := range n.Repos {
@@ -508,6 +518,10 @@ func (a *Access) ResolveEntry(e registry.Entry) (registry.Entry, bool) {
 		} else {
 			var best Role
 			var bestTeam string
+			if role := a.Teams[e.ID]; role != "" {
+				best = role
+				bestTeam = e.ID
+			}
 			for _, r := range e.Repos {
 				if own, ok := a.repos[strings.ToLower(r)]; ok {
 					if role := a.Teams[own.team]; role.rank() > best.rank() {
@@ -526,7 +540,7 @@ func (a *Access) ResolveEntry(e registry.Entry) (registry.Entry, bool) {
 	}
 	e.ViewerRole = viewerRole
 	e.RequireApproval = reqApproval
-	visible := a.HubAdmin || strings.EqualFold(e.Owner, a.Email) || uiRole != ""
+	visible := a.HubAdmin || strings.EqualFold(e.Owner, a.Email) || uiRole != "" || a.Teams[e.ID] != ""
 	if !visible {
 		for _, r := range e.Repos {
 			if a.SeesRepo(r) {

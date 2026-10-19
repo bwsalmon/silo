@@ -61,13 +61,21 @@ func hashToken(tok string) string {
 // owner's tokens revoked would be handed that owner's lost tasks
 // (SA1-H1).
 func (s *Store) MintNodeToken(ctx context.Context, owner, node string) (string, NodeToken, error) {
-	tok, t, _, err := s.mintNodeToken(ctx, owner, node)
+	tok, t, _, err := s.mintNodeToken(ctx, owner, node, false)
 	return tok, t, err
+}
+
+// MintDeploymentToken mints a node token for deployment node. When forceOwner
+// is true (the caller is an admin of deployment node or a Hub sys admin), any
+// earlier token for node minted by a different admin is automatically revoked
+// and released so the caller can mint a replacement token for node.
+func (s *Store) MintDeploymentToken(ctx context.Context, owner, node string, forceOwner bool) (string, NodeToken, int64, error) {
+	return s.mintNodeToken(ctx, owner, node, forceOwner)
 }
 
 // mintNodeToken is MintNodeToken, also saying how many earlier tokens
 // it revoked, so the API can end the connection one of them holds.
-func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, NodeToken, int64, error) {
+func (s *Store) mintNodeToken(ctx context.Context, owner, node string, forceOwner bool) (string, NodeToken, int64, error) {
 	o, err := normEmail(owner)
 	if err != nil {
 		return "", NodeToken{}, 0, err
@@ -89,22 +97,36 @@ func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, 
 		t = NodeToken{ID: hex.EncodeToString(idb), Owner: o, Node: node, Created: s.now().UTC().Truncate(time.Millisecond)}
 		tok = tokenPrefix + t.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
 		err = s.tx(ctx, func(tx *sql.Tx) error {
-			var other string
-			err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND released_at IS NULL LIMIT 1`), node, o).Scan(&other)
-			if err == nil {
-				return fmt.Errorf("%w: %s", ErrNodeOwner, node)
-			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				return err
+			revoked = 0
+			if forceOwner {
+				resOther, err := tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = COALESCE(revoked_at, ?), released_at = ? WHERE node = ? AND owner <> ? AND released_at IS NULL`),
+					t.Created.UnixMilli(), t.Created.UnixMilli(), node, o)
+				if err != nil {
+					return err
+				}
+				if nOther, err := resOther.RowsAffected(); err == nil {
+					revoked += nOther
+				}
+			} else {
+				var other string
+				err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND released_at IS NULL LIMIT 1`), node, o).Scan(&other)
+				if err == nil {
+					return fmt.Errorf("%w: %s", ErrNodeOwner, node)
+				}
+				if !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
 			}
 			res, err := tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE node = ? AND owner = ? AND revoked_at IS NULL`),
 				t.Created.UnixMilli(), node, o)
 			if err != nil {
 				return err
 			}
-			if revoked, err = res.RowsAffected(); err != nil {
+			nOwn, err := res.RowsAffected()
+			if err != nil {
 				return err
 			}
+			revoked += nOwn
 			_, err = tx.ExecContext(ctx, s.q(`INSERT INTO node_tokens (id, hash, owner, node, created_at) VALUES (?, ?, ?, ?, ?)`),
 				t.ID, hashToken(tok), o, node, t.Created.UnixMilli())
 			if isUnique(err) {

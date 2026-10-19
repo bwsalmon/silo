@@ -191,6 +191,13 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 	devHeader := fs.String("dev-user-header", env("SILO_HUB_DEV_USER_HEADER", ""),
 		"INSECURE, local development only: take the caller's email from this header, unverified [SILO_HUB_DEV_USER_HEADER]")
 	admins := fs.String("admins", env("SILO_HUB_ADMINS", ""), "comma-separated hub admins, user:EMAIL or group:NAME [SILO_HUB_ADMINS]")
+	var hubAdminFlags, acceptedUserFlags multi
+	fs.Var(&hubAdminFlags, "hub-admin", "hub sys-admin email or user:EMAIL (repeatable or comma-separated) [SILO_HUB_ADMINS]")
+	acceptedUsersEnv := fs.String("accepted-users", env("SILO_ACCEPTED_USERS", env("SILO_HUB_ACCEPTED_USERS", "")),
+		"comma-separated accepted user emails [SILO_ACCEPTED_USERS]")
+	fs.Var(&acceptedUserFlags, "accepted-user", "accepted user email (repeatable or comma-separated) [SILO_ACCEPTED_USERS]")
+	hubURL := fs.String("hub-url", env("SILO_HUB_URL", ""),
+		"canonical public HTTPS URL of the hub (e.g. https://hub.example.com) [SILO_HUB_URL]")
 	metricsAddr := fs.String("metrics-addr", env("SILO_HUB_METRICS_ADDR", ""),
 		"address to serve Prometheus metrics on, at /metrics; keep it off the load balancer's routes [SILO_HUB_METRICS_ADDR]")
 	nodeUI := fs.String("node-ui-domain", env("SILO_HUB_NODE_UI_DOMAIN", ""),
@@ -282,6 +289,14 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 		}
 		ghAppKey = b
 	}
+	allAdmins := list(*admins)
+	for _, v := range hubAdminFlags {
+		allAdmins = append(allAdmins, list(v)...)
+	}
+	allAccepted := list(*acceptedUsersEnv)
+	for _, v := range acceptedUserFlags {
+		allAccepted = append(allAccepted, list(v)...)
+	}
 	cfg := server.Config{
 		Database:          *db,
 		NoMigrate:         !*doMigrate,
@@ -295,7 +310,9 @@ func buildServeConfig(args []string) (string, server.Config, error) {
 		OIDCRedirectURL:     *redirect,
 		OIDCSessionKey:      []byte(os.Getenv("SILO_HUB_OIDC_SESSION_KEY")),
 		DevUserHeader:       *devHeader,
-		HubAdmins:           list(*admins),
+		HubAdmins:           allAdmins,
+		AcceptedUsers:       allAccepted,
+		HubURL:              strings.TrimSpace(*hubURL),
 		NodeUIDomain:        *nodeUI,
 		ShutdownGrace:       *grace,
 		Heartbeat:           *heartbeat,

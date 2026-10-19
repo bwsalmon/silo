@@ -369,3 +369,54 @@ func TestOfferRead(t *testing.T) {
 		}
 	})
 }
+
+func TestReclaimForNode(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		s.Now = ticking()
+
+		tOffered, err := s.Create(ctx, spec("infra", "bwsalmon/silo", "offered-task"))
+		check(t, err)
+		_, err = s.Offer(ctx, tOffered.ID, "ws-old", "alice@example.com")
+		check(t, err)
+
+		tRunning, err := s.Create(ctx, spec("infra", "bwsalmon/silo", "running-task"))
+		check(t, err)
+		_, err = s.Offer(ctx, tRunning.ID, "ws-old", "alice@example.com")
+		check(t, err)
+		_, err = s.Accept(ctx, tRunning.ID, "local-42")
+		check(t, err)
+
+		tLost, err := s.Create(ctx, spec("infra", "bwsalmon/silo", "lost-task"))
+		check(t, err)
+		_, err = s.Offer(ctx, tLost.ID, "ws-old", "alice@example.com")
+		check(t, err)
+		_, err = s.Accept(ctx, tLost.ID, "local-43")
+		check(t, err)
+		_, err = s.Lose(ctx, tLost.ID, "disconnected")
+		check(t, err)
+
+		tOther, err := s.Create(ctx, spec("infra", "bwsalmon/silo", "other-node-task"))
+		check(t, err)
+		_, err = s.Offer(ctx, tOther.ID, "ws-other", "alice@example.com")
+		check(t, err)
+
+		reclaimed, err := s.ReclaimForNode(ctx, "ws-old", "host replaced")
+		check(t, err)
+		if len(reclaimed) != 3 {
+			t.Fatalf("ReclaimForNode returned %d tasks, want 3", len(reclaimed))
+		}
+		for _, id := range []string{tOffered.ID, tRunning.ID, tLost.ID} {
+			got, err := s.Get(ctx, id)
+			check(t, err)
+			if got.State != Queued || got.Node != "" || got.NodeOwner != "" || got.NodeTask != "" {
+				t.Errorf("task %s after ReclaimForNode = %+v, want queued with empty node fields", id, got)
+			}
+		}
+		gotOther, err := s.Get(ctx, tOther.ID)
+		check(t, err)
+		if gotOther.State != Offered || gotOther.Node != "ws-other" {
+			t.Errorf("other node task changed: %+v", gotOther)
+		}
+	})
+}

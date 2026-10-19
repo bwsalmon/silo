@@ -909,18 +909,33 @@ GET    /v1/me                                          the caller, their teams, 
 PUT    /v1/me/theme {"theme":"light"|"dark"}           the caller's resolved light/dark theme
 GET    /v1/me/inbox                                    the caller's selected Unified Inbox deployments
 PUT    /v1/me/inbox {"nodes":[...]}                    update the caller's selected Unified Inbox deployments
-GET    /v1/teams                                       the caller's teams (all, for a hub admin)
-POST   /v1/teams {"id","name"}                         hub admin
-GET    /v1/teams/{team}                                one team as /v1/teams lists it: its members, a hub admin
-DELETE /v1/teams/{team}                                hub admin; its repositories are left unowned
-PUT    /v1/teams/{team}/members/{principal} {"role"}   team admin; principal is user:EMAIL or group:NAME
-DELETE /v1/teams/{team}/members/{principal}            team admin
-PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history": true}]   hub admin; history also gives the team the repository's earlier tasks
-DELETE /v1/teams/{team}/repos/{owner}/{name}           team admin
-GET    /v1/teams/{team}/settings                       its members (§5.3, §6.6.1)
-PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds","anyone_may_propose","require_approval"}   team admin (§5.3, §6.6.1)
+GET    /v1/users                                       sys admin: accepted users allowlist and sys-admin roles
+PUT    /v1/users/{email} {"sys_admin":bool}            sys admin: add or update an accepted user
+DELETE /v1/users/{email}                               sys admin: remove an accepted user (refuses last sys admin)
+GET    /v1/deployments                                 the caller's deployments (all, for a sys admin)
+POST   /v1/deployments {"id","name"}                   any accepted user (claims open id as admin)
+GET    /v1/deployments/{id}                            one deployment as /v1/deployments lists it: its members, or a sys admin
+DELETE /v1/deployments/{id}                            deployment admin or sys admin; its repositories are left unowned
+PUT    /v1/deployments/{id}/members/{principal} {"role"}   deployment admin; principal is user:EMAIL or group:NAME
+DELETE /v1/deployments/{id}/members/{principal}        deployment admin
+PUT    /v1/deployments/{id}/repos/{owner}/{name} [{"history": true}]   deployment admin (for unowned repos) or sys admin
+DELETE /v1/deployments/{id}/repos/{owner}/{name}       deployment admin
+GET    /v1/deployments/{id}/settings                   its members (§5.3, §6.6.1)
+PUT    /v1/deployments/{id}/settings {"lost_requeue_after_seconds","anyone_may_propose","require_approval"}   deployment admin (§5.3, §6.6.1)
+POST   /v1/deployments/{id}/token [{"replace_host": true}]   deployment admin or sys admin: mint a connection token for {id}
+POST   /v1/deployments/{id}/replace-host               deployment admin or sys admin: mint replacement token, reclaim active tasks, and replay Grainfiles
+GET    /v1/teams                                       backward-compatible alias for /v1/deployments
+POST   /v1/teams {"id","name"}                         backward-compatible alias for POST /v1/deployments
+GET    /v1/teams/{team}                                backward-compatible alias for GET /v1/deployments/{id}
+DELETE /v1/teams/{team}                                backward-compatible alias for DELETE /v1/deployments/{id}
+PUT    /v1/teams/{team}/members/{principal} {"role"}   backward-compatible alias for PUT /v1/deployments/{id}/members/{principal}
+DELETE /v1/teams/{team}/members/{principal}            backward-compatible alias for DELETE /v1/deployments/{id}/members/{principal}
+PUT    /v1/teams/{team}/repos/{owner}/{name} [{"history": true}]   backward-compatible alias for PUT /v1/deployments/{id}/repos/{owner}/{name}
+DELETE /v1/teams/{team}/repos/{owner}/{name}           backward-compatible alias for DELETE /v1/deployments/{id}/repos/{owner}/{name}
+GET    /v1/teams/{team}/settings                       backward-compatible alias for GET /v1/deployments/{id}/settings
+PUT    /v1/teams/{team}/settings {"lost_requeue_after_seconds","anyone_may_propose","require_approval"}   backward-compatible alias for PUT /v1/deployments/{id}/settings
 GET    /v1/node-tokens                                 the caller's (all, for a hub admin)
-POST   /v1/node-tokens {"node"}                        mint one for the caller
+POST   /v1/node-tokens {"node"}                        mint one for the caller (or for deployment {node} when caller is admin)
 DELETE /v1/node-tokens/{id}                            its owner, or a hub admin
 ```
 

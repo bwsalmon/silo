@@ -620,6 +620,48 @@ func (s *Store) RequeueLost(ctx context.Context, id, reason string, lostSince ti
 	})
 }
 
+// ReclaimForNode transitions all tasks currently claimed, offered, running, or
+// lost on nodeID back to queued, clearing their node, node_owner, and node_task
+// (and removing nodeID from Excluded) so a replacement or reinstalled host (or
+// another eligible deployment) can pick them up immediately.
+func (s *Store) ReclaimForNode(ctx context.Context, nodeID, reason string) ([]Task, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil, nil
+	}
+	if reason == "" {
+		reason = "host replaced"
+	}
+	inFlight := []State{Offered, Running, Lost, State("claimed")}
+	ts, err := s.list(ctx, Filter{States: inFlight}, true)
+	if err != nil {
+		return nil, err
+	}
+	var reclaimed []Task
+	for _, t := range ts {
+		if !strings.EqualFold(t.Node, nodeID) {
+			continue
+		}
+		updated, err := s.update(ctx, t.ID, inFlight, func(tk *Task) {
+			tk.State = Queued
+			tk.Node = ""
+			tk.NodeOwner = ""
+			tk.NodeTask = ""
+			tk.Reason = reason
+			tk.Excluded = slices.DeleteFunc(slices.Clone(tk.Excluded), func(ex string) bool {
+				return strings.EqualFold(ex, nodeID)
+			})
+		})
+		if err != nil && !errors.Is(err, ErrState) {
+			return reclaimed, err
+		}
+		if err == nil {
+			reclaimed = append(reclaimed, updated)
+		}
+	}
+	return reclaimed, nil
+}
+
 // Counts is how many tasks the backlog holds in each unfinished state,
 // by team: the hub's backlog-depth metric. Finished tasks are not
 // counted.

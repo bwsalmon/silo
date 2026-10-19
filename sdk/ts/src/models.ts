@@ -139,6 +139,8 @@ export interface NodeUI {
 // NodeEntry is a node as the directory (GET /v1/nodes) lists it.
 export interface NodeEntry {
   id: string;
+  url?: string;
+  recipient_url?: string;
   repos: string[];
   slots: number;
   version?: string;
@@ -423,20 +425,35 @@ export interface Approval {
   delivered: boolean;
 }
 
-// Team is a team the caller may see, with its members (principals,
-// user:EMAIL or group:NAME) and the repositories it owns.
+// AcceptedUser is a user on the Hub's accepted users allowlist (GET /v1/users, hub.md §5.4).
+export interface AcceptedUser {
+  email: string;
+  sys_admin: boolean;
+  added_by?: string;
+  created_at: string;
+}
+
+// Team is a deployment/team the caller may see, with its canonical Hub URL,
+// its members (principals, user:EMAIL or group:NAME) and the repositories it owns.
 export interface Team {
   id: string;
   name: string;
+  url?: string;
+  recipient_url?: string;
   members: Record<string, Role> | null;
   repos: string[] | null;
 }
+
+// Deployment is the unified deployment record returned by GET /v1/deployments.
+export type Deployment = Team;
 
 export interface TeamSettings {
   lost_requeue_after_seconds?: number;
   anyone_may_propose?: boolean;
   require_approval?: boolean;
 }
+
+export type DeploymentSettings = TeamSettings;
 
 // NodeToken is a node token's record; the hub keeps only a hash of the
 // token itself (hub.md §5.2).
@@ -449,11 +466,14 @@ export interface NodeToken {
   released?: string;
 }
 
-// MintedToken is POST /v1/node-tokens's answer: the token itself and
-// its record.
+// MintedToken is POST /v1/node-tokens's and POST /v1/deployments/{id}/token's answer:
+// the token itself, its record, and any host-replacement summary.
 export interface MintedToken {
   token: string;
   node_token: NodeToken;
+  replaced_host?: boolean;
+  reclaimed_tasks?: string[];
+  replayed_events?: number;
 }
 
 // ArtifactResult is a view of a node-only artifact: its text, held only

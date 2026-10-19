@@ -110,30 +110,29 @@ func TestAPI(t *testing.T) {
 	admins := "hub-admins@example.com"
 
 	h.want(t, 401, "", "GET", MePath, nil)
-	h.want(t, 403, alice, "POST", TeamsPath, map[string]string{"id": "infra"})
-	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"}, admins)
-	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "web"}, admins)
+	h.want(t, 201, alice, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"})
+	h.want(t, 201, bob, "POST", TeamsPath, map[string]string{"id": "web"})
 	h.want(t, 409, root, "POST", TeamsPath, map[string]string{"id": "web"}, admins)
 	h.want(t, 400, root, "POST", TeamsPath, map[string]string{"id": "Bad Team"}, admins)
 	h.want(t, 400, root, "POST", TeamsPath, map[string]any{"id": "x", "extra": 1}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/user:"+bob, map[string]string{"role": "admin"}, admins)
 
-	// Only a hub admin assigns repositories (SA1-M2).
-	h.want(t, 204, root, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil, admins)
+	// A deployment admin may claim an unowned repository (without history);
+	// history transfer requires a hub admin, and claiming another team's repo is 409.
+	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil)
 	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", map[string]bool{"history": true}, admins)
+	h.want(t, 409, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil)          // infra's
 	h.want(t, 409, root, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil, admins) // infra's
 	h.want(t, 400, root, "PUT", TeamsPath+"/web/repos/bwsalmon/x", map[string]any{"transfer": true}, admins)
 	h.want(t, 404, root, "PUT", TeamsPath+"/nope/repos/bwsalmon/x", nil, admins)
 
-	// Alice administers infra, and only infra.
+	// Alice administers infra, and only infra; Carol is only a member.
 	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/user:carol@example.com", map[string]string{"role": "member"})
-	h.want(t, 403, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/x", nil)
+	h.want(t, 403, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/x", map[string]bool{"history": true})
 	h.want(t, 404, alice, "PUT", TeamsPath+"/web/repos/bwsalmon/x", nil)
 	h.want(t, 403, "carol@example.com", "PUT", TeamsPath+"/infra/repos/bwsalmon/x", nil)
-	h.want(t, 403, alice, "DELETE", TeamsPath+"/infra", nil)
+	h.want(t, 403, "carol@example.com", "DELETE", TeamsPath+"/infra", nil)
 	if owner, _ := h.store.RepoOwner(context.Background(), "bwsalmon/x"); owner != "" {
-		t.Errorf("a team admin assigned bwsalmon/x to %q", owner)
+		t.Errorf("bwsalmon/x was assigned to %q", owner)
 	}
 
 	var teams struct{ Teams []Team }
@@ -366,13 +365,11 @@ func TestAdminModeHeader(t *testing.T) {
 	const root, alice, bob = "root@example.com", "alice@example.com", "bob@example.com"
 	const admins = "hub-admins@example.com"
 
-	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"}, admins)
-	h.want(t, 201, root, "POST", TeamsPath, map[string]string{"id": "web", "name": "Web"}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+root, map[string]string{"role": "member"}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/infra/members/user:"+alice, map[string]string{"role": "admin"}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/web/members/user:"+bob, map[string]string{"role": "admin"}, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil, admins)
-	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", nil, admins)
+	h.want(t, 201, alice, "POST", TeamsPath, map[string]string{"id": "infra", "name": "Infra"})
+	h.want(t, 201, bob, "POST", TeamsPath, map[string]string{"id": "web", "name": "Web"})
+	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/members/user:"+root, map[string]string{"role": "member"})
+	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil)
+	h.want(t, 204, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/web", nil)
 
 	// Mint node tokens for root and bob.
 	h.want(t, 201, root, "POST", NodeTokensPath, map[string]string{"node": "ws-root"}, admins)
@@ -454,9 +451,9 @@ func TestAdminModeHeader(t *testing.T) {
 			t.Errorf("GET /v1/teams/web mode=%q: got %d, want 404", mode, c)
 		}
 
-		// Hub-admin-only writes are refused when admin mode is off.
-		if c, _ := doMode(root, admins, mode, "POST", TeamsPath, map[string]string{"id": "extra"}); c != 403 {
-			t.Errorf("POST /v1/teams mode=%q: got %d, want 403", mode, c)
+		// Hub-admin-only and team-admin actions are refused when admin mode is off.
+		if c, _ := doMode(root, admins, mode, "GET", UsersPath, nil); c != 403 {
+			t.Errorf("GET /v1/users mode=%q: got %d, want 403", mode, c)
 		}
 		if c, _ := doMode(root, admins, mode, "PUT", TeamsPath+"/infra/repos/bwsalmon/extra", nil); c != 403 {
 			t.Errorf("PUT repo mode=%q: got %d, want 403", mode, c)
@@ -487,8 +484,8 @@ func TestAdminModeHeader(t *testing.T) {
 		if me.CanHubAdmin || me.HubAdmin {
 			t.Errorf("alice GET /v1/me mode=%q: got %+v, want CanHubAdmin=false HubAdmin=false", mode, me)
 		}
-		if c, _ := doMode(alice, "", mode, "POST", TeamsPath, map[string]string{"id": "escalated"}); c != 403 {
-			t.Errorf("alice POST /v1/teams mode=%q: got %d, want 403", mode, c)
+		if c, _ := doMode(alice, "", mode, "GET", UsersPath, nil); c != 403 {
+			t.Errorf("alice GET /v1/users mode=%q: got %d, want 403", mode, c)
 		}
 		if c, _ := doMode(alice, "", mode, "GET", TeamsPath+"/web", nil); c != 404 {
 			t.Errorf("alice GET /v1/teams/web mode=%q: got %d, want 404", mode, c)
@@ -662,5 +659,173 @@ func TestUserThemeInboxPreferencesAndDirectoryRoles(t *testing.T) {
 	json.Unmarshal(h.want(t, 200, vera, "PUT", MePath+"/inbox", map[string]any{"nodes": []string{"ws-infra"}}), &inboxPrefs)
 	if !inboxPrefs.Configured || len(inboxPrefs.Nodes) != 1 || inboxPrefs.Nodes[0] != "ws-infra" {
 		t.Fatalf("vera saved inbox prefs = %+v", inboxPrefs)
+	}
+}
+
+func TestAcceptedUsersAndDynamicSysAdmins(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, "sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	const root, alice, bob, stranger = "root@example.com", "alice@example.com", "bob@example.com", "stranger@example.com"
+	if err := s.SeedUsers(ctx, []string{"user:" + root}, []string{alice}); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &API{
+		Store:                s,
+		Auth:                 headerAuth{},
+		EnforceAcceptedUsers: true,
+		HubURL:               "https://hub.example.com",
+	}
+	ts := httptest.NewServer(api.Handler())
+	t.Cleanup(ts.Close)
+	h := &testHub{store: s, url: ts.URL}
+
+	// 1. Unaccepted user is refused with 403 Forbidden.
+	_, b := h.do(t, stranger, "GET", MePath, nil)
+	h.want(t, http.StatusForbidden, stranger, "GET", MePath, nil)
+	if !strings.Contains(string(b), "user is not on the hub accepted users list") {
+		t.Fatalf("unexpected 403 body: %s", b)
+	}
+
+	// 2. Seeded accepted user (alice) can sign in, but is not a sys-admin.
+	var me struct {
+		Email       string `json:"email"`
+		HubAdmin    bool   `json:"hub_admin"`
+		CanHubAdmin bool   `json:"can_hub_admin"`
+	}
+	json.Unmarshal(h.want(t, http.StatusOK, alice, "GET", MePath, nil), &me)
+	if me.Email != alice || me.HubAdmin || me.CanHubAdmin {
+		t.Fatalf("alice /v1/me = %+v", me)
+	}
+	h.want(t, http.StatusForbidden, alice, "GET", UsersPath, nil)
+	h.want(t, http.StatusForbidden, alice, "PUT", UsersPath+"/"+bob, map[string]bool{"sys_admin": false})
+
+	// 3. Seeded sys-admin (root) manages accepted users and dynamic sys-admins.
+	var usersResp struct {
+		Users []AcceptedUser `json:"users"`
+	}
+	json.Unmarshal(h.want(t, http.StatusOK, root, "GET", UsersPath, nil), &usersResp)
+	if len(usersResp.Users) != 2 {
+		t.Fatalf("initial users = %+v, want 2", usersResp.Users)
+	}
+
+	// Refuse demoting or deleting the last sys-admin (409 Conflict).
+	h.want(t, http.StatusConflict, root, "PUT", UsersPath+"/"+root, map[string]bool{"sys_admin": false})
+	h.want(t, http.StatusConflict, root, "DELETE", UsersPath+"/"+root, nil)
+
+	// Root adds bob as an accepted user and promotes alice to sys-admin.
+	h.want(t, http.StatusOK, root, "PUT", UsersPath+"/"+bob, map[string]bool{"sys_admin": false})
+	h.want(t, http.StatusOK, root, "PUT", UsersPath+"/"+alice, map[string]bool{"sys_admin": true})
+
+	// Alice now has dynamic sys-admin rights and can manage users.
+	json.Unmarshal(h.want(t, http.StatusOK, alice, "GET", MePath, nil), &me)
+	if !me.HubAdmin || !me.CanHubAdmin {
+		t.Fatalf("promoted alice /v1/me = %+v, want HubAdmin=true", me)
+	}
+	// Alice demotes root (allowed because alice is also a sys-admin), then removes bob.
+	h.want(t, http.StatusOK, alice, "PUT", UsersPath+"/"+root, map[string]bool{"sys_admin": false})
+	h.want(t, http.StatusNoContent, alice, "DELETE", UsersPath+"/"+bob, nil)
+	h.want(t, http.StatusForbidden, bob, "GET", MePath, nil)
+	// Alice is now the last sys-admin and cannot demote or delete herself.
+	h.want(t, http.StatusConflict, alice, "PUT", UsersPath+"/"+alice, map[string]bool{"sys_admin": false})
+	h.want(t, http.StatusConflict, alice, "DELETE", UsersPath+"/"+alice, nil)
+}
+
+func TestDeploymentsCanonicalURLAndHostReplacement(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, "sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	var reclaimedNode, reclaimedReason string
+	var replayedNode string
+	rv := &rendezvous.Server{
+		Registry:     registry.New(),
+		Authenticate: s.Authenticate,
+		Admit:        s.Admit,
+		ValidateUI:   s.ValidateNodeUI,
+		Heartbeat:    time.Second,
+		HubURL:       "https://hub.example.com",
+	}
+	api := &API{
+		Store:      s,
+		Auth:       headerAuth{},
+		HubURL:     "https://hub.example.com",
+		Disconnect: rv.Disconnect,
+		Unbind:     rv.Registry.Unbind,
+		Registry:   rv.Registry,
+		ReclaimTasks: func(_ context.Context, nodeID, reason string) ([]string, error) {
+			reclaimedNode, reclaimedReason = nodeID, reason
+			return []string{"t-1", "t-2"}, nil
+		},
+		ReplayGrainfiles: func(_ context.Context, nodeID string) (int, error) {
+			replayedNode = nodeID
+			return 3, nil
+		},
+	}
+	rv.Visible = api.Visible
+	rv.ResolveEntries = api.ResolveEntries
+	m := http.NewServeMux()
+	m.Handle(rendezvous.ConnectPath, rv.Handler())
+	m.Handle(rendezvous.DirectoryPath, rv.Handler())
+	m.Handle("/", api.Handler())
+	ts := httptest.NewServer(m)
+	t.Cleanup(ts.Close)
+	h := &testHub{store: s, rv: rv, url: ts.URL}
+
+	const alice, bob, carol = "alice@example.com", "bob@example.com", "carol@example.com"
+
+	// 1. Self-service deployment creation via POST /v1/deployments defaults name to id and sets canonical URL.
+	var dep Team
+	json.Unmarshal(h.want(t, http.StatusCreated, alice, "POST", DeploymentsPath, map[string]string{"id": "payments-prod"}), &dep)
+	wantURL := "https://hub.example.com/deployments/payments-prod"
+	if dep.ID != "payments-prod" || dep.Name != "payments-prod" || dep.URL != wantURL || dep.RecipientURL != wantURL || dep.Members["user:"+alice] != Admin {
+		t.Fatalf("created deployment = %+v, want url=%s", dep, wantURL)
+	}
+	// Name is taken (409 Conflict).
+	h.want(t, http.StatusConflict, bob, "POST", DeploymentsPath, map[string]string{"id": "payments-prod"})
+
+	// 2. Alice claims an open repo and adds Bob as a second deployment admin.
+	h.want(t, http.StatusNoContent, alice, "PUT", DeploymentsPath+"/payments-prod/repos/acme/payments", nil)
+	h.want(t, http.StatusNoContent, alice, "PUT", DeploymentsPath+"/payments-prod/members/user:"+bob, map[string]string{"role": "admin"})
+
+	// Carol (not an admin of payments-prod) cannot mint a token for payments-prod.
+	h.want(t, http.StatusConflict, carol, "POST", NodeTokensPath, map[string]string{"node": "payments-prod"})
+	h.want(t, http.StatusNotFound, carol, "POST", DeploymentsPath+"/payments-prod/token", nil)
+
+	// Alice mints initial deployment token.
+	var mint1 struct {
+		Token     string    `json:"token"`
+		NodeToken NodeToken `json:"node_token"`
+	}
+	json.Unmarshal(h.want(t, http.StatusCreated, alice, "POST", DeploymentsPath+"/payments-prod/token", nil), &mint1)
+	if mint1.Token == "" || mint1.NodeToken.Node != "payments-prod" {
+		t.Fatalf("alice mint = %+v", mint1)
+	}
+
+	// Bob (another admin of payments-prod) can replace the host and mint a new token for payments-prod!
+	var mint2 struct {
+		Token          string    `json:"token"`
+		NodeToken      NodeToken `json:"node_token"`
+		ReplacedHost   bool      `json:"replaced_host"`
+		ReclaimedTasks []string  `json:"reclaimed_tasks"`
+		ReplayedEvents int       `json:"replayed_events"`
+	}
+	json.Unmarshal(h.want(t, http.StatusCreated, bob, "POST", DeploymentsPath+"/payments-prod/replace-host", nil), &mint2)
+	if !mint2.ReplacedHost || len(mint2.ReclaimedTasks) != 2 || mint2.ReplayedEvents != 3 || reclaimedNode != "payments-prod" || replayedNode != "payments-prod" || reclaimedReason == "" {
+		t.Fatalf("bob replace-host = %+v (reclaimedNode=%q replayedNode=%q)", mint2, reclaimedNode, replayedNode)
+	}
+	if _, _, err := s.VerifyNodeToken(ctx, mint1.Token); err == nil {
+		t.Fatal("prior token was not revoked by replace-host")
+	}
+	if _, node, err := s.VerifyNodeToken(ctx, mint2.Token); err != nil || node != "payments-prod" {
+		t.Fatalf("replacement token verify: node=%q err=%v", node, err)
 	}
 }

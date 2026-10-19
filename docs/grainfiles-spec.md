@@ -29,6 +29,8 @@ Where this specification makes a normative design choice, the choice is marked *
 
 ## 1. Conventions
 
+**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) checked into Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` directs a single unit of work (optionally gated by `depends_on` or `not_before`) to a `recipient` deployment (such as its canonical Hub deployment URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, schedule, or manual events (`when`).
+
 1.1. The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY" and "OPTIONAL" are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 1.2. Grammars use ABNF (RFC 5234). `ALPHA`, `DIGIT` and `HEXDIG` are RFC 5234's core rules; `LOWER = %x61-7A`.
@@ -161,7 +163,7 @@ A reader MUST support at least, and MAY refuse beyond (GF006): a grainfile of 1 
 
 5.3. **The YAML subset.** Front matter is YAML 1.2 restricted to a single document whose top-level value is a mapping, with plain string keys, no duplicate keys at any level, no YAML anchors (`&`), aliases (`*`), merge keys (`<<`), or explicit tags (`!`) (GF004). Scalar values are strings, integers, booleans (`true`/`false`), `null`, or floats where a schema permits `number`. **Decision:** Process triggers use the key `when` rather than `on` so that legacy YAML 1.1 parsers never misparse the trigger key as boolean `true`.
 
-5.4. **The body.** The Markdown body (CommonMark with GitHub-Flavoured Markdown tables) is the **prompt** given directly to the run when a deployment executes the `.task.grain.md` or `.process.grain.md` (§9, §11.5).
+5.4. **The body (optional).** The Markdown body (CommonMark with GitHub-Flavoured Markdown tables) after the closing `---` front-matter delimiter is the **prompt** given directly to the run when a deployment executes the `.task.grain.md` or `.process.grain.md` (§9, §11.5). The Markdown body is **optional and MAY be empty** (for example, when `title`, `from_template`, `references`, or `when` already conveys the full intent of the task or process).
 
 5.5. **Round-trip editing.** A tool that modifies an existing grainfile MUST preserve the ordering, comments, unknown fields, and body text of everything it did not intend to change.
 
@@ -218,11 +220,12 @@ display-name  = non-angle *( non-angle / WSP )
 
 #### 6.2.2 Deployment identity
 
-A **deployment identity** is a reference (§8.1) naming the git repository or folder that the deployment controls:
+A **deployment identity** is a reference (§8.1) naming the canonical Hub deployment or the git repository or folder that the deployment controls:
+- A canonical Hub deployment URL `https://<hub-host>/deployments/<name>` (or Hub-rooted `/deployments/<name>`), which both opens deployment `<name>` in the Hub UI and routes `.task.grain.md` events (`task_ready`, `task_updated`, `task_removed`) directly to deployment `<name>`.
 - Across repositories, a plain `https://` repository or folder URL, such as `https://github.com/acme/grain-eu` or `https://github.com/acme/deployments/tree/main/grain-eu` (or `file://` in local test suites).
 - Within the same repository, a repo-local relative path (such as `.` or `../grain-eu`) or a `/`-rooted path from the repository root (such as `/` or `/grain-eu`).
-- When used in `requestor`, a plain `https://` URL MAY also name a user profile, team, or deployment URL.
-- A deployment identity MUST NOT carry a `#<anchor>` suffix or query parameters (GF035) and MUST NOT resolve to a file (GF032). When the target repository is present in the linted tree, the referenced repository or folder MUST exist (GF030).
+- When used in `requestor`, a plain `https://` URL MAY also name a user profile, team, or deployment URL (including `https://<hub-host>/deployments/<name>`).
+- A deployment identity MUST NOT carry a `#<anchor>` suffix or query parameters (GF035) and MUST NOT resolve to a file (GF032). When the target repository is present in the linted tree, a repo-local referenced repository or folder MUST exist (GF030).
 
 #### 6.2.3 Rules for `recipient` and `requestor`
 
