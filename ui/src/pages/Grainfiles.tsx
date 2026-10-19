@@ -63,6 +63,16 @@ function shortTargetLabel(url: string): string {
 function formatEventFilter(name: string, f?: EventFilter): string | null {
   if (!f) return null;
   const details: string[] = [];
+  const repoItems: string[] = [];
+  if (f.repo) repoItems.push(shortRepo(f.repo));
+  if (f.repos && f.repos.length > 0) {
+    for (const r of f.repos) {
+      const s = shortRepo(r);
+      if (!repoItems.includes(s)) repoItems.push(s);
+    }
+  }
+  if (repoItems.length === 1) details.push(`repo: ${repoItems[0]}`);
+  else if (repoItems.length > 1) details.push(`repos: ${repoItems.join(', ')}`);
   if (f.branches && f.branches.length > 0) details.push(`branches: ${f.branches.join(', ')}`);
   if (f.paths && f.paths.length > 0) details.push(`paths: ${f.paths.join(', ')}`);
   if (f.ignore && f.ignore.length > 0) details.push(`ignore: ${f.ignore.join(', ')}`);
@@ -83,15 +93,19 @@ export function summarizeTriggers(on?: GrainfileTriggers): string[] {
       }
     }
   }
-  for (const [label, filter] of [
+  for (const [label, rawFilter] of [
     ['push', on.push],
     ['merge', on.merge],
     ['pull_request', on.pull_request],
     ['workflow_run', on.workflow_run],
     ['release', on.release],
   ] as const) {
-    const formatted = formatEventFilter(label, filter);
-    if (formatted) items.push(formatted);
+    if (!rawFilter) continue;
+    const filters = Array.isArray(rawFilter) ? rawFilter : [rawFilter];
+    for (const filter of filters) {
+      const formatted = formatEventFilter(label, filter);
+      if (formatted) items.push(formatted);
+    }
   }
   if (on.manual) {
     const inputKeys = on.manual.inputs ? Object.keys(on.manual.inputs) : [];
@@ -305,6 +319,13 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                             variant="outlined"
                           />
                         )}
+                        {g.from_template && (
+                          <Chip
+                            size="small"
+                            label={`from_template: ${shortTargetLabel(g.from_template)}`}
+                            variant="outlined"
+                          />
+                        )}
                         {g.draft && <Chip size="small" label="Draft" color="warning" />}
                         {g.not_before && (
                           <Chip
@@ -450,6 +471,16 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                     </Stack>
                   </Box>
                 )}
+                {selected.from_template && (
+                  <Typography variant="body2">
+                    <strong>From template (from_template):</strong>{' '}
+                    <SafeExternalLink
+                      url={selected.from_template}
+                      label={selected.from_template}
+                      sx={{ fontFamily: mono, fontSize: 12 }}
+                    />
+                  </Typography>
+                )}
                 {selected.recipient && (
                   <Typography variant="body2">
                     <strong>Recipient:</strong>{' '}
@@ -586,7 +617,16 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                         <TableCell>
                           <Stack spacing={0.25}>
                             {ev.trigger_source && (
-                              <Typography variant="body2">trigger: {ev.trigger_source}</Typography>
+                              <Typography variant="body2">
+                                trigger: {ev.trigger_source}
+                                {ev.branch ? ` (${ev.branch})` : ''}
+                                {ev.pr_number ? ` #${ev.pr_number}` : ''}
+                              </Typography>
+                            )}
+                            {ev.paths && ev.paths.length > 0 && (
+                              <Typography variant="caption" sx={{ fontFamily: mono }}>
+                                paths: {ev.paths.join(', ')}
+                              </Typography>
                             )}
                             {ev.triggered_by && (
                               <Typography variant="caption" sx={{ fontFamily: mono }}>

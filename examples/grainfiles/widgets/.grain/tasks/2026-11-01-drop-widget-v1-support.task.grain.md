@@ -7,6 +7,7 @@ draft: true
 not_before: "2026-11-01"
 depends_on:
   - ./2026-10-16-widget-schema-v2-migration.task.grain.md
+from_template: ./rollout-region.task.grain.md.jinja2
 references:
   - /docs/widget-schema.md#schema-version-header
   - /src/widget.go

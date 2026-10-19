@@ -24,6 +24,7 @@ const sampleOverview = {
       url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.grain.md',
       kind: 'task',
       title: 'Deploy service to staging',
+      from_template: 'https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2',
       recipient: 'https://github.com/acme/grain-eu',
       requestor: 'Alice <alice@example.com>',
       draft: false,
@@ -49,7 +50,7 @@ const sampleOverview = {
       draft: true,
       references: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
       when: {
-        push: { branches: ['main'] },
+        push: { repos: ['acme/infra', 'acme/app'], branches: ['main'], paths: ['src/auth/'] },
         schedule: { cron: '0 * * * *' },
       },
       gate: true,
@@ -78,6 +79,7 @@ const sampleOverview = {
       grainfile_url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.grain.md',
       kind: 'task',
       title: 'Deploy service to staging',
+      from_template: 'https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2',
       recipient: 'https://github.com/acme/grain-eu',
       created_at: '2026-10-18T10:05:00Z',
     },
@@ -130,7 +132,8 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getByText('Gate')).toBeTruthy();
     expect(screen.getAllByText('jinja2').length).toBeGreaterThan(0);
     expect(screen.getByText('vars: branch, region')).toBeTruthy();
-    expect(screen.getByText('push (branches: main)')).toBeTruthy();
+    expect(screen.getByText('from_template: acme/app:.grain/templates/deploy.task.grain.md.jinja2')).toBeTruthy();
+    expect(screen.getByText('push (repos: acme/infra, acme/app; branches: main; paths: src/auth/)')).toBeTruthy();
     expect(screen.getByText('schedule: 0 * * * *')).toBeTruthy();
     expect(screen.getByText('acme/app:tasks/00-prep.task.grain.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md',
@@ -138,6 +141,9 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
 
     // Inspection panel for first Grainfile (Deploy service to staging)
     expect(screen.getByText('docs/grainfile-v1.md')).toBeTruthy();
+    expect(
+      screen.getByText('https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2').getAttribute('href'),
+    ).toBe('https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2');
     expect(screen.getByText('https://github.com/acme/app/blob/main/docs/arch.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/docs/arch.md',
     );

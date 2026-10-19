@@ -431,6 +431,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		}
 	}
 	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins, Logf: cfg.Logf, Registry: h.Registry}
+	h.Grainfiles.TeamResolver = h.Directory
 	h.Grainfiles.SameTeam = func(ctx context.Context, ownerA, ownerB string) bool {
 		if strings.EqualFold(ownerA, ownerB) {
 			return true

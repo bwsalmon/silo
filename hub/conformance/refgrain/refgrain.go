@@ -150,14 +150,23 @@ func HubTaskURL(hub, id string) string {
 func (g *Grain) TaskStatuses() []TaskStatus {
 	g.mu.Lock()
 	list := make([]*task, 0, len(g.tasks))
-	for _, t := range g.tasks {
+	seen := make(map[string]bool, len(g.tasks))
+	for id, t := range g.tasks {
 		list = append(list, t)
+		seen[id] = true
+	}
+	var extra []TaskStatus
+	for id, u := range g.uiTasks {
+		if !seen[id] && u != nil {
+			extra = append(extra, *u)
+		}
 	}
 	g.mu.Unlock()
-	out := make([]TaskStatus, 0, len(list))
+	out := make([]TaskStatus, 0, len(list)+len(extra))
 	for _, t := range list {
 		out = append(out, g.taskStatusOf(t))
 	}
+	out = append(out, extra...)
 	slices.SortFunc(out, func(a, b TaskStatus) int {
 		return strings.Compare(a.ID, b.ID)
 	})

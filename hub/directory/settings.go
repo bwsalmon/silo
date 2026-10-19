@@ -126,7 +126,10 @@ func (s *Store) SetTeamSettings(ctx context.Context, team string, set Settings) 
 			return err
 		}
 		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_settings (team, lost_requeue_seconds, anyone_may_propose, require_approval) VALUES (?, ?, ?, ?)
-			ON CONFLICT (team) DO UPDATE SET lost_requeue_seconds = excluded.lost_requeue_seconds, anyone_may_propose = excluded.anyone_may_propose, require_approval = excluded.require_approval`),
+			ON CONFLICT (team) DO UPDATE SET
+				lost_requeue_seconds = excluded.lost_requeue_seconds,
+				anyone_may_propose = excluded.anyone_may_propose,
+				require_approval = excluded.require_approval`),
 			team, int64(set.LostRequeueAfter/time.Second), anyone, reqApp)
 		return err
 	})
@@ -263,7 +266,9 @@ func (s *Store) SetUserTheme(ctx context.Context, email, theme string) (string, 
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, ?, '[]', 0, ?)
-			ON CONFLICT (email) DO UPDATE SET theme = excluded.theme, updated_at = excluded.updated_at`),
+			ON CONFLICT (email) DO UPDATE SET
+				theme = excluded.theme,
+				updated_at = excluded.updated_at`),
 			e, norm, s.now().UnixMilli())
 		return err
 	})
@@ -295,9 +300,12 @@ func (s *Store) SetUserInboxNodes(ctx context.Context, email string, nodes []str
 		return nil, err
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, ?, ?, 1, ?)
-			ON CONFLICT (email) DO UPDATE SET inbox_nodes = excluded.inbox_nodes, inbox_configured = 1, updated_at = excluded.updated_at`),
-			e, ThemeLight, string(raw), s.now().UnixMilli())
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, 'light', ?, 1, ?)
+			ON CONFLICT (email) DO UPDATE SET
+				inbox_nodes = excluded.inbox_nodes,
+				inbox_configured = 1,
+				updated_at = excluded.updated_at`),
+			e, string(raw), s.now().UnixMilli())
 		return err
 	})
 	if err != nil {

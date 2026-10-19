@@ -6,6 +6,7 @@ package grainfiles
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -196,6 +197,7 @@ type Grainfile struct {
 	CreatedAtRaw string         `json:"-"`
 	References   []string       `json:"references,omitempty"`
 	DependsOn    []string       `json:"depends_on,omitempty"`
+	FromTemplate string         `json:"from_template,omitempty"`
 	When         Triggers       `json:"when,omitempty"`
 	On           Triggers       `json:"on,omitempty"`
 	Gate         bool           `json:"gate,omitempty"`
@@ -236,11 +238,100 @@ type ScheduleTrigger struct {
 }
 
 // EventFilter is `when.push`, `when.merge`, or `when.pull_request`
-// (docs/grainfiles-spec.md §7.2.1).
+// (docs/grainfiles-spec.md §7.2.1). It may represent either a single filter
+// object or a list of filter objects (via Filters).
 type EventFilter struct {
+	Repo     string        `json:"repo,omitempty"`
+	Repos    []string      `json:"repos,omitempty"`
+	Branches []string      `json:"branches,omitempty"`
+	Paths    []string      `json:"paths,omitempty"`
+	Ignore   []string      `json:"ignore,omitempty"`
+	Filters  []EventFilter `json:"-"`
+}
+
+type singleEventFilterJSON struct {
+	Repo     string   `json:"repo,omitempty"`
+	Repos    []string `json:"repos,omitempty"`
 	Branches []string `json:"branches,omitempty"`
 	Paths    []string `json:"paths,omitempty"`
 	Ignore   []string `json:"ignore,omitempty"`
+}
+
+// Rules returns the list of individual filter rules in f.
+func (f *EventFilter) Rules() []EventFilter {
+	if f == nil {
+		return nil
+	}
+	if len(f.Filters) > 0 {
+		return f.Filters
+	}
+	return []EventFilter{*f}
+}
+
+// MarshalJSON serializes a single filter as a JSON object and a multi-filter
+// list as a JSON array.
+func (f EventFilter) MarshalJSON() ([]byte, error) {
+	if len(f.Filters) > 0 {
+		out := make([]singleEventFilterJSON, len(f.Filters))
+		for i, r := range f.Filters {
+			out[i] = singleEventFilterJSON{
+				Repo:     r.Repo,
+				Repos:    r.Repos,
+				Branches: r.Branches,
+				Paths:    r.Paths,
+				Ignore:   r.Ignore,
+			}
+		}
+		return json.Marshal(out)
+	}
+	return json.Marshal(singleEventFilterJSON{
+		Repo:     f.Repo,
+		Repos:    f.Repos,
+		Branches: f.Branches,
+		Paths:    f.Paths,
+		Ignore:   f.Ignore,
+	})
+}
+
+// UnmarshalJSON accepts either a single filter object or a non-empty array of
+// filter objects.
+func (f *EventFilter) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var list []singleEventFilterJSON
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return err
+		}
+		f.Filters = make([]EventFilter, len(list))
+		for i, item := range list {
+			f.Filters[i] = EventFilter{
+				Repo:     item.Repo,
+				Repos:    item.Repos,
+				Branches: item.Branches,
+				Paths:    item.Paths,
+				Ignore:   item.Ignore,
+			}
+		}
+		if len(f.Filters) > 0 {
+			f.Repo = f.Filters[0].Repo
+			f.Repos = f.Filters[0].Repos
+			f.Branches = f.Filters[0].Branches
+			f.Paths = f.Filters[0].Paths
+			f.Ignore = f.Filters[0].Ignore
+		}
+		return nil
+	}
+	var single singleEventFilterJSON
+	if err := json.Unmarshal(trimmed, &single); err != nil {
+		return err
+	}
+	f.Repo = single.Repo
+	f.Repos = single.Repos
+	f.Branches = single.Branches
+	f.Paths = single.Paths
+	f.Ignore = single.Ignore
+	f.Filters = nil
+	return nil
 }
 
 // ManualTrigger is `when.manual: {}` (docs/grainfiles-spec.md §7.2.1).
@@ -252,9 +343,9 @@ type ScenarioTrigger struct {
 }
 
 var (
-	stemRe             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
-	unknownGrainKindRe = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.grain\.md(?:\.jinja2)?$`)
-	unknownKindRe      = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.md(?:\.jinja2)?$`)
+	stemRe             = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	unknownGrainKindRe = regexp.MustCompile(`^(.+)\.([A-Za-z][A-Za-z0-9-]*)\.grain\.md(?:\.jinja2)?$`)
+	repoSlugRe         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$`)
 	userIdentityRe     = regexp.MustCompile(`^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$`)
 	timeRe             = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$`)
 	dateRe             = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
@@ -266,8 +357,9 @@ var (
 //
 // If relPath ends with .task.grain.md[.jinja2] or .process.grain.md[.jinja2],
 // isGrainfile is true and kind and stem are returned. If relPath is an asset
-// Markdown file with an unregistered .<kind>.grain.md[.jinja2] or .<kind>.md
-// suffix (excluding README*), warnCode is "GF005".
+// Markdown file with an unregistered .<kind>.grain.md[.jinja2] suffix,
+// warnCode is "GF005". Ordinary .md files without .grain.md are normal
+// Markdown assets and never emit GF005.
 func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile bool, warnCode string) {
 	norm := filepath.ToSlash(relPath)
 	leaf := norm
@@ -287,16 +379,13 @@ func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile boo
 	if unknownGrainKindRe.MatchString(leaf) {
 		return "", "", false, CodeUnknownSuffix
 	}
-	if unknownKindRe.MatchString(leaf) && !strings.HasPrefix(strings.ToLower(leaf), "readme") {
-		return "", "", false, CodeUnknownSuffix
-	}
 	return "", "", false, ""
 }
 
 // ClassifyPath classifies a repository-relative path according to
 // docs/grainfiles-spec.md §4.1 and §4.2, matching canonical .task.grain.md /
-// .process.grain.md files first and accepting legacy .task.md / .process.md
-// suffixes for backward compatibility.
+// .process.grain.md files first and also accepting .task.md / .process.md
+// suffixes when called directly by API callers.
 func ClassifyPath(relPath string) (kind Kind, stem string, isGrainfile bool, warnCode string) {
 	if k, s, ok, _ := ClassifyStrictPath(relPath); ok {
 		return k, s, true, ""
@@ -316,8 +405,8 @@ func ClassifyPath(relPath string) (kind Kind, stem string, isGrainfile bool, war
 	return "", "", false, warn
 }
 
-// ValidateStem checks whether stem matches the lowercase ASCII Grainfile stem
-// grammar `[a-z0-9][a-z0-9._-]*` (docs/grainfiles-spec.md §4.1).
+// ValidateStem checks whether stem matches the ASCII Grainfile stem
+// grammar `[A-Za-z0-9][A-Za-z0-9._-]*` (docs/grainfiles-spec.md §4.1).
 func ValidateStem(stem string) bool {
 	return stemRe.MatchString(stem)
 }
@@ -480,6 +569,14 @@ func parseWithKindAndVars(kind Kind, stem, path string, raw []byte, vars map[str
 		Body:         body,
 	}
 	errs := validateFrontMatter(g, fm, path)
+	if isTmpl && vars != nil && g.FromTemplate == "" && strings.TrimSpace(path) != "" {
+		cleanP := filepath.ToSlash(strings.TrimSpace(path))
+		if strings.HasPrefix(cleanP, "https://") || strings.HasPrefix(cleanP, "file://") {
+			g.FromTemplate = cleanP
+		} else {
+			g.FromTemplate = "/" + strings.TrimPrefix(cleanPosixPath(cleanP), "/")
+		}
+	}
 	return g, errs
 }
 
@@ -532,34 +629,37 @@ func splitAndParseFrontMatter(path string, raw []byte) (map[string]any, string, 
 
 var (
 	knownTaskFields = map[string]bool{
-		"grainfile":  true,
-		"title":      true,
-		"requestor":  true,
-		"recipient":  true,
-		"draft":      true,
-		"not_before": true,
-		"depends_on": true,
-		"references": true,
+		"grainfile":     true,
+		"title":         true,
+		"requestor":     true,
+		"recipient":     true,
+		"draft":         true,
+		"not_before":    true,
+		"depends_on":    true,
+		"references":    true,
+		"from_template": true,
 	}
 	knownProcessFields = map[string]bool{
-		"grainfile":  true,
-		"title":      true,
-		"draft":      true,
-		"not_before": true,
-		"depends_on": true,
-		"references": true,
-		"when":       true,
-		"on":         true,
-		"gate":       true,
+		"grainfile":     true,
+		"title":         true,
+		"draft":         true,
+		"not_before":    true,
+		"depends_on":    true,
+		"references":    true,
+		"from_template": true,
+		"when":          true,
+		"on":            true,
+		"gate":          true,
 	}
 	strictProcessFields = map[string]bool{
-		"grainfile":  true,
-		"title":      true,
-		"draft":      true,
-		"not_before": true,
-		"references": true,
-		"when":       true,
-		"gate":       true,
+		"grainfile":     true,
+		"title":         true,
+		"draft":         true,
+		"not_before":    true,
+		"references":    true,
+		"from_template": true,
+		"when":          true,
+		"gate":          true,
 	}
 	knownTriggerSources = map[string]bool{
 		TriggerSchedule:    true,
@@ -573,14 +673,14 @@ var (
 
 func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 	var errs Errors
-	isLegacyProcess := g.Kind == KindProcess &&
+	compatProcess := g.Kind == KindProcess &&
 		strings.HasSuffix(g.Path, ".process.md") &&
 		!strings.HasSuffix(g.Path, ".process.grain.md") &&
 		!IsTemplatePath(where)
 
 	known := knownTaskFields
 	if g.Kind == KindProcess {
-		if isLegacyProcess {
+		if compatProcess {
 			known = knownProcessFields
 		} else {
 			known = strictProcessFields
@@ -601,7 +701,7 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 			g.Extensions[k] = fm[k]
 			continue
 		}
-		if k == "trigger_with" && !isLegacyProcess {
+		if k == "trigger_with" && !compatProcess {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, "trigger_with is not allowed in Grainfile v1 (use depends_on and when instead)"))
 			continue
 		}
@@ -609,11 +709,11 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .process.grain.md files", k)))
 			continue
 		}
-		if g.Kind == KindProcess && !isLegacyProcess && (k == "recipient" || k == "requestor" || k == "depends_on") {
+		if g.Kind == KindProcess && !compatProcess && (k == "recipient" || k == "requestor" || k == "depends_on") {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .task.grain.md files", k)))
 			continue
 		}
-		if !known[k] && !(isLegacyProcess && (k == "recipient" || k == "requestor" || k == "trigger_with")) {
+		if !known[k] && !(compatProcess && (k == "recipient" || k == "requestor" || k == "trigger_with")) {
 			g.Warnings = append(g.Warnings, newFinding(CodeUnknownField, where, fmt.Sprintf("unknown field %q", k)))
 		}
 	}
@@ -646,7 +746,7 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		g.Title = title
 	}
 
-	if g.Kind == KindTask || isLegacyProcess {
+	if g.Kind == KindTask || compatProcess {
 		// recipient (optional deployment identity on .task.grain.md, defaults to "/" — the enclosing repository; §6.3, §7.1)
 		if rawRec, ok := fm["recipient"]; !ok {
 			if g.Kind == KindTask {
@@ -711,16 +811,26 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		g.References = refs
 	}
 
+	// from_template (optional template provenance ref; §6.5)
+	if rawFT, ok := fm["from_template"]; ok {
+		ft, ftErr := validateFromTemplate(rawFT, g.Kind, where, g.Path)
+		if ftErr != nil {
+			errs = append(errs, *ftErr)
+		} else {
+			g.FromTemplate = ft
+		}
+	}
+
 	// depends_on (optional list of refs on .task.grain.md: must target concrete .task.grain.md files only; §8.3)
-	if rawDeps, ok := fm["depends_on"]; ok && (g.Kind == KindTask || isLegacyProcess) {
+	if rawDeps, ok := fm["depends_on"]; ok && (g.Kind == KindTask || compatProcess) {
 		deps, depErrs := validateDependsOnSlice(rawDeps, g.Kind, where, g.Path)
 		errs = append(errs, depErrs...)
 		g.DependsOn = deps
 	}
 
 	if g.Kind == KindProcess {
-		_, hasLegacyTW := fm["trigger_with"]
-		if isLegacyProcess && hasLegacyTW && len(g.DependsOn) == 0 {
+		_, hasCompatTW := fm["trigger_with"]
+		if compatProcess && hasCompatTW && len(g.DependsOn) == 0 {
 			switch v := fm["trigger_with"].(type) {
 			case string:
 				if v != "" && !strings.ContainsAny(v, " \t\r\n\\") {
@@ -743,10 +853,10 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		}
 
 		rawWhen, hasWhen := fm["when"]
-		if !hasWhen && isLegacyProcess {
+		if !hasWhen && compatProcess {
 			rawWhen, hasWhen = fm["on"]
 		}
-		if !hasWhen && !(isLegacyProcess && hasLegacyTW) {
+		if !hasWhen && !(compatProcess && hasCompatTW) {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, "when: required field missing on .process.grain.md"))
 		}
 		if hasWhen {
@@ -782,6 +892,47 @@ func isProcessTargetPath(p string) bool {
 
 func isGrainfileTargetPath(p string) bool {
 	return isTaskTargetPath(p) || isProcessTargetPath(p)
+}
+
+func validateFromTemplate(raw any, sourceKind Kind, where, sourcePath string) (string, *Finding) {
+	s, ok := raw.(string)
+	if !ok {
+		f := newFinding(CodeSchemaInvalid, where, "from_template: must be a non-empty string")
+		return "", &f
+	}
+	if s == "" || strings.TrimSpace(s) == "" || strings.ContainsAny(s, " \t\r\n\\") {
+		f := newFinding(CodeMalformedRef, where, "from_template: must be a non-empty URL or path without whitespace")
+		return "", &f
+	}
+	r, err := ParseRef(s)
+	if err != nil {
+		if f, ok := err.(Finding); ok {
+			f.Path = where
+			f.Message = fmt.Sprintf("from_template: %s", f.Message)
+			return "", &f
+		}
+		f := newFinding(CodeMalformedRef, where, fmt.Sprintf("from_template: %v", err))
+		return "", &f
+	}
+	if r.Anchor != "" {
+		f := newFinding(CodeMalformedRef, where, fmt.Sprintf("from_template: %q may not carry an anchor", s))
+		return "", &f
+	}
+	if r.Mode == "tree" || r.TrailingSlash || strings.HasSuffix(s, "/") {
+		f := newFinding(CodeMalformedRef, where, fmt.Sprintf("from_template: %q must reference a .%s.grain.md.jinja2 file, not a directory", s, sourceKind))
+		return "", &f
+	}
+	wantSuf := "." + string(sourceKind) + ".grain.md.jinja2"
+	if r.Path == "" || !strings.HasSuffix(r.Path, wantSuf) {
+		f := newFinding(CodeMalformedRef, where, fmt.Sprintf("from_template: %q on a %s grainfile must end with %s", s, sourceKind, wantSuf))
+		return "", &f
+	}
+	if sourcePath != "" {
+		if f := checkLocalClimb(s, "from_template", where, sourcePath); f != nil {
+			return "", f
+		}
+	}
+	return s, nil
 }
 
 func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
@@ -1063,19 +1214,131 @@ func validateWhenTriggers(raw any, where string) (Triggers, Errors) {
 	return t, errs
 }
 
+// NormalizeRepoSlugOrURL validates and normalizes either an https:// repository
+// URL ("https://github.com/owner/repo") or an "owner/repo" slug into its
+// canonical lower-case repository URL ("https://github.com/owner/repo").
+func NormalizeRepoSlugOrURL(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.ContainsAny(s, " \t\r\n\\") {
+		return "", fmt.Errorf("invalid repository %q", raw)
+	}
+	if strings.Contains(s, "://") || strings.HasPrefix(s, "http:") || strings.HasPrefix(s, "https:") || strings.HasPrefix(s, "ssh:") || strings.HasPrefix(s, "git@") || strings.HasPrefix(s, "file:") {
+		r, err := ParseRef(s)
+		if err != nil {
+			return "", err
+		}
+		if r.Form != RefRemote || r.Path != "" || r.GitRef != "" || r.Mode != "" || r.Anchor != "" {
+			return "", fmt.Errorf("repository %q must be a repository root URL without branch/path/anchor", raw)
+		}
+		return r.Repo, nil
+	}
+	cleaned := strings.TrimSuffix(s, ".git")
+	if !repoSlugRe.MatchString(cleaned) {
+		return "", fmt.Errorf("repository %q must be an https:// URL or owner/repo slug", raw)
+	}
+	owner, repo, _ := strings.Cut(cleaned, "/")
+	if owner == "." || owner == ".." || repo == "" || repo == "." || repo == ".." {
+		return "", fmt.Errorf("invalid repository slug %q", raw)
+	}
+	return "https://github.com/" + strings.ToLower(owner) + "/" + strings.ToLower(repo), nil
+}
+
+func validateAndNormalizeWhenPath(raw, fieldPath, where string, allowURL bool) (string, *Finding) {
+	if raw == "" || strings.ContainsRune(raw, '\\') {
+		f := newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: invalid path %q", fieldPath, raw))
+		return "", &f
+	}
+	if strings.Contains(raw, "://") || strings.HasPrefix(raw, "http:") || strings.HasPrefix(raw, "https:") || strings.HasPrefix(raw, "ssh:") || strings.HasPrefix(raw, "git@") || strings.HasPrefix(raw, "file:") {
+		if !allowURL {
+			f := newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: URL not allowed in %q", fieldPath, raw))
+			return "", &f
+		}
+		r, err := ParseRef(raw)
+		if err != nil || r.Form != RefRemote || r.Anchor != "" {
+			f := newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: invalid forge URL %q", fieldPath, raw))
+			return "", &f
+		}
+		return r.CanonicalURL(), nil
+	}
+	trimmed := strings.TrimPrefix(raw, "/")
+	for _, seg := range strings.Split(strings.TrimSuffix(trimmed, "/"), "/") {
+		if seg == ".." {
+			f := newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: '..' segment not allowed in %q", fieldPath, raw))
+			return "", &f
+		}
+	}
+	if trimmed == "" {
+		return "/", nil
+	}
+	return trimmed, nil
+}
+
 func validateEventFilter(raw any, fieldPath, where string) (*EventFilter, Errors) {
+	if list, isList := raw.([]any); isList {
+		if len(list) == 0 {
+			return nil, Errors{newFinding(CodeSchemaInvalid, where, fieldPath+": must be a non-empty list of filter mappings")}
+		}
+		var errs Errors
+		var filters []EventFilter
+		for i, item := range list {
+			itemPath := fmt.Sprintf("%s.%d", fieldPath, i)
+			single, sErrs := validateSingleEventFilter(item, itemPath, where)
+			errs = append(errs, sErrs...)
+			if single != nil {
+				filters = append(filters, *single)
+			}
+		}
+		if len(errs) > 0 || len(filters) == 0 {
+			return nil, errs
+		}
+		out := &EventFilter{
+			Repo:     filters[0].Repo,
+			Repos:    filters[0].Repos,
+			Branches: filters[0].Branches,
+			Paths:    filters[0].Paths,
+			Ignore:   filters[0].Ignore,
+			Filters:  filters,
+		}
+		return out, nil
+	}
+	return validateSingleEventFilter(raw, fieldPath, where)
+}
+
+func validateSingleEventFilter(raw any, fieldPath, where string) (*EventFilter, Errors) {
 	var errs Errors
 	m, ok := raw.(map[string]any)
 	if !ok {
 		return nil, Errors{newFinding(CodeSchemaInvalid, where, fieldPath+": must be a mapping")}
 	}
 	for k := range m {
-		if k != "branches" && k != "paths" && k != "ignore" {
+		if k != "repo" && k != "repos" && k != "branches" && k != "paths" && k != "ignore" {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: unknown property %q", fieldPath, k)))
 		}
 	}
 
 	ef := &EventFilter{}
+	if rawRepo, ok := m["repo"]; ok {
+		s, ok := rawRepo.(string)
+		if !ok || s == "" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+".repo: must be a non-empty string"))
+		} else if normRepo, err := NormalizeRepoSlugOrURL(s); err != nil {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.repo: %v", fieldPath, err)))
+		} else {
+			ef.Repo = normRepo
+		}
+	}
+	if rawRepos, ok := m["repos"]; ok {
+		rs, rErrs := validateStringSlice(rawRepos, fieldPath+".repos", where, true)
+		errs = append(errs, rErrs...)
+		for i, s := range rs {
+			normRepo, err := NormalizeRepoSlugOrURL(s)
+			if err != nil {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.repos.%d: %v", fieldPath, i, err)))
+			} else {
+				ef.Repos = append(ef.Repos, normRepo)
+			}
+		}
+	}
 	if rawBranches, ok := m["branches"]; ok {
 		bs, bErrs := validateStringSlice(rawBranches, fieldPath+".branches", where, true)
 		errs = append(errs, bErrs...)
@@ -1084,18 +1347,34 @@ func validateEventFilter(raw any, fieldPath, where string) (*EventFilter, Errors
 	if rawPaths, ok := m["paths"]; ok {
 		ps, pErrs := validateStringSlice(rawPaths, fieldPath+".paths", where, true)
 		errs = append(errs, pErrs...)
-		ef.Paths = ps
+		for i, p := range ps {
+			normP, f := validateAndNormalizeWhenPath(p, fmt.Sprintf("%s.paths.%d", fieldPath, i), where, true)
+			if f != nil {
+				errs = append(errs, *f)
+			} else {
+				ef.Paths = append(ef.Paths, normP)
+			}
+		}
 	}
 	if rawIgnore, ok := m["ignore"]; ok {
 		ig, iErrs := validateStringSlice(rawIgnore, fieldPath+".ignore", where, false)
 		errs = append(errs, iErrs...)
-		ef.Ignore = ig
+		for i, p := range ig {
+			normP, f := validateAndNormalizeWhenPath(p, fmt.Sprintf("%s.ignore.%d", fieldPath, i), where, false)
+			if f != nil {
+				errs = append(errs, *f)
+			} else {
+				ef.Ignore = append(ef.Ignore, normP)
+			}
+		}
 	}
 
-	if _, hasBranches := m["branches"]; !hasBranches {
-		if _, hasPaths := m["paths"]; !hasPaths {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+": at least one of branches or paths is required"))
-		}
+	_, hasRepo := m["repo"]
+	_, hasRepos := m["repos"]
+	_, hasBranches := m["branches"]
+	_, hasPaths := m["paths"]
+	if !hasRepo && !hasRepos && !hasBranches && !hasPaths {
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+": at least one of repo, repos, branches, or paths is required"))
 	}
 
 	return ef, errs

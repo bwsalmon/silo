@@ -30,6 +30,9 @@
     },
     "references": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
+    },
+    "from_template": {
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/ref"
     }
   },
   "required": [

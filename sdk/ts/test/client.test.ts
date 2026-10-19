@@ -227,6 +227,7 @@ describe('Grainfiles and node subscriptions', () => {
         url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
         kind: 'task',
         title: 'Deploy staging service',
+        from_template: 'https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2',
         recipient: 'https://github.com/acme/grain-eu',
         requestor: 'Alice <alice@example.com>',
         draft: false,
@@ -251,7 +252,7 @@ describe('Grainfiles and node subscriptions', () => {
         not_before: '0001-01-01T00:00:00Z',
         created_at: '0001-01-01T00:00:00Z',
         references: ['https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md'],
-        on_spec: { push: { branches: ['main'] }, schedule: { cron: '0 * * * *' } },
+        on_spec: { push: { repo: 'acme/app', branches: ['main'] }, schedule: { cron: '0 * * * *' } },
         gate: true,
         updated_at: '2026-10-18T10:06:00Z',
       },
@@ -278,6 +279,7 @@ describe('Grainfiles and node subscriptions', () => {
         grainfile_url: 'https://github.com/acme/app/blob/main/tasks/01-deploy.task.md',
         kind: 'task',
         title: 'Deploy staging service',
+        from_template: 'https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2',
         recipient: 'https://github.com/acme/grain-eu',
         created_at: '2026-10-18T10:05:00Z',
       },
@@ -314,6 +316,7 @@ describe('Grainfiles and node subscriptions', () => {
     );
     expect(tasks).toHaveLength(1);
     expect(tasks[0].title).toBe('Deploy staging service');
+    expect(tasks[0].from_template).toBe('https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2');
     expect(tasks[0].requestor).toBe('Alice <alice@example.com>');
     expect(tasks[0].depends_on).toEqual(['https://github.com/acme/app/blob/main/tasks/00-prep.task.md']);
   });
@@ -329,8 +332,9 @@ describe('Grainfiles and node subscriptions', () => {
     expect(insp.grainfile?.is_template).toBe(true);
     expect(insp.grainfile?.template_vars).toEqual(['branch', 'env']);
     expect(insp.grainfile?.gate).toBe(true);
-    expect(insp.grainfile?.when?.push?.branches).toEqual(['main']);
-    expect(insp.grainfile?.on?.push?.branches).toEqual(['main']);
+    expect(!Array.isArray(insp.grainfile?.when?.push) && insp.grainfile?.when?.push?.repo).toBe('acme/app');
+    expect(!Array.isArray(insp.grainfile?.when?.push) && insp.grainfile?.when?.push?.branches).toEqual(['main']);
+    expect(!Array.isArray(insp.grainfile?.on?.push) && insp.grainfile?.on?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.not_before).toBeUndefined();
     expect(insp.grainfile?.references).toEqual([
       'https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md',
