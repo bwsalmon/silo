@@ -821,6 +821,61 @@ func IsSameRepo(repoA, repoB string) bool {
 	return strings.EqualFold(ca, cb)
 }
 
+// CanonicalDeploymentURL constructs the canonical Hub deployment URL
+// ("https://<hub-host>/deployments/<id>") for deployment id.
+func CanonicalDeploymentURL(hubURL, id string) string {
+	id = strings.Trim(strings.TrimSpace(id), "/")
+	if id == "" {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(hubURL), "/")
+	if base == "" {
+		return "/deployments/" + id
+	}
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
+	return base + "/deployments/" + id
+}
+
+// DeploymentIDFromRecipient extracts the deployment ID <id> when raw is a
+// canonical Hub deployment URL ("https://<hub-host>/deployments/<id>"), a
+// rooted "/deployments/<id>" reference, or a repository tree URL whose path is
+// "deployments/<id>" (produced when ResolveSource resolves "/deployments/<id>").
+// It returns "" if raw does not name a "/deployments/<id>" recipient.
+func DeploymentIDFromRecipient(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(s, '#'); idx >= 0 {
+		s = s[:idx]
+	}
+	if !strings.Contains(s, "://") {
+		trimmed := strings.Trim(s, "/")
+		segs := strings.Split(trimmed, "/")
+		if len(segs) == 2 && strings.EqualFold(segs[0], "deployments") && segs[1] != "" {
+			return strings.ToLower(segs[1])
+		}
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return ""
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segs) == 2 && strings.EqualFold(segs[0], "deployments") && segs[1] != "" {
+		return strings.ToLower(segs[1])
+	}
+	if r, err := ParseRef(s); err == nil && r.Form == RefRemote && r.Mode == "tree" {
+		pSegs := strings.Split(strings.Trim(r.Path, "/"), "/")
+		if len(pSegs) == 2 && strings.EqualFold(pSegs[0], "deployments") && pSegs[1] != "" {
+			return strings.ToLower(pSegs[1])
+		}
+	}
+	return ""
+}
+
 func canonicalRepoFromAnyRef(s string) (string, error) {
 	if r, err := ParseRef(s); err == nil && r.Form == RefRemote && r.Repo != "" {
 		return r.Repo, nil

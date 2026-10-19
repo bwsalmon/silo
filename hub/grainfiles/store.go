@@ -81,6 +81,9 @@ type Store struct {
 	// SameRepoTeam, when set, reports whether two repository URLs belong to the
 	// same team in hub/directory.
 	SameRepoTeam func(ctx context.Context, repoA, repoB string) bool
+	// HubURL, when set, is the base URL of the Hub ("https://<hub-host>") used
+	// to construct canonical deployment recipient URLs ("https://<hub-host>/deployments/<id>").
+	HubURL string
 }
 
 // Open opens the Grainfile store at url: "postgres://..." (or
@@ -499,6 +502,11 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 
 	cp := *g
 	cp.Body = ""
+	if s.HubURL != "" && strings.HasPrefix(strings.TrimSpace(cp.Recipient), "/deployments/") {
+		if depID := DeploymentIDFromRecipient(cp.Recipient); depID != "" {
+			cp.Recipient = CanonicalDeploymentURL(s.HubURL, depID)
+		}
+	}
 	if cp.URL == "" || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) || (cp.FromTemplate != "" && !strings.Contains(cp.FromTemplate, "://")) {
 		if err := cp.ResolveSource(Source{
 			RepoURL: cp.Repo,
@@ -727,6 +735,20 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 				if _, err := tx.ExecContext(ctx, s.q(`UPDATE grainfile_index SET ready_emitted = 1 WHERE LOWER(repo) = LOWER(?) AND path = ? AND commit_sha <> ?`),
 					rec.Repo, rec.Path, rec.CommitSHA); err != nil {
 					return err
+				}
+			}
+		}
+
+		if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.HasPrefix(rec.Recipient, "https://") {
+			var subRecJSON string
+			if err := tx.QueryRowContext(ctx, s.q(`SELECT recipients FROM grainfile_subscriptions WHERE LOWER(node_id) = LOWER(?)`), depID).Scan(&subRecJSON); err == nil {
+				var subRecs []string
+				_ = json.Unmarshal([]byte(subRecJSON), &subRecs)
+				if !slices.Contains(subRecs, rec.Recipient) {
+					subRecs = append(subRecs, rec.Recipient)
+					if b, mErr := json.Marshal(subRecs); mErr == nil {
+						_, _ = tx.ExecContext(ctx, s.q(`UPDATE grainfile_subscriptions SET recipients = ? WHERE LOWER(node_id) = LOWER(?)`), string(b), depID)
+					}
 				}
 			}
 		}
@@ -1253,7 +1275,7 @@ func (s *Store) ListIndexByRecipient(ctx context.Context, recipientURL string, i
 	}
 	var out []IndexRecord
 	for _, r := range all {
-		if r.removed || r.Recipient != normRec {
+		if r.removed || !sameRecipient(r.Recipient, normRec) {
 			continue
 		}
 		if !includeDrafts && r.Draft {
@@ -1791,8 +1813,15 @@ func (s *Store) RecordDependencyCompletedByNode(ctx context.Context, nodeID, com
 	}
 	authorized := false
 	if rec.Recipient != "" {
+		if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.EqualFold(depID, sub.NodeID) {
+			authorized = true
+		}
 		for _, r := range sub.Recipients {
-			if strings.EqualFold(r, rec.Recipient) || IsSameRepo(r, rec.Recipient) {
+			if sameRecipient(r, rec.Recipient) {
+				if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.EqualFold(depID, sub.NodeID) {
+					authorized = true
+					break
+				}
 				if s.AuthorizeOwnerRepo != nil && sub.Owner != "" {
 					recRepo, rErr := canonicalRepoFromAnyRef(rec.Recipient)
 					if rErr != nil || !s.AuthorizeOwnerRepo(ctx, sub.Owner, recRepo) {
@@ -2056,7 +2085,7 @@ func (s *Store) EventsForRecipient(ctx context.Context, recipientURL string, sin
 	}
 	var out []Event
 	for _, ev := range all {
-		if ev.Recipient == normRec {
+		if sameRecipient(ev.Recipient, normRec) {
 			out = append(out, ev)
 		}
 	}
@@ -2072,7 +2101,13 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 		return Subscriptions{}, fmt.Errorf("%w: empty node_id", ErrInvalid)
 	}
 
-	recipients, err := normalizeSubscriptionList(sub.Recipients, normalizeRecipientURL)
+	rawRecipients := slices.Clone(sub.Recipients)
+	if s.HubURL != "" {
+		if canonDeploy := CanonicalDeploymentURL(s.HubURL, nodeID); canonDeploy != "" && strings.HasPrefix(canonDeploy, "https://") {
+			rawRecipients = append(rawRecipients, canonDeploy)
+		}
+	}
+	recipients, err := normalizeSubscriptionList(rawRecipients, normalizeRecipientURL)
 	if err != nil {
 		return Subscriptions{}, err
 	}
@@ -2146,7 +2181,14 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 			Scan(&prevOwner, &prevCursor, &prevRev)
 		if err == nil {
 			if prevOwner != "" && out.Owner != "" && !strings.EqualFold(prevOwner, out.Owner) {
-				return fmt.Errorf("%w: node %q is already registered to another owner", ErrUnauthorized, nodeID)
+				sameTeam, cached := sameTeamOwners[strings.ToLower(prevOwner)]
+				if !cached && s.SameTeam != nil {
+					sameTeam = s.SameTeam(ctx, out.Owner, prevOwner)
+					sameTeamOwners[strings.ToLower(prevOwner)] = sameTeam
+				}
+				if !sameTeam {
+					return fmt.Errorf("%w: node %q is already registered to another owner", ErrUnauthorized, nodeID)
+				}
 			}
 			out.Revision = prevRev + 1
 			if !sub.ResetCursor && out.Cursor == 0 && prevCursor > 0 {
@@ -2159,8 +2201,28 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 			return err
 		}
 
+		idxRows, idxErr := tx.QueryContext(ctx, s.q(`SELECT DISTINCT recipient FROM grainfile_index WHERE removed = 0 AND recipient <> ''`))
+		if idxErr == nil {
+			for idxRows.Next() {
+				var idxRec string
+				if err := idxRows.Scan(&idxRec); err == nil && strings.HasPrefix(idxRec, "https://") {
+					if depID := DeploymentIDFromRecipient(idxRec); depID != "" && strings.EqualFold(depID, nodeID) && !slices.Contains(out.Recipients, idxRec) {
+						out.Recipients = append(out.Recipients, idxRec)
+					}
+				}
+			}
+			idxRows.Close()
+			recJSON, _ = json.Marshal(out.Recipients)
+		}
+
 		if s.AuthorizeOwnerRepo != nil && out.Owner != "" {
 			for _, u := range out.Recipients {
+				if depID := DeploymentIDFromRecipient(u); depID != "" {
+					if !strings.EqualFold(depID, nodeID) {
+						return fmt.Errorf("%w: node %q cannot subscribe to deployment URL %q", ErrUnauthorized, nodeID, u)
+					}
+					continue
+				}
 				repoURL, rErr := canonicalRepoFromAnyRef(u)
 				if rErr != nil || !s.AuthorizeOwnerRepo(ctx, out.Owner, repoURL) {
 					return fmt.Errorf("%w: owner %q is not admitted for recipient repository %q", ErrUnauthorized, out.Owner, u)
@@ -2368,11 +2430,181 @@ func (s *Store) CatchupNode(ctx context.Context, nodeID string, advance bool) ([
 	return events, newCursor, nil
 }
 
-// MatchesRecord reports whether sub subscribes to rec by recipient URL,
+// ReplayForNode resets nodeID's subscription delivery cursor to 0 (and clears
+// any prior owner binding so a replacement or reinstalled host can reconnect)
+// and replays all active .process.grain.md (process_updated) and active
+// .task.grain.md (task_ready) Grainfiles targeted at nodeID.
+func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil, fmt.Errorf("%w: empty node_id", ErrInvalid)
+	}
+	now := s.now().UTC().Truncate(time.Millisecond)
+	var replayed []Event
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		replayed = nil
+		var sub Subscriptions
+		row := tx.QueryRowContext(ctx, s.q(`SELECT node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
+			FROM grainfile_subscriptions WHERE node_id = ?`), nodeID)
+		loaded, err := scanSubscriptions(row)
+		if errors.Is(err, sql.ErrNoRows) {
+			var recs []string
+			if s.HubURL != "" {
+				if u := CanonicalDeploymentURL(s.HubURL, nodeID); u != "" && strings.HasPrefix(u, "https://") {
+					recs = append(recs, u)
+				}
+			}
+			recJSON, _ := json.Marshal(recs)
+			_, err = tx.ExecContext(ctx, s.q(`INSERT INTO grainfile_subscriptions (
+				node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
+			) VALUES (?, '', ?, '[]', '[]', '[]', 0, 1, ?)`),
+				nodeID, string(recJSON), now.UnixMilli())
+			if err != nil {
+				return err
+			}
+			sub = Subscriptions{
+				NodeID:     nodeID,
+				Recipients: recs,
+				Cursor:     0,
+				Revision:   1,
+				UpdatedAt:  now,
+			}
+		} else if err != nil {
+			return err
+		} else {
+			sub = loaded
+			sub.Cursor = 0
+			sub.Owner = ""
+			sub.Revision = loaded.Revision + 1
+			sub.UpdatedAt = now
+			_, err = tx.ExecContext(ctx, s.q(`UPDATE grainfile_subscriptions SET owner = '', cursor = 0, revision = ?, updated_at = ? WHERE node_id = ?`),
+				sub.Revision, now.UnixMilli(), nodeID)
+			if err != nil {
+				return err
+			}
+		}
+
+		allRecords, err := s.loadLatestIndexQ(tx, ctx, "")
+		if err != nil {
+			return err
+		}
+
+		// Load existing events so we only insert a new event if none exists yet for a matching record.
+		evRows, err := tx.QueryContext(ctx, `SELECT `+selectEventCols+` FROM grainfile_events ORDER BY seq ASC`)
+		if err != nil {
+			return err
+		}
+		var existingEvents []Event
+		for evRows.Next() {
+			ev, sErr := scanEvent(evRows)
+			if sErr != nil {
+				evRows.Close()
+				return sErr
+			}
+			existingEvents = append(existingEvents, ev)
+		}
+		if err := evRows.Close(); err != nil {
+			return err
+		}
+
+		for _, rec := range allRecords {
+			if rec.removed || rec.Draft || !sub.MatchesRecord(rec) {
+				continue
+			}
+			gf := rec.ToGrainfile()
+			if !gf.ActiveAt(now) {
+				continue
+			}
+			if rec.Kind == KindTask {
+				done, dErr := s.isTaskCompletedTx(tx, ctx, rec.Repo, rec.Path)
+				if dErr != nil {
+					return dErr
+				}
+				if done {
+					continue
+				}
+			}
+			wantType := EventTaskReady
+			if rec.Kind == KindProcess {
+				wantType = EventProcessUpdated
+			}
+			var found *Event
+			for i := len(existingEvents) - 1; i >= 0; i-- {
+				ev := existingEvents[i]
+				if ev.Type == wantType && IsSameRepo(ev.Repo, rec.Repo) && ev.Path == rec.Path && ev.CommitSHA == rec.CommitSHA {
+					found = &existingEvents[i]
+					break
+				}
+			}
+			if found != nil {
+				replayed = append(replayed, *found)
+				continue
+			}
+			ins, err := s.insertEventTx(tx, ctx, Event{
+				Type:                 wantType,
+				Grainfile:            rec.Grainfile,
+				SpecSummaryPath:      rec.SpecSummaryPath,
+				SpecPath:             rec.SpecPath,
+				Repo:                 rec.Repo,
+				Path:                 rec.Path,
+				CommitSHA:            rec.CommitSHA,
+				Ref:                  rec.Ref,
+				GrainfileURL:         rec.URL,
+				Kind:                 rec.Kind,
+				Title:                rec.Title,
+				Recipient:            rec.Recipient,
+				Requestor:            rec.Requestor,
+				FromTemplate:         rec.FromTemplate,
+				NotBefore:            rec.NotBefore,
+				References:           rec.References,
+				AuthorizedReferences: rec.AuthorizedReferences,
+				DependsOn:            rec.DependsOn,
+				When:                 rec.When,
+				OnSpec:               rec.OnSpec,
+				Gate:                 rec.Gate,
+				IsTemplate:           rec.IsTemplate,
+				TemplateVars:         rec.TemplateVars,
+				CreatedAt:            now,
+			})
+			if err != nil {
+				return err
+			}
+			replayed = append(replayed, ins)
+		}
+		return nil
+	})
+	return replayed, err
+}
+
+// EffectiveRecipients returns sub's configured Recipients plus the canonical
+// Hub deployment URL ("https://<hub-host>/deployments/<node_id>") when NodeID
+// is set.
+func (sub Subscriptions) EffectiveRecipients(hubURL string) []string {
+	out := slices.Clone(sub.Recipients)
+	if sub.NodeID != "" {
+		if u := CanonicalDeploymentURL(hubURL, sub.NodeID); u != "" && !slices.Contains(out, u) {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// MatchesRecord reports whether sub subscribes to rec by recipient URL
+// (including canonical Hub deployment URLs /deployments/<node_id>),
 // repository URL, folder prefix, or explicit Grainfile URL.
 func (sub Subscriptions) MatchesRecord(rec IndexRecord) bool {
-	if rec.Recipient != "" && slices.Contains(sub.Recipients, rec.Recipient) {
-		return true
+	if rec.Recipient != "" {
+		if slices.Contains(sub.Recipients, rec.Recipient) {
+			return true
+		}
+		if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.EqualFold(depID, sub.NodeID) {
+			return true
+		}
+		for _, r := range sub.Recipients {
+			if sameRecipient(r, rec.Recipient) {
+				return true
+			}
+		}
 	}
 	for _, r := range sub.Repos {
 		if IsSameRepo(r, rec.Repo) {
@@ -2487,13 +2719,30 @@ func normalizeSubRepoURL(raw string) (string, error) {
 	return CanonicalRepoURL(raw)
 }
 
+func sameRecipient(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if strings.EqualFold(a, b) || IsSameRepo(a, b) {
+		return true
+	}
+	idA := DeploymentIDFromRecipient(a)
+	idB := DeploymentIDFromRecipient(b)
+	return idA != "" && strings.EqualFold(idA, idB)
+}
+
 func normalizeRecipientURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("empty recipient URL")
 	}
-	if !strings.Contains(raw, "://") && strings.Count(raw, "/") == 1 {
-		raw = "https://github.com/" + raw
+	if !strings.Contains(raw, "://") {
+		if depID := DeploymentIDFromRecipient(raw); depID != "" {
+			return "/deployments/" + depID, nil
+		}
+		if strings.Count(raw, "/") == 1 {
+			raw = "https://github.com/" + raw
+		}
 	}
 	r, err := ParseRef(raw)
 	if err != nil {

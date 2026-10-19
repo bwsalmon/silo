@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1003,6 +1004,89 @@ Verify auth changes.
 		}
 		if len(outsiderEvs) != 0 {
 			t.Errorf("expected 0 events for cross-team repository other/outsider, got %+v", outsiderEvs)
+		}
+	})
+}
+
+func TestCanonicalDeploymentURLRoutingAndReplayForNode(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+		s.HubURL = "https://hub.example.com"
+
+		// Subscribe deployment "payments-prod" without explicitly listing its canonical URL.
+		sub, err := s.SetSubscriptions(ctx, Subscriptions{
+			NodeID: "payments-prod",
+			Owner:  "alice@example.com",
+			Repos:  []string{"https://github.com/acme/payments"},
+		})
+		if err != nil {
+			t.Fatalf("SetSubscriptions: %v", err)
+		}
+		wantCanon := "https://hub.example.com/deployments/payments-prod"
+		if !slices.Contains(sub.Recipients, wantCanon) {
+			t.Fatalf("sub.Recipients = %v, want to include %q", sub.Recipients, wantCanon)
+		}
+
+		// Index a task in another repo targeting https://hub.example.com/deployments/payments-prod
+		taskGF := &Grainfile{
+			Kind:      KindTask,
+			Repo:      "https://github.com/acme/caller-repo",
+			Ref:       "refs/heads/main",
+			Commit:    "c111",
+			Path:      ".grain/tasks/2026-10-20-call-payments.task.grain.md",
+			Title:     "Audit payment webhook retries",
+			Recipient: wantCanon,
+		}
+		if _, err := s.IndexGrainfile(ctx, taskGF); err != nil {
+			t.Fatalf("IndexGrainfile(task): %v", err)
+		}
+
+		// Index a standing process in acme/payments
+		procGF, err := Parse(".grain/processes/ci.process.grain.md", []byte("---\ntitle: Payments CI check\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
+		if err != nil {
+			t.Fatalf("Parse(process): %v", err)
+		}
+		procGF.Repo = "https://github.com/acme/payments"
+		procGF.Ref = "refs/heads/main"
+		procGF.Commit = "c222"
+		if _, err := s.IndexGrainfile(ctx, procGF); err != nil {
+			t.Fatalf("IndexGrainfile(process): %v", err)
+		}
+
+		// Initial catch-up advances cursor past both events.
+		evs, cur, err := s.CatchupNode(ctx, "payments-prod", true)
+		if err != nil {
+			t.Fatalf("CatchupNode initial: %v", err)
+		}
+		if len(evs) != 2 || cur == 0 {
+			t.Fatalf("initial CatchupNode events = %d (cursor=%d), want 2", len(evs), cur)
+		}
+
+		// Subsequent catch-up returns 0 events because cursor is at high-water mark.
+		evsAfter, _, err := s.CatchupNode(ctx, "payments-prod", true)
+		if err != nil {
+			t.Fatalf("CatchupNode second: %v", err)
+		}
+		if len(evsAfter) != 0 {
+			t.Fatalf("second CatchupNode events = %d, want 0", len(evsAfter))
+		}
+
+		// Host replacement replays standing processes and active tasks by resetting cursor to 0.
+		replayed, err := s.ReplayForNode(ctx, "payments-prod")
+		if err != nil {
+			t.Fatalf("ReplayForNode: %v", err)
+		}
+		if len(replayed) != 2 {
+			t.Fatalf("ReplayForNode returned %d events, want 2: %+v", len(replayed), replayed)
+		}
+
+		// Reconnecting replacement host catches up from cursor=0 and receives both again.
+		evsReplayed, newCur, err := s.CatchupNode(ctx, "payments-prod", true)
+		if err != nil {
+			t.Fatalf("CatchupNode after ReplayForNode: %v", err)
+		}
+		if len(evsReplayed) != 2 || newCur == 0 {
+			t.Fatalf("CatchupNode after ReplayForNode events = %d (cursor=%d), want 2", len(evsReplayed), newCur)
 		}
 	})
 }
