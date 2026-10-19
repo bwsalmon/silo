@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,15 @@ type task struct {
 	seq        int64
 	stream     *tasks.Stream
 	approveCh  chan tasks.Message
+}
+
+func (t *task) clone() task {
+	cp := *t
+	cp.Received = slices.Clone(t.Received)
+	if cp.Received == nil {
+		cp.Received = []tasks.Message{}
+	}
+	return cp
 }
 
 type grain struct {
@@ -433,13 +443,17 @@ func (g *grain) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
-		defer g.mu.Unlock()
-		ts := []*task{}
+		ts := make([]task, 0, len(g.order))
 		for _, id := range g.order {
-			ts = append(ts, g.tasks[id])
+			if t := g.tasks[id]; t != nil {
+				ts = append(ts, t.clone())
+			}
 		}
-		writeJSON(w, map[string]any{"online": g.conn != nil, "refused": g.refused, "connects": g.connects,
-			"failures": g.failures, "last_error": g.lastError, "tasks": ts, "grainfile_events": g.grainfileEvents})
+		evs := slices.Clone(g.grainfileEvents)
+		online, refused, connects, failures, lastErr := g.conn != nil, g.refused, g.connects, g.failures, g.lastError
+		g.mu.Unlock()
+		writeJSON(w, map[string]any{"online": online, "refused": refused, "connects": connects,
+			"failures": failures, "last_error": lastErr, "tasks": ts, "grainfile_events": evs})
 	})
 	mux.HandleFunc("POST /tasks/{id}/emit", func(w http.ResponseWriter, r *http.Request) {
 		var evs []map[string]any
@@ -496,12 +510,16 @@ func (g *grain) routes() http.Handler {
 	mux.HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		t := g.tasks[r.PathValue("id")]
+		var cp task
+		if t != nil {
+			cp = t.clone()
+		}
 		g.mu.Unlock()
 		if t == nil {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, t)
+		writeJSON(w, cp)
 	})
 	mux.HandleFunc("POST /online", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
@@ -589,9 +607,11 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 	})
 	tasksHandler := func(w http.ResponseWriter, _ *http.Request) {
 		g.mu.Lock()
-		ts := make([]*task, 0, len(g.order))
+		ts := make([]task, 0, len(g.order))
 		for _, id := range g.order {
-			ts = append(ts, g.tasks[id])
+			if t := g.tasks[id]; t != nil {
+				ts = append(ts, t.clone())
+			}
 		}
 		g.mu.Unlock()
 		writeJSON(w, map[string]any{"tasks": ts})
@@ -599,12 +619,16 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 	taskByIDHandler := func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		t := g.tasks[r.PathValue("id")]
+		var cp task
+		if t != nil {
+			cp = t.clone()
+		}
 		g.mu.Unlock()
 		if t == nil {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, t)
+		writeJSON(w, cp)
 	}
 	createTaskHandler := func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -652,10 +676,11 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 		}
 		g.tasks[id] = tk
 		g.order = append(g.order, id)
+		cp := tk.clone()
 		g.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(tk)
+		_ = json.NewEncoder(w).Encode(cp)
 	}
 	approveTaskHandler := func(approve bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -682,7 +707,7 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 			} else {
 				t.State = tasks.Cancelled
 			}
-			cp := *t
+			cp := t.clone()
 			g.mu.Unlock()
 			writeJSON(w, cp)
 		}
@@ -699,7 +724,7 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 			if nextState != "" {
 				t.State = nextState
 			}
-			cp := *t
+			cp := t.clone()
 			g.mu.Unlock()
 			writeJSON(w, cp)
 		}
@@ -744,9 +769,11 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
-		ts := make([]*task, 0, len(g.order))
+		ts := make([]task, 0, len(g.order))
 		for _, id := range g.order {
-			ts = append(ts, g.tasks[id])
+			if t := g.tasks[id]; t != nil {
+				ts = append(ts, t.clone())
+			}
 		}
 		g.mu.Unlock()
 		viewer := r.Header.Get(headerHubUIViewer)

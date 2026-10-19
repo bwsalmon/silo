@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,7 +129,10 @@ func (h *harness) connectNode(t *testing.T, node registry.Node, owner string, ui
 					s.Close()
 					return
 				}
-				asked <- m
+				select {
+				case asked <- m:
+				default:
+				}
 				if ui == nil {
 					Refuse(s, "its owner has not turned it on")
 					return
@@ -628,5 +632,438 @@ func TestFiveRoleNodeUIAndThemePropagation(t *testing.T) {
 	}
 	if resp, _ := h.do(t, postReq("/api/tasks"), "ws-inferred."+domain, "tviewer@example.com"); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("viewer POST /api/tasks: got %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestConcurrentFiveRoleNodeUIStressAndSpoofing(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	dir := h.ui.Directory.Store
+	check(t, dir.CreateTeam(ctx, "infra", "Infra"))
+	check(t, dir.SetMember(ctx, "infra", "user:alice@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:tadmin@example.com", directory.Admin))
+	check(t, dir.SetMember(ctx, "infra", "user:tmember@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:tproposer@example.com", directory.Proposer))
+	check(t, dir.SetMember(ctx, "infra", "user:tviewer@example.com", directory.Viewer))
+	check(t, dir.SetMember(ctx, "infra", "user:dynamic@example.com", directory.Member))
+	check(t, dir.AssignRepo(ctx, "infra", "org/infra-repo"))
+
+	check(t, dir.CreateTeam(ctx, "other", "Other"))
+	check(t, dir.SetMember(ctx, "other", "user:other@example.com", directory.Admin))
+	check(t, dir.AssignRepo(ctx, "other", "org/other-repo"))
+
+	dirSrv := httptest.NewServer(h.ui.Directory.Handler())
+	t.Cleanup(dirSrv.Close)
+
+	type nodeEcho struct {
+		Viewer          string `json:"viewer"`
+		User            string `json:"user"`
+		Role            string `json:"role"`
+		Team            string `json:"team"`
+		Theme           string `json:"theme"`
+		RequireApproval string `json:"require_approval"`
+		Authz           string `json:"authz"`
+		IAPEmail        string `json:"iap_email"`
+		IAPJWT          string `json:"iap_jwt"`
+		Cookie          string `json:"cookie"`
+		Method          string `json:"method"`
+		Path            string `json:"path"`
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws", websocket.Handler(func(ws *websocket.Conn) {
+		r := ws.Request()
+		var in string
+		if websocket.Message.Receive(ws, &in) != nil {
+			return
+		}
+		out, _ := json.Marshal(nodeEcho{
+			Viewer:          r.Header.Get(HeaderViewer),
+			User:            r.Header.Get(HeaderUser),
+			Role:            r.Header.Get(HeaderRole),
+			Team:            r.Header.Get(HeaderTeam),
+			Theme:           r.Header.Get(HeaderTheme),
+			RequireApproval: r.Header.Get(HeaderRequireApproval),
+			Authz:           r.Header.Get("Authorization"),
+			IAPEmail:        r.Header.Get("X-Goog-Authenticated-User-Email"),
+			IAPJWT:          r.Header.Get("X-Goog-IAP-JWT-Assertion"),
+			Cookie:          r.Header.Get("Cookie"),
+			Method:          "WS",
+			Path:            in,
+		})
+		_ = websocket.Message.Send(ws, string(out))
+	}))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(nodeEcho{
+			Viewer:          r.Header.Get(HeaderViewer),
+			User:            r.Header.Get(HeaderUser),
+			Role:            r.Header.Get(HeaderRole),
+			Team:            r.Header.Get(HeaderTeam),
+			Theme:           r.Header.Get(HeaderTheme),
+			RequireApproval: r.Header.Get(HeaderRequireApproval),
+			Authz:           r.Header.Get("Authorization"),
+			IAPEmail:        r.Header.Get("X-Goog-Authenticated-User-Email"),
+			IAPJWT:          r.Header.Get("X-Goog-IAP-JWT-Assertion"),
+			Cookie:          r.Header.Get("Cookie"),
+			Method:          r.Method,
+			Path:            r.URL.Path,
+		})
+	})
+
+	h.connectNode(t, registry.Node{
+		ID:    "ws-stress",
+		Repos: []string{"org/infra-repo"},
+		Slots: 4,
+		UI:    &registry.NodeUI{Offered: true},
+	}, "alice@example.com", mux)
+
+	u, _ := url.Parse(h.url)
+	host := "ws-stress." + domain
+
+	attachSpoofHeaders := func(hdr http.Header) {
+		hdr.Set(HeaderViewer, "spoofed-owner@example.com")
+		hdr.Set(HeaderUser, "spoofed-owner@example.com")
+		hdr.Set(HeaderRole, RoleOwner)
+		hdr.Set(HeaderTeam, "other")
+		hdr.Set(HeaderRequireApproval, "false")
+		hdr.Set(HeaderTheme, "spoofed-neon")
+		hdr.Set(HeaderAccess, "admin")
+		hdr.Set(directory.AdminModeHeader, "on")
+		hdr.Set("Authorization", "Bearer leaked-secret-token")
+		hdr.Set("X-Goog-IAP-JWT-Assertion", "forged-jwt")
+		hdr.Set("X-Goog-Authenticated-User-Email", "accounts.google.com:spoofed@example.com")
+		hdr.Set("X-Forwarded-User", "spoofed@example.com")
+		hdr.Set("Cookie", "silo_session=leaked; __Host-silo_session=leaked; GCP_IAP_UID=leaked; app_pref=kept")
+	}
+
+	verifyEcho := func(caller, wantRole string, e nodeEcho) error {
+		if e.Viewer != caller || e.User != caller {
+			return fmt.Errorf("caller %s: viewer=%q user=%q", caller, e.Viewer, e.User)
+		}
+		if wantRole != "" && e.Role != wantRole {
+			return fmt.Errorf("caller %s: role=%q, want %q", caller, e.Role, wantRole)
+		}
+		if e.Team != "infra" {
+			return fmt.Errorf("caller %s: team=%q, want infra", caller, e.Team)
+		}
+		if e.Theme != directory.ThemeLight && e.Theme != directory.ThemeDark {
+			return fmt.Errorf("caller %s: invalid theme=%q", caller, e.Theme)
+		}
+		if e.RequireApproval != "true" && e.RequireApproval != "false" {
+			return fmt.Errorf("caller %s: invalid require_approval=%q", caller, e.RequireApproval)
+		}
+		if e.Authz != "" || e.IAPEmail != "" || e.IAPJWT != "" {
+			return fmt.Errorf("caller %s: leaked auth headers: %+v", caller, e)
+		}
+		if strings.Contains(e.Cookie, "silo_session") || strings.Contains(e.Cookie, "GCP_IAP") || !strings.Contains(e.Cookie, "app_pref=kept") {
+			return fmt.Errorf("caller %s: unexpected cookie header %q", caller, e.Cookie)
+		}
+		return nil
+	}
+
+	const iterations = 12
+	errCh := make(chan error, 256)
+	recordErr := func(err error) {
+		if err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// 1. Concurrent mutator: flip themes, team settings (anyone_may_propose, require_approval), and dynamic user's role.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		roles := []directory.Role{directory.Admin, directory.Member, directory.Proposer, directory.Viewer}
+		users := []string{
+			"alice@example.com",
+			"tadmin@example.com",
+			"tmember@example.com",
+			"tproposer@example.com",
+			"tviewer@example.com",
+			"dynamic@example.com",
+			"outsider@example.com",
+		}
+		for i := 0; i < iterations; i++ {
+			theme := directory.ThemeLight
+			if i%2 == 1 {
+				theme = directory.ThemeDark
+			}
+			for _, usr := range users {
+				if _, err := dir.SetUserTheme(ctx, usr, theme); err != nil {
+					recordErr(fmt.Errorf("SetUserTheme(%s): %w", usr, err))
+					return
+				}
+			}
+			if err := dir.SetTeamSettings(ctx, "infra", directory.Settings{
+				LostRequeueAfter: directory.MinLostRequeueAfter,
+				AnyoneMayPropose: i%2 == 0,
+				RequireApproval:  i%3 == 0,
+			}); err != nil {
+				recordErr(fmt.Errorf("SetTeamSettings: %w", err))
+				return
+			}
+			if i%5 == 4 {
+				if err := dir.RemoveMember(ctx, "infra", "user:dynamic@example.com"); err != nil {
+					recordErr(fmt.Errorf("RemoveMember(dynamic): %w", err))
+					return
+				}
+			} else {
+				if err := dir.SetMember(ctx, "infra", "user:dynamic@example.com", roles[i%len(roles)]); err != nil {
+					recordErr(fmt.Errorf("SetMember(dynamic): %w", err))
+					return
+				}
+			}
+		}
+	}()
+
+	// 2. Concurrent HTTP & WebSocket workers for each of the 5 fixed roles: owner, admin, member, proposer, viewer.
+	fixedCallers := []struct {
+		email          string
+		role           string
+		canPostTask    bool
+		canPutSettings bool
+	}{
+		{"alice@example.com", RoleOwner, true, true},
+		{"tadmin@example.com", RoleAdmin, true, true},
+		{"tmember@example.com", RoleMember, true, false},
+		{"tproposer@example.com", RoleProposer, true, false},
+		{"tviewer@example.com", RoleViewer, false, false},
+	}
+
+	for _, fc := range fixedCallers {
+		fc := fc
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				// GET /api/me with spoofed headers
+				req, _ := http.NewRequest("GET", "http://x/api/me", nil)
+				attachSpoofHeaders(req.Header)
+				resp, body := h.do(t, req, host, fc.email)
+				if resp.StatusCode != http.StatusOK {
+					recordErr(fmt.Errorf("%s GET /api/me: status %d (%s)", fc.email, resp.StatusCode, body))
+					return
+				}
+				var echo nodeEcho
+				if err := json.Unmarshal([]byte(body), &echo); err != nil {
+					recordErr(fmt.Errorf("%s GET /api/me json: %w", fc.email, err))
+					return
+				}
+				if err := verifyEcho(fc.email, fc.role, echo); err != nil {
+					recordErr(err)
+					return
+				}
+
+				// POST /api/tasks
+				postTaskReq, _ := http.NewRequest("POST", "http://x/api/tasks", strings.NewReader(`{"title":"stress"}`))
+				postTaskReq.Header.Set("Content-Type", "application/json")
+				attachSpoofHeaders(postTaskReq.Header)
+				resp, body = h.do(t, postTaskReq, host, fc.email)
+				if fc.canPostTask {
+					if resp.StatusCode != http.StatusOK {
+						recordErr(fmt.Errorf("%s POST /api/tasks: got %d, want 200 (%s)", fc.email, resp.StatusCode, body))
+						return
+					}
+					if err := json.Unmarshal([]byte(body), &echo); err != nil {
+						recordErr(fmt.Errorf("%s POST /api/tasks json: %w", fc.email, err))
+						return
+					}
+					if err := verifyEcho(fc.email, fc.role, echo); err != nil {
+						recordErr(err)
+						return
+					}
+				} else if resp.StatusCode != http.StatusForbidden {
+					recordErr(fmt.Errorf("%s POST /api/tasks: got %d, want 403", fc.email, resp.StatusCode))
+					return
+				}
+
+				// PUT /api/settings, /api/secrets, /api/capabilities
+				targetPath := []string{"/api/settings", "/api/secrets", "/api/capabilities"}[i%3]
+				putSetReq, _ := http.NewRequest("PUT", "http://x"+targetPath, strings.NewReader(`{"k":"v"}`))
+				putSetReq.Header.Set("Content-Type", "application/json")
+				attachSpoofHeaders(putSetReq.Header)
+				resp, body = h.do(t, putSetReq, host, fc.email)
+				if fc.canPutSettings {
+					if resp.StatusCode != http.StatusOK {
+						recordErr(fmt.Errorf("%s PUT %s: got %d, want 200 (%s)", fc.email, targetPath, resp.StatusCode, body))
+						return
+					}
+				} else if resp.StatusCode != http.StatusForbidden {
+					recordErr(fmt.Errorf("%s PUT %s: got %d, want 403", fc.email, targetPath, resp.StatusCode))
+					return
+				}
+
+				// WebSocket upgrade with spoofed headers
+				if i%3 == 0 {
+					cfg, err := websocket.NewConfig("ws://"+host+"/ws", "http://"+host)
+					if err != nil {
+						recordErr(err)
+						return
+					}
+					attachSpoofHeaders(cfg.Header)
+					cfg.Header.Set("X-User", fc.email)
+					tc, err := net.Dial("tcp", u.Host)
+					if err != nil {
+						recordErr(err)
+						return
+					}
+					ws, err := websocket.NewClient(cfg, tc)
+					if err != nil {
+						tc.Close()
+						recordErr(fmt.Errorf("%s ws dial: %w", fc.email, err))
+						return
+					}
+					msg := fmt.Sprintf("ping-%d", i)
+					_ = ws.SetDeadline(time.Now().Add(5 * time.Second))
+					if err := websocket.Message.Send(ws, msg); err != nil {
+						ws.Close()
+						recordErr(fmt.Errorf("%s ws send: %w", fc.email, err))
+						return
+					}
+					var raw string
+					if err := websocket.Message.Receive(ws, &raw); err != nil {
+						ws.Close()
+						recordErr(fmt.Errorf("%s ws recv: %w", fc.email, err))
+						return
+					}
+					ws.Close()
+					if err := json.Unmarshal([]byte(raw), &echo); err != nil {
+						recordErr(fmt.Errorf("%s ws json: %w", fc.email, err))
+						return
+					}
+					if err := verifyEcho(fc.email, fc.role, echo); err != nil {
+						recordErr(err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// 3. Dynamic user & outsider concurrent requests while roles and anyone_may_propose change.
+	for _, caller := range []string{"dynamic@example.com", "outsider@example.com"} {
+		caller := caller
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				req, _ := http.NewRequest("GET", "http://x/api/tasks", nil)
+				attachSpoofHeaders(req.Header)
+				resp, body := h.do(t, req, host, caller)
+				switch resp.StatusCode {
+				case http.StatusOK:
+					var echo nodeEcho
+					if err := json.Unmarshal([]byte(body), &echo); err != nil {
+						recordErr(fmt.Errorf("%s GET /api/tasks json: %w", caller, err))
+						return
+					}
+					if caller == "outsider@example.com" && echo.Role != RoleProposer {
+						recordErr(fmt.Errorf("outsider got role %q, want proposer", echo.Role))
+						return
+					}
+					if err := verifyEcho(caller, "", echo); err != nil {
+						recordErr(err)
+						return
+					}
+				case http.StatusNotFound:
+					// Allowed when dynamic is removed and anyone_may_propose is false.
+				default:
+					recordErr(fmt.Errorf("%s GET /api/tasks unexpected status %d (%s)", caller, resp.StatusCode, body))
+					return
+				}
+
+				if caller == "outsider@example.com" {
+					// Outsider must never be allowed to mutate /api/settings even when anyone_may_propose is true.
+					putReq, _ := http.NewRequest("PUT", "http://x/api/settings", strings.NewReader(`{}`))
+					putReq.Header.Set("Content-Type", "application/json")
+					attachSpoofHeaders(putReq.Header)
+					sResp, _ := h.do(t, putReq, host, caller)
+					if sResp.StatusCode != http.StatusForbidden && sResp.StatusCode != http.StatusNotFound {
+						recordErr(fmt.Errorf("outsider PUT /api/settings got %d, want 403 or 404", sResp.StatusCode))
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// 4. Directory API concurrent theme/inbox preference mutations & X-Silo-Admin-Mode spoofing checks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			theme := directory.ThemeDark
+			if i%2 == 0 {
+				theme = directory.ThemeLight
+			}
+			// Non-admin attempts to spoof X-Silo-Admin-Mode: on and X-Grain-Hub-UI-Role: owner on directory API.
+			putTheme, _ := http.NewRequest("PUT", dirSrv.URL+"/v1/me/theme", strings.NewReader(`{"theme":"`+theme+`"}`))
+			putTheme.Header.Set("Content-Type", "application/json")
+			putTheme.Header.Set("Origin", dirSrv.URL)
+			putTheme.Header.Set("X-User", "tmember@example.com")
+			attachSpoofHeaders(putTheme.Header)
+			resp, err := http.DefaultClient.Do(putTheme)
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				recordErr(fmt.Errorf("PUT /v1/me/theme status %d", resp.StatusCode))
+				return
+			}
+
+			getMe, _ := http.NewRequest("GET", dirSrv.URL+"/v1/me", nil)
+			getMe.Header.Set("X-User", "tmember@example.com")
+			attachSpoofHeaders(getMe.Header)
+			mResp, err := http.DefaultClient.Do(getMe)
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			var me struct {
+				Email       string `json:"email"`
+				HubAdmin    bool   `json:"hub_admin"`
+				CanHubAdmin bool   `json:"can_hub_admin"`
+				Theme       string `json:"theme"`
+			}
+			_ = json.NewDecoder(mResp.Body).Decode(&me)
+			mResp.Body.Close()
+			if me.Email != "tmember@example.com" || me.HubAdmin || me.CanHubAdmin {
+				recordErr(fmt.Errorf("spoofed /v1/me response: %+v", me))
+				return
+			}
+			if me.Theme != directory.ThemeLight && me.Theme != directory.ThemeDark {
+				recordErr(fmt.Errorf("unexpected /v1/me theme: %q", me.Theme))
+				return
+			}
+
+			// Non-admin with X-Silo-Admin-Mode: on must not see other team ("other") or create teams.
+			getOther, _ := http.NewRequest("GET", dirSrv.URL+"/v1/teams/other", nil)
+			getOther.Header.Set("X-User", "tmember@example.com")
+			attachSpoofHeaders(getOther.Header)
+			oResp, err := http.DefaultClient.Do(getOther)
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			oResp.Body.Close()
+			if oResp.StatusCode != http.StatusNotFound {
+				recordErr(fmt.Errorf("non-admin GET /v1/teams/other with X-Silo-Admin-Mode=on: got %d, want 404", oResp.StatusCode))
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
 	}
 }

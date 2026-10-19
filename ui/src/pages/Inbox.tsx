@@ -224,7 +224,7 @@ export function Inbox({
 
   useEffect(() => {
     setConfiguredOverride(undefined);
-  }, [me?.email, me?.inbox_configured, me?.inbox_nodes?.join(',')]);
+  }, [me?.email]);
 
   const selectedNodes = configuredOverride ?? defaultSelectedNodes(me, nodes);
   const queryNodes = configuredOverride !== undefined ? configuredOverride : undefined;
