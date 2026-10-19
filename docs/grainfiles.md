@@ -4,6 +4,8 @@
 
 This document explains the design rationale for the Grainfile Format (`grainfile: v1`). The concise agent quick-reference is **[`docs/grainfile-v1.md`](grainfile-v1.md)**, and the normative specification is **[The Grainfile Format](grainfiles-spec.md)** (`docs/grainfiles-spec.md`), accompanied by its JSON Schemas ([`schemas/grainfiles/`](../schemas/grainfiles/)) and reference linter ([`tools/grainfiles/grainlint.py`](../tools/grainfiles/grainlint.py)). Where this document and the specification ever disagree, the specification wins.
 
+**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) stored in Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` dispatches a discrete unit of work (optionally gated by `depends_on` or `not_before`) to a target `recipient` deployment (defaulting to `"/"` for the source repository's deployment, or a canonical Hub deployment URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, CI workflow, schedule, or manual events (`when`). Grain deployments connect to the Silo Hub, subscribe to the `.task.grain.md` recipient identities they serve (`recipients`) and the `.process.grain.md` repositories, folders, or URLs they execute (`repos`, `folders`, `grainfiles`), and automatically include and run matching tasks and processes when their triggers and dependencies fire.
+
 ## Contents
 
 1. Purpose, versioning (`grainfile: v1`), and scope
@@ -18,7 +20,7 @@ This document explains the design rationale for the Grainfile Format (`grainfile
 
 A Grainfile is a plain Markdown file with YAML front matter stored in git (`**/*.grain.md`). Its goal is to let people and deployments author work in ordinary git repositories—reviewed through standard pull requests and protected branches—in a form that a Grain deployment can pick up and run directly without an intermediate translation layer.
 
-Each Grainfile optionally declares `grainfile: v1` (defaulting to `"v1"` when omitted), which maps programmatically in Hub APIs, SDKs, and UI responses to:
+Each Grainfile must declare `grainfile: v1` (mandatory; `GF020` when omitted), which maps programmatically in Hub APIs, SDKs, and UI responses to:
 - `spec_summary_path`: [`docs/grainfile-v1.md`](grainfile-v1.md) (~50-line low-token agent quick reference)
 - `spec_path`: [`docs/grainfiles-spec.md`](grainfiles-spec.md) (full normative specification)
 - `schemas/grainfiles/`: JSON Schemas for `common`, `task`, and `process`
@@ -46,10 +48,10 @@ The **authoritative source** of a `.task.grain.md` or `.process.grain.md` is the
 
 Accordingly, `.task.grain.md` files (1-to-1 work items) separate routing from optional attribution, while `.process.grain.md` files (1-to-many reusable processes) omit both `recipient` and `requestor` so any subscribed deployment can run them:
 
-- **`recipient` (`.task.grain.md` only; optional, defaults to `"/"`):** Which deployment is intended to execute the task. When omitted, `recipient` defaults to `"/"`, meaning the root of the enclosing repository where the task lives. When set explicitly, it is a **deployment identity**: a plain `https://` URL naming the git repository or folder that the deployment controls (for example, `https://github.com/acme/grain-eu`), or a repo-local relative / `/`-rooted folder path. Rejected on `.process.grain.md` (`GF005`).
-- **`requestor` (`.task.grain.md` only; optional):** Attribution metadata recording who requested or owns the task. Rejected on `.process.grain.md` (`GF005`). When present on a task, this may be either:
+- **`recipient` (`.task.grain.md` only; optional, defaults to `"/"`):** Which deployment is intended to execute the task. When omitted, `recipient` defaults to `"/"`, meaning the root of the enclosing repository where the task lives. When set explicitly, it is a **deployment identity**: a canonical Hub deployment URL (`https://<hub-host>/deployments/<id>` or `/deployments/<id>`), a plain `https://` URL naming the git repository or folder that the deployment controls (for example, `https://github.com/acme/grain-eu`), or a repo-local relative / `/`-rooted folder path. Rejected on `.process.grain.md` (`GF020`).
+- **`requestor` (`.task.grain.md` only; optional):** Attribution metadata recording who requested or owns the task. Rejected on `.process.grain.md` (`GF020`). When present on a task, this may be either:
   - A **user identity** in standard RFC 5322 / git author notation (`Bruce Salmon <bsalmon@google.com>`), or
-  - A **deployment / URL identity** (`https://github.com/acme/grain-eu`).
+  - A **deployment / URL identity** (`https://<hub-host>/deployments/<id>` or `https://github.com/acme/grain-eu`).
 
 ## 4. References and `depends_on` target rules
 
@@ -68,8 +70,9 @@ Grainfiles use two reference lists (`references` and `depends_on`), both sharing
 
 A `.process.grain.md` specifies when it fires using **`when`** (required on every `.process.grain.md`; spec §7.2.1). Using `when` rather than `on` ensures that YAML 1.1 parsers never misparse an unquoted `on:` key as boolean `true`:
 
-- **`schedule: {cron, timezone}`:** Standard five-field POSIX cron expression with an optional IANA timezone name (default `UTC`).
+- **`schedule: {cron, timezone?}` (or non-empty list of `{cron, timezone?}` objects):** Standard five-field POSIX cron expression with an optional IANA Time Zone Database identifier (default `"UTC"`, e.g. `"America/Los_Angeles"`, `"Europe/Berlin"`; unknown names and 3-letter abbreviations like `"PST"`/`"EST"` are rejected with `GF020`).
 - **`push`, `merge`, `pull_request`:** Either a single filter object or a non-empty list of filter objects, where each filter supports `repo` / `repos` (repository URL or `owner/repo` slug, defaulting to the process's repository), `branches`, `paths` (file paths, folder paths `dir/` or `/dir` matching `dir/**`, globs, or full forge `https://` file/folder URLs), and `ignore` (at least one of `repo`, `repos`, `branches`, or `paths` is required; `GF020`).
+- **`workflow`:** Either a single workflow filter object or a non-empty list of workflow filter objects (`GF020`), where each filter specifies `workflow` and/or `workflows` (workflow name, glob, or `.github/workflows/*.yml` / `.grain/workflows/*.yml` path; required, `GF020`), optional `events` (`["triggered", "succeeded", "failed"]`, defaulting to `["succeeded", "failed"]`), optional `repo` / `repos`, and optional `branches`.
 - **`manual: {}`:** On-demand firing by a human or operator.
 - **`scenario: <string> | {description}`:** A natural-language scenario description specifying when the process applies.
 
@@ -92,7 +95,7 @@ Deployments watch their attached repositories—or subscribe via **[Grain Hub](h
 4. **Commit-SHA pinning & regular-file check (spec §11.3):**
    - `authorized_references` are pinned to the exact commit SHA at which the Grainfile was indexed, and `GitHubFetcher` rejects `symlink` and `submodule` git objects.
 5. **Bounded `depends_on` DAG depth (spec §11.4):**
-   - `depends_on` evaluation enforces a visited set (`GF033`) and a maximum transitive depth of 16.
+   - `depends_on` evaluation enforces a visited set (`GF034`) and a maximum transitive depth of 16.
 6. **Prompt/reference separation (spec §11.5):**
    - Executors structurally delimit the Grainfile Markdown body (trusted instructions) from materialized `references` and PR diffs (tagged with source URL and commit SHA).
 

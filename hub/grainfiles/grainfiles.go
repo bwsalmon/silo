@@ -1318,10 +1318,10 @@ func validateWhenTriggers(raw any, where string) (Triggers, Errors) {
 // URL ("https://github.com/owner/repo") or an "owner/repo" slug into its
 // canonical lower-case repository URL ("https://github.com/owner/repo").
 func NormalizeRepoSlugOrURL(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" || strings.ContainsAny(s, " \t\r\n\\") {
+	if raw == "" || strings.ContainsAny(raw, " \t\r\n\\") {
 		return "", fmt.Errorf("invalid repository %q", raw)
 	}
+	s := strings.TrimSpace(raw)
 	if strings.Contains(s, "://") || strings.HasPrefix(s, "http:") || strings.HasPrefix(s, "https:") || strings.HasPrefix(s, "ssh:") || strings.HasPrefix(s, "git@") || strings.HasPrefix(s, "file:") {
 		r, err := ParseRef(s)
 		if err != nil {

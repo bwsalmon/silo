@@ -1,6 +1,6 @@
 # Grainfile v1 Quick Reference (`grainfile: v1`)
 
-**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) stored in Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` dispatches a discrete unit of work (optionally gated by `depends_on` or `not_before`) to a target `recipient` deployment (such as its canonical Hub URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, CI workflow, schedule, or manual events (`when`).
+**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) stored in Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` dispatches a discrete unit of work (optionally gated by `depends_on` or `not_before`) to a target `recipient` deployment (defaulting to `"/"` for the source repository's deployment, or a canonical Hub deployment URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, CI workflow, schedule, or manual events (`when`). Grain deployments connect to the Silo Hub, subscribe to the `.task.grain.md` recipient identities they serve (`recipients`) and the `.process.grain.md` repositories, folders, or URLs they execute (`repos`, `folders`, `grainfiles`), and automatically include and run matching tasks and processes when their triggers and dependencies fire.
 
 ## 1. File Naming & Templates (`GF001`–`GF006`, `GF033`, `GF034`)
 - **One-shot task:** `<stem>.task.grain.md` — executes once when dependencies and `not_before` are satisfied.
@@ -11,13 +11,13 @@
   - Jinja2 syntax or evaluation errors are rejected (`GF033`), and both raw and rendered size must fit within `MaxFileBytes` (`GF006`).
   - Undeclared variables are extracted from the AST in deterministic sorted order (`template_vars`).
 - `<stem>` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (uppercase and lowercase ASCII letters, digits, `.`, `_`, `-`, starting with an ASCII letter or digit). Compact ISO timestamps in filename stems MUST use `Z` (UTC), e.g. `2026-10-18T143000Z-fix-API.task.grain.md`. Two Grainfiles in the same repository MUST NOT collide when compared case-insensitively (`GF006`).
-- Files ending in `.grain.md` or `.grain.md.jinja2` with an unknown `<kind>` suffix (e.g. `foo.unknown.grain.md`) warn with `GF005`. Ordinary `.md` files without `.grain.md` (including `*.task.md` or `*.process.md`) are regular Markdown assets and do not trigger `GF005`.
+- Files ending in `.grain.md` or `.grain.md.jinja2` with an unknown `<kind>` suffix (e.g. `foo.unknown.grain.md`) warn with `GF005`. Ordinary `.md` files without `.grain.md` (such as `README.md` or `docs/design.md`) are regular Markdown assets and do not trigger `GF005`.
 
 ## 2. Front Matter (`---` YAML `---` + Optional Markdown Body)
 Standard YAML 1.2 Core Schema (`GF004`: no anchors `&`, aliases `*`, merge keys `<<`, or tags `!`). Unknown non-`x_*` keys warn (`GF022`); vendor extensions MUST start with `x_`. The Markdown body after the closing `---` delimiter is **optional and may be empty** when the front matter (`title`, `from_template`, `references`, `when`, etc.) carries everything the task or process requires.
 
 The finalized `grainfile: v1` front-matter vocabulary consists of **10 fields** (plus `title` and `x_*` extensions):
-- **Shared (5):** `grainfile` (**required**), `draft`, `not_before`, `references`, `from_template`
+- **Shared (5):** `grainfile` (`"v1"`, **required**), `title` (**required**), `draft`, `not_before`, `references`, `from_template`
 - **`.task.grain.md` only (3):** `recipient` (optional, default `"/"`), `requestor` (optional), `depends_on` (optional; targets must resolve to concrete `.task.grain.md` files, never `.process.grain.md` and never unrendered `.jinja2` templates)
 - **`.process.grain.md` only (2):** `when` (**required**), `gate` (optional, default `false`)
 
@@ -57,7 +57,7 @@ The finalized `grainfile: v1` front-matter vocabulary consists of **10 fields** 
   - `repo?: "owner/repo" | "https://github.com/owner/repo"` and/or `repos?: ["owner/repo", ...]` (same-repo by default; cross-repo allowed within the same team).
   - `branches?: ["main", "release/*"]` (branch names or globs matched against the workflow run's head branch).
 - `manual: {}`
-- `scenario: "Description"` or `scenario: { description: "..." }` (or list)
+- `scenario: "Description"` or `scenario: { description: "..." }`
 
 ## 3. Minimal Copy-Paste Examples
 
@@ -121,3 +121,22 @@ Deploy widget service to `{{ region | default("eu-west-1") }}` in `{{ env | defa
 - **`depends_on` targets (`GF020`, `GF032`, `GF034`):** `depends_on` is only valid on `.task.grain.md` (and rendered `.task.grain.md.jinja2`) files (`GF020` on `.process.grain.md`). Every `depends_on` target MUST resolve to a concrete `.task.grain.md` file — never a `.process.grain.md` and never an unrendered `.jinja2` template (`GF032`) — subject to DAG cycle detection (`GF034`).
 - **Same-origin reference authority:** A repository can only grant read access to its own files/folders at the Grainfile's pinned commit SHA (`authorized_references`). Cross-repo `references` require the executing deployment's own credentials.
 - **Full specification:** See `docs/grainfiles-spec.md`.
+
+## 5. Lint Codes (`GF001`–`GF036`)
+| Code | Severity | Condition |
+| :--- | :--- | :--- |
+| `GF001` | error | Missing opening `---` on line 1 or missing closing `---` front-matter delimiter |
+| `GF002` | error | Malformed YAML front matter or non-mapping root |
+| `GF003` | error | Duplicate YAML mapping key |
+| `GF004` | error | Disallowed YAML construct (anchor `&`, alias `*`, merge key `<<`, or tag `!`) |
+| `GF005` | warning | Unregistered `.<kind>.grain.md` or `.<kind>.grain.md.jinja2` suffix |
+| `GF006` | error | Invalid filename `<stem>`, non-UTC compact stem timestamp, case-insensitive path collision, or file/front-matter size limit exceeded |
+| `GF020` | error | Schema validation failure: missing/invalid `grainfile: v1`, missing required field (`title`, `when`), kind-mismatch field, invalid timestamp/timezone (`-00:00`, naive timestamp, non-IANA timezone), or invalid trigger filter |
+| `GF022` | warning | Unknown top-level front-matter key not prefixed with `x_` |
+| `GF030` | error | Unresolvable local `recipient` or `requestor` path in repository tree |
+| `GF031` | error | Unresolvable or invalid `references` entry |
+| `GF032` | error | Unresolvable or invalid `depends_on` target (must resolve to a concrete `.task.grain.md` file; `.process.grain.md` and unrendered `.jinja2` templates are rejected) |
+| `GF033` | error | Jinja2 template syntax, AST security, or evaluation error in `.grain.md.jinja2` |
+| `GF034` | error | Cycle in `depends_on` graph (`A -> ... -> A`) or forbidden Jinja2 tag (`include`, `extends`, `import`, `from`) |
+| `GF035` | error | Invalid or unresolvable `from_template` reference (must target a `.task.grain.md.jinja2` or `.process.grain.md.jinja2` matching the Grainfile's kind) |
+| `GF036` | error | Path traversal (`..`) climbing outside repository root in `recipient`, `requestor`, `references`, `depends_on`, or `from_template` |
