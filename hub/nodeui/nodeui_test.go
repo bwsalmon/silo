@@ -393,16 +393,24 @@ func TestTeamAdminAndRegistrationValidation(t *testing.T) {
 		t.Fatalf("owner handshake = %+v", m)
 	}
 
-	// Team admin of "infra" gets 200 with role: "team-admin", team: "infra".
+	// Team admin of "infra" gets 200 with role: "admin" (or "team-admin"), team: "infra".
 	if resp, _ := h.get(t, "ws-team."+domain, "/api/hello", "tadmin@example.com"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("team-admin: %d", resp.StatusCode)
 	}
-	if m := <-asked; m.Role != RoleTeamAdmin || m.Team != "infra" || m.Viewer != "tadmin@example.com" {
+	if m := <-asked; (m.Role != RoleAdmin && m.Role != RoleTeamAdmin) || m.Team != "infra" || m.Viewer != "tadmin@example.com" {
 		t.Fatalf("team-admin handshake = %+v", m)
 	}
 
-	// Regular team member, other team's admin, and hub admin all get 404.
-	for _, viewer := range []string{"tmember@example.com", "oadmin@example.com", "hubadmin@example.com", "stranger@example.com"} {
+	// Regular team member of "infra" gets 200 with role: "member", team: "infra".
+	if resp, _ := h.get(t, "ws-team."+domain, "/api/hello", "tmember@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("team-member: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleMember || m.Team != "infra" || m.Viewer != "tmember@example.com" {
+		t.Fatalf("team-member handshake = %+v", m)
+	}
+
+	// Other team's admin, hub admin outside the team, and stranger all get 404.
+	for _, viewer := range []string{"oadmin@example.com", "hubadmin@example.com", "stranger@example.com"} {
 		if resp, _ := h.get(t, "ws-team."+domain, "/api/hello", viewer); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("viewer %s on ws-team: got %d, want 404", viewer, resp.StatusCode)
 		}
@@ -503,5 +511,122 @@ func TestCookieAndHeaderHardening(t *testing.T) {
 	}
 	if resp.Header.Get("Referrer-Policy") != "no-referrer" || resp.Header.Get("Cross-Origin-Opener-Policy") != "same-origin" {
 		t.Fatalf("security headers = %v", resp.Header)
+	}
+}
+
+func TestFiveRoleNodeUIAndThemePropagation(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	dir := h.ui.Directory.Store
+	check(t, dir.CreateTeam(ctx, "infra", "Infra"))
+	check(t, dir.SetMember(ctx, "infra", "user:alice@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:tadmin@example.com", directory.Admin))
+	check(t, dir.SetMember(ctx, "infra", "user:tmember@example.com", directory.Member))
+	check(t, dir.SetMember(ctx, "infra", "user:tproposer@example.com", directory.Proposer))
+	check(t, dir.SetMember(ctx, "infra", "user:tviewer@example.com", directory.Viewer))
+	check(t, dir.AssignRepo(ctx, "infra", "org/infra-repo"))
+	check(t, dir.SetTeamSettings(ctx, "infra", directory.Settings{
+		LostRequeueAfter: directory.MinLostRequeueAfter,
+		RequireApproval:  true,
+		AnyoneMayPropose: true,
+	}))
+	_, err := dir.SetUserTheme(ctx, "tmember@example.com", "dark")
+	check(t, err)
+
+	var lastHeaders http.Header
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"viewer":           r.Header.Get(HeaderViewer),
+			"role":             r.Header.Get(HeaderRole),
+			"team":             r.Header.Get(HeaderTeam),
+			"theme":            r.Header.Get(HeaderTheme),
+			"require_approval": r.Header.Get(HeaderRequireApproval),
+		})
+	})
+
+	// Connect node with UI.Offered=true and UI.Team omitted: ValidateNodeUI infers UI.Team="infra".
+	_, asked := h.connectNode(t, registry.Node{
+		ID:    "ws-inferred",
+		Repos: []string{"org/infra-repo"},
+		UI:    &registry.NodeUI{Offered: true},
+	}, "alice@example.com", handler)
+
+	if e, ok := h.ui.Registry.Get("ws-inferred"); !ok || e.UI == nil || e.UI.Team != "infra" {
+		t.Fatalf("expected inferred UI.Team=\"infra\", got %+v", e.UI)
+	}
+
+	postReq := func(path string) *http.Request {
+		r, _ := http.NewRequest("POST", "http://x"+path, strings.NewReader(`{"title":"test"}`))
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+	putReq := func(path string) *http.Request {
+		r, _ := http.NewRequest("PUT", "http://x"+path, strings.NewReader(`{"model":"x"}`))
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+
+	// 1. Owner: full read-write including /api/settings, theme defaults to "light".
+	if resp, _ := h.do(t, putReq("/api/settings"), "ws-inferred."+domain, "alice@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("owner PUT /api/settings: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleOwner || m.Team != "infra" || !m.RequireApproval || m.Theme != "light" {
+		t.Fatalf("owner handshake = %+v", m)
+	}
+
+	// 2. Admin: full read-write including /api/settings.
+	if resp, _ := h.do(t, putReq("/api/settings"), "ws-inferred."+domain, "tadmin@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin PUT /api/settings: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleAdmin || m.Team != "infra" || !m.RequireApproval || m.Theme != "light" {
+		t.Fatalf("admin handshake = %+v", m)
+	}
+
+	// 3. Member: read-write tasks & director sessions (theme="dark"), but 403 on /api/settings, /api/secrets, /api/capabilities.
+	if resp, _ := h.do(t, postReq("/api/tasks"), "ws-inferred."+domain, "tmember@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("member POST /api/tasks: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleMember || m.Team != "infra" || !m.RequireApproval || m.Theme != "dark" {
+		t.Fatalf("member handshake = %+v", m)
+	}
+	if lastHeaders.Get(HeaderTheme) != "dark" || lastHeaders.Get(HeaderRequireApproval) != "true" || lastHeaders.Get(HeaderRole) != RoleMember {
+		t.Fatalf("member headers = %v", lastHeaders)
+	}
+	for _, restricted := range []string{"/api/settings", "/api/secrets", "/api/capabilities"} {
+		if resp, _ := h.do(t, putReq(restricted), "ws-inferred."+domain, "tmember@example.com"); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("member PUT %s: got %d, want 403", restricted, resp.StatusCode)
+		}
+	}
+
+	// 4. Proposer (explicit team proposer & org-wide anyone_may_propose): GET and POST /api/tasks allowed, other writes 403.
+	for _, propUser := range []string{"tproposer@example.com", "outsider@example.com"} {
+		if resp, _ := h.get(t, "ws-inferred."+domain, "/api/tasks", propUser); resp.StatusCode != http.StatusOK {
+			t.Fatalf("proposer %s GET /api/tasks: %d", propUser, resp.StatusCode)
+		}
+		if m := <-asked; m.Role != RoleProposer || m.Team != "infra" || !m.RequireApproval {
+			t.Fatalf("proposer %s handshake = %+v", propUser, m)
+		}
+		if resp, _ := h.do(t, postReq("/api/tasks"), "ws-inferred."+domain, propUser); resp.StatusCode != http.StatusOK {
+			t.Fatalf("proposer %s POST /api/tasks: %d", propUser, resp.StatusCode)
+		}
+		<-asked
+		for _, blocked := range []string{"/api/tasks/123/approve", "/api/director/messages", "/api/settings"} {
+			if resp, _ := h.do(t, postReq(blocked), "ws-inferred."+domain, propUser); resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("proposer %s POST %s: got %d, want 403", propUser, blocked, resp.StatusCode)
+			}
+		}
+	}
+
+	// 5. Viewer: GET allowed, all POST/PUT/DELETE return 403.
+	if resp, _ := h.get(t, "ws-inferred."+domain, "/api/tasks", "tviewer@example.com"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("viewer GET /api/tasks: %d", resp.StatusCode)
+	}
+	if m := <-asked; m.Role != RoleViewer || m.Team != "infra" {
+		t.Fatalf("viewer handshake = %+v", m)
+	}
+	if resp, _ := h.do(t, postReq("/api/tasks"), "ws-inferred."+domain, "tviewer@example.com"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("viewer POST /api/tasks: got %d, want 403", resp.StatusCode)
 	}
 }

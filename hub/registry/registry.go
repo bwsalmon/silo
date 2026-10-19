@@ -126,9 +126,11 @@ type Entry struct {
 	Free int `json:"free"`
 	// Claimed is the slots the hub has claimed on the node for tasks it
 	// is dispatching and the node has not yet counted against Free.
-	Claimed     int       `json:"claimed"`
-	ConnectedAt time.Time `json:"connected_at"`
-	LastSeen    time.Time `json:"last_seen"`
+	Claimed         int       `json:"claimed"`
+	ConnectedAt     time.Time `json:"connected_at"`
+	LastSeen        time.Time `json:"last_seen"`
+	ViewerRole      string    `json:"viewer_role,omitempty"`
+	RequireApproval bool      `json:"require_approval,omitempty"`
 }
 
 // Available is the slots the dispatcher may still claim on the node.

@@ -32,7 +32,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +55,23 @@ const (
 // Viewer roles on an http stream.
 const (
 	RoleOwner     = "owner"
+	RoleAdmin     = "admin"
 	RoleTeamAdmin = "team-admin"
+	RoleMember    = "member"
+	RoleProposer  = "proposer"
+	RoleViewer    = "viewer"
+)
+
+// Request headers synthesized by hub/nodeui and nodeui.Serve for the node's
+// local UI handler.
+const (
+	HeaderViewer          = "X-Grain-Hub-UI-Viewer"
+	HeaderUser            = "X-Grain-Hub-UI-User"
+	HeaderRole            = "X-Grain-Hub-UI-Role"
+	HeaderTeam            = "X-Grain-Hub-UI-Team"
+	HeaderRequireApproval = "X-Grain-Hub-UI-Require-Approval"
+	HeaderTheme           = "X-Grain-Hub-UI-Theme"
+	HeaderAccess          = "X-Grain-Hub-UI-Access"
 )
 
 // Message is a line on an http stream.
@@ -64,11 +82,18 @@ type Message struct {
 	// Viewer is whom the hub signed the request's sender in as, in
 	// http.
 	Viewer string `json:"viewer,omitempty"`
-	// Role is why the hub admitted Viewer ("owner" or "team-admin"), in
-	// http.
+	// Role is the caller's effective role on the deployment ("owner",
+	// "admin", "member", "proposer", or "viewer"), in http.
 	Role string `json:"role,omitempty"`
-	// Team is the node's validated ui.team when configured, in http.
+	// Team is the node's validated or inferred ui.team when configured,
+	// in http.
 	Team string `json:"team,omitempty"`
+	// RequireApproval reports whether the owning team's submission policy
+	// requires two-person approval for member/admin task filings, in http.
+	RequireApproval bool `json:"require_approval,omitempty"`
+	// Theme is the signed-in user's Hub-resolved theme ("light" or "dark"),
+	// in http.
+	Theme string `json:"theme,omitempty"`
 	// Access is the access level ("read-only" or "read-write") the node
 	// granted the viewer, in ok.
 	Access string `json:"access,omitempty"`
@@ -152,8 +177,8 @@ type ctxKey struct{}
 // target is what Rewrite hands the transport's dial: which node, and
 // for whom.
 type target struct {
-	node, viewer, role, team string
-	https, legacy            bool
+	node, viewer, role, team, theme string
+	requireApproval, https, legacy  bool
 }
 
 // refusal is the node's answer error: it does not serve its UI here.
@@ -161,12 +186,66 @@ type refusal struct{ why string }
 
 func (r *refusal) Error() string { return r.why }
 
+// CheckRoleRequest enforces proxy-level and node-level HTTP method and path
+// guards for the 5 node UI roles ("owner", "admin"/"team-admin", "member",
+// "proposer", "viewer") and any explicit ui.access="read-only" cap.
+func CheckRoleRequest(role, uiAccess, method, reqPath string) error {
+	isRead := method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+	if role != RoleOwner && strings.EqualFold(strings.TrimSpace(uiAccess), "read-only") && !isRead {
+		return fmt.Errorf("forbidden: %s access is read-only", role)
+	}
+	p := path.Clean("/" + strings.TrimSpace(reqPath))
+	switch role {
+	case RoleOwner, RoleAdmin, RoleTeamAdmin:
+		return nil
+	case RoleMember:
+		if !isRead && isAdminSettingsPath(p) {
+			return errors.New("forbidden: member role cannot modify deployment settings, secrets, or capabilities")
+		}
+		return nil
+	case RoleProposer:
+		if isRead {
+			return nil
+		}
+		if method == http.MethodPost && (p == "/api/tasks" || p == "/v1/tasks" || p == "/tasks") {
+			return nil
+		}
+		return errors.New("forbidden: proposer role may only view and submit tasks")
+	case RoleViewer:
+		if !isRead {
+			return errors.New("forbidden: viewer role is read-only")
+		}
+		return nil
+	default:
+		return errors.New("forbidden: unrecognized role")
+	}
+}
+
+func isAdminSettingsPath(cleanPath string) bool {
+	for _, prefix := range []string{
+		"/api/settings",
+		"/api/secrets",
+		"/api/capabilities",
+		"/v1/settings",
+		"/v1/secrets",
+		"/v1/capabilities",
+		"/settings",
+		"/secrets",
+		"/capabilities",
+	} {
+		if cleanPath == prefix || strings.HasPrefix(cleanPath, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // ServeHTTP serves one request to a node's UI host. The caller must be
-// signed in, and must be either the node's owner or an authenticated
-// team admin of the node's validated ui.team: a node they may not open,
-// or that the hub does not know, is answered 404 whether or not it
-// exists. An offline node is answered 503, one that does not serve its
-// UI through the hub 403.
+// signed in and hold one of the 5 roles on the deployment (owner,
+// admin, member, proposer, or viewer): a node they may not open, or
+// that the hub does not know, is answered 404 whether or not it exists.
+// An offline node is answered 503, one that does not serve its UI
+// through the hub 403.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.Node(r.Host)
 	if !ok {
@@ -183,23 +262,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such node", http.StatusNotFound)
 		return
 	}
-	uiTeam := ""
-	if e.UI != nil && e.UI.Offered && e.UI.Team != "" {
-		if s.Directory != nil && s.Directory.Store != nil {
-			_ = s.Directory.Store.ValidateNodeUI(r.Context(), e.Owner, &e.Node)
-		}
-		if e.UI != nil {
-			uiTeam = e.UI.Team
-		}
+	offersUI := (e.UI != nil && e.UI.Offered) || (e.UI == nil && e.Supports(registry.FeatureNodeUI))
+	if offersUI && (e.UI == nil || e.UI.Reason == "") && s.Directory != nil && s.Directory.Store != nil {
+		_ = s.Directory.Store.ValidateNodeUI(r.Context(), e.Owner, &e.Node)
 	}
-	var role string
-	switch {
-	case e.Owner != "" && strings.EqualFold(e.Owner, acc.Email):
-		role = RoleOwner
-	case uiTeam != "" && acc.Teams[uiTeam] == directory.Admin:
-		role = RoleTeamAdmin
-	default:
+	role, uiTeam, requireApproval := acc.NodeUIRole(e)
+	if role == "" {
 		http.Error(w, "no such node", http.StatusNotFound)
+		return
+	}
+	uiAccess := ""
+	if e.UI != nil {
+		uiAccess = e.UI.Access
+	}
+	if err := CheckRoleRequest(role, uiAccess, r.Method, r.URL.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 	if e.Status == registry.Offline || s.Open == nil {
@@ -212,15 +289,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	theme := directory.ThemeLight
+	if s.Directory != nil && s.Directory.Store != nil {
+		if prefs, err := s.Directory.Store.UserPreferences(r.Context(), acc.Email); err == nil && prefs.Theme == directory.ThemeDark {
+			theme = directory.ThemeDark
+		}
+	}
 	isHTTPS := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	s.once.Do(s.init)
 	s.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, target{
-		node:   id,
-		viewer: acc.Email,
-		role:   role,
-		team:   uiTeam,
-		https:  isHTTPS,
-		legacy: e.UI == nil && role == RoleOwner,
+		node:            id,
+		viewer:          acc.Email,
+		role:            role,
+		team:            uiTeam,
+		requireApproval: requireApproval,
+		theme:           theme,
+		https:           isHTTPS,
+		legacy:          e.UI == nil && role == RoleOwner,
 	})))
 }
 
@@ -246,6 +331,13 @@ var clientHeaders = []string{
 	"X-User-LDAP",
 	"X-Grain-User",
 	"Grain-User",
+	HeaderViewer,
+	HeaderUser,
+	HeaderRole,
+	HeaderTeam,
+	HeaderRequireApproval,
+	HeaderTheme,
+	HeaderAccess,
 }
 
 // hubCookies are the hub's own session cookies (OIDC's), which the node
@@ -278,6 +370,20 @@ func rewrite(pr *httputil.ProxyRequest) {
 			continue
 		}
 		pr.Out.Header.Del(h)
+	}
+	if t.viewer != "" {
+		pr.Out.Header.Set(HeaderViewer, t.viewer)
+		pr.Out.Header.Set(HeaderUser, t.viewer)
+	}
+	if t.role != "" {
+		pr.Out.Header.Set(HeaderRole, t.role)
+	}
+	if t.team != "" {
+		pr.Out.Header.Set(HeaderTeam, t.team)
+	}
+	pr.Out.Header.Set(HeaderRequireApproval, strconv.FormatBool(t.requireApproval))
+	if t.theme != "" {
+		pr.Out.Header.Set(HeaderTheme, t.theme)
 	}
 	if cs := pr.In.Cookies(); len(cs) > 0 {
 		pr.Out.Header.Del("Cookie")
@@ -364,7 +470,15 @@ func (s *Server) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(Message{Type: TypeHTTP, Node: t.node, Viewer: t.viewer, Role: t.role, Team: t.team})
+	b, _ := json.Marshal(Message{
+		Type:            TypeHTTP,
+		Node:            t.node,
+		Viewer:          t.viewer,
+		Role:            t.role,
+		Team:            t.team,
+		RequireApproval: t.requireApproval,
+		Theme:           t.theme,
+	})
 	c.SetDeadline(time.Now().Add(openTimeout))
 	if _, err := c.Write(append(b, '\n')); err != nil {
 		c.Close()
@@ -460,9 +574,34 @@ func Serve(c net.Conn, m Message, h http.Handler) error {
 		c.Close()
 		return err
 	}
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.Viewer != "" {
+			r.Header.Set(HeaderViewer, m.Viewer)
+			r.Header.Set(HeaderUser, m.Viewer)
+		}
+		if m.Role != "" {
+			r.Header.Set(HeaderRole, m.Role)
+		}
+		if m.Team != "" {
+			r.Header.Set(HeaderTeam, m.Team)
+		}
+		r.Header.Set(HeaderRequireApproval, strconv.FormatBool(m.RequireApproval))
+		theme := m.Theme
+		if theme != directory.ThemeDark {
+			theme = directory.ThemeLight
+		}
+		r.Header.Set(HeaderTheme, theme)
+		if m.Role != "" {
+			if err := CheckRoleRequest(m.Role, m.Access, r.Method, r.URL.Path); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 	l := &oneConn{c: c, done: make(chan struct{})}
 	srv := &http.Server{
-		Handler:           h,
+		Handler:           wrapped,
 		ReadHeaderTimeout: openTimeout,
 		ConnState: func(_ net.Conn, st http.ConnState) {
 			if st == http.StateClosed || st == http.StateHijacked {

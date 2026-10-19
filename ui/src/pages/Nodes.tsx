@@ -25,18 +25,18 @@ import { useLoad } from '../load';
 import { mono } from '../theme';
 import { when } from './Backlog';
 
-function safeHref(raw?: string): string | undefined {
+export function safeHref(raw?: string): string | undefined {
   if (!raw) return undefined;
   const clean = safeUrl(raw.trim());
   if (!clean || clean.startsWith('//') || clean.startsWith('/\\') || !/^(https?:|mailto:|\/[^/\\])/i.test(clean)) return undefined;
   return clean;
 }
 
-function offersNodeUI(n: NodeEntry): boolean {
+export function offersNodeUI(n: NodeEntry): boolean {
   return Boolean(n.ui?.offered || n.features?.includes('nodeui') || n.ui_url || n.ui?.url);
 }
 
-function nodeUIHref(n: NodeEntry): string | undefined {
+export function nodeUIHref(n: NodeEntry): string | undefined {
   if (!offersNodeUI(n) || n.status === 'offline') return undefined;
   const candidate = n.ui_url || n.ui?.url || `/nodes/${encodeURIComponent(n.id)}/ui`;
   return safeHref(candidate);
@@ -156,19 +156,22 @@ export function Nodes({ me }: { me?: Me }) {
                     </Stack>
                   </TableCell>
                   <TableCell>
-                    {uiHref ? (
-                      <MuiLink href={uiHref} target="_blank" rel="noopener noreferrer" underline="hover">
-                        Open Grain UI
-                      </MuiLink>
-                    ) : hasNodeUI ? (
-                      <Typography variant="caption" color="text.secondary">
-                        Offline (nodeui)
-                      </Typography>
-                    ) : (
-                      <Typography variant="caption" color="text.secondary">
-                        —
-                      </Typography>
-                    )}
+                    <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 0.5 }}>
+                      {uiHref ? (
+                        <MuiLink href={uiHref} target="_blank" rel="noopener noreferrer" underline="hover">
+                          Open Grain UI
+                        </MuiLink>
+                      ) : hasNodeUI ? (
+                        <Typography variant="caption" color="text.secondary">
+                          Offline (nodeui)
+                        </Typography>
+                      ) : (
+                        <Typography variant="caption" color="text.secondary">
+                          —
+                        </Typography>
+                      )}
+                      {n.viewer_role && <Chip size="small" label={n.viewer_role} variant="outlined" />}
+                    </Stack>
                   </TableCell>
                   <TableCell>{n.version ?? ''}</TableCell>
                   <TableCell>{n.status === 'offline' ? '' : when(n.last_seen)}</TableCell>

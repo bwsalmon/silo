@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,11 +14,24 @@ import (
 	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/identity"
+	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/route"
 )
 
-// TasksPath is the backlog's HTTP API.
-const TasksPath = "/v1/tasks"
+// TasksPath is the backlog's HTTP API, and InboxPath is the unified
+// cross-deployment inbox HTTP API.
+const (
+	TasksPath = "/v1/tasks"
+	InboxPath = "/v1/inbox"
+)
+
+// Actionable item kinds returned by GET /v1/inbox.
+const (
+	InboxAwaitingReply   = "awaiting_reply"
+	InboxApprovalRequest = "approval_request"
+	InboxProposal        = "proposal"
+	InboxFailed          = "failed"
+)
 
 // API is the backlog over HTTP, for humans and custom UIs signed in
 // through the team directory's API (docs/hub.md §6.1):
@@ -63,12 +77,51 @@ type API struct {
 	// Requests finds a task's approval requests among its stored events:
 	// *live.Store. Without it no approval request is answered.
 	Requests ApprovalRequests
+	// Events finds a task's awaiting_reply and approval_request events for
+	// GET /v1/inbox: *live.Store. When nil, Requests is used if it also
+	// implements InboxEvents.
+	Events InboxEvents
+	// Registry lists connected nodes for GET /v1/inbox.
+	Registry *registry.Registry
+	// NodeUIDomain, when set, populates node_ui_url on inbox items.
+	NodeUIDomain string
 }
 
 // ApprovalRequests finds the approval_request event a task's node sent
 // with an ID, if it sent one.
 type ApprovalRequests interface {
 	ApprovalRequest(ctx context.Context, task, id string) (events.ApprovalRequest, bool, error)
+}
+
+// InboxEvents inspects a task's kept awaiting_reply, message, and
+// approval_request events for GET /v1/inbox: *live.Store.
+type InboxEvents interface {
+	TaskInboxState(ctx context.Context, task string) (awaiting bool, question string, awaitingAt time.Time, approvals []events.ApprovalRequest, approvalTimes []time.Time, err error)
+}
+
+// InboxItem is one actionable item returned by GET /v1/inbox across the
+// caller's selected Grain deployments.
+type InboxItem struct {
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	TaskID     string    `json:"task_id"`
+	NodeID     string    `json:"node_id,omitempty"`
+	NodeUIURL  string    `json:"node_ui_url,omitempty"`
+	Team       string    `json:"team"`
+	Repo       string    `json:"repo,omitempty"`
+	TaskKind   string    `json:"task_kind,omitempty"`
+	Title      string    `json:"title"`
+	State      State     `json:"state"`
+	Summary    string    `json:"summary,omitempty"`
+	Question   string    `json:"question,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
+	Submitter  string    `json:"submitter,omitempty"`
+	Proposer   string    `json:"proposer,omitempty"`
+	ApprovalID string    `json:"approval_id,omitempty"`
+	Tool       string    `json:"tool,omitempty"`
+	ViewerRole string    `json:"viewer_role,omitempty"`
+	CanAct     bool      `json:"can_act"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Handler serves the API's paths. A write a browser sent from anywhere
@@ -88,6 +141,7 @@ func (a *API) Handler() http.Handler {
 			}
 		})
 	}
+	h("GET "+InboxPath, a.inbox)
 	h("POST "+TasksPath, a.submit)
 	h("GET "+TasksPath, a.list)
 	h("GET "+TasksPath+"/{id}", a.get)
@@ -524,4 +578,359 @@ func (a *API) post(w http.ResponseWriter, r *http.Request, acc *directory.Access
 		a.Dispatcher.Posted(r.Context(), t.ID)
 	}
 	return writeJSON(w, http.StatusCreated, m)
+}
+
+func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Access) error {
+	ctx := r.Context()
+	kindFilter := map[string]bool{}
+	for _, raw := range r.URL.Query()["kind"] {
+		for _, part := range strings.Split(raw, ",") {
+			k := strings.TrimSpace(part)
+			if k == "" {
+				continue
+			}
+			switch k {
+			case InboxAwaitingReply, InboxApprovalRequest, InboxProposal, InboxFailed:
+				kindFilter[k] = true
+			default:
+				return &httpError{http.StatusBadRequest, "bad inbox kind: " + k}
+			}
+		}
+	}
+	kindAllowed := func(k string) bool {
+		return len(kindFilter) == 0 || kindFilter[k]
+	}
+
+	reg := a.Registry
+	if reg == nil && a.Directory != nil {
+		reg = a.Directory.Registry
+	}
+	if reg == nil && a.Dispatcher != nil {
+		reg = a.Dispatcher.Registry
+	}
+	var entries []registry.Entry
+	if reg != nil {
+		entries = reg.List()
+	}
+
+	allByID := map[string]registry.Entry{}
+	resolvedByID := map[string]registry.Entry{}
+	for _, raw := range entries {
+		allByID[raw.ID] = raw
+		if res, ok := acc.ResolveEntry(raw); ok {
+			resolvedByID[res.ID] = res
+		}
+	}
+
+	var selectedNodes []string
+	var hasExplicitFilter bool
+	if r.URL.Query().Has("nodes") {
+		hasExplicitFilter = true
+		seen := map[string]bool{}
+		for _, raw := range r.URL.Query()["nodes"] {
+			for _, part := range strings.Split(raw, ",") {
+				id := strings.TrimSpace(part)
+				if id == "" || seen[id] {
+					continue
+				}
+				if _, exists := allByID[id]; exists {
+					if _, visible := resolvedByID[id]; !visible {
+						continue
+					}
+				}
+				seen[id] = true
+				selectedNodes = append(selectedNodes, id)
+			}
+		}
+	} else {
+		nodes, configured, err := acc.EffectiveInboxNodes(ctx, entries)
+		if err != nil {
+			return err
+		}
+		hasExplicitFilter = configured
+		seen := map[string]bool{}
+		for _, id := range nodes {
+			if seen[id] {
+				continue
+			}
+			if _, exists := allByID[id]; exists {
+				if _, visible := resolvedByID[id]; !visible {
+					continue
+				}
+			}
+			seen[id] = true
+			selectedNodes = append(selectedNodes, id)
+		}
+	}
+	if selectedNodes == nil {
+		selectedNodes = []string{}
+	}
+	if hasExplicitFilter && len(selectedNodes) == 0 {
+		return writeJSON(w, http.StatusOK, struct {
+			Items []InboxItem `json:"items"`
+			Nodes []string    `json:"nodes"`
+		}{Items: []InboxItem{}, Nodes: selectedNodes})
+	}
+
+	selectedSet := map[string]bool{}
+	for _, id := range selectedNodes {
+		selectedSet[id] = true
+	}
+
+	var f Filter
+	if !acc.HubAdmin {
+		f.Submitter = strings.ToLower(acc.Email)
+		for team := range acc.Teams {
+			f.Teams = append(f.Teams, team)
+		}
+	}
+	f.States = []State{Running, Proposed, Failed, Lost}
+	ts, err := a.Store.List(ctx, f)
+	if err != nil {
+		return err
+	}
+
+	ie := a.Events
+	if ie == nil {
+		ie, _ = a.Requests.(InboxEvents)
+	}
+
+	nodeServesTask := func(e registry.Entry, t Task) bool {
+		if t.Constraints.Node != "" {
+			return e.ID == t.Constraints.Node
+		}
+		if t.Repo != "" {
+			for _, rp := range e.Repos {
+				if strings.EqualFold(rp, t.Repo) {
+					return true
+				}
+			}
+		}
+		if t.Team != "" {
+			if e.UI != nil && strings.EqualFold(e.UI.Team, t.Team) {
+				return true
+			}
+			if a.Directory != nil && a.Directory.Store != nil {
+				for _, rp := range e.Repos {
+					if ownerTeam, err := a.Directory.Store.RepoOwner(ctx, rp); err == nil && strings.EqualFold(ownerTeam, t.Team) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	nodeUIURLFor := func(nodeID string) string {
+		if nodeID == "" {
+			return ""
+		}
+		if res, ok := resolvedByID[nodeID]; ok {
+			if res.UI != nil && res.UI.URL != "" {
+				return res.UI.URL
+			}
+			if a.NodeUIDomain != "" && ((res.UI != nil && res.UI.Offered) || res.Supports(registry.FeatureNodeUI) || strings.EqualFold(res.Owner, acc.Email)) {
+				return "https://" + nodeID + "." + a.NodeUIDomain
+			}
+		}
+		if a.NodeUIDomain != "" {
+			return "https://" + nodeID + "." + a.NodeUIDomain
+		}
+		return ""
+	}
+
+	items := []InboxItem{}
+	for _, t := range ts {
+		if !sees(acc, t) {
+			continue
+		}
+		nodeID := t.Node
+		if nodeID == "" && t.Constraints.Node != "" {
+			nodeID = t.Constraints.Node
+		}
+		if nodeID != "" {
+			if len(selectedSet) > 0 || hasExplicitFilter {
+				if !selectedSet[nodeID] {
+					continue
+				}
+			}
+		} else {
+			for _, id := range selectedNodes {
+				if res, ok := resolvedByID[id]; ok && nodeServesTask(res, t) {
+					nodeID = id
+					break
+				}
+			}
+			if nodeID == "" && (hasExplicitFilter || len(entries) > 0) {
+				continue
+			}
+		}
+
+		viewerRole := ""
+		if res, ok := resolvedByID[nodeID]; ok && res.ViewerRole != "" {
+			viewerRole = res.ViewerRole
+		} else if t.Team != "" {
+			viewerRole = string(acc.Teams[t.Team])
+		}
+		uiURL := nodeUIURLFor(nodeID)
+
+		switch t.State {
+		case Running:
+			if ie == nil {
+				continue
+			}
+			awaiting, question, awaitingAt, approvals, approvalTimes, err := ie.TaskInboxState(ctx, t.ID)
+			if err != nil {
+				return err
+			}
+			if awaiting && kindAllowed(InboxAwaitingReply) {
+				msgs, err := a.Store.Messages(ctx, t.ID, false)
+				if err != nil {
+					return err
+				}
+				if len(msgs) > 0 {
+					lastMsg := msgs[len(msgs)-1]
+					if awaitingAt.IsZero() || !lastMsg.SentAt.Before(awaitingAt) {
+						awaiting = false
+					}
+				}
+				if awaiting {
+					summary := question
+					if summary == "" {
+						summary = "Interactive session is waiting for a reply"
+					}
+					stamp := awaitingAt
+					if stamp.IsZero() {
+						stamp = t.Updated
+					}
+					items = append(items, InboxItem{
+						ID:         t.ID + ":awaiting_reply",
+						Kind:       InboxAwaitingReply,
+						TaskID:     t.ID,
+						NodeID:     nodeID,
+						NodeUIURL:  uiURL,
+						Team:       t.Team,
+						Repo:       t.Repo,
+						TaskKind:   t.Kind,
+						Title:      t.Title,
+						State:      t.State,
+						Summary:    summary,
+						Question:   question,
+						Submitter:  t.Submitter,
+						ViewerRole: viewerRole,
+						CanAct:     posts(acc, t),
+						UpdatedAt:  stamp,
+					})
+				}
+			}
+			if len(approvals) > 0 && kindAllowed(InboxApprovalRequest) {
+				ans, err := a.Store.Answers(ctx, t.ID, false)
+				if err != nil {
+					return err
+				}
+				answered := map[string]bool{}
+				for _, an := range ans {
+					answered[an.Request] = true
+				}
+				now := time.Now()
+				for i, ar := range approvals {
+					if answered[ar.ID] {
+						continue
+					}
+					if ar.Deadline != nil && now.After(*ar.Deadline) {
+						continue
+					}
+					summary := ar.Message
+					if summary == "" {
+						summary = "Tool " + ar.Tool + " requires approval"
+					}
+					stamp := approvalTimes[i]
+					if stamp.IsZero() {
+						stamp = t.Updated
+					}
+					items = append(items, InboxItem{
+						ID:         t.ID + ":approval:" + ar.ID,
+						Kind:       InboxApprovalRequest,
+						TaskID:     t.ID,
+						NodeID:     nodeID,
+						NodeUIURL:  uiURL,
+						Team:       t.Team,
+						Repo:       t.Repo,
+						TaskKind:   t.Kind,
+						Title:      t.Title,
+						State:      t.State,
+						Summary:    summary,
+						Submitter:  t.Submitter,
+						ApprovalID: ar.ID,
+						Tool:       ar.Tool,
+						ViewerRole: viewerRole,
+						CanAct:     member(acc, t),
+						UpdatedAt:  stamp,
+					})
+				}
+			}
+		case Proposed:
+			if kindAllowed(InboxProposal) {
+				items = append(items, InboxItem{
+					ID:         t.ID + ":proposal",
+					Kind:       InboxProposal,
+					TaskID:     t.ID,
+					NodeID:     nodeID,
+					NodeUIURL:  uiURL,
+					Team:       t.Team,
+					Repo:       t.Repo,
+					TaskKind:   t.Kind,
+					Title:      t.Title,
+					State:      t.State,
+					Summary:    t.Prompt,
+					Submitter:  t.Submitter,
+					Proposer:   t.Submitter,
+					ViewerRole: viewerRole,
+					CanAct:     member(acc, t) && !strings.EqualFold(t.Submitter, acc.Email),
+					UpdatedAt:  t.Updated,
+				})
+			}
+		case Failed, Lost:
+			if kindAllowed(InboxFailed) {
+				summary := t.Reason
+				if summary == "" {
+					if t.State == Lost {
+						summary = "Node connection lost"
+					} else {
+						summary = "Task failed"
+					}
+				}
+				items = append(items, InboxItem{
+					ID:         t.ID + ":failed",
+					Kind:       InboxFailed,
+					TaskID:     t.ID,
+					NodeID:     nodeID,
+					NodeUIURL:  uiURL,
+					Team:       t.Team,
+					Repo:       t.Repo,
+					TaskKind:   t.Kind,
+					Title:      t.Title,
+					State:      t.State,
+					Summary:    summary,
+					Reason:     t.Reason,
+					Submitter:  t.Submitter,
+					ViewerRole: viewerRole,
+					CanAct:     manages(acc, t),
+					UpdatedAt:  t.Updated,
+				})
+			}
+		}
+	}
+
+	slices.SortFunc(items, func(a, b InboxItem) int {
+		if c := b.UpdatedAt.Compare(a.UpdatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	return writeJSON(w, http.StatusOK, struct {
+		Items []InboxItem `json:"items"`
+		Nodes []string    `json:"nodes"`
+	}{Items: items, Nodes: selectedNodes})
 }

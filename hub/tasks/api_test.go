@@ -60,6 +60,7 @@ func newAPIHub(t *testing.T) *apiHub {
 	dirAPI := &directory.API{Store: dir, Auth: headerAuth{}, HubAdmins: []string{"root@example.com"}}
 	api := &API{Store: store, Directory: dirAPI}
 	m := http.NewServeMux()
+	m.Handle(InboxPath, api.Handler())
 	m.Handle(TasksPath, api.Handler())
 	m.Handle(TasksPath+"/", api.Handler())
 	m.Handle("/", dirAPI.Handler())
@@ -652,5 +653,157 @@ func TestRolesAndTeamSubmissionPolicies(t *testing.T) {
 	check(t, json.Unmarshal(b, &approved))
 	if approved.State != Queued || approved.ApprovedBy != dave {
 		t.Errorf("approved task: %+v, want state=queued approved_by=%s", approved, dave)
+	}
+}
+
+type fakeInboxEvents struct {
+	awaiting      map[string]string
+	awaitingTimes map[string]time.Time
+	approvals     map[string][]events.ApprovalRequest
+	approvalTimes map[string][]time.Time
+}
+
+func (f *fakeInboxEvents) ApprovalRequest(ctx context.Context, task, id string) (events.ApprovalRequest, bool, error) {
+	for _, a := range f.approvals[task] {
+		if a.ID == id {
+			return a, true, nil
+		}
+	}
+	return events.ApprovalRequest{}, false, nil
+}
+
+func (f *fakeInboxEvents) TaskInboxState(ctx context.Context, task string) (bool, string, time.Time, []events.ApprovalRequest, []time.Time, error) {
+	q, ok := f.awaiting[task]
+	return ok, q, f.awaitingTimes[task], f.approvals[task], f.approvalTimes[task], nil
+}
+
+func TestAPIUnifiedInbox(t *testing.T) {
+	ctx := context.Background()
+	h := newAPIHub(t)
+	check(t, h.dir.SetMember(ctx, "infra", "user:pete@example.com", directory.Proposer))
+	check(t, h.dir.SetMember(ctx, "web", "user:alice@example.com", directory.Member))
+
+	reg := registry.New()
+	h.api.Registry = reg
+	h.api.Directory.Registry = reg
+	h.api.NodeUIDomain = "nodes.grain.example"
+
+	nodeInfra := registry.Node{
+		ID:    "ws-infra",
+		Repos: []string{"bwsalmon/silo"},
+		Slots: 2,
+		UI:    &registry.NodeUI{Offered: true, Team: "infra"},
+	}
+	leaseInfra, err := reg.Register(nodeInfra, "alice@example.com")
+	check(t, err)
+	defer leaseInfra.Close()
+
+	nodeWeb := registry.Node{
+		ID:    "ws-web",
+		Repos: []string{"bwsalmon/web"},
+		Slots: 2,
+		UI:    &registry.NodeUI{Offered: true, Team: "web"},
+	}
+	leaseWeb, err := reg.Register(nodeWeb, "bob@example.com")
+	check(t, err)
+	defer leaseWeb.Close()
+
+	// 1. Create a running interactive session awaiting a reply on ws-infra.
+	tWait := h.submit(t, "alice@example.com", map[string]any{"repo": "bwsalmon/silo", "kind": "interactive", "title": "Pair debug", "prompt": "debug auth"})
+	_, err = h.store.Offer(ctx, tWait.ID, "ws-infra", "alice@example.com")
+	check(t, err)
+	_, err = h.store.Accept(ctx, tWait.ID, "local-1")
+	check(t, err)
+
+	// 2. Create a running task with an approval_request on ws-infra.
+	tApp := h.submit(t, "alice@example.com", map[string]any{"repo": "bwsalmon/silo", "title": "Deploy prod", "prompt": "deploy"})
+	_, err = h.store.Offer(ctx, tApp.ID, "ws-infra", "alice@example.com")
+	check(t, err)
+	_, err = h.store.Accept(ctx, tApp.ID, "local-2")
+	check(t, err)
+
+	// 3. Create a proposed task on infra by pete.
+	tProp := h.submit(t, "pete@example.com", map[string]any{"repo": "bwsalmon/silo", "title": "Fix typo", "prompt": "fix typo in readme"})
+
+	// 4. Create a failed task on ws-web.
+	tFail := h.submit(t, "bob@example.com", map[string]any{"repo": "bwsalmon/web", "title": "Web build", "prompt": "build web"})
+	_, err = h.store.Offer(ctx, tFail.ID, "ws-web", "bob@example.com")
+	check(t, err)
+	_, err = h.store.Accept(ctx, tFail.ID, "local-3")
+	check(t, err)
+	_, err = h.store.Finish(ctx, tFail.ID, Failed, "lint failed")
+	check(t, err)
+
+	evStore := &fakeInboxEvents{
+		awaiting:      map[string]string{tWait.ID: "Which environment should I target?"},
+		awaitingTimes: map[string]time.Time{tWait.ID: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)},
+		approvals: map[string][]events.ApprovalRequest{
+			tApp.ID: {{ID: "req-1", Tool: "kubectl_apply", Message: "Apply prod manifest?"}},
+		},
+		approvalTimes: map[string][]time.Time{
+			tApp.ID: {time.Date(2026, 10, 15, 12, 1, 0, 0, time.UTC)},
+		},
+	}
+	h.api.Requests = evStore
+	h.api.Events = evStore
+
+	getInbox := func(user, query string) ([]InboxItem, []string) {
+		t.Helper()
+		code, b := h.do(t, user, "GET", InboxPath+query, nil)
+		if code != http.StatusOK {
+			t.Fatalf("%s GET %s%s: %d %s", user, InboxPath, query, code, b)
+		}
+		var out struct {
+			Items []InboxItem `json:"items"`
+			Nodes []string    `json:"nodes"`
+		}
+		check(t, json.Unmarshal(b, &out))
+		return out.Items, out.Nodes
+	}
+
+	// Alice is owner of ws-infra and member of web (ws-web): default inbox includes both deployments and all 4 items.
+	items, nodes := getInbox("alice@example.com", "")
+	if len(nodes) != 2 || len(items) != 4 {
+		t.Fatalf("alice default inbox: nodes=%v items=%+v; want 2 nodes and 4 items", nodes, items)
+	}
+
+	// Filter by ?nodes=ws-infra returns only the 3 ws-infra items with node_ui_url populated.
+	infraItems, _ := getInbox("alice@example.com", "?nodes=ws-infra")
+	if len(infraItems) != 3 {
+		t.Fatalf("alice ?nodes=ws-infra items=%+v; want 3", infraItems)
+	}
+	for _, it := range infraItems {
+		if it.NodeID != "ws-infra" || it.NodeUIURL != "https://ws-infra.nodes.grain.example" {
+			t.Fatalf("unexpected node/url on item: %+v", it)
+		}
+	}
+
+	// Filter by ?kind=proposal returns only the proposal item.
+	propItems, _ := getInbox("alice@example.com", "?kind=proposal")
+	if len(propItems) != 1 || propItems[0].TaskID != tProp.ID || !propItems[0].CanAct {
+		t.Fatalf("alice ?kind=proposal = %+v", propItems)
+	}
+
+	// Inline quick actions clear each item from the inbox:
+	// a) Reply to awaiting_reply session:
+	if code, b := h.do(t, "alice@example.com", "POST", TasksPath+"/"+tWait.ID+"/messages", map[string]string{"id": "m-1", "text": "staging"}); code != http.StatusCreated {
+		t.Fatalf("reply to awaiting session: %d %s", code, b)
+	}
+	// b) Answer approval_request:
+	if code, b := h.do(t, "alice@example.com", "POST", TasksPath+"/"+tApp.ID+"/approvals/req-1", map[string]string{"decision": "allow"}); code != http.StatusOK {
+		t.Fatalf("answer approval: %d %s", code, b)
+	}
+	// c) Approve proposal:
+	if code, b := h.do(t, "alice@example.com", "POST", TasksPath+"/"+tProp.ID+"/approve", nil); code != http.StatusOK {
+		t.Fatalf("approve proposal: %d %s", code, b)
+	}
+	// d) Retry failed task on ws-web as bob:
+	if code, b := h.do(t, "bob@example.com", "POST", TasksPath+"/"+tFail.ID+"/requeue", nil); code != http.StatusOK {
+		t.Fatalf("requeue failed task: %d %s", code, b)
+	}
+
+	remaining, _ := getInbox("alice@example.com", "")
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 remaining inbox items after resolving all 4, got %+v", remaining)
 	}
 }

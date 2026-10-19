@@ -429,7 +429,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			cfg.logf("hub: hub admin %q has no user: or group: prefix; treating it as %s (write group:NAME if a group was meant)", adm, p)
 		}
 	}
-	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins, Logf: cfg.Logf}
+	dirAPI := &directory.API{Store: h.Directory, Auth: auth, HubAdmins: cfg.HubAdmins, Logf: cfg.Logf, Registry: h.Registry}
 	h.Grainfiles.SameTeam = func(ctx context.Context, ownerA, ownerB string) bool {
 		if strings.EqualFold(ownerA, ownerB) {
 			return true
@@ -499,6 +499,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		ValidateUI:             h.Directory.ValidateNodeUI,
 		ObserveGrainfileEvents: h.metrics.observeGrainfileEvents,
 		Visible:                dirAPI.Visible,
+		ResolveEntries:         dirAPI.ResolveEntries,
 		Heartbeat:              hb,
 		Logf:                   cfg.Logf,
 		Observe:                h.metrics.observeRendezvous,
@@ -600,7 +601,15 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		}
 	}
 	h.Dispatcher.Finished = func(t tasks.Task) { h.Live.Finished(t.ID) }
-	tasksAPI := &tasks.API{Store: h.Backlog, Dispatcher: h.Dispatcher, Directory: dirAPI, Requests: h.Events}
+	tasksAPI := &tasks.API{
+		Store:        h.Backlog,
+		Dispatcher:   h.Dispatcher,
+		Directory:    dirAPI,
+		Requests:     h.Events,
+		Events:       h.Events,
+		Registry:     h.Registry,
+		NodeUIDomain: cfg.NodeUIDomain,
+	}
 	fetcher := cfg.GrainfileFetcher
 	if fetcher == nil {
 		fetcher = &grainfiles.GitHubFetcher{
@@ -665,6 +674,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		m.Handle(p+"/", dir)
 	}
 	tk := tasksAPI.Handler()
+	m.Handle(tasks.InboxPath, tk)
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
 	gf := h.GrainfilesAPI.Handler()

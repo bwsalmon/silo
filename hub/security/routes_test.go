@@ -215,6 +215,9 @@ func matrix() []row {
 
 		// The team directory.
 		{route: pub("GET /v1/me"), method: "GET", path: "/v1/me", want: human(200, 200, 200, 200)},
+		{route: pub("PUT /v1/me/theme"), method: "PUT", path: "/v1/me/theme", body: body(map[string]string{"theme": "dark"}), want: human(200, 200, 200, 200)},
+		{route: pub("GET /v1/me/inbox"), method: "GET", path: "/v1/me/inbox", want: human(200, 200, 200, 200)},
+		{route: pub("PUT /v1/me/inbox"), method: "PUT", path: "/v1/me/inbox", body: body(map[string][]string{"nodes": {}}), want: human(200, 200, 200, 200)},
 		{route: pub("GET /v1/teams"), method: "GET", path: "/v1/teams", want: human(200, 200, 200, 200)},
 		{route: pub("POST /v1/teams"), method: "POST", path: "/v1/teams", body: func(c string) any { return map[string]string{"id": "t-" + c} }, want: human(403, 403, 403, 403)},
 		{route: pub("GET /v1/teams/{team}"), method: "GET", path: "/v1/teams/team-a", want: human(404, 200, 200, 404)},
@@ -233,6 +236,7 @@ func matrix() []row {
 
 		// The backlog. Anyone signed in may propose a task to a team;
 		// a task the caller may not see is a 404 (docs/hub.md §6.1).
+		{route: pub("GET " + tasks.InboxPath), method: "GET", path: tasks.InboxPath, want: human(200, 200, 200, 200)},
 		{route: pub("POST /v1/tasks"), method: "POST", path: "/v1/tasks", body: body(map[string]string{"repo": quietA, "prompt": "p"}), want: human(201, 201, 201, 201)},
 		{route: pub("GET /v1/tasks"), method: "GET", path: "/v1/tasks", want: human(200, 200, 200, 200)},
 		{route: pub("GET /v1/tasks/{id}"), method: "GET", path: "/v1/tasks/{task}", want: human(404, 200, 200, 404)},

@@ -566,7 +566,7 @@ func (s *Store) Requeue(ctx context.Context, id, reason, exclude string) (Task, 
 // a queued one. Either way the task's exclusions are cleared, so a node
 // that refused it is offered it again.
 func (s *Store) Retry(ctx context.Context, id string) (Task, error) {
-	return s.update(ctx, id, []State{Queued, Lost}, func(t *Task) {
+	return s.update(ctx, id, []State{Queued, Lost, Failed}, func(t *Task) {
 		t.State, t.Node, t.NodeOwner, t.NodeTask, t.Reason = Queued, "", "", "", ""
 		t.Excluded = []string{}
 	})

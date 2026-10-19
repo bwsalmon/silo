@@ -8,8 +8,8 @@
 // A task a Grain filed says which, on whose behalf, and from which task;
 // a task with dependencies links to each.
 import { useState, type ReactNode } from 'react';
-import { Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Typography } from '@mui/material';
-import { ApiError, cancelTask, getTask, listApprovals, listMessages, requeueTask, type Me, type Task } from '../api';
+import { Alert, Box, Button, Chip, LinearProgress, Link as MuiLink, Paper, Stack, TextField, Typography } from '@mui/material';
+import { ApiError, cancelTask, getTask, listApprovals, listMessages, requeueTask, type Me, type NodeEntry, type Task } from '../api';
 import { useAction } from '../action';
 import { managesTask, mayApprove, mayMessage, memberOf } from '../may';
 import { ApprovalPrompt } from '../components/ApprovalPrompt';
@@ -23,6 +23,7 @@ import { StateChip } from '../components/StateChip';
 import Markdown from '../components/Markdown';
 import { Timeline } from '../components/Timeline';
 import { when } from './Backlog';
+import { nodeUIHref } from './Nodes';
 
 const finished = new Set(['done', 'failed', 'cancelled', 'rejected']);
 
@@ -164,7 +165,7 @@ function Events({ t, me }: { t: Task; me?: Me }) {
   );
 }
 
-export function TaskPage({ id, me }: { id: string; me?: Me }) {
+export function TaskPage({ id, me, nodes }: { id: string; me?: Me; nodes?: NodeEntry[] }) {
   const task = useLoad((signal) => getTask(id, signal), [id], 10000);
   const t = task.data;
   if (task.error && !t) {
@@ -172,15 +173,30 @@ export function TaskPage({ id, me }: { id: string; me?: Me }) {
     return <Alert severity={missing ? 'warning' : 'error'}>{missing ? `No task ${id} in your teams.` : task.error.message}</Alert>;
   }
   if (!t) return <LinearProgress />;
+  const matchedNode = t.node ? nodes?.find((n) => n.id === t.node) : undefined;
+  const uiHref = matchedNode ? nodeUIHref(matchedNode) : undefined;
   return (
     <Stack spacing={2}>
-      <Box>
-        <Typography variant="h5">{t.title || t.id}</Typography>
-        <Typography variant="caption" color="text.secondary">
-          {t.id}
-          {finished.has(t.state) ? '' : ' · refreshing'}
-        </Typography>
-      </Box>
+      <Stack direction="row" spacing={2} sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', rowGap: 1 }}>
+        <Box>
+          <Typography variant="h5">{t.title || t.id}</Typography>
+          <Typography variant="caption" color="text.secondary">
+            {t.id}
+            {finished.has(t.state) ? '' : ' · refreshing'}
+          </Typography>
+        </Box>
+        {t.node && uiHref && (
+          <MuiLink
+            href={uiHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            underline="hover"
+            data-testid="open-in-node-ui"
+          >
+            {`Open in ${t.node} Grain UI`}
+          </MuiLink>
+        )}
+      </Stack>
       {task.error && <Alert severity="error">{task.error.message}</Alert>}
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ alignItems: 'flex-start' }}>
         <Paper sx={{ p: 2, flex: 2, minWidth: 0, width: '100%' }}>

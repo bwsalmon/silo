@@ -906,7 +906,10 @@ Grain deployments:
 The directory's HTTP API (`directory.API`):
 
 ```
-GET    /v1/me                                          the caller, their teams and roles
+GET    /v1/me                                          the caller, their teams, roles, theme, and inbox_nodes
+PUT    /v1/me/theme {"theme":"light"|"dark"}           the caller's resolved light/dark theme
+GET    /v1/me/inbox                                    the caller's selected Unified Inbox deployments
+PUT    /v1/me/inbox {"nodes":[...]}                    update the caller's selected Unified Inbox deployments
 GET    /v1/teams                                       the caller's teams (all, for a hub admin)
 POST   /v1/teams {"id","name"}                         hub admin
 GET    /v1/teams/{team}                                one team as /v1/teams lists it: its members, a hub admin
@@ -1200,6 +1203,7 @@ The Grainfile discovery (`grainfiles.API`), task, and interactive-action
 HTTP API routes (`tasks.API`, verified by `sdk/ts/test/routes.test.ts`):
 
 ```
+GET  /v1/inbox?nodes=node-1,node-2&kind=awaiting_reply|approval_request|proposal|failed   actionable items across the caller's selected deployments
 GET  /v1/grainfiles?kind=task|process&recipient=...&repo=...&draft=true|false&node=...&url=...   indexed Grainfile metadata, subscriptions, and events
 POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}
 GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
@@ -1473,16 +1477,17 @@ traffic over it. As built (`hub/nodeui`), with `silo hub serve
   script the hub's API (and every other node's UI) with the viewer's
   sign-on. On its own host, a node's UI reaches only itself. A node
   whose ID is not a DNS label (capitals, `.` or `_`) has no host.
-- **Access.** The viewer is signed in by the hub's sign-on and must be
-  the node's owner: any other caller, and a node the hub does not
-  know, gets 404. An offline node is 503. Hub admins are not let in:
-  a node's UI is its owner's grain, with everything it holds.
-  Team members (`SeesNode`) are §10's question.
+- **Access.** The viewer is signed in by the hub's sign-on and their
+  effective role (`owner`, `admin`, `member`, `proposer`, or `viewer`)
+  on the deployment is resolved from ownership and `ui.team` (inferred
+  from the node's single owning team when `ui.team` is omitted): any
+  other caller, and a node the hub does not know, gets 404. An offline
+  node is 503. Hub admins outside the team are not let in.
 - **The stream.** The hub opens a stream with `Server.Open` and, like
   the artifact view (§7.2), writes one line and reads one:
 
   ```
-  hub → node  {"type":"http","node":"ws-1","viewer":"alice@example.com"}
+  hub → node  {"type":"http","node":"ws-1","viewer":"alice@example.com","role":"owner","team":"infra","require_approval":false,"theme":"light"}
   node → hub  {"type":"ok"}, then the node reads one HTTP/1.1 request and writes its response
               or {"type":"error","error":"..."}   (answered 403)
   ```

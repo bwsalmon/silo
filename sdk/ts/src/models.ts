@@ -70,6 +70,10 @@ export interface TaskQuery {
 
 export type Role = 'admin' | 'member' | 'proposer' | 'viewer' | (string & {});
 
+export type ViewerRole = 'owner' | 'admin' | 'member' | 'proposer' | 'viewer' | (string & {});
+
+export type ResolvedTheme = 'light' | 'dark';
+
 // Me is GET /v1/me: the caller, their teams and their role in each.
 export interface Me {
   email: string;
@@ -77,6 +81,51 @@ export interface Me {
   hub_admin: boolean;
   can_hub_admin?: boolean;
   teams: Record<string, Role> | null;
+  theme?: ResolvedTheme;
+  inbox_nodes?: string[];
+  inbox_configured?: boolean;
+}
+
+export type InboxKind = 'awaiting_reply' | 'approval_request' | 'proposal' | 'failed';
+
+export const INBOX_KINDS: InboxKind[] = [
+  'awaiting_reply',
+  'approval_request',
+  'proposal',
+  'failed',
+];
+
+export interface InboxPreferences {
+  nodes: string[];
+  configured: boolean;
+}
+
+export interface InboxItem {
+  id: string;
+  kind: InboxKind;
+  task_id: string;
+  node_id?: string;
+  node_ui_url?: string;
+  team: string;
+  repo?: string;
+  task_kind?: string;
+  title: string;
+  state: TaskState;
+  summary?: string;
+  question?: string;
+  reason?: string;
+  submitter?: string;
+  proposer?: string;
+  approval_id?: string;
+  tool?: string;
+  viewer_role?: ViewerRole;
+  can_act?: boolean;
+  updated_at: string;
+}
+
+export interface InboxQuery {
+  nodes?: string[];
+  kind?: InboxKind | InboxKind[];
 }
 
 // NodeUI describes a node's tunneled local Grain web UI status on GET /v1/nodes.
@@ -100,6 +149,8 @@ export interface NodeEntry {
   grainfiles?: string[];
   ui?: NodeUI;
   ui_url?: string;
+  viewer_role?: ViewerRole;
+  require_approval?: boolean;
   owner: string;
   status: 'online' | 'stale' | 'offline' | string;
   free: number;

@@ -27,11 +27,15 @@ import type {
   GrainfilesOverview,
   GrainfileSubscriptions,
   HubEvent,
+  InboxItem,
+  InboxPreferences,
+  InboxQuery,
   Me,
   MintedToken,
   NewTask,
   NodeEntry,
   NodeToken,
+  ResolvedTheme,
   Role,
   Task,
   TaskMessage,
@@ -234,6 +238,31 @@ export class HubClient {
 
   getMe(signal?: AbortSignal): Promise<Me> {
     return this.getJSON<Me>('/v1/me', signal);
+  }
+
+  setTheme(theme: ResolvedTheme): Promise<{ theme: ResolvedTheme }> {
+    return this.write<{ theme: ResolvedTheme }>('PUT', '/v1/me/theme', { theme });
+  }
+
+  getInboxPreferences(signal?: AbortSignal): Promise<InboxPreferences> {
+    return this.getJSON<InboxPreferences>('/v1/me/inbox', signal);
+  }
+
+  setInboxPreferences(nodes: string[]): Promise<InboxPreferences> {
+    return this.write<InboxPreferences>('PUT', '/v1/me/inbox', { nodes });
+  }
+
+  async listInbox(q: InboxQuery = {}, signal?: AbortSignal): Promise<InboxItem[]> {
+    const p = new URLSearchParams();
+    if (q.nodes !== undefined) {
+      p.set('nodes', q.nodes.join(','));
+    }
+    if (q.kind) {
+      p.set('kind', Array.isArray(q.kind) ? q.kind.join(',') : q.kind);
+    }
+    const s = p.toString();
+    const r = await this.getJSON<{ items: InboxItem[]; nodes?: string[] }>(`/v1/inbox${s ? `?${s}` : ''}`, signal);
+    return r.items ?? [];
   }
 
   // The backlog (docs/hub.md §6.1).

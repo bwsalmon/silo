@@ -75,3 +75,83 @@ test('connected Grain deployments display their recipient URLs, subscribed repos
     `https://${id.toLowerCase()}.nodes.hub.e2e.test/`,
   );
 });
+
+test('deployment switcher, theme switcher, and unified inbox across deployments', async ({
+  world,
+  newWorld,
+  pageAs,
+  grain,
+  fileTask,
+  hub,
+}) => {
+  const id = `ws-inbox-${world.n}`;
+  const node = await grain({
+    owner: world.admin,
+    repos: [world.repo],
+    id,
+    interactive: true,
+    nodeui: true,
+  });
+
+  // File a session awaiting a reply, and a proposal from another team's member.
+  const session = await fileTask(world.member, {
+    repo: world.repo,
+    kind: 'interactive',
+    title: `Inbox session ${world.n}`,
+    prompt: 'Pair with me.',
+  });
+  await node.task(session.id);
+  await node.emit(session.id, {
+    type: 'awaiting_reply',
+    awaiting_reply: { state: 'waiting', question: 'Should we ship this?' },
+  });
+
+  const other = await newWorld();
+  const proposal = await fileTask(other.member, {
+    repo: world.repo,
+    title: `Inbox proposal ${world.n}`,
+    prompt: 'Proposed change.',
+  });
+
+  const page = await pageAs(world.member);
+  await page.goto('/');
+
+  // Unified Inbox is the default landing page and shows the actionable count badge.
+  await expect(page.getByRole('heading', { name: 'Unified Inbox' })).toBeVisible();
+  await expect(page.getByTestId('inbox-count-badge')).toBeVisible();
+  await expect(page.getByTestId('inbox-deployment-selector')).toContainText(id);
+
+  // Open in <node> Grain UI link is shown on the inbox card and on /tasks/{id}.
+  const sessionCard = page.getByTestId(`inbox-item-${session.id}`);
+  await expect(sessionCard.getByTestId('open-in-node-ui')).toHaveAttribute(
+    'href',
+    `https://${id.toLowerCase()}.nodes.hub.e2e.test/`,
+  );
+
+  // Inline quick action: approve the proposal directly from the Unified Inbox.
+  const proposalCard = page.getByTestId(`inbox-item-${proposal.id}`);
+  await proposalCard.getByRole('button', { name: 'Approve' }).click();
+  await expect
+    .poll(async () => (await hub.must(world.member, 'GET', `/v1/tasks/${proposal.id}`)).state)
+    .toBe('queued');
+
+  // Deployment Switcher lists the deployment with its inferred team and role chip.
+  await page.getByTestId('deployment-switcher').click();
+  const opt = page.getByTestId(`deployment-option-${id}`);
+  await expect(opt).toContainText(id);
+  await expect(opt).toContainText(world.team);
+  await expect(opt).toContainText('member');
+  await page.getByRole('option', { name: 'Grain Hub (All deployments)' }).click();
+
+  // Theme Switcher switches to dark and syncs resolved theme to /v1/me.
+  await page.getByTestId('theme-mode-select').click();
+  await page.getByRole('option', { name: 'dark' }).click();
+  await expect.poll(async () => (await hub.must(world.member, 'GET', '/v1/me')).theme).toBe('dark');
+
+  // TaskPage also renders the Open in <node> Grain UI link.
+  await page.goto(`/tasks/${session.id}`);
+  await expect(page.getByTestId('open-in-node-ui')).toHaveAttribute(
+    'href',
+    `https://${id.toLowerCase()}.nodes.hub.e2e.test/`,
+  );
+});

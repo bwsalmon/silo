@@ -495,7 +495,7 @@ domain>`, the hub opens a stream ([hub.md](hub.md) §11,
 [grain-ui-proxy.md](grain-ui-proxy.md)):
 
 ```
-hub → node  {"type":"http","node":"<id>","viewer":"<email>","role":"owner"|"team-admin"}
+hub → node  {"type":"http","node":"<id>","viewer":"<email>","role":"owner"|"team-admin"|"admin"|"member"|"proposer"|"viewer","team":"<team>","access":"read-only"|"read-write","require_approval":true|false,"theme":"light"|"dark"}
 node → hub  {"type":"ok"}, then one HTTP/1.1 request is read and its response written,
             a 101 leaving the stream as the upgraded connection
             or {"type":"error","error":"..."}
@@ -506,12 +506,15 @@ view-through, and refuses it otherwise (`nodeui.Serve` and
 `nodeui.Refuse` in `hub/nodeui`). When a node advertises `ui` in
 `hello` (`{"offered":true,"team":"<team>","access":"read-only"|"read-write"}`,
 configured via `-ui-team` and `-ui-access` in `internal/fakegrain` and
-`hub/conformance/refgrain`), `nodeui.Serve` sets `X-Grain-Hub-UI-Role`
-and `X-Grain-Hub-UI-Viewer` on the tunneled HTTP request, and the node's
-local UI handler enforces read-only mode when
-`X-Grain-Hub-UI-Role: team-admin` and `ui.access == "read-only"`
-(allowing `GET`/`HEAD` and rejecting state-mutating methods
-`POST`/`PUT`/`DELETE`/`PATCH` with `403 Forbidden`) while rejecting any
+`hub/conformance/refgrain`, with `ui.team` inferred automatically when
+all `repos` belong to a single team that the node's `owner` belongs to),
+`nodeui.Serve` sets `X-Grain-Hub-UI-Role`, `X-Grain-Hub-UI-Viewer`,
+`X-Grain-Hub-UI-Team`, `X-Grain-Hub-UI-Require-Approval`, and
+`X-Grain-Hub-UI-Theme` (`light` | `dark`) on the tunneled HTTP request,
+and both `hub/nodeui` and the node's local UI handler enforce the caller's
+role permissions (`owner`, `admin`/`team-admin`, `member`, `proposer`,
+`viewer`) and expose `theme`, `role`, `team`, and `require_approval` on
+`/api/me` while rejecting any
 request that still carries leaked Hub session cookies or
 `X-Goog-Authenticated-User-*` headers (`G2–G4`). For tasks placed by or
 mirrored to the hub, the node's local task status and UI responses
