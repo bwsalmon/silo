@@ -1970,12 +1970,11 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 			}
 		}
 	}
-	// A .process.grain.md or .capability.grain.md is a 1-to-many reusable
-	// definition that any number of Grain deployments may subscribe to (by repo,
-	// enclosing folder, or explicit Grainfile URL). When subscribed by explicit
-	// Grainfile URL (or when rec.Repo has no exclusive team owner in Directory),
-	// allow access.
-	if rec.Kind == KindProcess || rec.Kind == KindCapability {
+	// A .process.grain.md is a 1-to-many reusable/standing process that any
+	// number of Grain deployments may subscribe to (by repo, enclosing folder, or
+	// explicit .process.grain.md URL). When subscribed by explicit Grainfile URL
+	// (or when rec.Repo has no exclusive team owner in Directory), allow access.
+	if rec.Kind == KindProcess {
 		for _, gf := range sub.Grainfiles {
 			if matchesGrainfileRef(rec, gf) {
 				return true

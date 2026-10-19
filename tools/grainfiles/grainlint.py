@@ -34,7 +34,6 @@ VERSIONS = {
             "common": "schemas/grainfiles/common.schema.json",
             "task": "schemas/grainfiles/task.schema.json",
             "process": "schemas/grainfiles/process.schema.json",
-            "capability": "schemas/grainfiles/capability.schema.json",
         },
     },
 }
@@ -47,7 +46,7 @@ def resolve_version(version=None):
     return dict(VERSIONS[v])
 
 
-KINDS = ["task", "process", "capability"]
+KINDS = ["task", "process"]
 SOURCES = ["schedule", "push", "merge", "pull_request", "workflow", "manual", "scenario"]
 SEVERITY = {"GF005": "warning", "GF022": "warning"}
 CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
@@ -123,9 +122,32 @@ def valid_iana_timezone(tz):
 
 EXPECTS = {
     ("task", "depends_on"): ("task",),
-    ("task", "capabilities"): ("capability",),
-    ("process", "capabilities"): ("capability",),
 }
+CAPABILITY_REF_RE = re.compile(
+    r"^(?!.*\.(?:grain\.md|jinja2)(?:[:@#]|$))(?:localhost(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:[0-9]{1,5})/[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$"
+)
+
+
+def valid_capability_ref(s):
+    return isinstance(s, str) and bool(CAPABILITY_REF_RE.match(s))
+
+
+def normalize_capabilities(raw):
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if isinstance(entry, str) and valid_capability_ref(entry):
+            out.append({"capability": entry})
+        elif isinstance(entry, dict) and set(entry.keys()) <= {"capability", "with"}:
+            cap = entry.get("capability")
+            with_val = entry.get("with")
+            if valid_capability_ref(cap) and (with_val is None or isinstance(with_val, dict)):
+                item = {"capability": cap}
+                if isinstance(with_val, dict) and with_val:
+                    item["with"] = dict(with_val)
+                out.append(item)
+    return out
 MAX_FILE_BYTES = 1024 * 1024
 MAX_FM_BYTES = 64 * 1024
 
@@ -598,8 +620,6 @@ class Schemas:
                     out.append(Finding("GF020", path, "%s is only valid on .task.grain.md files" % k))
                 elif kind == "task" and k in ("when", "on", "gate"):
                     out.append(Finding("GF020", path, "%s is only valid on .process.grain.md files" % k))
-                elif kind == "capability" and k in ("recipient", "requestor", "depends_on", "capabilities", "when", "on", "gate"):
-                    out.append(Finding("GF020", path, "%s is not valid on .capability.grain.md files" % k))
                 else:
                     out.append(Finding("GF022", path, "unknown field %r" % k))
                 del data[k]
@@ -618,7 +638,7 @@ class Schemas:
         v = jsonschema.Draft202012Validator(s, resolver=jsonschema.RefResolver.from_schema(s, store=self.store))
         for e in sorted(v.iter_errors(data), key=lambda e: list(e.path)):
             p = list(e.path)
-            if p and p[0] in ("references", "depends_on", "capabilities") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
+            if p and p[0] in ("references", "depends_on") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
                 continue
             if p == ["from_template"] and isinstance(e.instance, str):
                 continue
@@ -896,12 +916,7 @@ class Linter:
         def add(field, v):
             if isinstance(v, str):
                 out.append((field, v))
-        if it.kind == "task":
-            fields = ("depends_on", "capabilities", "references")
-        elif it.kind == "process":
-            fields = ("capabilities", "references")
-        else:
-            fields = ("references",)
+        fields = ("depends_on", "references") if it.kind == "task" else ("references",)
         for f in fields:
             val = fm.get(f)
             if isinstance(val, list):
@@ -913,6 +928,7 @@ class Linter:
         where = self.show(it.repo, it.rel)
         self.findings += self.schemas.validate(it.kind, it.fm, where)
         fm = it.fm
+        it.capabilities = normalize_capabilities(fm.get("capabilities"))
         vinfo = resolve_version(fm["grainfile"]) if "grainfile" in fm else None
         if vinfo is not None:
             it.grainfile = vinfo["grainfile"]

@@ -11,7 +11,7 @@ when:
     paths: ["src/**"]
 gate: true
 capabilities:
-  - /.grain/capabilities/gcp-key.capability.grain.md
+  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest
 references:
   - /docs/widget-schema.md
   - /src/widget.go

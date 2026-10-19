@@ -598,24 +598,6 @@ func (g *Grainfile) ResolveSource(src Source) error {
 		}
 	}
 
-	// Resolve capabilities (always .capability.grain.md grainfiles -> "blob").
-	var resolvedCaps []string
-	if len(g.Capabilities) > 0 {
-		resolvedCaps = make([]string, len(g.Capabilities))
-		for i, raw := range g.Capabilities {
-			u, _, err := ResolveRefWithSource(Source{
-				RepoURL: canonRepo,
-				Ref:     urlRef,
-				Commit:  src.Commit,
-				Path:    cleanFile,
-			}, raw, "blob")
-			if err != nil {
-				return wrapFieldError("capabilities", cleanFile, err)
-			}
-			resolvedCaps[i] = u
-		}
-	}
-
 	// Resolve from_template (always a .grain.md.jinja2 template -> "blob").
 	var resolvedFromTemplate string
 	if g.FromTemplate != "" {
@@ -657,8 +639,6 @@ func (g *Grainfile) ResolveSource(src Source) error {
 	g.Requestor = resolvedRequestor
 	g.References = resolvedRefs
 	g.DependsOn = resolvedDeps
-	g.Capabilities = resolvedCaps
-	g.ResolvedCapabilities = resolvedCaps
 	g.FromTemplate = resolvedFromTemplate
 	return nil
 }
@@ -711,8 +691,8 @@ func ResolveRefWithSource(src Source, rawRef, defaultMode string) (string, Ref, 
 		if r.Mode == "blob" {
 			return "", Ref{}, newFinding(CodeWrongTargetKind, src.Path, fmt.Sprintf("%q is a file reference (/blob/), expected a repository or folder", rawRef))
 		}
-		for _, k := range []Kind{KindTask, KindProcess, KindCapability} {
-			for _, suf := range []string{"." + string(k) + ".grain.md", "." + string(k) + ".grain.md.jinja2", "." + string(k) + ".md"} {
+		for _, k := range []Kind{KindTask, KindProcess} {
+			for _, suf := range []string{"." + string(k) + ".grain.md", "." + string(k) + ".md"} {
 				if strings.HasSuffix(r.Path, suf) || strings.HasSuffix(r.Repo, suf) {
 					return "", Ref{}, newFinding(CodeWrongTargetKind, src.Path, fmt.Sprintf("%q is a %s grainfile, expected a repository or folder", rawRef, k))
 				}
@@ -933,7 +913,7 @@ func canonicalRepoFromAnyRef(s string) (string, error) {
 // (`/`-rooted or relative), it is resolved against sourceRepoURL using g.Ref,
 // g.Commit, and g.Path.
 func (g *Grainfile) AuthorizedReferences(sourceRepoURL string) (sameRepo, crossRepo []string) {
-	if g == nil || (len(g.References) == 0 && len(g.Capabilities) == 0 && len(g.ResolvedCapabilities) == 0 && g.FromTemplate == "") {
+	if g == nil || (len(g.References) == 0 && g.FromTemplate == "") {
 		return nil, nil
 	}
 	repoURL := sourceRepoURL
@@ -964,30 +944,6 @@ func (g *Grainfile) AuthorizedReferences(sourceRepoURL string) (sameRepo, crossR
 			sameRepo = append(sameRepo, u)
 		} else {
 			crossRepo = append(crossRepo, u)
-		}
-	}
-	for _, raw := range g.Capabilities {
-		u, r, err := ResolveRefWithSource(Source{
-			RepoURL: canonSource,
-			Ref:     urlRef,
-			Commit:  g.Commit,
-			Path:    g.Path,
-		}, raw, "blob")
-		if err != nil {
-			continue
-		}
-		if IsSameRepo(r.Repo, canonSource) {
-			if strings.TrimSpace(g.Commit) != "" && (r.Mode == "blob" || r.Mode == "tree") {
-				r.GitRef = strings.TrimSpace(g.Commit)
-				u = r.CanonicalURL()
-			}
-			if !slices.Contains(sameRepo, u) {
-				sameRepo = append(sameRepo, u)
-			}
-		} else {
-			if !slices.Contains(crossRepo, u) {
-				crossRepo = append(crossRepo, u)
-			}
 		}
 	}
 	if g.FromTemplate != "" {
@@ -1074,7 +1030,6 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 	refTrim := normalizeURLRef(g.Ref, "")
 
 	candidates := slices.Clone(g.References)
-	candidates = append(candidates, g.Capabilities...)
 	if g.FromTemplate != "" {
 		candidates = append(candidates, g.FromTemplate)
 	}
@@ -1533,22 +1488,19 @@ func LintTreeWithVars(top string, vars map[string]string) ([]Finding, error) {
 		}
 
 		type fieldRef struct {
-			field    string
-			ref      string
-			wantKind Kind
+			field string
+			ref   string
+			want  bool
 		}
 		var refs []fieldRef
 		for _, s := range gf.DependsOn {
-			refs = append(refs, fieldRef{"depends_on", s, KindTask})
-		}
-		for _, s := range gf.Capabilities {
-			refs = append(refs, fieldRef{"capabilities", s, KindCapability})
+			refs = append(refs, fieldRef{"depends_on", s, true})
 		}
 		for _, s := range gf.References {
-			refs = append(refs, fieldRef{"references", s, ""})
+			refs = append(refs, fieldRef{"references", s, false})
 		}
 		if gf.FromTemplate != "" {
-			refs = append(refs, fieldRef{"from_template", gf.FromTemplate, ""})
+			refs = append(refs, fieldRef{"from_template", gf.FromTemplate, false})
 		}
 
 		for _, fr := range refs {
@@ -1558,19 +1510,21 @@ func LintTreeWithVars(top string, vars map[string]string) ([]Finding, error) {
 				findings = append(findings, *fErr)
 				continue
 			}
-			if fr.wantKind != "" {
-				if tItem != nil {
-					if IsTemplatePath(tItem.rel) || (tItem.gf != nil && tItem.gf.IsTemplate) {
-						findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is an unrendered .jinja2 template, expected a concrete .%s.grain.md file", fr.field, fr.ref, fr.wantKind)))
-					} else if tItem.kind != fr.wantKind {
-						findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q resolves to %s, expected %s", fr.field, fr.ref, tItem.kind, fr.wantKind)))
-					}
-				} else if tKind == "asset" || tKind == "folder" {
-					findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s, expected %s grainfile", fr.field, fr.ref, tKind, fr.wantKind)))
-				} else if tKind == "external" {
-					r, _ := ParseRef(fr.ref)
-					if r.Mode == "tree" || !strings.HasSuffix(r.Path, "."+string(fr.wantKind)+".grain.md") {
-						findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is not a .%s.grain.md file", fr.field, fr.ref, fr.wantKind)))
+			if fr.want {
+				if fr.field == "depends_on" && it.kind == KindTask {
+					if tItem != nil {
+						if IsTemplatePath(tItem.rel) || (tItem.gf != nil && tItem.gf.IsTemplate) {
+							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is an unrendered .jinja2 template, expected a concrete .task.grain.md file", fr.field, fr.ref)))
+						} else if tItem.kind != KindTask {
+							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: task %q cannot depend on %s %q (only .task.grain.md allowed)", fr.field, it.rel, tItem.kind, fr.ref)))
+						}
+					} else if tKind == "asset" || tKind == "folder" {
+						findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s, expected task grainfile", fr.field, fr.ref, tKind)))
+					} else if tKind == "external" {
+						r, _ := ParseRef(fr.ref)
+						if r.Mode == "tree" || !strings.HasSuffix(r.Path, ".task.grain.md") {
+							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is not a .task.grain.md file", fr.field, fr.ref)))
+						}
 					}
 				}
 			}
@@ -1621,11 +1575,8 @@ func LintTreeWithVars(top string, vars map[string]string) ([]Finding, error) {
 func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string) Errors {
 	var errs Errors
 	known := knownTaskFields
-	switch g.Kind {
-	case KindProcess:
+	if g.Kind == KindProcess {
 		known = strictProcessFields
-	case KindCapability:
-		known = knownCapabilityFields
 	}
 
 	keys := make([]string, 0, len(fm))
@@ -1652,10 +1603,6 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 		}
 		if g.Kind == KindProcess && (k == "recipient" || k == "requestor" || k == "depends_on") {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .task.grain.md files", k)))
-			continue
-		}
-		if g.Kind == KindCapability && (k == "recipient" || k == "requestor" || k == "depends_on" || k == "capabilities" || k == "when" || k == "on" || k == "gate") {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is not valid on .capability.grain.md files", k)))
 			continue
 		}
 		if !known[k] {
@@ -1754,8 +1701,10 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 	if rawDeps, ok := fm["depends_on"]; ok && g.Kind == KindTask {
 		g.DependsOn = extractRefStrings(rawDeps, "depends_on")
 	}
-	if rawCaps, ok := fm["capabilities"]; ok && (g.Kind == KindTask || g.Kind == KindProcess) {
-		g.Capabilities = extractRefStrings(rawCaps, "capabilities")
+	if rawCaps, ok := fm["capabilities"]; ok {
+		caps, capErrs := validateCapabilitiesSlice(rawCaps, where)
+		errs = append(errs, capErrs...)
+		g.Capabilities = caps
 	}
 	if rawFT, ok := fm["from_template"]; ok {
 		ft, fErr := validateFromTemplate(rawFT, g.Kind, where, g.Path)

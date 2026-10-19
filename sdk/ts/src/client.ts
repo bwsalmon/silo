@@ -28,6 +28,7 @@ import type {
   AcceptedUser,
   Approval,
   ArtifactResult,
+  CapabilityRef,
   ChatEvent,
   ChatMessage,
   ChatQuery,
@@ -118,6 +119,11 @@ function cleanTimestamp(ts?: string): string | undefined {
   return ts;
 }
 
+function normalizeCapabilities(raw?: Array<string | CapabilityRef>): CapabilityRef[] | undefined {
+  if (!raw) return undefined;
+  return raw.map((item) => (typeof item === 'string' ? { capability: item } : item));
+}
+
 function normalizeGrainfile(g: Grainfile): Grainfile {
   const out: Grainfile = {
     ...g,
@@ -125,6 +131,9 @@ function normalizeGrainfile(g: Grainfile): Grainfile {
     spec_summary_path: g.spec_summary_path ?? 'docs/grainfile-v1.md',
     spec_path: g.spec_path ?? 'docs/grainfiles-spec.md',
   };
+  if (g.capabilities) {
+    out.capabilities = normalizeCapabilities(g.capabilities as Array<string | CapabilityRef>);
+  }
   if (g.is_template || g.path?.endsWith('.jinja2')) {
     out.is_template = true;
   }
@@ -153,6 +162,9 @@ function normalizeGrainfileEvent(e: GrainfileEvent): GrainfileEvent {
     spec_summary_path: e.spec_summary_path ?? 'docs/grainfile-v1.md',
     spec_path: e.spec_path ?? 'docs/grainfiles-spec.md',
   };
+  if (e.capabilities) {
+    out.capabilities = normalizeCapabilities(e.capabilities as Array<string | CapabilityRef>);
+  }
   if (e.is_template || e.path?.endsWith('.jinja2')) {
     out.is_template = true;
   }

@@ -1267,30 +1267,12 @@ Authorized same-team co-trigger.
 	})
 }
 
-func TestCapabilityIndexingAndEvents(t *testing.T) {
+func TestCapabilitiesIndexingAndEvents(t *testing.T) {
 	eachStore(t, func(t *testing.T, s *Store, _ string) {
 		ctx := context.Background()
 		s.Now = func() time.Time { return time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC) }
 
-		// 1. Index a .capability.grain.md file -> emits capability_updated.
-		capRaw := []byte("---\ngrainfile: v1\ntitle: GCP service-account key\nreferences:\n  - /docs/widget-schema.md\n---\nGrants GOOGLE_APPLICATION_CREDENTIALS.\n")
-		capGF, err := Parse(".grain/capabilities/gcp-key.capability.grain.md", capRaw)
-		if err != nil {
-			t.Fatalf("Parse capability: %v", err)
-		}
-		capGF.Repo = "https://github.com/acme/widgets"
-		capGF.Ref = "refs/heads/main"
-		capGF.Commit = "cap-sha-1"
-		capRec, err := s.IndexGrainfile(ctx, capGF)
-		if err != nil {
-			t.Fatalf("IndexGrainfile(capability): %v", err)
-		}
-		if capRec.Kind != KindCapability {
-			t.Fatalf("capRec.Kind = %q, want %q", capRec.Kind, KindCapability)
-		}
-
-		// 2. Index a .task.grain.md and .process.grain.md referencing the capability.
-		taskRaw := []byte("---\ngrainfile: v1\ntitle: Task with capability\nrecipient: https://github.com/acme/grain-eu\ncapabilities:\n  - /.grain/capabilities/gcp-key.capability.grain.md#agent-usage\n---\nTask body.\n")
+		taskRaw := []byte("---\ngrainfile: v1\ntitle: Task with OCI capabilities\nrecipient: https://github.com/acme/grain-eu\ncapabilities:\n  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    with:\n      account: infra-staging\n  - capability: ghcr.io/bwsalmon/grain/capabilities/github:latest#git-repo\n    with:\n      repo: bwsalmon/grain\n      mode: write\n      base: main\n---\nTask body.\n")
 		taskGF, err := Parse(".grain/tasks/use-cap.task.grain.md", taskRaw)
 		if err != nil {
 			t.Fatalf("Parse task: %v", err)
@@ -1302,54 +1284,34 @@ func TestCapabilityIndexingAndEvents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("IndexGrainfile(task): %v", err)
 		}
-		wantCapURL := "https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage"
-		wantPinnedCapURL := "https://github.com/acme/widgets/blob/task-sha-1/.grain/capabilities/gcp-key.capability.grain.md#agent-usage"
-		if !reflect.DeepEqual(taskRec.Capabilities, []string{wantCapURL}) {
-			t.Fatalf("taskRec.Capabilities = %v, want [%s]", taskRec.Capabilities, wantCapURL)
+		wantCaps := []CapabilityRef{
+			{Capability: "ghcr.io/bwsalmon/grain/capabilities/self-debug:latest"},
+			{
+				Capability: "ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key",
+				With:       map[string]any{"account": "infra-staging"},
+			},
+			{
+				Capability: "ghcr.io/bwsalmon/grain/capabilities/github:latest#git-repo",
+				With: map[string]any{
+					"repo": "bwsalmon/grain",
+					"mode": "write",
+					"base": "main",
+				},
+			},
 		}
-		if !slices.Contains(taskRec.AuthorizedReferences, wantPinnedCapURL) {
-			t.Fatalf("taskRec.AuthorizedReferences = %v, want to include %s", taskRec.AuthorizedReferences, wantPinnedCapURL)
-		}
-
-		// 3. Mark capability as draft -> emits capability_removed.
-		capDraftGF := *capGF
-		capDraftGF.Commit = "cap-sha-2"
-		capDraftGF.Draft = true
-		if _, err := s.IndexGrainfile(ctx, &capDraftGF); err != nil {
-			t.Fatalf("IndexGrainfile(capability draft): %v", err)
-		}
-
-		// 4. Re-activate capability and then delete via RemoveGrainfile -> emits capability_updated then capability_removed.
-		capActiveGF := *capGF
-		capActiveGF.Commit = "cap-sha-3"
-		capActiveGF.Draft = false
-		if _, err := s.IndexGrainfile(ctx, &capActiveGF); err != nil {
-			t.Fatalf("IndexGrainfile(capability re-active): %v", err)
-		}
-		if err := s.RemoveGrainfile(ctx, "https://github.com/acme/widgets", ".grain/capabilities/gcp-key.capability.grain.md"); err != nil {
-			t.Fatalf("RemoveGrainfile(capability): %v", err)
+		if !reflect.DeepEqual(taskRec.Capabilities, wantCaps) {
+			t.Fatalf("taskRec.Capabilities = %#v, want %#v", taskRec.Capabilities, wantCaps)
 		}
 
 		evs, err := s.EventsSince(ctx, 0)
 		if err != nil {
 			t.Fatalf("EventsSince: %v", err)
 		}
-		var types []string
-		for _, ev := range evs {
-			types = append(types, ev.Type)
-			if ev.Type == EventTaskReady && !reflect.DeepEqual(ev.Capabilities, []string{wantCapURL}) {
-				t.Errorf("task_ready event Capabilities = %v, want [%s]", ev.Capabilities, wantCapURL)
-			}
+		if len(evs) != 1 || evs[0].Type != EventTaskReady {
+			t.Fatalf("EventsSince = %+v, want 1 task_ready event", evs)
 		}
-		wantTypes := []string{
-			EventCapabilityUpdated,
-			EventTaskReady,
-			EventCapabilityRemoved,
-			EventCapabilityUpdated,
-			EventCapabilityRemoved,
-		}
-		if !reflect.DeepEqual(types, wantTypes) {
-			t.Fatalf("event types = %v, want %v", types, wantTypes)
+		if !reflect.DeepEqual(evs[0].Capabilities, wantCaps) {
+			t.Fatalf("task_ready event Capabilities = %#v, want %#v", evs[0].Capabilities, wantCaps)
 		}
 	})
 }

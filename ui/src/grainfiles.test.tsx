@@ -32,23 +32,14 @@ const sampleOverview = {
       references: ['/docs/arch.md'],
       authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
       depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md'],
-      capabilities: ['https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md'],
+      capabilities: [
+        { capability: 'ghcr.io/bwsalmon/grain/capabilities/self-debug:latest' },
+        {
+          capability: 'ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key',
+          with: { account: 'infra-staging' },
+        },
+      ],
       updated_at: '2026-10-18T10:05:00Z',
-    },
-    {
-      grainfile: 'v1',
-      spec_summary_path: 'docs/grainfile-v1.md',
-      spec_path: 'docs/grainfiles-spec.md',
-      repo: 'https://github.com/acme/app',
-      path: '.grain/capabilities/gcp-key.capability.grain.md',
-      commit_sha: '3333333333333333333333333333333333333333',
-      ref: 'main',
-      url: 'https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md',
-      kind: 'capability',
-      title: 'GCP service-account key',
-      draft: false,
-      references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
-      updated_at: '2026-10-18T10:05:30Z',
     },
     {
       grainfile: 'v1',
@@ -182,20 +173,16 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getByText('acme/app:tasks/00-prep.task.grain.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md',
     );
-    expect(screen.getByText('acme/app:.grain/capabilities/gcp-key.capability.grain.md').getAttribute('href')).toBe(
-      'https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md',
-    );
-    expect(screen.getByText('GCP service-account key')).toBeTruthy();
-    expect(screen.getByText('capability')).toBeTruthy();
+    expect(screen.getAllByText('ghcr.io/bwsalmon/grain/capabilities/self-debug:latest').length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getAllByText('ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key (account=infra-staging)').length,
+    ).toBeGreaterThanOrEqual(2);
 
     // Inspection panel for first Grainfile (Deploy service to staging)
     expect(screen.getByText('docs/grainfile-v1.md')).toBeTruthy();
     expect(
       screen.getByText('https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2').getAttribute('href'),
     ).toBe('https://github.com/acme/app/blob/main/.grain/templates/deploy.task.grain.md.jinja2');
-    expect(
-      screen.getByText('https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md').getAttribute('href'),
-    ).toBe('https://github.com/acme/app/blob/main/.grain/capabilities/gcp-key.capability.grain.md');
     expect(screen.getByText('https://github.com/acme/app/blob/main/docs/arch.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/docs/arch.md',
     );
@@ -225,11 +212,11 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.queryByText('Continuous verification gate')).toBeNull();
     expect(screen.getAllByText('Deploy service to staging').length).toBeGreaterThan(0);
 
-    // Filter by kind = capability
+    // Filter by kind = process
     fireEvent.mouseDown(screen.getByLabelText('Kind'));
-    fireEvent.click(await screen.findByRole('option', { name: 'Capabilities (.capability.grain.md)' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'Processes (.process.grain.md)' }));
     await waitFor(() => {
-      expect(seenUrls.some((u) => u.includes('kind=capability'))).toBe(true);
+      expect(seenUrls.some((u) => u.includes('kind=process'))).toBe(true);
     });
   });
 

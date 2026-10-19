@@ -25,48 +25,43 @@ const (
 	KindTask Kind = "task"
 	// KindProcess is a standing repeatable process (<name>.process.grain.md).
 	KindProcess Kind = "process"
-	// KindCapability is a named capability definition (<name>.capability.grain.md).
-	KindCapability Kind = "capability"
 )
 
 // Valid reports whether k is a registered Grainfile kind.
 func (k Kind) Valid() bool {
-	return k == KindTask || k == KindProcess || k == KindCapability
+	return k == KindTask || k == KindProcess
 }
 
 // Registered Grainfile format versions and specification paths (docs/grainfiles-spec.md §6.1).
 const (
-	VersionV1              = "v1"
-	SpecSummaryPathV1      = "docs/grainfile-v1.md"
-	SpecPathV1             = "docs/grainfiles-spec.md"
-	CommonSchemaPathV1     = "schemas/grainfiles/common.schema.json"
-	TaskSchemaPathV1       = "schemas/grainfiles/task.schema.json"
-	ProcessSchemaPathV1    = "schemas/grainfiles/process.schema.json"
-	CapabilitySchemaPathV1 = "schemas/grainfiles/capability.schema.json"
+	VersionV1           = "v1"
+	SpecSummaryPathV1   = "docs/grainfile-v1.md"
+	SpecPathV1          = "docs/grainfiles-spec.md"
+	CommonSchemaPathV1  = "schemas/grainfiles/common.schema.json"
+	TaskSchemaPathV1    = "schemas/grainfiles/task.schema.json"
+	ProcessSchemaPathV1 = "schemas/grainfiles/process.schema.json"
 )
 
 // VersionSpec maps a Grainfile format version identifier (such as "v1") to the
 // repository-relative paths of its concise agent summary, normative
 // specification, and JSON schemas (docs/grainfiles-spec.md §6.1).
 type VersionSpec struct {
-	Version              string `json:"version"`
-	SpecSummaryPath      string `json:"spec_summary_path"`
-	SpecPath             string `json:"spec_path"`
-	CommonSchemaPath     string `json:"common_schema_path"`
-	TaskSchemaPath       string `json:"task_schema_path"`
-	ProcessSchemaPath    string `json:"process_schema_path"`
-	CapabilitySchemaPath string `json:"capability_schema_path"`
+	Version           string `json:"version"`
+	SpecSummaryPath   string `json:"spec_summary_path"`
+	SpecPath          string `json:"spec_path"`
+	CommonSchemaPath  string `json:"common_schema_path"`
+	TaskSchemaPath    string `json:"task_schema_path"`
+	ProcessSchemaPath string `json:"process_schema_path"`
 }
 
 var versionRegistry = map[string]VersionSpec{
 	VersionV1: {
-		Version:              VersionV1,
-		SpecSummaryPath:      SpecSummaryPathV1,
-		SpecPath:             SpecPathV1,
-		CommonSchemaPath:     CommonSchemaPathV1,
-		TaskSchemaPath:       TaskSchemaPathV1,
-		ProcessSchemaPath:    ProcessSchemaPathV1,
-		CapabilitySchemaPath: CapabilitySchemaPathV1,
+		Version:           VersionV1,
+		SpecSummaryPath:   SpecSummaryPathV1,
+		SpecPath:          SpecPathV1,
+		CommonSchemaPath:  CommonSchemaPathV1,
+		TaskSchemaPath:    TaskSchemaPathV1,
+		ProcessSchemaPath: ProcessSchemaPathV1,
 	},
 }
 
@@ -193,23 +188,22 @@ type Grainfile struct {
 	Commit string `json:"commit,omitempty"`
 
 	// Front-matter fields (docs/grainfiles-spec.md §6, §7).
-	Title                string         `json:"title"`
-	Recipient            string         `json:"recipient,omitempty"`
-	Requestor            string         `json:"requestor,omitempty"`
-	Draft                bool           `json:"draft"`
-	NotBefore            time.Time      `json:"not_before,omitempty"`
-	NotBeforeRaw         string         `json:"-"`
-	CreatedAt            time.Time      `json:"created_at,omitempty"`
-	CreatedAtRaw         string         `json:"-"`
-	References           []string       `json:"references,omitempty"`
-	DependsOn            []string       `json:"depends_on,omitempty"`
-	Capabilities         []string       `json:"capabilities,omitempty"`
-	ResolvedCapabilities []string       `json:"resolved_capabilities,omitempty"`
-	FromTemplate         string         `json:"from_template,omitempty"`
-	When                 Triggers       `json:"when,omitempty"`
-	On                   Triggers       `json:"on,omitempty"`
-	Gate                 bool           `json:"gate,omitempty"`
-	Extensions           map[string]any `json:"extensions,omitempty"`
+	Title        string          `json:"title"`
+	Recipient    string          `json:"recipient,omitempty"`
+	Requestor    string          `json:"requestor,omitempty"`
+	Draft        bool            `json:"draft"`
+	NotBefore    time.Time       `json:"not_before,omitempty"`
+	NotBeforeRaw string          `json:"-"`
+	CreatedAt    time.Time       `json:"created_at,omitempty"`
+	CreatedAtRaw string          `json:"-"`
+	References   []string        `json:"references,omitempty"`
+	DependsOn    []string        `json:"depends_on,omitempty"`
+	Capabilities []CapabilityRef `json:"capabilities,omitempty"`
+	FromTemplate string          `json:"from_template,omitempty"`
+	When         Triggers        `json:"when,omitempty"`
+	On           Triggers        `json:"on,omitempty"`
+	Gate         bool            `json:"gate,omitempty"`
+	Extensions   map[string]any  `json:"extensions,omitempty"`
 
 	// Body is the UTF-8 Markdown prompt body after the closing --- line.
 	Body string `json:"-"`
@@ -218,8 +212,13 @@ type Grainfile struct {
 	Warnings []Finding `json:"-"`
 }
 
-// ResolvedGrainfile is an alias for a resolved Grainfile.
-type ResolvedGrainfile = Grainfile
+// CapabilityRef represents an OCI-image capability reference
+// (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]) with optional
+// structured arguments (`with:`).
+type CapabilityRef struct {
+	Capability string         `json:"capability"`
+	With       map[string]any `json:"with,omitempty"`
+}
 
 // Triggers holds the structured trigger rules under `when` in a
 // .process.grain.md file (docs/grainfiles-spec.md §7.2.1).
@@ -468,7 +467,7 @@ func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile boo
 	if idx := strings.LastIndexByte(norm, '/'); idx >= 0 {
 		leaf = norm[idx+1:]
 	}
-	for _, k := range []Kind{KindTask, KindProcess, KindCapability} {
+	for _, k := range []Kind{KindTask, KindProcess} {
 		sufJ2 := "." + string(k) + ".grain.md.jinja2"
 		if strings.HasSuffix(leaf, sufJ2) {
 			return k, leaf[:len(leaf)-len(sufJ2)], true, ""
@@ -486,8 +485,8 @@ func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile boo
 
 // ClassifyPath classifies a repository-relative path according to
 // docs/grainfiles-spec.md §4.1 and §4.2, matching canonical .task.grain.md /
-// .process.grain.md / .capability.grain.md files first and also accepting
-// .task.md / .process.md suffixes when called directly by API callers.
+// .process.grain.md files first and also accepting .task.md / .process.md
+// suffixes when called directly by API callers.
 func ClassifyPath(relPath string) (kind Kind, stem string, isGrainfile bool, warnCode string) {
 	if k, s, ok, _ := ClassifyStrictPath(relPath); ok {
 		return k, s, true, ""
@@ -530,7 +529,7 @@ func ParseFilename(relPath string) (Kind, string, error) {
 		if warnCode != "" {
 			return "", "", newFinding(warnCode, relPath, "unregistered kind suffix")
 		}
-		return "", "", newFinding(CodeBadName, relPath, "filename must end with .task.grain.md, .process.grain.md, or .capability.grain.md")
+		return "", "", newFinding(CodeBadName, relPath, "filename must end with .task.grain.md or .process.grain.md")
 	}
 	if !ValidateStem(stem) {
 		return kind, stem, newFinding(CodeBadName, relPath, fmt.Sprintf("bad grainfile name %q", stem))
@@ -796,14 +795,6 @@ var (
 		"when":          true,
 		"gate":          true,
 	}
-	knownCapabilityFields = map[string]bool{
-		"grainfile":     true,
-		"title":         true,
-		"draft":         true,
-		"not_before":    true,
-		"references":    true,
-		"from_template": true,
-	}
 	knownTriggerSources = map[string]bool{
 		TriggerSchedule:    true,
 		TriggerPush:        true,
@@ -823,15 +814,12 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		!IsTemplatePath(where)
 
 	known := knownTaskFields
-	switch g.Kind {
-	case KindProcess:
+	if g.Kind == KindProcess {
 		if compatProcess {
 			known = knownProcessFields
 		} else {
 			known = strictProcessFields
 		}
-	case KindCapability:
-		known = knownCapabilityFields
 	}
 
 	keys := make([]string, 0, len(fm))
@@ -858,10 +846,6 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		}
 		if g.Kind == KindProcess && !compatProcess && (k == "recipient" || k == "requestor" || k == "depends_on") {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .task.grain.md files", k)))
-			continue
-		}
-		if g.Kind == KindCapability && (k == "recipient" || k == "requestor" || k == "depends_on" || k == "capabilities" || k == "when" || k == "on" || k == "gate") {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is not valid on .capability.grain.md files", k)))
 			continue
 		}
 		if !known[k] && !(compatProcess && (k == "recipient" || k == "requestor" || k == "trigger_with")) {
@@ -981,9 +965,9 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		g.DependsOn = deps
 	}
 
-	// capabilities (optional list of refs on .task.grain.md and .process.grain.md: must target concrete .capability.grain.md files only; §8.3)
-	if rawCaps, ok := fm["capabilities"]; ok && (g.Kind == KindTask || g.Kind == KindProcess) {
-		caps, capErrs := validateCapabilitiesSlice(rawCaps, where, g.Path)
+	// capabilities (optional list of OCI capability refs or {capability, with} objects on .task.grain.md and .process.grain.md; §6.6)
+	if rawCaps, ok := fm["capabilities"]; ok {
+		caps, capErrs := validateCapabilitiesSlice(rawCaps, where)
 		errs = append(errs, capErrs...)
 		g.Capabilities = caps
 	}
@@ -1050,12 +1034,8 @@ func isProcessTargetPath(p string) bool {
 	return strings.HasSuffix(p, ".process.grain.md") || strings.HasSuffix(p, ".process.md")
 }
 
-func isCapabilityTargetPath(p string) bool {
-	return strings.HasSuffix(p, ".capability.grain.md")
-}
-
 func isGrainfileTargetPath(p string) bool {
-	return isTaskTargetPath(p) || isProcessTargetPath(p) || isCapabilityTargetPath(p)
+	return isTaskTargetPath(p) || isProcessTargetPath(p)
 }
 
 func validateFromTemplate(raw any, sourceKind Kind, where, sourcePath string) (string, *Finding) {
@@ -1118,7 +1098,7 @@ func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
 		f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a file reference (/blob/), expected a repository or folder", field, s))
 		return &f
 	}
-	for _, k := range []Kind{KindTask, KindProcess, KindCapability} {
+	for _, k := range []Kind{KindTask, KindProcess} {
 		for _, suf := range []string{"." + string(k) + ".grain.md", "." + string(k) + ".grain.md.jinja2", "." + string(k) + ".md"} {
 			if strings.HasSuffix(r.Path, suf) || strings.HasSuffix(r.Repo, suf) {
 				f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s grainfile, expected a repository or folder", field, s, k))
@@ -1132,28 +1112,67 @@ func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
 	return nil
 }
 
-func validateCapabilitiesSlice(raw any, where, sourcePath string) ([]string, Errors) {
+var (
+	capabilityRefRe             = regexp.MustCompile(`^(?:localhost(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:[0-9]{1,5})/[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$`)
+	capabilityForbiddenSuffixRe = regexp.MustCompile(`\.(?:grain\.md|jinja2)(?:[:@#]|$)`)
+)
+
+// IsValidCapabilityRef reports whether s is a valid OCI container image
+// capability reference (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]).
+func IsValidCapabilityRef(s string) bool {
+	if s == "" || capabilityForbiddenSuffixRe.MatchString(s) {
+		return false
+	}
+	return capabilityRefRe.MatchString(s)
+}
+
+func validateCapabilitiesSlice(raw any, where string) ([]CapabilityRef, Errors) {
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, Errors{newFinding(CodeSchemaInvalid, where, "capabilities: must be a list of strings")}
+		return nil, Errors{newFinding(CodeSchemaInvalid, where, "capabilities: must be a list of OCI capability references")}
 	}
-	var out []string
+	var out []CapabilityRef
 	var errs Errors
 	for i, item := range list {
-		s, ok := item.(string)
-		if !ok || s == "" || strings.ContainsAny(s, " \t\r\n\\") {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: must be a non-empty reference string", i)))
-			continue
-		}
-		out = append(out, s)
-		if f := validateSingleRef(s, "capabilities", where, false, sourcePath); f != nil {
-			errs = append(errs, *f)
-			continue
-		}
-		if r, err := ParseRef(s); err == nil {
-			if r.Mode == "tree" || r.TrailingSlash || !isCapabilityTargetPath(r.Path) {
-				errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("capabilities: %q is not a concrete .capability.grain.md file", s)))
+		switch v := item.(type) {
+		case string:
+			if !IsValidCapabilityRef(v) {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: %q is not a valid OCI capability reference (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>])", i, v)))
+				continue
 			}
+			out = append(out, CapabilityRef{Capability: v})
+		case map[string]any:
+			valid := true
+			for k := range v {
+				if k != "capability" && k != "with" {
+					valid = false
+					break
+				}
+			}
+			rawCap, hasCap := v["capability"]
+			capStr, capIsStr := rawCap.(string)
+			if !hasCap || !capIsStr || !IsValidCapabilityRef(capStr) {
+				valid = false
+			}
+			var withMap map[string]any
+			if rawWith, hasWith := v["with"]; hasWith {
+				m, ok := rawWith.(map[string]any)
+				if !ok || m == nil {
+					valid = false
+				} else if len(m) > 0 {
+					withMap = m
+				}
+			}
+			if !valid {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: invalid capability object (expected {capability: \"<oci-image>[#<method>]\", with?: <object>})", i)))
+				continue
+			}
+			out = append(out, CapabilityRef{
+				Capability: capStr,
+				With:       withMap,
+			})
+		default:
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: must be a capability string or {capability, with} object", i)))
 		}
 	}
 	return out, errs
@@ -1183,7 +1202,6 @@ func validateDependsOnSlice(raw any, sourceKind Kind, where, sourcePath string) 
 				if !isGrainfileTargetPath(r.Path) ||
 					strings.HasSuffix(r.Path, ".jinja2") ||
 					strings.HasSuffix(r.Path, ".process.grain.md") ||
-					strings.HasSuffix(r.Path, ".capability.grain.md") ||
 					(strictTaskSource && !strings.HasSuffix(r.Path, ".task.grain.md")) {
 					errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("depends_on: %q is not a concrete .task.grain.md file", s)))
 				}
