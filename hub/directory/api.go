@@ -100,6 +100,9 @@ func (a *API) Access(r *http.Request) (*Access, error) {
 		if err != nil {
 			return nil, err
 		}
+		if a.Store.EnforceAcceptedUsers() {
+			cfgAdmin = a.isHubAdminGroup(p)
+		}
 		enforce := hasAnyUsers || a.Store.EnforceAcceptedUsers() || a.EnforceAcceptedUsers
 		if enforce && !accepted && !cfgAdmin {
 			return nil, ErrNotAcceptedUser
@@ -135,6 +138,18 @@ func (a *API) isHubAdmin(p identity.Principal) bool {
 		if u, err := userPrincipal(p.Email); err == nil && adm == u {
 			return true
 		}
+		for _, g := range p.Groups {
+			if adm == GroupPrefix+strings.ToLower(strings.TrimSpace(g)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (a *API) isHubAdminGroup(p identity.Principal) bool {
+	for _, adm := range a.HubAdmins {
+		adm, _ = HubAdminPrincipal(adm)
 		for _, g := range p.Groups {
 			if adm == GroupPrefix+strings.ToLower(strings.TrimSpace(g)) {
 				return true

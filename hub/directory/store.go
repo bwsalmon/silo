@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -131,6 +132,7 @@ const maxConns = 8
 type Store struct {
 	db                   *sql.DB
 	postgres             bool
+	userMu               sync.Mutex
 	enforceAcceptedUsers atomic.Bool
 	// Now, when set, is the clock tokens are stamped with.
 	Now func() time.Time
@@ -474,6 +476,8 @@ func (s *Store) SeedUsers(ctx context.Context, hubAdmins, acceptedUsers []string
 	if len(entries) == 0 {
 		return nil
 	}
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
 	now := s.now().UnixMilli()
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		for _, ent := range entries {
@@ -528,12 +532,16 @@ func (s *Store) SetUser(ctx context.Context, email string, sysAdmin bool, addedB
 	if sysAdmin {
 		sysInt = 1
 	}
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
 	now := s.now().UnixMilli()
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		wasSysAdmin := false
 		if !sysAdmin {
 			var curSys int
 			err := tx.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&curSys)
 			if err == nil && curSys != 0 {
+				wasSysAdmin = true
 				var count int
 				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accepted_users WHERE sys_admin <> 0`).Scan(&count); err != nil {
 					return err
@@ -545,11 +553,22 @@ func (s *Store) SetUser(ctx context.Context, email string, sysAdmin bool, addedB
 				return err
 			}
 		}
-		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
+		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO accepted_users (email, sys_admin, added_by, created_at)
 			VALUES (?, ?, ?, ?)
 			ON CONFLICT (email) DO UPDATE SET sys_admin = excluded.sys_admin`),
-			e, sysInt, addedBy, now)
-		return err
+			e, sysInt, addedBy, now); err != nil {
+			return err
+		}
+		if wasSysAdmin {
+			var remaining int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accepted_users WHERE sys_admin <> 0`).Scan(&remaining); err != nil {
+				return err
+			}
+			if remaining < 1 {
+				return ErrLastSysAdmin
+			}
+		}
+		return nil
 	})
 }
 
@@ -561,6 +580,8 @@ func (s *Store) DeleteUser(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		var curSys int
 		err := tx.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&curSys)
@@ -579,8 +600,19 @@ func (s *Store) DeleteUser(ctx context.Context, email string) error {
 				return ErrLastSysAdmin
 			}
 		}
-		_, err = tx.ExecContext(ctx, s.q(`DELETE FROM accepted_users WHERE email = ?`), e)
-		return err
+		if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM accepted_users WHERE email = ?`), e); err != nil {
+			return err
+		}
+		if curSys != 0 {
+			var remaining int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accepted_users WHERE sys_admin <> 0`).Scan(&remaining); err != nil {
+				return err
+			}
+			if remaining < 1 {
+				return ErrLastSysAdmin
+			}
+		}
+		return nil
 	})
 }
 

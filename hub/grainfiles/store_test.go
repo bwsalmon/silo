@@ -1090,3 +1090,167 @@ func TestCanonicalDeploymentURLRoutingAndReplayForNode(t *testing.T) {
 		}
 	})
 }
+
+func TestMultiRepoGateCrossRepoAuthorizationAndCoTriggers(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+
+		// Configure team resolver:
+		// - github.com/acme/control-plane -> team-core
+		// - github.com/acme/service-a     -> team-core (same team, authorized)
+		// - github.com/acme/service-b     -> team-other (different team, unauthorized)
+		// - github.com/evil/attacker      -> team-evil (different team, unauthorized)
+		s.TeamResolver = &fakeRepoTeamResolver{
+			teams: map[string]string{
+				"acme/control-plane":            "team-core",
+				"github.com/acme/control-plane": "team-core",
+				"acme/service-a":                "team-core",
+				"github.com/acme/service-a":     "team-core",
+				"acme/service-b":                "team-other",
+				"github.com/acme/service-b":     "team-other",
+				"evil/attacker":                 "team-evil",
+				"github.com/evil/attacker":      "team-evil",
+			},
+		}
+
+		// 1. Multi-repo gate process in control-plane watching control-plane, service-a (same team), and service-b (other team).
+		gateRaw := `---
+title: Multi-Repo Gate Watcher
+gate: true
+when:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "internal/"
+      - "https://github.com/acme/service-a/tree/main/pkg/"
+      - "https://github.com/acme/service-b/tree/main/pkg/"
+    ignore:
+      - "internal/generated/"
+      - "pkg/mocks/"
+      - "pkg/doc.go"
+---
+Gate verification across repos.
+`
+		gateGF, err := Parse(".grain/multi-gate.process.grain.md", []byte(gateRaw))
+		if err != nil {
+			t.Fatalf("Parse gateGF: %v", err)
+		}
+		_ = gateGF.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/control-plane",
+			Ref:     "refs/heads/main",
+			Commit:  "1111111111111111111111111111111111111111",
+			Path:    ".grain/multi-gate.process.grain.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, gateGF); err != nil {
+			t.Fatalf("IndexGrainfile gateGF: %v", err)
+		}
+
+		// 2. Unauthorized cross-team gate process in evil/attacker attempting to co-trigger via depends_on on gateGF!
+		evilRaw := `---
+title: Evil Co-Trigger Gate Process
+recipient: https://hub.example.com/deployments/evil-node
+gate: true
+when:
+  manual: {}
+depends_on:
+  - "https://github.com/acme/control-plane/blob/main/.grain/multi-gate.process.grain.md"
+---
+Should never co-trigger a gate across teams.
+`
+		evilGF, err := Parse(".grain/evil.process.md", []byte(evilRaw))
+		if err != nil {
+			t.Fatalf("Parse evilGF: %v", err)
+		}
+		_ = evilGF.ResolveSource(Source{
+			RepoURL: "https://github.com/evil/attacker",
+			Ref:     "refs/heads/main",
+			Commit:  "2222222222222222222222222222222222222222",
+			Path:    ".grain/evil.process.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, evilGF); err != nil {
+			t.Fatalf("IndexGrainfile evilGF: %v", err)
+		}
+
+		// 3. Authorized same-team process in service-a co-triggering via depends_on on gateGF.
+		allyRaw := `---
+title: Authorized Same-Team Co-Trigger
+recipient: https://hub.example.com/deployments/core-ally
+when:
+  manual: {}
+depends_on:
+  - "https://github.com/acme/control-plane/blob/main/.grain/multi-gate.process.grain.md"
+---
+Authorized same-team co-trigger.
+`
+		allyGF, err := Parse(".grain/ally.process.md", []byte(allyRaw))
+		if err != nil {
+			t.Fatalf("Parse allyGF: %v", err)
+		}
+		_ = allyGF.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/service-a",
+			Ref:     "refs/heads/main",
+			Commit:  "3333333333333333333333333333333333333333",
+			Path:    ".grain/ally.process.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, allyGF); err != nil {
+			t.Fatalf("IndexGrainfile allyGF: %v", err)
+		}
+
+		// Case A: PR in service-a (same team) touching pkg/api.go -> triggers gateGF AND allyGF, but NOT evilGF!
+		evsA, err := s.EvaluateTriggers(ctx, "https://github.com/acme/service-a", "aaaa1111", ForgeEvent{
+			Source:       TriggerPullRequest,
+			Branch:       "main",
+			ChangedPaths: []string{"pkg/api.go"},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateTriggers service-a: %v", err)
+		}
+		if len(evsA) != 2 {
+			t.Fatalf("EvaluateTriggers service-a got %d events, want 2 (gateGF + allyGF): %+v", len(evsA), evsA)
+		}
+		for _, ev := range evsA {
+			if strings.Contains(ev.Repo, "evil/attacker") {
+				t.Fatalf("unauthorized cross-team process co-triggered: %+v", ev)
+			}
+		}
+
+		// Case B: PR in service-a touching only ignored cross-repo folder pkg/mocks/foo.go and ignored blob pkg/doc.go -> 0 triggers.
+		evsB, err := s.EvaluateTriggers(ctx, "https://github.com/acme/service-a", "aaaa2222", ForgeEvent{
+			Source:       TriggerPullRequest,
+			Branch:       "main",
+			ChangedPaths: []string{"pkg/mocks/foo.go", "pkg/doc.go"},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateTriggers service-a ignored: %v", err)
+		}
+		if len(evsB) != 0 {
+			t.Fatalf("EvaluateTriggers service-a ignored got %d events, want 0: %+v", len(evsB), evsB)
+		}
+
+		// Case C: PR in service-b (different team) touching pkg/api.go -> blocked by cross-repo team authorization!
+		evsC, err := s.EvaluateTriggers(ctx, "https://github.com/acme/service-b", "bbbb1111", ForgeEvent{
+			Source:       TriggerPullRequest,
+			Branch:       "main",
+			ChangedPaths: []string{"pkg/api.go"},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateTriggers service-b: %v", err)
+		}
+		if len(evsC) != 0 {
+			t.Fatalf("EvaluateTriggers service-b (unauthorized cross-team) got %d events, want 0: %+v", len(evsC), evsC)
+		}
+
+		// Case D: PR in control-plane with path traversal attempt -> rejected, 0 triggers.
+		evsD, err := s.EvaluateTriggers(ctx, "https://github.com/acme/control-plane", "cccc1111", ForgeEvent{
+			Source:       TriggerPullRequest,
+			Branch:       "main",
+			ChangedPaths: []string{"internal/generated/../../internal/secret.go", "docs/%2e%2e/internal/secret.go"},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateTriggers traversal: %v", err)
+		}
+		if len(evsD) != 0 {
+			t.Fatalf("EvaluateTriggers traversal got %d events, want 0: %+v", len(evsD), evsD)
+		}
+	})
+}

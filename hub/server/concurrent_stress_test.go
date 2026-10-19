@@ -1443,3 +1443,412 @@ func TestConcurrentDatabaseContentionNoLostUpdates(t *testing.T) {
 		})
 	}
 }
+
+// mapContentFetcher is an in-memory grainfiles.ContentFetcher for host replacement tests.
+type mapContentFetcher struct {
+	files map[string][]byte
+}
+
+func (f *mapContentFetcher) FetchFile(_ context.Context, _, _, path string) ([]byte, error) {
+	if b, ok := f.files[path]; ok {
+		return b, nil
+	}
+	return []byte("# " + path + "\n"), nil
+}
+
+func (f *mapContentFetcher) ListGrainfiles(_ context.Context, _, _ string) ([]string, string, error) {
+	var out []string
+	for k := range f.files {
+		out = append(out, k)
+	}
+	return out, "c1", nil
+}
+
+func TestConcurrentHostReplacementAndAcceptedUsersEnforcement(t *testing.T) {
+	ctx := context.Background()
+	dbURL := "sqlite:" + filepath.Join(t.TempDir(), "replace-race.db")
+	const (
+		adminA = "admin-a@example.com"
+		adminB = "admin-b@example.com"
+		alice  = "alice@example.com"
+		bob    = "bob@example.com"
+		carol  = "carol@example.com"
+	)
+
+	h, err := New(ctx, Config{
+		Database:         dbURL,
+		DevUserHeader:    userHeader,
+		HubAdmins:        []string{"user:" + adminA},
+		AcceptedUsers:    []string{adminB, alice, bob, carol},
+		HubURL:           "https://hub.example.com",
+		NodeUIDomain:     "nodes.hub.test",
+		Heartbeat:        150 * time.Millisecond,
+		ShutdownGrace:    5 * time.Second,
+		DispatchRetry:    80 * time.Millisecond,
+		GrainfileFetcher: &mapContentFetcher{files: map[string][]byte{}},
+		Logf:             logf(t),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		h.Close()
+		t.Fatalf("Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- h.Serve(srvCtx, l) }()
+	t.Cleanup(func() {
+		srvCancel()
+		<-srvDone
+		_ = h.Close()
+	})
+	hubURL := "http://" + l.Addr().String()
+	eventually(t, "hub ready", func() bool {
+		return call(t, "GET", hubURL+ReadyzPath, "", nil, nil) == http.StatusOK
+	})
+
+	// 1. Promote adminB and race concurrent mutual DELETE / PUT demote between adminA and adminB.
+	if code := call(t, "PUT", hubURL+"/v1/users/"+adminB, adminA, map[string]bool{"sys_admin": true}, nil); code != http.StatusOK {
+		t.Fatalf("promote adminB: %d", code)
+	}
+	for iter := 0; iter < 15; iter++ {
+		_ = h.Directory.SetUser(ctx, adminA, true, "bootstrap")
+		_ = h.Directory.SetUser(ctx, adminB, true, adminA)
+		var wg sync.WaitGroup
+		var codeA, codeB int
+		gate := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-gate
+			if iter%2 == 0 {
+				codeA = call(t, "DELETE", hubURL+"/v1/users/"+adminB, adminA, nil, nil)
+			} else {
+				codeA = call(t, "PUT", hubURL+"/v1/users/"+adminB, adminA, map[string]bool{"sys_admin": false}, nil)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-gate
+			if iter%2 == 0 {
+				codeB = call(t, "PUT", hubURL+"/v1/users/"+adminA, adminB, map[string]bool{"sys_admin": false}, nil)
+			} else {
+				codeB = call(t, "DELETE", hubURL+"/v1/users/"+adminA, adminB, nil, nil)
+			}
+		}()
+		close(gate)
+		wg.Wait()
+		if (codeA == http.StatusOK || codeA == http.StatusNoContent) &&
+			(codeB == http.StatusOK || codeB == http.StatusNoContent) {
+			t.Fatalf("iter %d: both concurrent sys-admin removals succeeded (%d, %d)", iter, codeA, codeB)
+		}
+		users, err := h.Directory.Users(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sysAdmins := 0
+		for _, u := range users {
+			if u.SysAdmin {
+				sysAdmins++
+			}
+		}
+		if sysAdmins < 1 {
+			t.Fatalf("iter %d: zero sys admins remaining: %+v", iter, users)
+		}
+	}
+	_ = h.Directory.SetUser(ctx, adminA, true, "bootstrap")
+	_ = h.Directory.SetUser(ctx, adminB, true, adminA)
+
+	// 2. Race alice and bob concurrently claiming "shared-deploy" via POST /v1/deployments.
+	var (
+		claimWG                sync.WaitGroup
+		claimGate              = make(chan struct{})
+		aliceClaim, bobClaim   int
+		winnerUser, secondUser string
+	)
+	claimWG.Add(2)
+	go func() {
+		defer claimWG.Done()
+		<-claimGate
+		aliceClaim = call(t, "POST", hubURL+"/v1/deployments", alice, map[string]string{"id": "shared-deploy"}, nil)
+	}()
+	go func() {
+		defer claimWG.Done()
+		<-claimGate
+		bobClaim = call(t, "POST", hubURL+"/v1/deployments", bob, map[string]string{"id": "shared-deploy"}, nil)
+	}()
+	close(claimGate)
+	claimWG.Wait()
+	if !((aliceClaim == http.StatusCreated && bobClaim == http.StatusConflict) ||
+		(aliceClaim == http.StatusConflict && bobClaim == http.StatusCreated)) {
+		t.Fatalf("expected one 201 and one 409 on concurrent deployment claim, got alice=%d bob=%d", aliceClaim, bobClaim)
+	}
+	if aliceClaim == http.StatusCreated {
+		winnerUser, secondUser = alice, bob
+	} else {
+		winnerUser, secondUser = bob, alice
+	}
+	if code := call(t, "PUT", hubURL+"/v1/deployments/shared-deploy/members/user:"+secondUser, winnerUser, map[string]string{"role": "admin"}, nil); code != http.StatusNoContent {
+		t.Fatalf("add second admin: %d", code)
+	}
+	if code := call(t, "PUT", hubURL+"/v1/deployments/shared-deploy/members/user:"+carol, winnerUser, map[string]string{"role": "viewer"}, nil); code != http.StatusNoContent {
+		t.Fatalf("add carol viewer: %d", code)
+	}
+	if code := call(t, "PUT", hubURL+"/v1/deployments/shared-deploy/repos/bwsalmon/silo", winnerUser, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("assign repo: %d", code)
+	}
+
+	// Index a completed .task.grain.md, an uncompleted .task.grain.md, and a standing .process.grain.md
+	// targeting https://hub.example.com/deployments/shared-deploy.
+	const canonDeployURL = "https://hub.example.com/deployments/shared-deploy"
+	doneGF := &grainfiles.Grainfile{
+		Kind:      grainfiles.KindTask,
+		Repo:      "https://github.com/bwsalmon/silo",
+		Ref:       "refs/heads/main",
+		Commit:    "c100",
+		Path:      ".grain/tasks/2026-10-19-done.task.grain.md",
+		Title:     "Done task",
+		Recipient: canonDeployURL,
+	}
+	if _, err := h.Grainfiles.IndexGrainfile(ctx, doneGF); err != nil {
+		t.Fatalf("IndexGrainfile(doneGF): %v", err)
+	}
+	if _, err := h.Grainfiles.RecordDependencyCompleted(ctx, "https://github.com/bwsalmon/silo/blob/main/.grain/tasks/2026-10-19-done.task.grain.md", "c100", "done", ""); err != nil {
+		t.Fatalf("RecordDependencyCompleted: %v", err)
+	}
+	openGF := &grainfiles.Grainfile{
+		Kind:      grainfiles.KindTask,
+		Repo:      "https://github.com/bwsalmon/silo",
+		Ref:       "refs/heads/main",
+		Commit:    "c101",
+		Path:      ".grain/tasks/2026-10-19-open.task.grain.md",
+		Title:     "Open task",
+		Recipient: canonDeployURL,
+	}
+	if _, err := h.Grainfiles.IndexGrainfile(ctx, openGF); err != nil {
+		t.Fatalf("IndexGrainfile(openGF): %v", err)
+	}
+	procGF, err := grainfiles.Parse(".grain/processes/gate.process.grain.md", []byte("---\ntitle: Standing gate\ngate: true\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
+	if err != nil {
+		t.Fatalf("Parse(procGF): %v", err)
+	}
+	procGF.Repo = "https://github.com/bwsalmon/silo"
+	procGF.Ref = "refs/heads/main"
+	procGF.Commit = "c102"
+	procGF.Recipient = canonDeployURL
+	if _, err := h.Grainfiles.IndexGrainfile(ctx, procGF); err != nil {
+		t.Fatalf("IndexGrainfile(procGF): %v", err)
+	}
+
+	// Mint initial deployment token for shared-deploy and connect the old host.
+	var oldMint struct {
+		Token string `json:"token"`
+	}
+	if code := call(t, "POST", hubURL+"/v1/deployments/shared-deploy/token", winnerUser, nil, &oldMint); code != http.StatusCreated {
+		t.Fatalf("mint old token: %d", code)
+	}
+
+	oldNode := &streamingTransferNode{id: "shared-deploy"}
+	oldClient := &rendezvous.Client{
+		Hub:   hubURL,
+		Token: func(context.Context) (string, error) { return oldMint.Token, nil },
+		Node: registry.Node{
+			ID:       "shared-deploy",
+			Repos:    []string{"bwsalmon/silo"},
+			Slots:    2,
+			UI:       &registry.NodeUI{Offered: true},
+			Features: []string{registry.FeatureGrainfiles},
+		},
+	}
+	oldConn, err := oldClient.Connect(ctx)
+	if err != nil {
+		t.Fatalf("oldClient.Connect: %v", err)
+	}
+	oldClosed := make(chan struct{})
+	go func() {
+		defer close(oldClosed)
+		for {
+			st, err := oldConn.Accept()
+			if err != nil {
+				return
+			}
+			go oldNode.handle(st)
+		}
+	}()
+	eventually(t, "shared-deploy online", func() bool {
+		return online(t, hubURL, "shared-deploy")
+	})
+	_, _, _ = h.Grainfiles.CatchupNode(ctx, "shared-deploy", true)
+
+	// Verify carol (accepted viewer) can access both API and nodeui before removal,
+	// and is immediately blocked with 403 Forbidden on both API and nodeui after DELETE /v1/users/carol.
+	callNodeUI := func(user string) int {
+		req, _ := http.NewRequest("GET", hubURL+"/stream", nil)
+		req.Host = "shared-deploy.nodes.hub.test"
+		req.Header.Set(userHeader, user)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("callNodeUI: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := call(t, "GET", hubURL+"/v1/me", carol, nil, nil); code != http.StatusOK {
+		t.Fatalf("carol /v1/me before delete: %d", code)
+	}
+	if code := callNodeUI(carol); code != http.StatusOK {
+		t.Fatalf("carol nodeui before delete: %d", code)
+	}
+	if code := call(t, "DELETE", hubURL+"/v1/users/"+carol, adminA, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("delete carol: %d", code)
+	}
+	if code := call(t, "GET", hubURL+"/v1/me", carol, nil, nil); code != http.StatusForbidden {
+		t.Fatalf("carol /v1/me after delete: %d, want 403", code)
+	}
+	if code := callNodeUI(carol); code != http.StatusForbidden {
+		t.Fatalf("carol nodeui after delete: %d, want 403", code)
+	}
+
+	// File an in-flight task on shared-deploy and open an active hub/live NodeStream.
+	var inflightTask tasks.Task
+	if code := call(t, "POST", hubURL+tasks.TasksPath, winnerUser, map[string]any{
+		"repo":        "bwsalmon/silo",
+		"prompt":      "in-flight work during host replacement",
+		"constraints": map[string]any{"node": "shared-deploy"},
+	}, &inflightTask); code != http.StatusCreated {
+		t.Fatalf("create inflight task: %d", code)
+	}
+	eventually(t, "inflight task running on old host", func() bool {
+		return taskState(t, hubURL, inflightTask.ID) == tasks.Running
+	})
+
+	oldUp, err := oldConn.Open(ctx)
+	if err != nil {
+		t.Fatalf("oldConn.Open: %v", err)
+	}
+	defer oldUp.Close()
+	_, _ = fmt.Fprintf(oldUp, `{"v":1,"seq":1,"type":"status","task":%q,"status":{"phase":"running","state":"info","message":"working"}}`+"\n", inflightTask.ID)
+
+	// Start background goroutines simulating the old host actively streaming hub/live events
+	// and fetching Grainfiles while secondUser triggers POST /v1/deployments/shared-deploy/token {"replace_host": true}.
+	var raceWG sync.WaitGroup
+	stopOld := make(chan struct{})
+	raceWG.Add(2)
+	go func() {
+		defer raceWG.Done()
+		for seq := int64(2); seq < 200; seq++ {
+			select {
+			case <-stopOld:
+				return
+			default:
+			}
+			_, _ = fmt.Fprintf(oldUp, `{"v":1,"seq":%d,"type":"transcript","task":%q,"transcript":{"kind":"text","text":"old-host"}}`+"\n", seq, inflightTask.ID)
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	go func() {
+		defer raceWG.Done()
+		for i := 0; i < 50; i++ {
+			select {
+			case <-stopOld:
+				return
+			default:
+			}
+			req, _ := http.NewRequest("GET", hubURL+"/v1/grainfiles/content?url="+url.QueryEscape("https://github.com/bwsalmon/silo/blob/main/.grain/tasks/2026-10-19-open.task.grain.md"), nil)
+			req.Header.Set("Authorization", "Bearer "+oldMint.Token)
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				resp.Body.Close()
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	time.Sleep(15 * time.Millisecond)
+
+	var replaceMint struct {
+		Token          string   `json:"token"`
+		ReplacedHost   bool     `json:"replaced_host"`
+		ReclaimedTasks []string `json:"reclaimed_tasks"`
+		ReplayedEvents int      `json:"replayed_events"`
+	}
+	if code := call(t, "POST", hubURL+"/v1/deployments/shared-deploy/token", secondUser, map[string]bool{"replace_host": true}, &replaceMint); code != http.StatusCreated {
+		t.Fatalf("replace_host: %d", code)
+	}
+	close(stopOld)
+	raceWG.Wait()
+
+	if !replaceMint.ReplacedHost || len(replaceMint.ReclaimedTasks) != 1 || replaceMint.ReclaimedTasks[0] != inflightTask.ID || replaceMint.ReplayedEvents != 2 {
+		t.Fatalf("unexpected replace_host result: %+v", replaceMint)
+	}
+
+	// Verify old host was immediately disconnected.
+	select {
+	case <-oldClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old host was not disconnected upon replace_host")
+	}
+
+	// Verify old host's revoked token is immediately rejected (401 Unauthorized) when fetching Grainfiles.
+	fetchReq, _ := http.NewRequest("GET", hubURL+"/v1/grainfiles/content?url="+url.QueryEscape("https://github.com/bwsalmon/silo/blob/main/.grain/tasks/2026-10-19-open.task.grain.md"), nil)
+	fetchReq.Header.Set("Authorization", "Bearer "+oldMint.Token)
+	fetchResp, err := http.DefaultClient.Do(fetchReq)
+	if err != nil {
+		t.Fatalf("fetch with revoked token: %v", err)
+	}
+	fetchResp.Body.Close()
+	if fetchResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("fetch with revoked token status = %d, want 401", fetchResp.StatusCode)
+	}
+
+	// Verify the reclaimed task is Queued (not completed by the old host) and can be claimed and completed once by the replacement host.
+	if st := taskState(t, hubURL, inflightTask.ID); st != tasks.Queued {
+		t.Fatalf("reclaimed task state before replacement host connects = %s, want queued", st)
+	}
+
+	// Verify that CatchupNode (advance=false) sees the 2 replayed events waiting for the replacement host.
+	replayedEvs, newCur, err := h.Grainfiles.CatchupNode(ctx, "shared-deploy", false)
+	if err != nil {
+		t.Fatalf("CatchupNode on replacement host: %v", err)
+	}
+	if len(replayedEvs) != 2 || newCur == 0 {
+		t.Fatalf("replacement host CatchupNode got %d events (cursor=%d), want 2: %+v", len(replayedEvs), newCur, replayedEvs)
+	}
+
+	// Connect replacement host with replaceMint.Token: it executes the reclaimed task to completion and receives the 2 replayed Grainfile notifications over rendezvous.
+	newNode := newSimulatedCapNode("shared-deploy", nil, []string{registry.FeatureGrainfiles}, 2, replaceMint.Token)
+	newConn, newDone, err := newNode.connectAndServe(ctx, hubURL)
+	if err != nil {
+		t.Fatalf("replacement host connectAndServe: %v", err)
+	}
+	defer func() {
+		newConn.Close()
+		<-newDone
+	}()
+
+	eventually(t, "reclaimed task completed by replacement host", func() bool {
+		return taskState(t, hubURL, inflightTask.ID) == tasks.Done
+	})
+	newNode.mu.Lock()
+	_, executedOnNew := newNode.offered[inflightTask.ID]
+	newNode.mu.Unlock()
+	if !executedOnNew {
+		t.Fatalf("expected reclaimed task %s to be offered and executed on replacement host", inflightTask.ID)
+	}
+
+	receivedPaths := map[string]string{}
+	deadline := time.After(5 * time.Second)
+	for len(receivedPaths) < 2 {
+		select {
+		case ev := <-newConn.GrainfileEvents():
+			receivedPaths[ev.Path] = ev.Type
+		case <-deadline:
+			t.Fatalf("timed out waiting for replacement host to receive 2 replayed Grainfile events over rendezvous; got %+v", receivedPaths)
+		}
+	}
+	if receivedPaths[".grain/tasks/2026-10-19-open.task.grain.md"] != grainfiles.EventTaskReady ||
+		receivedPaths[".grain/processes/gate.process.grain.md"] != grainfiles.EventProcessUpdated {
+		t.Fatalf("unexpected replayed Grainfile events delivered to replacement host: %+v", receivedPaths)
+	}
+}
