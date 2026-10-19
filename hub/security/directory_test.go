@@ -1,9 +1,15 @@
 package security_test
 
 import (
+	"bytes"
+	"context"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/bwsalmon/silo/hub/grainfiles"
 )
 
 // TestDeploymentAdminCannotBypassAcceptedUsers: adding a member admits a
@@ -127,4 +133,117 @@ func TestLosingStandingRevokesNodeTokens(t *testing.T) {
 		// The name is free again, for anyone.
 		hb.must(hb.user(alice), "POST", "/v1/deployments", map[string]string{"id": "tmp-dep"}, http.StatusCreated, nil)
 	})
+}
+
+// TestSelfServiceRepoClaimRequiresProofOfAccess: any accepted user can create
+// a self-service deployment and become its admin, so claiming an unowned
+// repository via PUT /v1/{deployments|teams}/{id}/repos/{owner}/{name} must
+// require proof of repository write access (.grain/hub-claim on the default
+// branch naming the deployment). Without that proof, a self-service admin
+// cannot claim victim-org/private-repo or read its Grainfiles and referenced
+// files via GET /v1/grainfiles/content.
+func TestSelfServiceRepoClaimRequiresProofOfAccess(t *testing.T) {
+	const commitSHA = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	const secretGF = `---
+grainfile: v1
+kind: task
+title: Internal migration
+references:
+  - /docs/internal.md
+---
+INTERNAL SECRET PLAN
+`
+	fetcher := &recordingFetcher{
+		files: map[string][]byte{
+			"https://github.com/victim-org/private-repo|tasks/secret.task.md|" + commitSHA: []byte(secretGF),
+			"https://github.com/victim-org/private-repo|tasks/secret.task.md|":             []byte(secretGF),
+			"https://github.com/victim-org/private-repo|docs/internal.md|" + commitSHA:     []byte("TOP SECRET DOC\n"),
+			"https://github.com/victim-org/private-repo|docs/internal.md|":                 []byte("TOP SECRET DOC\n"),
+		},
+	}
+	hb := startHub(t, options{grainfileFetcher: fetcher})
+	hb.teams()
+
+	// Index the private repo's Grainfile via signed push webhook (as happens when
+	// the Grain Hub GitHub App is installed on victim-org/private-repo).
+	whPayload, _ := jsonMarshal(map[string]any{
+		"ref":   "refs/heads/main",
+		"after": commitSHA,
+		"repository": map[string]any{
+			"html_url": "https://github.com/victim-org/private-repo",
+		},
+		"commits": []map[string]any{
+			{
+				"id":    commitSHA,
+				"added": []string{"tasks/secret.task.md"},
+			},
+		},
+	})
+	whReq, _ := http.NewRequest("POST", hb.url+grainfiles.GitHubWebhookPath, bytes.NewReader(whPayload))
+	whReq.Header.Set("Content-Type", "application/json")
+	whReq.Header.Set("X-GitHub-Event", "push")
+	whReq.Header.Set("X-Hub-Signature-256", signWebhook(webhookSecret, whPayload))
+	whResp, err := http.DefaultClient.Do(whReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whResp.Body.Close()
+	if whResp.StatusCode != http.StatusOK {
+		t.Fatalf("webhook status = %d, want 200", whResp.StatusCode)
+	}
+
+	// Accepted user nina creates a self-service deployment, mints a node token,
+	// and registers subscriptions so only repository ownership gates content access.
+	hb.must(hb.user(nina), "POST", "/v1/deployments", map[string]string{"id": "nina-dep"}, http.StatusCreated, nil)
+	tokNina := hb.mintDeployment(nina, "nina-dep")
+	if _, err := hb.h.Grainfiles.SetSubscriptions(context.Background(), grainfiles.Subscriptions{
+		NodeID:     "nina-dep",
+		Owner:      nina,
+		Repos:      []string{"https://github.com/victim-org/private-repo"},
+		Recipients: []string{"https://hub.test/deployments/nina-dep"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gfURL := "https://github.com/victim-org/private-repo/blob/main/tasks/secret.task.md"
+	gfQuery := url.Values{"grainfile_url": {gfURL}}.Encode()
+	refQuery := url.Values{"grainfile_url": {gfURL}, "reference": {"/docs/internal.md"}}.Encode()
+
+	// 1. Without .grain/hub-claim, nina cannot claim victim-org/private-repo via either route.
+	hb.must(hb.user(nina), "PUT", "/v1/deployments/nina-dep/repos/victim-org/private-repo", nil, http.StatusForbidden, nil)
+	hb.must(hb.user(nina), "PUT", "/v1/teams/nina-dep/repos/victim-org/private-repo", nil, http.StatusForbidden, nil)
+
+	// nina's node cannot read the private repo's Grainfile or referenced content.
+	if code, body, _ := hb.do(bearer(tokNina), "GET", grainfiles.ContentPath+"?"+gfQuery, nil); code != http.StatusForbidden || strings.Contains(string(body), "INTERNAL SECRET PLAN") {
+		t.Fatalf("unclaimed grainfile fetch: got %d %q, want 403", code, body)
+	}
+	if code, body, _ := hb.do(bearer(tokNina), "GET", grainfiles.ContentPath+"?"+refQuery, nil); code != http.StatusForbidden || strings.Contains(string(body), "TOP SECRET DOC") {
+		t.Fatalf("unclaimed reference fetch: got %d %q, want 403", code, body)
+	}
+
+	// 2. When .grain/hub-claim names a different deployment (victim-prod), nina is still refused.
+	fetcher.mu.Lock()
+	fetcher.files["https://github.com/victim-org/private-repo|.grain/hub-claim|"] = []byte("victim-prod\n")
+	fetcher.mu.Unlock()
+	hb.must(hb.user(nina), "PUT", "/v1/deployments/nina-dep/repos/victim-org/private-repo", nil, http.StatusForbidden, nil)
+	if code, _, _ := hb.do(bearer(tokNina), "GET", grainfiles.ContentPath+"?"+gfQuery, nil); code != http.StatusForbidden {
+		t.Fatalf("mismatched claim grainfile fetch: got %d, want 403", code)
+	}
+
+	// 3. Once .grain/hub-claim on the default branch names nina-dep, nina can claim the repo
+	// and her deployment node is admitted to read its Grainfiles and references.
+	fetcher.mu.Lock()
+	fetcher.files["https://github.com/victim-org/private-repo|.grain/hub-claim|"] = []byte("# Authorized deployment\nnina-dep\n")
+	fetcher.mu.Unlock()
+	hb.must(hb.user(nina), "PUT", "/v1/deployments/nina-dep/repos/victim-org/private-repo", nil, http.StatusNoContent, nil)
+
+	if code, body, _ := hb.do(bearer(tokNina), "GET", grainfiles.ContentPath+"?"+gfQuery, nil); code != http.StatusOK || !strings.Contains(string(body), "INTERNAL SECRET PLAN") {
+		t.Fatalf("claimed grainfile fetch: got %d %q, want 200 with body", code, body)
+	}
+	if code, body, _ := hb.do(bearer(tokNina), "GET", grainfiles.ContentPath+"?"+refQuery, nil); code != http.StatusOK || !strings.Contains(string(body), "TOP SECRET DOC") {
+		t.Fatalf("claimed reference fetch: got %d %q, want 200 with reference", code, body)
+	}
+
+	// 4. A Hub sys admin (root) may still assign an unowned repo without .grain/hub-claim.
+	hb.must(hb.user(root), "PUT", "/v1/deployments/nina-dep/repos/victim-org/sysadmin-assigned", nil, http.StatusNoContent, nil)
 }

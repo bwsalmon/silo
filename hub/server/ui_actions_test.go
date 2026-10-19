@@ -26,7 +26,10 @@ func TestWebUIActions(t *testing.T) {
 		DevUserHeader: userHeader,
 		HubAdmins:     []string{"user:" + root},
 		AcceptedUsers: []string{alice, bob, carol},
-		Logf:          logf(t),
+		GrainfileFetcher: &mapContentFetcher{files: map[string][]byte{
+			".grain/hub-claim": []byte("infra\n"),
+		}},
+		Logf: logf(t),
 	})
 	if err != nil {
 		t.Fatal(err)
