@@ -144,6 +144,38 @@ func (a *API) isHubAdmin(p identity.Principal) bool {
 	return false
 }
 
+// IsAcceptedUser reports whether email is an accepted Hub user (present in
+// accepted_users, a configured HubAdmin, or, when accepted_users is empty and
+// not strictly enforced, a member of at least one deployment/team).
+func (a *API) IsAcceptedUser(ctx context.Context, email string) (bool, error) {
+	email = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(email)), UserPrefix)
+	if email == "" || !strings.Contains(email, "@") {
+		return false, nil
+	}
+	if a.isHubAdmin(identity.Principal{Email: email}) {
+		return true, nil
+	}
+	if a.Store == nil {
+		return true, nil
+	}
+	accepted, _, hasAnyUsers, err := a.Store.CheckAcceptedUser(ctx, email)
+	if err != nil {
+		return false, err
+	}
+	if accepted {
+		return true, nil
+	}
+	enforce := hasAnyUsers || a.Store.EnforceAcceptedUsers() || a.EnforceAcceptedUsers
+	if enforce {
+		return false, nil
+	}
+	acc, err := a.Store.Access(ctx, identity.Principal{Email: email}, false)
+	if err != nil {
+		return false, err
+	}
+	return len(acc.Teams) > 0, nil
+}
+
 // Visible is rendezvous.Server.Visible: the node directory, filtered to
 // the nodes the caller may see.
 func (a *API) Visible(r *http.Request) (func(registry.Entry) bool, error) {

@@ -86,13 +86,14 @@ export interface Me {
   inbox_configured?: boolean;
 }
 
-export type InboxKind = 'awaiting_reply' | 'approval_request' | 'proposal' | 'failed';
+export type InboxKind = 'awaiting_reply' | 'approval_request' | 'proposal' | 'failed' | 'chat_mention';
 
 export const INBOX_KINDS: InboxKind[] = [
   'awaiting_reply',
   'approval_request',
   'proposal',
   'failed',
+  'chat_mention',
 ];
 
 export interface InboxPreferences {
@@ -104,6 +105,7 @@ export interface InboxItem {
   id: string;
   kind: InboxKind;
   task_id: string;
+  chat_id?: string;
   node_id?: string;
   node_ui_url?: string;
   team: string;
@@ -383,6 +385,8 @@ export const EVENT_TYPES = [
   'awaiting_reply',
   'message',
   'artifact',
+  'chat_updated',
+  'task_proposed',
 ];
 
 export interface Attachment {
@@ -482,3 +486,112 @@ export type ArtifactResult =
   | { kind: 'text'; text: string }
   | { kind: 'unavailable'; message: string }
   | { kind: 'error'; status: number; message: string };
+
+export type ChatReplyMode = 'mention' | 'all';
+
+export type ChatParticipantRole = 'participant' | 'viewer' | (string & {});
+
+export interface ChatParticipant {
+  email: string;
+  role: ChatParticipantRole;
+  source?: 'deployment' | 'invited' | (string & {});
+  added_by?: string;
+  added_at?: string;
+}
+
+export interface ChatExternalBinding {
+  provider: string;
+  external_id: string;
+  thread_id?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface ChatMessage {
+  seq: number;
+  id: string;
+  chat_id?: string;
+  sender: string;
+  role: 'user' | 'agent' | (string & {});
+  text: string;
+  attachments?: Attachment[];
+  triggered_agent?: boolean;
+  created_at: string;
+}
+
+export interface ChatSession {
+  id: string;
+  task_id: string;
+  title: string;
+  deployment: string;
+  linked_deployments: string[];
+  reply_mode: ChatReplyMode;
+  participants: ChatParticipant[];
+  repos: string[];
+  references: string[];
+  external_bindings: ChatExternalBinding[];
+  state?: TaskState;
+  node?: string;
+  awaiting_reply: boolean;
+  question?: string;
+  pending_approvals?: { id: string; tool: string; message?: string; deadline?: string }[];
+  proposed_tasks?: Task[];
+  messages?: ChatMessage[];
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_agent_seq?: number;
+}
+
+export interface ChatEvent {
+  seq: number;
+  type: string;
+  time: string;
+  chat_id: string;
+  task_id?: string;
+  message?: ChatMessage;
+  transcript?: { kind: string; text?: string };
+  status?: { phase: string; step?: string; state: string; message?: string };
+  awaiting_reply?: { state: 'waiting' | 'resumed' | string; question?: string; message_id?: string };
+  approval_request?: { id: string; tool: string; message?: string; deadline?: string };
+  result?: {
+    exit: { code: number; reason: string; detail?: string; cli_error?: { kind: string; message?: string } };
+    final_text?: string;
+    errors?: string[];
+  };
+  proposed_task?: Task;
+  chat?: ChatSession;
+}
+
+export interface ChatQuery {
+  deployment?: string;
+}
+
+export interface CreateChatInput {
+  title: string;
+  deployment: string;
+  linked_deployments?: string[];
+  reply_mode?: ChatReplyMode;
+  participants?: ChatParticipant[];
+  repos?: string[];
+  references?: string[];
+  prompt?: string;
+  external_bindings?: ChatExternalBinding[];
+}
+
+export interface UpdateChatInput {
+  title?: string;
+  reply_mode?: ChatReplyMode;
+  linked_deployments?: string[];
+  participants?: ChatParticipant[];
+  repos?: string[];
+  references?: string[];
+  external_bindings?: ChatExternalBinding[];
+}
+
+export interface PostChatMessageInput {
+  id?: string;
+  text: string;
+  attachments?: Attachment[];
+  trigger_agent?: boolean;
+}
+

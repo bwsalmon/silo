@@ -76,7 +76,7 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 	if create {
 		err = s.migrate(ctx)
 	} else {
-		err = dbaccess.Check(ctx, db, "tasks", "tasks", "task_approvals", "task_messages", "task_watchers")
+		err = dbaccess.Check(ctx, db, "tasks", "tasks", "task_approvals", "task_messages", "task_watchers", "chat_sessions", "chat_participants", "chat_messages")
 		if err == nil {
 			err = dbaccess.CheckColumns(ctx, db, "tasks", added...)
 		}
@@ -147,7 +147,45 @@ CREATE TABLE IF NOT EXISTS task_watchers (
 	delivered INTEGER NOT NULL,
 	PRIMARY KEY (task, node, node_task)
 );
-CREATE INDEX IF NOT EXISTS task_watchers_pending ON task_watchers (delivered, task)
+CREATE INDEX IF NOT EXISTS task_watchers_pending ON task_watchers (delivered, task);
+CREATE TABLE IF NOT EXISTS chat_sessions (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	title TEXT NOT NULL,
+	deployment TEXT NOT NULL,
+	linked_deployments TEXT NOT NULL DEFAULT '[]',
+	reply_mode TEXT NOT NULL DEFAULT 'mention',
+	repos TEXT NOT NULL DEFAULT '[]',
+	refs TEXT NOT NULL DEFAULT '[]',
+	external_bindings TEXT NOT NULL DEFAULT '[]',
+	created_by TEXT NOT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	last_agent_seq BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS chat_sessions_deployment ON chat_sessions (deployment, updated_at);
+CREATE INDEX IF NOT EXISTS chat_sessions_task ON chat_sessions (task_id);
+CREATE TABLE IF NOT EXISTS chat_participants (
+	chat TEXT NOT NULL,
+	email TEXT NOT NULL,
+	role TEXT NOT NULL,
+	added_by TEXT NOT NULL DEFAULT '',
+	added_at BIGINT NOT NULL DEFAULT 0,
+	PRIMARY KEY (chat, email)
+);
+CREATE INDEX IF NOT EXISTS chat_participants_email ON chat_participants (email);
+CREATE TABLE IF NOT EXISTS chat_messages (
+	chat TEXT NOT NULL,
+	seq BIGINT NOT NULL,
+	id TEXT NOT NULL,
+	sender TEXT NOT NULL,
+	role TEXT NOT NULL,
+	text TEXT NOT NULL DEFAULT '',
+	attachments TEXT NOT NULL DEFAULT '[]',
+	triggered_agent INTEGER NOT NULL DEFAULT 0,
+	created_at BIGINT NOT NULL,
+	PRIMARY KEY (chat, seq)
+)
 `
 
 // added are the columns added to tasks since it was first made.

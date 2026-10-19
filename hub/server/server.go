@@ -53,6 +53,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bwsalmon/silo/events"
 	"github.com/bwsalmon/silo/hub/claims"
 	"github.com/bwsalmon/silo/hub/directory"
 	"github.com/bwsalmon/silo/hub/grainfiles"
@@ -655,7 +656,22 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 		Events:       h.Events,
 		Registry:     h.Registry,
 		NodeUIDomain: cfg.NodeUIDomain,
+		TaskEvents: func(ctx context.Context, taskID string) ([]events.Event, error) {
+			evs, err := h.Live.RecentEvents(ctx, taskID)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]events.Event, 0, len(evs))
+			for _, e := range evs {
+				out = append(out, e.Event)
+			}
+			return out, nil
+		},
 	}
+	h.Live.OnEvent = func(e live.Event) {
+		tasksAPI.OnTaskEvent(e.Task, e.Event)
+	}
+	filer.OnFiled = tasksAPI.OnTaskFiled
 	fetcher := cfg.GrainfileFetcher
 	if fetcher == nil {
 		fetcher = &grainfiles.GitHubFetcher{
@@ -725,6 +741,8 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	}
 	tk := tasksAPI.Handler()
 	m.Handle(tasks.InboxPath, tk)
+	m.Handle(tasks.ChatsPath, tk)
+	m.Handle(tasks.ChatsPath+"/", tk)
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
 	gf := h.GrainfilesAPI.Handler()

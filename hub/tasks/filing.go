@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,8 @@ type Filer struct {
 	Every time.Duration
 	// Logf, when set, receives one line per task filed.
 	Logf func(format string, args ...any)
+	// OnFiled, when set, is called after a task is filed.
+	OnFiled func(t Task)
 	// Now, when set, is the rate limit's clock.
 	Now func() time.Time
 
@@ -233,10 +236,19 @@ func (f *Filer) file(ctx context.Context, nodeID, owner string, req Filing) (Tas
 		}
 		spec.Team = team
 	default:
-		// A team-targeted task is never proposed, for a human either: it
-		// is for a team both its submitter and its filer are in.
+		linkedAllowed := false
+		if req.OriginTask != "" {
+			if chat, ok, _ := f.Store.GetChatByTask(ctx, req.OriginTask); ok && slices.Contains(chat.LinkedDeployments, req.Team) {
+				if exists, _ := f.Directory.HasTeam(ctx, req.Team); exists {
+					linkedAllowed = true
+				}
+			}
+		}
 		if !subAcc.MemberOf(req.Team) || !ownerAcc.MemberOf(req.Team) {
-			return Task{}, fmt.Errorf("%w: no such team %s, or its submitter and the node's owner are not both in it", ErrInvalid, req.Team)
+			if !linkedAllowed {
+				return Task{}, fmt.Errorf("%w: no such team %s, or its submitter and the node's owner are not both in it", ErrInvalid, req.Team)
+			}
+			propose = true
 		}
 		if settings, sErr := f.Directory.TeamSettings(ctx, req.Team); sErr == nil && settings.RequireApproval {
 			propose = true
@@ -265,6 +277,9 @@ func (f *Filer) file(ctx context.Context, nodeID, owner string, req Filing) (Tas
 	}
 	if t.State == Queued && f.Dispatcher != nil {
 		f.Dispatcher.Wake()
+	}
+	if f.OnFiled != nil {
+		f.OnFiled(t)
 	}
 	return t, nil
 }

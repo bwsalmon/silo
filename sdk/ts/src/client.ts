@@ -15,11 +15,24 @@
 // requires; a browser marks it same-origin itself (Origin and
 // Sec-Fetch-Site), and a client that is not a browser sends neither.
 import { check } from './errors.js';
-import { followEventSource, followFetch, type Connection, type EventStream, type FollowOptions, type Transport } from './events.js';
+import {
+  followEventSource,
+  followFetch,
+  type Connection,
+  type EventStream,
+  type FollowOptions,
+  type SubscribeChatEventsOptions,
+  type Transport,
+} from './events.js';
 import type {
   AcceptedUser,
   Approval,
   ArtifactResult,
+  ChatEvent,
+  ChatMessage,
+  ChatQuery,
+  ChatSession,
+  CreateChatInput,
   Decision,
   Deployment,
   DeploymentSettings,
@@ -38,6 +51,7 @@ import type {
   NewTask,
   NodeEntry,
   NodeToken,
+  PostChatMessageInput,
   ResolvedTheme,
   Role,
   Task,
@@ -45,6 +59,7 @@ import type {
   TaskQuery,
   Team,
   TeamSettings,
+  UpdateChatInput,
 } from './models.js';
 
 // TokenSource is a bearer token, or a function that answers the current
@@ -77,7 +92,7 @@ export interface HubClientOptions {
   adminMode?: boolean;
 }
 
-type Method = 'POST' | 'PUT' | 'DELETE';
+type Method = 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 const enc = (s: string): string => {
   const encoded = encodeURIComponent(s);
@@ -87,6 +102,7 @@ const enc = (s: string): string => {
   return encoded;
 };
 const taskPath = (id: string) => `/v1/tasks/${enc(id)}`;
+const chatPath = (id: string) => `/v1/chats/${enc(id)}`;
 const teamPath = (team: string) => `/v1/teams/${enc(team)}`;
 const deploymentPath = (id: string) => `/v1/deployments/${enc(id)}`;
 // repoPath keeps the slash between a repository's owner and name: the
@@ -661,5 +677,42 @@ export class HubClient {
   async listGrainfileEvents(q: GrainfileQuery = {}, signal?: AbortSignal): Promise<GrainfileEvent[]> {
     const r = await this.getGrainfilesOverview(q, signal);
     return r.events;
+  }
+
+  // Shared chat sessions (docs/hub.md §6.6, docs/shared-chats.md).
+
+  async listChats(q: ChatQuery = {}, signal?: AbortSignal): Promise<ChatSession[]> {
+    const p = new URLSearchParams();
+    if (q.deployment) p.set('deployment', q.deployment);
+    const s = p.toString();
+    const r = await this.getJSON<{ chats: ChatSession[] }>(`/v1/chats${s ? `?${s}` : ''}`, signal);
+    return r.chats ?? [];
+  }
+
+  createChat(input: CreateChatInput): Promise<ChatSession> {
+    return this.write<ChatSession>('POST', '/v1/chats', input);
+  }
+
+  getChat(id: string, signal?: AbortSignal): Promise<ChatSession> {
+    return this.getJSON<ChatSession>(chatPath(id), signal);
+  }
+
+  updateChat(id: string, input: UpdateChatInput): Promise<ChatSession> {
+    return this.write<ChatSession>('PATCH', chatPath(id), input);
+  }
+
+  postChatMessage(id: string, input: PostChatMessageInput): Promise<ChatMessage> {
+    return this.write<ChatMessage>('POST', `${chatPath(id)}/messages`, input);
+  }
+
+  subscribeChatEvents(id: string, o: SubscribeChatEventsOptions): EventStream {
+    const transport = o.transport ?? this.opts.transport ?? this.defaultTransport();
+    const conn: Connection = {
+      url: (chatId, from) => `${this.base}${chatPath(chatId)}/events${from !== undefined ? `?from=${from}` : ''}`,
+      fetch: (url, init) => this.send(url, init),
+      headers: () => this.headers(),
+      withCredentials: this.opts.credentials === 'include',
+    };
+    return transport === 'eventsource' ? followEventSource<ChatEvent>(conn, id, o) : followFetch<ChatEvent>(conn, id, o);
   }
 }

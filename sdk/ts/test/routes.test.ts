@@ -69,6 +69,12 @@ const cases: Record<string, Case> = {
   inspectGrainfile: ['GET', '/v1/grainfiles', (h) => h.inspectGrainfile('https://github.com/acme/app/blob/main/tasks/deploy.task.md')],
   listGrainfileSubscriptions: ['GET', '/v1/grainfiles', (h) => h.listGrainfileSubscriptions('node-1')],
   listGrainfileEvents: ['GET', '/v1/grainfiles', (h) => h.listGrainfileEvents({ recipient: 'https://github.com/acme/grain-eu' })],
+  listChats: ['GET', '/v1/chats', (h) => h.listChats({ deployment: 'infra' })],
+  createChat: ['POST', '/v1/chats', (h) => h.createChat({ title: 'Ops Room', deployment: 'infra' })],
+  getChat: ['GET', '/v1/chats/{id}', (h) => h.getChat('c-1')],
+  updateChat: ['PATCH', '/v1/chats/{id}', (h) => h.updateChat('c-1', { reply_mode: 'all' })],
+  postChatMessage: ['POST', '/v1/chats/{id}/messages', (h) => h.postChatMessage('c-1', { text: 'hello' })],
+  subscribeChatEvents: ['GET', '/v1/chats/{id}/events', (h) => h.subscribeChatEvents('c-1', { onEvent: () => {} }).done],
 };
 
 const pattern = (template: string) => new RegExp(`^${template.replace(/\{[a-z_]+\}/g, '[^/?]+')}(\\?|$)`);

@@ -1210,24 +1210,39 @@ routes over `Server.Open` to the Grain deployment that owns the run
   routes `message` to the owning node, which acknowledges ingestion with
   a `message` event on its event stream (§7.1) and signals waiting state
   with `awaiting_reply` (`waiting` / `resumed`).
+- **Shared chat sessions (`GET /v1/chats`, `POST /v1/chats`,
+  `GET /v1/chats/{id}`, `PATCH /v1/chats/{id}`,
+  `POST /v1/chats/{id}/messages`, `GET /v1/chats/{id}/events`):**
+  Multi-user and multi-agent collaborative chat rooms (`docs/shared-chats.md`)
+  backed by a primary deployment's standing interactive session plus optional
+  `linked_deployments`, invited participants (`participant` / `viewer` from
+  `accepted_users`), `@mention` vs `all` reply modes, attributed message
+  delivery (`[sender]: text`), and extensible `external_bindings` (e.g.
+  Google Chat spaces).
 
 The Grainfile discovery (`grainfiles.API`), task, and interactive-action
 HTTP API routes (`tasks.API`, verified by `sdk/ts/test/routes.test.ts`):
 
 ```
-GET  /v1/inbox?nodes=node-1,node-2&kind=awaiting_reply|approval_request|proposal|failed   actionable items across the caller's selected deployments
-GET  /v1/grainfiles?kind=task|process&recipient=...&repo=...&draft=true|false&node=...&url=...   indexed Grainfile metadata, subscriptions, and events
-POST /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}
-GET  /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
-GET  /v1/tasks/{id}
-POST /v1/tasks/{id}/cancel {"reason"}                        its submitter, a team admin or a hub admin
-POST /v1/tasks/{id}/requeue                                  the same (current build)
-POST /v1/tasks/{id}/approve                                  a member of its team, not its submitter
-POST /v1/tasks/{id}/reject {"reason"}                        the same
-GET  /v1/tasks/{id}/approvals                                the answers to its approval requests
-POST /v1/tasks/{id}/approvals/{request_id} {"decision","reason"}   a member of its team: allow or deny one
-GET  /v1/tasks/{id}/messages                                 the messages sent to an interactive task
-POST /v1/tasks/{id}/messages {"id","text","attachments"}     its submitter or a member of its team: send it one
+GET   /v1/inbox?nodes=node-1,node-2&kind=awaiting_reply|approval_request|proposal|failed|chat_mention   actionable items across the caller's selected deployments and shared chats
+GET   /v1/grainfiles?kind=task|process&recipient=...&repo=...&draft=true|false&node=...&url=...   indexed Grainfile metadata, subscriptions, and events
+POST  /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}
+GET   /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
+GET   /v1/tasks/{id}
+POST  /v1/tasks/{id}/cancel {"reason"}                        its submitter, a team admin or a hub admin
+POST  /v1/tasks/{id}/requeue                                  the same (current build)
+POST  /v1/tasks/{id}/approve                                  a member of its team, not its submitter
+POST  /v1/tasks/{id}/reject {"reason"}                        the same
+GET   /v1/tasks/{id}/approvals                                the answers to its approval requests
+POST  /v1/tasks/{id}/approvals/{request_id} {"decision","reason"}   a member of its team: allow or deny one
+GET   /v1/tasks/{id}/messages                                 the messages sent to an interactive task
+POST  /v1/tasks/{id}/messages {"id","text","attachments"}     its submitter or a member of its team: send it one
+GET   /v1/chats                                               shared chat sessions the caller has access to
+POST  /v1/chats {"title","deployment","linked_deployments","reply_mode","participants","repos","references","prompt","external_bindings"}
+GET   /v1/chats/{id}                                          shared chat session metadata, participants, external bindings, and transcript
+PATCH /v1/chats/{id} {"title","reply_mode","linked_deployments","participants","repos","references","external_bindings"}
+POST  /v1/chats/{id}/messages {"id","text","attachments","trigger_agent"}
+GET   /v1/chats/{id}/events                                   live SSE stream of shared chat messages, agent replies, approvals, and proposed tasks
 ```
 
 #### 6.6.1 Legacy imperative backlog and signed claims in the current build (`hub/tasks`, `hub/claims`)

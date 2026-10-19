@@ -14,17 +14,17 @@
 //     token and headers, and so works in Node and behind IAP with a
 //     bearer token. It reconnects from its cursor with ?from=.
 import { check } from './errors.js';
-import { EVENT_TYPES, type HubEvent } from './models.js';
+import { EVENT_TYPES, type ChatEvent, type HubEvent } from './models.js';
 
 export type StreamState = 'connecting' | 'live' | 'reconnecting' | 'ended' | 'closed';
 
 export type Transport = 'eventsource' | 'fetch';
 
-export interface FollowOptions {
+export interface FollowOptions<E = HubEvent> {
   // from resumes after this seq: only events after it are delivered.
   // 0, the start, by default.
   from?: number;
-  onEvent: (e: HubEvent) => void;
+  onEvent: (e: E) => void;
   onState?: (s: StreamState) => void;
   // onError hears why a stream closed for good (an ApiError for a
   // refusal such as a 404), or a failure it will reconnect after.
@@ -34,6 +34,8 @@ export interface FollowOptions {
   // transport overrides the client's choice (see HubClient).
   transport?: Transport;
 }
+
+export type SubscribeChatEventsOptions = FollowOptions<ChatEvent>;
 
 // EventStream is one subscription. cursor is the last seq delivered;
 // done settles once the stream has ended or closed.
@@ -110,14 +112,14 @@ export interface Connection {
 // retryMs is how long the fetch transport waits before it reconnects.
 export const retryMs = 1000;
 
-class Subscription implements EventStream {
+class Subscription<E extends { seq?: number } = HubEvent> implements EventStream {
   cursor: number;
   state: StreamState = 'connecting';
   readonly done: Promise<void>;
   private settle!: () => void;
   protected readonly abort = new AbortController();
 
-  constructor(protected readonly o: FollowOptions) {
+  constructor(protected readonly o: FollowOptions<E>) {
     this.cursor = o.from ?? 0;
     this.done = new Promise((r) => (this.settle = r));
     o.signal?.addEventListener('abort', () => this.close(), { once: true });
@@ -135,9 +137,9 @@ class Subscription implements EventStream {
 
   // deliver passes on an event's data once, after the cursor.
   protected deliver(data: string) {
-    let e: HubEvent;
+    let e: E;
     try {
-      e = JSON.parse(data) as HubEvent;
+      e = JSON.parse(data) as E;
     } catch {
       return; // Not an event: nothing the hub sends.
     }
@@ -157,8 +159,8 @@ class Subscription implements EventStream {
 // opened with a cursor names it in its URL, which wins over
 // Last-Event-ID, so its reconnects replay from that cursor: the seqs
 // already delivered are dropped here.
-export function followEventSource(c: Connection, task: string, o: FollowOptions): EventStream {
-  const s = new (class extends Subscription {
+export function followEventSource<E extends { seq?: number } = HubEvent>(c: Connection, task: string, o: FollowOptions<E>): EventStream {
+  const s = new (class extends Subscription<E> {
     es: EventSource;
     constructor() {
       super(o);
@@ -180,8 +182,8 @@ export function followEventSource(c: Connection, task: string, o: FollowOptions)
 
 // followFetch follows with a streamed fetch, reconnecting from its
 // cursor until the stream ends, is closed, or is refused.
-export function followFetch(c: Connection, task: string, o: FollowOptions): EventStream {
-  const s = new (class extends Subscription {
+export function followFetch<E extends { seq?: number } = HubEvent>(c: Connection, task: string, o: FollowOptions<E>): EventStream {
+  const s = new (class extends Subscription<E> {
     async run() {
       let first = true;
       while (this.state !== 'ended' && this.state !== 'closed') {

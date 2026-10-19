@@ -106,6 +106,8 @@ type Hub struct {
 	// OnResult, when set, is invoked when a NodeStream ingests a terminal
 	// result event for a task.
 	OnResult func(ctx context.Context, task tasks.Task, state, reason string)
+	// OnEvent, when set, is invoked whenever a fresh event is ingested for a task.
+	OnEvent func(e Event)
 
 	wmu     sync.Mutex
 	waiters map[string]map[chan struct{}]struct{} // stored subscriptions, by task
@@ -425,6 +427,9 @@ func (h *Hub) NodeStream(nodeID string, c net.Conn) {
 		if fresh && class.Stored() {
 			h.announce(t.id, e.Seq)
 		}
+		if fresh && h.OnEvent != nil {
+			h.OnEvent(e)
+		}
 		if fresh && e.Type == events.TypeResult && e.Result != nil {
 			meta := ExtractRunMeta(line, e)
 			if streamTask.GrainfileURL == "" && meta.GrainfileURL != "" {
@@ -740,4 +745,35 @@ func (h *Hub) follow(ctx context.Context, sn *subscription, send func(Event) err
 			return "", ctx.Err()
 		}
 	}
+}
+
+// RecentEvents returns a snapshot of task's stored events and in-memory ring
+// events in seq order.
+func (h *Hub) RecentEvents(ctx context.Context, taskID string) ([]Event, error) {
+	t, err := h.acquire(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	var ring []Event
+	for _, r := range t.ring {
+		ring = append(ring, r.e)
+	}
+	hw := t.last
+	t.mu.Unlock()
+
+	var stored []Event
+	if hw > 0 && h.Log != nil {
+		if stored, err = h.Log.Since(ctx, taskID, 0, hw); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]Event, 0, len(stored)+len(ring))
+	for len(stored) > 0 || len(ring) > 0 {
+		if len(ring) == 0 || (len(stored) > 0 && stored[0].Seq < ring[0].Seq) {
+			out, stored = append(out, stored[0]), stored[1:]
+		} else {
+			out, ring = append(out, ring[0]), ring[1:]
+		}
+	}
+	return out, nil
 }
