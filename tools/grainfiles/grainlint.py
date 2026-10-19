@@ -230,6 +230,17 @@ def _strip_yaml_quoted_and_comments(src):
     return "".join(out)
 
 
+def _bounded_replace(path, s, old, new, count=None):
+    """Jinja2's `replace` filter, refusing (GF006) any result over MAX_FILE_BYTES before allocating it."""
+    s, old, new = str(s), str(old), str(new)
+    n = len(s) + 1 if old == "" else s.count(old)
+    if count is not None:
+        n = min(n, max(int(count), 0))
+    if len(s.encode("utf-8")) + n * (len(new.encode("utf-8")) - len(old.encode("utf-8"))) > MAX_FILE_BYTES:
+        raise Finding("GF006", path, "rendered grainfile template exceeds 1 MiB")
+    return s.replace(old, new) if count is None else s.replace(old, new, int(count))
+
+
 def render_template(raw_text, path="<template>", cli_vars=None):
     """Render a sandboxed .grain.md.jinja2 template -> (rendered_text, template_vars) or raises Finding."""
     if isinstance(raw_text, bytes):
@@ -243,6 +254,7 @@ def render_template(raw_text, path="<template>", cli_vars=None):
         raise Finding("GF006", path, "grainfile template exceeds 1 MiB")
     raw_text = raw_text.replace("\r\n", "\n")
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(loader=None, keep_trailing_newline=True)
+    env.filters["replace"] = lambda s, old, new, count=None: _bounded_replace(path, s, old, new, count)
     try:
         ast = env.parse(raw_text)
     except jinja2.TemplateSyntaxError as e:
@@ -263,9 +275,29 @@ def render_template(raw_text, path="<template>", cli_vars=None):
         jinja2.nodes.Concat,
     )):
         raise Finding("GF033", path, "unsupported Jinja2 operator %s" % type(mnode).__name__.lower())
+    # Like the Go renderer, the sandboxed grammar has no function or method
+    # calls and no attribute/item access beyond `loop.<attr>`: a sandboxed
+    # str method call such as "x".ljust(10**9) would otherwise allocate
+    # unbounded memory before the rendered-size check below ever ran.
+    for cnode in ast.find_all(jinja2.nodes.Call):
+        raise Finding("GF033", path, "unsupported Jinja2 call expression in sandboxed grainfile template")
+    for anode in ast.find_all((jinja2.nodes.Getattr, jinja2.nodes.Getitem, jinja2.nodes.Slice)):
+        if not (isinstance(anode, jinja2.nodes.Getattr) and isinstance(anode.node, jinja2.nodes.Name)
+                and anode.node.name == "loop"):
+            raise Finding("GF033", path, "unsupported Jinja2 attribute or item access in sandboxed grainfile template")
     try:
         template_vars = sorted(jinja2.meta.find_undeclared_variables(ast))
-        rendered = env.from_string(raw_text).render(**(cli_vars or {}))
+        # Stream the output and stop as soon as it exceeds MAX_FILE_BYTES,
+        # rather than materializing an output-expansion bomb first.
+        chunks, total = [], 0
+        for chunk in env.from_string(raw_text).generate(**(cli_vars or {})):
+            total += len(chunk.encode("utf-8"))
+            if total > MAX_FILE_BYTES:
+                raise Finding("GF006", path, "rendered grainfile template exceeds 1 MiB")
+            chunks.append(chunk)
+        rendered = "".join(chunks)
+    except Finding:
+        raise
     except jinja2.TemplateError as e:
         raise Finding("GF033", path, "Jinja2 render error: %s" % e)
     except Exception as e:

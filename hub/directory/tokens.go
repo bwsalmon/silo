@@ -294,3 +294,66 @@ func (s *Store) ReleaseNodeID(ctx context.Context, owner, node string) error {
 	}
 	return nil
 }
+
+// RevokeOwnerTokens revokes every live node token owner holds, for node
+// only when node is non-empty, and returns the distinct node IDs whose
+// tokens it revoked, so the caller can disconnect them. It is used when an
+// owner loses the standing their tokens were minted on: removed from the
+// accepted users list, or removed from the deployment the token is for.
+// The tokens stay unreleased, so the owner's claim to a personal node ID
+// is kept (an admin of a deployment may still mint over it).
+func (s *Store) RevokeOwnerTokens(ctx context.Context, owner, node string) ([]string, error) {
+	o, err := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(owner)), UserPrefix))
+	if err != nil {
+		return nil, err
+	}
+	where := ` WHERE owner = ? AND revoked_at IS NULL`
+	args := []any{o}
+	if node != "" {
+		where += ` AND node = ?`
+		args = append(args, node)
+	}
+	var nodes []string
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		nodes = nil
+		rows, err := tx.QueryContext(ctx, s.q(`SELECT DISTINCT node FROM node_tokens`+where), args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				rows.Close()
+				return err
+			}
+			nodes = append(nodes, n)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ?`+where), append([]any{s.now().UnixMilli()}, args...)...)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+// ReleaseNodeTokens revokes and releases every owner's tokens for node,
+// returning how many it changed. It is used when the deployment node
+// names is deleted, so no former admin's host stays connected as it and
+// the name can be created again.
+func (s *Store) ReleaseNodeTokens(ctx context.Context, node string) (int64, error) {
+	now := s.now().UnixMilli()
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = COALESCE(revoked_at, ?), released_at = ? WHERE node = ? AND released_at IS NULL`), now, now, node)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return n, err
+}
