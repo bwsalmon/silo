@@ -1482,17 +1482,19 @@ func TestConcurrentHostReplacementAndAcceptedUsersEnforcement(t *testing.T) {
 	)
 
 	h, err := New(ctx, Config{
-		Database:         dbURL,
-		DevUserHeader:    userHeader,
-		HubAdmins:        []string{"user:" + adminA},
-		AcceptedUsers:    []string{adminB, alice, bob, carol},
-		HubURL:           "https://hub.example.com",
-		NodeUIDomain:     "nodes.hub.test",
-		Heartbeat:        150 * time.Millisecond,
-		ShutdownGrace:    5 * time.Second,
-		DispatchRetry:    80 * time.Millisecond,
-		GrainfileFetcher: &mapContentFetcher{files: map[string][]byte{}},
-		Logf:             logf(t),
+		Database:      dbURL,
+		DevUserHeader: userHeader,
+		HubAdmins:     []string{"user:" + adminA},
+		AcceptedUsers: []string{adminB, alice, bob, carol},
+		HubURL:        "https://hub.example.com",
+		NodeUIDomain:  "nodes.hub.test",
+		Heartbeat:     150 * time.Millisecond,
+		ShutdownGrace: 5 * time.Second,
+		DispatchRetry: 80 * time.Millisecond,
+		GrainfileFetcher: &mapContentFetcher{files: map[string][]byte{
+			".grain/hub-claim": []byte("shared-deploy\n"),
+		}},
+		Logf: logf(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
