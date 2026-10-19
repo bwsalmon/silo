@@ -29,7 +29,7 @@ Where this specification makes a normative design choice, the choice is marked *
 
 ## 1. Conventions
 
-**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) checked into Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` directs a single unit of work (optionally gated by `depends_on` or `not_before`) to a `recipient` deployment (such as its canonical Hub deployment URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, schedule, or manual events (`when`).
+**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) checked into Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` directs a single unit of work (optionally gated by `depends_on` or `not_before`) to a `recipient` deployment (defaulting to `"/"` for the source repository's deployment, or a canonical Hub deployment URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, CI workflow, schedule, or manual events (`when`). Grain deployments connect to the Silo Hub, subscribe to the `.task.grain.md` recipient identities they serve (`recipients`) and the `.process.grain.md` repositories, folders, or URLs they execute (`repos`, `folders`, `grainfiles`), and automatically include and run matching tasks and processes when their triggers and dependencies fire.
 
 1.1. The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY" and "OPTIONAL" are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
@@ -76,11 +76,11 @@ Where this specification makes a normative design choice, the choice is marked *
 
 The format defines:
 - the two grainfile kinds, `task` (`<name>.task.grain.md`) and `process` (`<name>.process.grain.md`), and their self-contained Jinja2 template counterparts (`<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2`) (§4.1, §5.7, §7);
-- the format version field `grainfile: v1` (optional, defaulting to `"v1"`) and programmatic version mapping to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3);
+- the mandatory format version field `grainfile: v1` (required in every Grainfile; `GF020` when omitted) and programmatic version mapping to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3);
 - source authority from the repository/folder URL where the grainfile lives, task `recipient` deployment identities (defaulting to `"/"` when omitted), and optional task `requestor` attribution (`Name <email>` or plain `https://` URL) (§6);
 - work-in-progress drafting (`draft: true`) and deferred execution/activation (`not_before`) (§6.3, §6.4);
 - plain `https://` remote references (including standard forge `/blob/<ref>/<path>` and `/tree/<ref>/<path>` URLs) and repo-local references in `references` and task-only `depends_on` (§8);
-- structured process triggers (`when`: `schedule`, `push`, `merge`, `pull_request`, `manual`, `scenario`) and commit/pull-request gating (`gate: true`) (§7.2);
+- structured process triggers (`when`: `schedule`, `push`, `merge`, `pull_request`, `workflow`, `manual`, `scenario`) and commit/pull-request gating (`gate: true`) (§7.2);
 - the direct execution and lifecycle model by which deployments watch repositories and execute matching `.task.grain.md` and `.process.grain.md` files (§9);
 - the validation rules, lint codes (§10), and security invariants (§11).
 
@@ -186,7 +186,7 @@ A reader MUST support at least, and MAY refuse beyond (GF006): a grainfile of 1 
 ### 6.1 Common fields
 
 The entire Grainfile `v1` front-matter vocabulary consists of **10 orthogonal fields** (plus `title` and `x_*` extensions):
-- **Shared (5):** `grainfile`, `draft`, `not_before`, `references`, `from_template`
+- **Shared (5):** `grainfile` (`"v1"`, **required**), `title` (**required**), `draft`, `not_before`, `references`, `from_template`
 - **`.task.grain.md` only (3):** `recipient` (optional, default `"/"`), `requestor` (optional), `depends_on` (optional; targets must resolve to concrete `.task.grain.md` files, never `.process.grain.md` and never unrendered `.jinja2` templates)
 - **`.process.grain.md` only (2):** `when` (required), `gate` (optional, default `false`)
 
@@ -232,8 +232,8 @@ A **deployment identity** is a reference (§8.1) naming the canonical Hub deploy
 
 #### 6.2.3 Rules for `recipient` and `requestor`
 
-- **`recipient`** (OPTIONAL on `.task.grain.md` only, default `"/"`) MUST be a deployment identity when present (GF020). When omitted on a `.task.grain.md`, `recipient` defaults to `"/"` (resolving to the root of the repository where the grainfile lives). A user identity or empty string in `recipient` is an error (GF020). `recipient` is not permitted on `.process.grain.md` (GF022 / GF020).
-- **`requestor`** (OPTIONAL on `.task.grain.md` only) MAY be omitted; when present, it MUST be either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (GF020, GF035). `requestor` is not permitted on `.process.grain.md` (GF022 / GF020).
+- **`recipient`** (OPTIONAL on `.task.grain.md` only, default `"/"`) MUST be a deployment identity when present (GF020). When omitted on a `.task.grain.md`, `recipient` defaults to `"/"` (resolving to the root of the repository where the grainfile lives). A user identity or empty string in `recipient` is an error (GF020). `recipient` is not permitted on `.process.grain.md` (GF020).
+- **`requestor`** (OPTIONAL on `.task.grain.md` only) MAY be omitted; when present, it MUST be either a user identity (`Name <email>`) or a plain `https://` URL / deployment identity (GF020, GF035). `requestor` is not permitted on `.process.grain.md` (GF020).
 
 ### 6.3 Drafts (`draft`)
 
@@ -514,8 +514,8 @@ Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/te
 
 1. **Two directly executed kinds (`<name>.task.grain.md` and `<name>.process.grain.md`) and self-contained `.grain.md.jinja2` templates.** Discrete one-off tasks are `<name>.task.grain.md` and standing/repeatable processes are `<name>.process.grain.md` (`**/*.grain.md`, 100% literal), while `<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2` apply sandboxed Jinja2 to the whole file to produce a standard `.task.grain.md` or `.process.grain.md` (§2.1, §4.1, §5.7, §7, §9).
 2. **Mandatory version field (`grainfile: v1`) and agent quick-reference.** Front matter on every `.task.grain.md` and `.process.grain.md` (and rendered `.grain.md.jinja2` output) MUST declare `grainfile: v1` (omission or unsupported version fails with `GF020`), programmatically mapped to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3.1).
-3. **Lower-case ASCII stems (`^[a-z0-9][a-z0-9._-]*$`).** Grainfile stems use only lower-case ASCII letters, digits, `.`, `-`, and `_` (without uppercase compact-UTC `T`/`Z` exceptions) so filenames are portable across case-insensitive file systems (§4.1.3).
-4. **Nine orthogonal front-matter fields: `when` trigger key, no `created_at` or `trigger_with`, and `recipient`, `requestor`, and `depends_on` on `.task.grain.md` only.** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` and `trigger_with` are omitted (§6.1, §7.2); and `recipient` (defaulting to `"/"`), `requestor`, and `depends_on` are restricted to `.task.grain.md` because tasks are 1-to-1 with a single completion state while processes are standing 1-to-many triggers (§6.1, §6.2.3, §7, §8.3).
+3. **Mixed-case ASCII stems (`^[A-Za-z0-9][A-Za-z0-9._-]*$`) with compact UTC stem timestamps (`Z`) and case-collision detection (`GF006`).** Grainfile stems use ASCII letters, digits, `.`, `-`, and `_` (starting with an ASCII letter or digit), require compact stem timestamps (`YYYYMMDDTHHMMSSZ`) to use `Z` (UTC), and reject case-insensitive path collisions within a repository (`GF006`) so filenames remain portable across case-insensitive file systems (§4.1.3).
+4. **Finalized orthogonal front-matter vocabulary (`grainfile`, `title`, `draft`, `not_before`, `references`, `from_template`, `recipient`, `requestor`, `depends_on`, `when`, `gate`).** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` and `trigger_with` are omitted (§6.1, §7.2); and `recipient` (defaulting to `"/"`), `requestor`, and `depends_on` are restricted to `.task.grain.md` because tasks are 1-to-1 with a single completion state while processes are standing 1-to-many triggers (§6.1, §6.2.3, §7, §8.3).
 5. **Unknown fields warn; `x_*` extends; unknown trigger sources fail closed.** Unrecognised fields emit a warning (`GF022`) while `x_*` extension fields are silent; unknown `when` trigger sources are an error (`GF020`) (§3.3, §3.4).
 6. **Task lifecycle idempotency, withdrawal events, and `depends_on` target kind rules.** A `.task.grain.md`'s identity is `(repo_url, file_path)`: once completed, pushes do not re-run it; editing a queued task updates it; deleting or drafting an active task or process emits `task_removed` / `process_removed` (`action: "removed"`); deleting a completed task is a no-op (§9.3). Only `.task.grain.md` may declare `depends_on` (`GF020` on `.process.grain.md`), and every `depends_on` entry must resolve to a concrete `.task.grain.md` file, never a `.process.grain.md` or an unrendered `.jinja2` template (`GF032`; §8.3).
 7. **Security invariants.** `.task.grain.md` executes only from default/protected branches and `when.pull_request` reads `.process.grain.md` definitions from the base branch (§11.1); Hub enforces directory-verified subscription authorization (§11.2), commit-SHA pinning and regular-file/tree checks on `/v1/grainfiles/content` and mux streams (§11.3), `depends_on` DAG cycle detection (§11.4), and structural separation between trusted prompts and untrusted references/diffs (§11.5).

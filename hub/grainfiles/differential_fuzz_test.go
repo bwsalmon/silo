@@ -329,6 +329,26 @@ recipient: https://github.com/acme/grain-eu
 			Raw:  "---\ntitle: \"{{ x | nonexistent_filter }}\"\n---\nBody\n",
 		},
 		{
+			Name: "forbidden-call-range-gf033",
+			Path: "call-range.task.grain.md.jinja2",
+			Raw:  "---\ngrainfile: v1\ntitle: \"{{ range(100) }}\"\n---\nBody\n",
+		},
+		{
+			Name: "forbidden-getattr-gf033",
+			Path: "getattr.task.grain.md.jinja2",
+			Raw:  "---\ngrainfile: v1\ntitle: \"{{ user.email }}\"\n---\nBody\n",
+		},
+		{
+			Name: "forbidden-getitem-gf033",
+			Path: "getitem.task.grain.md.jinja2",
+			Raw:  "---\ngrainfile: v1\ntitle: \"{{ user['email'] }}\"\n---\nBody\n",
+		},
+		{
+			Name: "forbidden-set-assign-gf033",
+			Path: "assign.task.grain.md.jinja2",
+			Raw:  "{% set x = 'val' %}---\ngrainfile: v1\ntitle: \"{{ x }}\"\n---\nBody\n",
+		},
+		{
 			Name: "expansion-cap-exceeds-1mib-gf006",
 			Path: "bomb.task.grain.md.jinja2",
 			Raw: "---\ngrainfile: v1\ntitle: Bomb\nrecipient: https://github.com/acme/grain-eu\n---\n" +
@@ -569,6 +589,66 @@ references:
   - https://github.com/acme/other/blob/main/../escape.md
 ---
 Body.
+`,
+			},
+		},
+		{
+			Name: "canonical-deployments-and-when-workflow-schedule-tz-parity",
+			Files: map[string]string{
+				"tasks/deploy-target.task.grain.md": `---
+grainfile: v1
+title: Canonical deployment recipient and requestor
+recipient: /deployments/prod-runner-1
+requestor: /deployments/sec-ops
+not_before: "2026-10-25T09:00:00+02:00"
+---
+`,
+				"processes/ci-triage.process.grain.md": `---
+grainfile: v1
+title: Workflow and multi-timezone process
+gate: true
+when:
+  schedule:
+    - cron: "0 9 * * 1-5"
+      timezone: "America/New_York"
+    - cron: "30 14 * * 1-5"
+      timezone: "Europe/London"
+  push:
+    repos: ["acme/widgets", "https://github.com/acme/payments"]
+    branches: ["main", "release/*"]
+    paths: ["src/auth/", "/db/migrations", "https://github.com/acme/payments/tree/main/api"]
+    ignore: ["docs/", "**/*.md"]
+  workflow:
+    workflows: ["grain CI", "e2e-*", ".github/workflows/release.yml"]
+    events: ["triggered", "succeeded", "failed"]
+    repos: ["acme/widgets"]
+    branches: ["main"]
+---
+`,
+			},
+		},
+		{
+			Name: "invalid-from-template-climbing-and-when-ignore-hazards",
+			Files: map[string]string{
+				"tasks/bad-ft-climb.task.grain.md": `---
+grainfile: v1
+title: Climbing from_template remote URL
+from_template: https://github.com/acme/widgets/blob/main/../../outside.task.grain.md.jinja2
+---
+`,
+				"processes/bad-when-ignore.process.grain.md": `---
+grainfile: v1
+title: Invalid ignore URL and timezone abbreviation
+when:
+  schedule:
+    cron: "0 9 * * *"
+    timezone: "PST"
+  push:
+    branches: ["main"]
+    ignore:
+      - "https://github.com/acme/widgets/blob/main/docs/a.md"
+      - "docs/%2e%2e/secret.md"
+---
 `,
 			},
 		},
