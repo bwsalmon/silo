@@ -458,7 +458,7 @@ func (a *Access) NodeUIRole(e registry.Entry) (role, team string, requireApprova
 		return "", "", false
 	}
 	offersUI := (e.UI != nil && e.UI.Offered) || (e.UI == nil && e.Supports(registry.FeatureNodeUI))
-	if offersUI && (e.UI == nil || (e.UI.Team == "" && e.UI.Reason == "")) && len(e.Repos) > 0 && a.store != nil {
+	if offersUI && (e.UI == nil || e.UI.Reason == "") && a.store != nil {
 		_ = a.store.ValidateNodeUI(context.Background(), e.Owner, &e.Node)
 	}
 	if offersUI && e.UI != nil && e.UI.Team != "" {
@@ -497,7 +497,7 @@ func (a *Access) ResolveEntry(e registry.Entry) (registry.Entry, bool) {
 		return e, false
 	}
 	offersUI := (e.UI != nil && e.UI.Offered) || (e.UI == nil && e.Supports(registry.FeatureNodeUI))
-	if offersUI && (e.UI == nil || (e.UI.Team == "" && e.UI.Reason == "")) && len(e.Repos) > 0 && a.store != nil {
+	if offersUI && (e.UI == nil || e.UI.Reason == "") && a.store != nil {
 		_ = a.store.ValidateNodeUI(context.Background(), e.Owner, &e.Node)
 	}
 	uiRole, uiTeam, reqApproval := a.NodeUIRole(e)

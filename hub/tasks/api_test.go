@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -805,5 +807,426 @@ func TestAPIUnifiedInbox(t *testing.T) {
 	remaining, _ := getInbox("alice@example.com", "")
 	if len(remaining) != 0 {
 		t.Fatalf("expected 0 remaining inbox items after resolving all 4, got %+v", remaining)
+	}
+}
+
+type concurrentInboxEvents struct {
+	mu            sync.RWMutex
+	awaiting      map[string]string
+	awaitingTimes map[string]time.Time
+	approvals     map[string][]events.ApprovalRequest
+	approvalTimes map[string][]time.Time
+}
+
+func (c *concurrentInboxEvents) setAwaiting(task, q string, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if q == "" {
+		delete(c.awaiting, task)
+		delete(c.awaitingTimes, task)
+		return
+	}
+	c.awaiting[task] = q
+	c.awaitingTimes[task] = at
+}
+
+func (c *concurrentInboxEvents) addApproval(task string, ar events.ApprovalRequest, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.approvals[task] = append(c.approvals[task], ar)
+	c.approvalTimes[task] = append(c.approvalTimes[task], at)
+}
+
+func (c *concurrentInboxEvents) ApprovalRequest(_ context.Context, task, id string) (events.ApprovalRequest, bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, a := range c.approvals[task] {
+		if a.ID == id {
+			return a, true, nil
+		}
+	}
+	return events.ApprovalRequest{}, false, nil
+}
+
+func (c *concurrentInboxEvents) TaskInboxState(_ context.Context, task string) (awaiting bool, question string, awaitingAt time.Time, approvals []events.ApprovalRequest, approvalTimes []time.Time, err error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	q, ok := c.awaiting[task]
+	apps := append([]events.ApprovalRequest(nil), c.approvals[task]...)
+	times := append([]time.Time(nil), c.approvalTimes[task]...)
+	return ok, q, c.awaitingTimes[task], apps, times, nil
+}
+
+func TestConcurrentUnifiedInboxStressAndSpoofing(t *testing.T) {
+	ctx := context.Background()
+	h := newAPIHub(t)
+	check(t, h.dir.SetMember(ctx, "infra", "user:pete@example.com", directory.Proposer))
+	check(t, h.dir.SetMember(ctx, "infra", "user:vera@example.com", directory.Viewer))
+	check(t, h.dir.SetMember(ctx, "web", "user:alice@example.com", directory.Member))
+	check(t, h.dir.CreateTeam(ctx, "secret", "Secret"))
+	check(t, h.dir.SetMember(ctx, "secret", "user:sec@example.com", directory.Admin))
+	check(t, h.dir.AssignRepo(ctx, "secret", "bwsalmon/secret"))
+	check(t, h.dir.SetTeamSettings(ctx, "secret", directory.Settings{AnyoneMayPropose: false}))
+
+	reg := registry.New()
+	h.api.Registry = reg
+	h.api.Directory.Registry = reg
+	h.api.NodeUIDomain = "nodes.grain.example"
+
+	for _, n := range []struct {
+		node  registry.Node
+		owner string
+	}{
+		{
+			node: registry.Node{
+				ID:       "ws-infra-1",
+				Repos:    []string{"bwsalmon/silo"},
+				Slots:    4,
+				Features: []string{registry.FeatureInteractive, registry.FeatureNodeUI},
+				UI:       &registry.NodeUI{Offered: true, Team: "infra"},
+			},
+			owner: "alice@example.com",
+		},
+		{
+			node: registry.Node{
+				ID:       "ws-infra-2",
+				Repos:    []string{"bwsalmon/silo"},
+				Slots:    4,
+				Features: []string{registry.FeatureInteractive, registry.FeatureNodeUI},
+				UI:       &registry.NodeUI{Offered: true},
+			},
+			owner: "dave@example.com",
+		},
+		{
+			node: registry.Node{
+				ID:       "ws-web-1",
+				Repos:    []string{"bwsalmon/web"},
+				Slots:    4,
+				Features: []string{registry.FeatureInteractive, registry.FeatureNodeUI},
+				UI:       &registry.NodeUI{Offered: true, Team: "web"},
+			},
+			owner: "bob@example.com",
+		},
+		{
+			node: registry.Node{
+				ID:    "ws-secret-1",
+				Repos: []string{"bwsalmon/secret"},
+				Slots: 2,
+				UI:    &registry.NodeUI{Offered: true, Team: "secret"},
+			},
+			owner: "sec@example.com",
+		},
+	} {
+		lease, err := reg.Register(n.node, n.owner)
+		check(t, err)
+		t.Cleanup(func() { lease.Close() })
+	}
+
+	evStore := &concurrentInboxEvents{
+		awaiting:      map[string]string{},
+		awaitingTimes: map[string]time.Time{},
+		approvals:     map[string][]events.ApprovalRequest{},
+		approvalTimes: map[string][]time.Time{},
+	}
+	h.api.Requests = evStore
+	h.api.Events = evStore
+
+	// Seed a secret task on team "secret" that non-secret users must never see in their inbox.
+	secretTask := h.submit(t, "sec@example.com", map[string]any{"repo": "bwsalmon/secret", "title": "Secret op", "prompt": "top secret"})
+	_, err := h.store.Offer(ctx, secretTask.ID, "ws-secret-1", "sec@example.com")
+	check(t, err)
+	_, err = h.store.Accept(ctx, secretTask.ID, "local-sec-1")
+	check(t, err)
+	evStore.addApproval(secretTask.ID, events.ApprovalRequest{ID: "sec-req", Tool: "vault", Message: "unseal"}, time.Now().UTC())
+
+	doSpoofed := func(user, method, path string, body any) (int, []byte, error) {
+		var rd io.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			rd = bytes.NewReader(b)
+		}
+		req, err := http.NewRequest(method, h.url+path, rd)
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Origin", h.url)
+		if user != "" {
+			req.Header.Set("X-User", user)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		// Attach spoofed nodeui & admin-mode headers.
+		req.Header.Set("X-Grain-Hub-UI-Viewer", "root@example.com")
+		req.Header.Set("X-Grain-Hub-UI-User", "root@example.com")
+		req.Header.Set("X-Grain-Hub-UI-Role", "owner")
+		req.Header.Set("X-Grain-Hub-UI-Theme", "spoofed")
+		req.Header.Set(directory.AdminModeHeader, "on")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		return resp.StatusCode, b, err
+	}
+
+	const iterations = 10
+	errCh := make(chan error, 256)
+	recordErr := func(err error) {
+		if err != nil {
+			select {
+			case errCh <- err:
+			default:
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// 1. Concurrent task lifecycle writer: proposed -> queued -> running (awaiting_reply & approval_request) -> lost -> requeued -> failed / done.
+	for wIdx := 0; wIdx < 2; wIdx++ {
+		wIdx := wIdx
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				// File a proposal as pete (proposer on infra), approve as dave, run on ws-infra-1 or ws-infra-2, transition states.
+				code, b, err := doSpoofed("pete@example.com", "POST", TasksPath, map[string]any{
+					"repo":   "bwsalmon/silo",
+					"kind":   "interactive",
+					"title":  fmt.Sprintf("Lifecycle-%d-%d", wIdx, i),
+					"prompt": "pair",
+				})
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				if code != http.StatusCreated {
+					recordErr(fmt.Errorf("pete submit proposal: %d %s", code, b))
+					return
+				}
+				var tk Task
+				if err := json.Unmarshal(b, &tk); err != nil {
+					recordErr(err)
+					return
+				}
+				if tk.State != Proposed {
+					recordErr(fmt.Errorf("pete task state = %s, want proposed", tk.State))
+					return
+				}
+
+				// Submitter (pete) and viewer (vera) must not be allowed to approve the proposal even with spoofed headers.
+				for _, deniedUser := range []string{"pete@example.com", "vera@example.com", "bob@example.com"} {
+					acode, _, err := doSpoofed(deniedUser, "POST", TasksPath+"/"+tk.ID+"/approve", nil)
+					if err != nil {
+						recordErr(err)
+						return
+					}
+					if acode != http.StatusForbidden && acode != http.StatusNotFound {
+						recordErr(fmt.Errorf("%s approve proposal: got %d, want 403/404", deniedUser, acode))
+						return
+					}
+				}
+
+				// Approve as dave (member of infra).
+				acode, ab, err := doSpoofed("dave@example.com", "POST", TasksPath+"/"+tk.ID+"/approve", nil)
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				if acode != http.StatusOK {
+					recordErr(fmt.Errorf("dave approve: %d %s", acode, ab))
+					return
+				}
+
+				nodeID := "ws-infra-1"
+				nodeOwner := "alice@example.com"
+				if i%2 == 1 {
+					nodeID = "ws-infra-2"
+					nodeOwner = "dave@example.com"
+				}
+				if _, err := h.store.Offer(ctx, tk.ID, nodeID, nodeOwner); err != nil {
+					recordErr(fmt.Errorf("Offer: %w", err))
+					return
+				}
+				if _, err := h.store.Accept(ctx, tk.ID, fmt.Sprintf("local-%d-%d", wIdx, i)); err != nil {
+					recordErr(fmt.Errorf("Accept: %w", err))
+					return
+				}
+
+				now := h.store.Now()
+				evStore.setAwaiting(tk.ID, "Ready to proceed?", now)
+				reqID := fmt.Sprintf("req-%d-%d", wIdx, i)
+				evStore.addApproval(tk.ID, events.ApprovalRequest{ID: reqID, Tool: "bash", Message: "run build"}, now)
+
+				// Post a reply from alice and answer the approval request from dave.
+				mcode, mb, err := doSpoofed("alice@example.com", "POST", TasksPath+"/"+tk.ID+"/messages", map[string]any{
+					"id":   fmt.Sprintf("msg-%d-%d", wIdx, i),
+					"text": "proceed",
+				})
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				if mcode != http.StatusCreated && mcode != http.StatusOK {
+					recordErr(fmt.Errorf("post message: %d %s", mcode, mb))
+					return
+				}
+				evStore.setAwaiting(tk.ID, "", time.Time{})
+
+				apCode, apB, err := doSpoofed("dave@example.com", "POST", TasksPath+"/"+tk.ID+"/approvals/"+reqID, map[string]any{
+					"decision": "allow",
+				})
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				if apCode != http.StatusOK {
+					recordErr(fmt.Errorf("answer approval: %d %s", apCode, apB))
+					return
+				}
+
+				// Transition through lost -> retry -> failed or done.
+				if _, err := h.store.Lose(ctx, tk.ID, "node connection lost"); err != nil {
+					recordErr(fmt.Errorf("Lose: %w", err))
+					return
+				}
+				if _, err := h.store.Retry(ctx, tk.ID); err != nil {
+					recordErr(fmt.Errorf("Retry: %w", err))
+					return
+				}
+				if _, err := h.store.Offer(ctx, tk.ID, nodeID, nodeOwner); err != nil {
+					recordErr(fmt.Errorf("Re-Offer: %w", err))
+					return
+				}
+				if _, err := h.store.Accept(ctx, tk.ID, fmt.Sprintf("local-r-%d-%d", wIdx, i)); err != nil {
+					recordErr(fmt.Errorf("Re-Accept: %w", err))
+					return
+				}
+				endState := Done
+				reason := ""
+				if i%2 == 0 {
+					endState = Failed
+					reason = "transient failure"
+				}
+				if _, err := h.store.Finish(ctx, tk.ID, endState, reason); err != nil {
+					recordErr(fmt.Errorf("Finish: %w", err))
+					return
+				}
+			}
+		}()
+	}
+
+	// 2. Concurrent preference mutator: rapidly update PUT /v1/me/inbox and PUT /v1/me/theme for alice and dave.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		nodeSelections := [][]string{
+			{"ws-infra-1", "ws-infra-2", "ws-web-1"},
+			{"ws-infra-1"},
+			{"ws-infra-1", "ws-web-1"},
+			{},
+			{"ws-infra-1", "ws-infra-2"},
+		}
+		for i := 0; i < iterations*2; i++ {
+			sel := nodeSelections[i%len(nodeSelections)]
+			code, b, err := doSpoofed("alice@example.com", "PUT", "/v1/me/inbox", map[string]any{"nodes": sel})
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			if code != http.StatusOK {
+				recordErr(fmt.Errorf("alice PUT /v1/me/inbox: %d %s", code, b))
+				return
+			}
+			theme := "light"
+			if i%2 == 1 {
+				theme = "dark"
+			}
+			tcode, tb, err := doSpoofed("alice@example.com", "PUT", "/v1/me/theme", map[string]any{"theme": theme})
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			if tcode != http.StatusOK {
+				recordErr(fmt.Errorf("alice PUT /v1/me/theme: %d %s", tcode, tb))
+				return
+			}
+
+			// Verify alice cannot select a node she has no access to (ws-secret-1).
+			scode, _, err := doSpoofed("alice@example.com", "PUT", "/v1/me/inbox", map[string]any{"nodes": []string{"ws-secret-1"}})
+			if err != nil {
+				recordErr(err)
+				return
+			}
+			if scode != http.StatusForbidden {
+				recordErr(fmt.Errorf("alice PUT /v1/me/inbox ws-secret-1: got %d, want 403", scode))
+				return
+			}
+		}
+	}()
+
+	// 3. Concurrent GET /v1/inbox and GET /v1/me readers across all roles.
+	queries := []string{
+		"",
+		"?nodes=ws-infra-1",
+		"?nodes=ws-infra-1,ws-infra-2",
+		"?kind=proposal",
+		"?kind=awaiting_reply,approval_request",
+		"?kind=failed",
+	}
+	readers := []string{"alice@example.com", "dave@example.com", "pete@example.com", "vera@example.com", "bob@example.com"}
+	for _, rUser := range readers {
+		rUser := rUser
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations*2; i++ {
+				q := queries[i%len(queries)]
+				code, b, err := doSpoofed(rUser, "GET", InboxPath+q, nil)
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				if code != http.StatusOK {
+					recordErr(fmt.Errorf("%s GET %s%s: %d %s", rUser, InboxPath, q, code, b))
+					return
+				}
+				var out struct {
+					Items []InboxItem `json:"items"`
+					Nodes []string    `json:"nodes"`
+				}
+				if err := json.Unmarshal(b, &out); err != nil {
+					recordErr(fmt.Errorf("%s inbox json: %w", rUser, err))
+					return
+				}
+				for _, item := range out.Items {
+					// None of these non-secret readers may ever see team "secret" items despite X-Silo-Admin-Mode: on.
+					if item.Team == "secret" || item.TaskID == secretTask.ID {
+						recordErr(fmt.Errorf("%s leaked secret inbox item: %+v", rUser, item))
+						return
+					}
+					if item.State == Done || item.State == Cancelled || item.State == Rejected {
+						recordErr(fmt.Errorf("%s inbox returned terminal item: %+v", rUser, item))
+						return
+					}
+					if rUser == "vera@example.com" && item.CanAct {
+						recordErr(fmt.Errorf("vera (viewer) got CanAct=true on item: %+v", item))
+						return
+					}
+					if rUser == "pete@example.com" && (item.Kind == InboxProposal || item.Kind == InboxApprovalRequest) && item.CanAct {
+						recordErr(fmt.Errorf("pete (proposer/submitter) got CanAct=true on %s item: %+v", item.Kind, item))
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
 	}
 }
