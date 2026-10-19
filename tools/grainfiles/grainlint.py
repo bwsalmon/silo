@@ -684,6 +684,9 @@ class Linter:
                 if r.path.endswith(suf) or (r.repo and r.repo.endswith(suf)):
                     self.add("GF032", where, "%s: %r is a %s grainfile, expected a repository or folder" % (field, s, k))
                     return
+        # Canonical Hub deployment reference (/deployments/<id> or https://<hub-host>/deployments/<id>)
+        if r.form == "rooted" and re.match(r"^deployments/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", r.path.strip("/")):
+            return
         try:
             t = self.resolve(it, s, field)
         except Finding as e:

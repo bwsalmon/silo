@@ -1,5 +1,7 @@
 # Grainfile `v1` Quick Reference (`docs/grainfile-v1.md`)
 
+**Use Case & Overview:** Grainfiles are version-controlled, declarative Markdown documents (`.task.grain.md` and `.process.grain.md`) stored in Git repositories that coordinate one-shot tasks and standing event-driven processes across Grain deployments via the Silo Hub. A `.task.grain.md` dispatches a discrete unit of work (optionally gated by `depends_on` or `not_before`) to a target `recipient` deployment (such as its canonical Hub URL `https://<hub-host>/deployments/<name>`), while a `.process.grain.md` defines a reusable automation workflow or merge gate triggered by repository, schedule, or manual events (`when`).
+
 ## 1. File Naming & Templates (`GF001`–`GF006`, `GF033`, `GF034`)
 - **One-shot task:** `<stem>.task.grain.md` — executes once when dependencies and `not_before` are satisfied.
 - **Recurring/event process:** `<stem>.process.grain.md` — executes whenever its `when` condition fires.
@@ -11,8 +13,8 @@
 - `<stem>` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (uppercase and lowercase ASCII letters, digits, `.`, `_`, `-`, starting with an ASCII letter or digit, including ISO/compact UTC timestamps like `2026-10-18T143000Z-fix-API.task.grain.md`). Two Grainfiles in the same repository MUST NOT collide when compared case-insensitively (`GF006`).
 - Files ending in `.grain.md` or `.grain.md.jinja2` with an unknown `<kind>` suffix (e.g. `foo.unknown.grain.md`) warn with `GF005`. Ordinary `.md` files without `.grain.md` (including `*.task.md` or `*.process.md`) are regular Markdown assets and do not trigger `GF005`.
 
-## 2. Front Matter (`---` YAML `---` + Non-Empty Markdown Body)
-Standard YAML 1.2 Core Schema (`GF004`: no anchors `&`, aliases `*`, merge keys `<<`, or tags `!`). Unknown non-`x_*` keys warn (`GF022`); vendor extensions MUST start with `x_`.
+## 2. Front Matter (`---` YAML `---` + Optional Markdown Body)
+Standard YAML 1.2 Core Schema (`GF004`: no anchors `&`, aliases `*`, merge keys `<<`, or tags `!`). Unknown non-`x_*` keys warn (`GF022`); vendor extensions MUST start with `x_`. The Markdown body after the closing `---` delimiter is **optional and may be empty** when the front matter (`title`, `from_template`, `references`, `when`, etc.) carries everything the task or process requires.
 
 The finalized `grainfile: v1` front-matter vocabulary consists of **10 fields** (plus `title` and `x_*` extensions):
 - **Shared (5):** `grainfile`, `draft`, `not_before`, `references`, `from_template`
@@ -27,8 +29,8 @@ The finalized `grainfile: v1` front-matter vocabulary consists of **10 fields** 
 | `not_before` | both | `string` | *(none)* | Earliest activation time: `YYYY-MM-DD` (00:00:00Z) or RFC 3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`). |
 | `references` | both | `string[]` | `[]` | Read-only context files/folders (`https://...`, `/repo-rooted`, `./relative`, `../relative`). |
 | `from_template` | both | `string` | *(none)* | Optional provenance link to the source `.task.grain.md.jinja2` or `.process.grain.md.jinja2` template (`GF035`). Same-repo templates are added to `authorized_references` at `commit_sha`; auto-populated on `.grain.md.jinja2` rendering. |
-| `recipient` | task | `string` | `"/"` | Target Grain deployment identity (`https://...` repo/folder URL or repo-local path). |
-| `requestor` | task | `string` | *(none)* | Attribution (`Name <email@domain>` or deployment URL/path). |
+| `recipient` | task | `string` | `"/"` | Target Grain deployment identity: canonical Hub deployment URL (`https://<hub-host>/deployments/<name>` or `/deployments/<name>`), forge repo/folder URL (`https://...`), or repo-local path. |
+| `requestor` | task | `string` | *(none)* | Attribution (`Name <email@domain>`, canonical Hub deployment URL `https://<hub-host>/deployments/<name>`, or deployment URL/path). |
 | `depends_on` | task | `string[]` | `[]` | Prerequisite concrete `.task.grain.md` files that must complete before this task runs (`GF032`). |
 | `when` | process | `object` | *(required)* | Trigger map: `schedule`, `push`, `pull_request`, `merge`, `manual`, `scenario`. |
 | `gate` | process | `boolean` | `false` | Advisory merge-gate signal on `pull_request` / `push` / `merge` triggers. |
