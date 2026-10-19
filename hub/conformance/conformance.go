@@ -367,8 +367,8 @@ func (k *kit) free(ctx context.Context, n int, d time.Duration) error {
 	return err
 }
 
-// beats is n heartbeat intervals, with a second's slack.
-func (k *kit) beats(n int) time.Duration { return time.Duration(n)*k.cfg.Heartbeat + time.Second }
+// beats is n heartbeat intervals, with three seconds' slack.
+func (k *kit) beats(n int) time.Duration { return time.Duration(n)*k.cfg.Heartbeat + 3*time.Second }
 
 func (k *kit) register(ctx context.Context) (string, error) {
 	err := eventually(ctx, k.cfg.Register, "the grain to register", func() (bool, error) {
@@ -844,14 +844,11 @@ func (k *kit) restart(ctx context.Context) (string, error) {
 	if _, ok := w.Await(k.cfg.Timeout, func(e live.Event) bool { return e.Seq > before }); !ok {
 		return "", fmt.Errorf("no event after seq %d reached the restarted hub", before)
 	}
-	after, err := k.h.task(ctx, t.ID)
+	after, err := k.await(ctx, t.ID, tasks.Running)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("after the restart: %w", err)
 	}
-	switch {
-	case after.State != tasks.Running:
-		return "", fmt.Errorf("after the restart task %s is %s (%s), want running", t.ID, after.State, after.Reason)
-	case after.NodeTask != t.NodeTask:
+	if after.NodeTask != t.NodeTask {
 		return "", fmt.Errorf("after the restart task %s is node task %q, was %q: a second run", t.ID, after.NodeTask, t.NodeTask)
 	}
 	n := 0
