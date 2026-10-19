@@ -571,6 +571,7 @@ func TestCUJ02_MultiAdminTakeoverAndStateRecovery(t *testing.T) {
 	// 2. Author a team grainfile for infra-core and connect primary host (Alice).
 	recipientURL := "https://hub.test/deployments/infra-core"
 	gfContent := fmt.Sprintf(`---
+grainfile: v1
 title: Infra health check
 recipient: %s
 ---
@@ -706,6 +707,7 @@ func TestCUJ03_PersonalHubGrainfileAuthoringAndCrossDeploymentDispatch(t *testin
 
 	// 2. Alice authors a personal Hub-hosted grainfile targeting the platform deployment.
 	gfSource := fmt.Sprintf(`---
+grainfile: v1
 title: Morning platform triage
 recipient: %s
 requestor: Alice <alice@example.com>
@@ -790,7 +792,7 @@ func TestCUJ04_DeploymentHubGrainfileAuthoring(t *testing.T) {
 
 	// 2. Outsider Eve cannot write or read a team grainfile for "payments".
 	code, _ := th.call("PUT", "/v1/grainfiles/team/payments/processes/sweep.process.md", "eve@example.com", map[string]any{
-		"content": "---\ntitle: Sweep\nwhen:\n  manual: {}\n---\nSweep.\n",
+		"content": "---\ngrainfile: v1\ntitle: Sweep\nwhen:\n  manual: {}\n---\nSweep.\n",
 	}, nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("outsider PUT team grainfile: got %d, want 404", code)
@@ -803,6 +805,7 @@ func TestCUJ04_DeploymentHubGrainfileAuthoring(t *testing.T) {
 	}, nil)
 
 	gfSource := `---
+grainfile: v1
 title: Weekly dependency audit
 when:
   schedule:
@@ -894,6 +897,7 @@ func TestCUJ05_GitHubGrainfileWebhookCrossRepoTriggerAndGate(t *testing.T) {
 	})
 
 	gateProcess := `---
+grainfile: v1
 title: PR security gate
 gate: true
 when:
@@ -907,6 +911,7 @@ when:
 Audit PR changes under src/.
 `
 	coTriggeredProcess := `---
+grainfile: v1
 title: Post-merge compliance report
 depends_on:
   - https://github.com/acme/web-service/blob/main/.grain/processes/pr-gate.process.md
@@ -944,7 +949,7 @@ Generate compliance report after PR security gate runs on merge.
 	// 2. Open a pull request on acme/web-service modifying src/auth.go (and attempting to sneak in a PR-head task).
 	pr, prWhResp := th.gh.MustOpenPullRequest(t, "acme", "web-service", "main", "feat/oauth", "Add OAuth handler", map[string]string{
 		"src/auth.go":                       "package src\n// oauth\n",
-		".grain/tasks/sneaky.task.grain.md": "---\ntitle: Sneaky PR task\n---\nShould not be indexed from PR branch.\n",
+		".grain/tasks/sneaky.task.grain.md": "---\ngrainfile: v1\ntitle: Sneaky PR task\n---\nShould not be indexed from PR branch.\n",
 	}, nil)
 
 	// Verify the PR webhook did NOT index the untrusted PR-head task, and DID fire the base-branch gate process
@@ -1022,6 +1027,7 @@ func TestCUJ06_CrossRepoTaskDispatchAndScopedReferenceFetch(t *testing.T) {
 	})
 
 	taskMD := `---
+grainfile: v1
 title: Migrate billing schema
 recipient: https://github.com/acme/billing-service
 requestor: Alice <alice@example.com>
@@ -1135,6 +1141,7 @@ func TestCUJ07_Jinja2TemplatesAndDependsOnDAG(t *testing.T) {
 
 	// 1. Author a prerequisite task and a Jinja2 template task that depends on it.
 	prereqSource := fmt.Sprintf(`---
+grainfile: v1
 title: Prepare schema migration
 recipient: %s
 ---
@@ -1146,6 +1153,7 @@ Run schema preparation.
 	}, &prereqResp)
 
 	tplSource := fmt.Sprintf(`---
+grainfile: v1
 title: Roll out shard {{ shard | default('auth') | upper }}
 recipient: %s
 depends_on:
@@ -1261,6 +1269,7 @@ func TestCUJ08_DraftNotBeforeAndGrainfileRemovalLifecycle(t *testing.T) {
 
 	// 1. Author a draft grainfile (`draft: true`) and a future `not_before` grainfile.
 	draftSource := fmt.Sprintf(`---
+grainfile: v1
 title: Draft RFC implementation
 recipient: %s
 draft: true
@@ -1290,6 +1299,7 @@ Implement RFC once design is approved.
 
 	futureDate := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
 	deferredSource := fmt.Sprintf(`---
+grainfile: v1
 title: Scheduled production cutover
 recipient: %s
 not_before: %q
@@ -1306,6 +1316,7 @@ Execute production cutover.
 
 	// 2. Promote the draft grainfile to `draft: false`; verify `task_ready` is emitted immediately.
 	promotedSource := fmt.Sprintf(`---
+grainfile: v1
 title: Draft RFC implementation
 recipient: %s
 draft: false

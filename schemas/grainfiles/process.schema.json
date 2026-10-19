@@ -33,6 +33,7 @@
     }
   },
   "required": [
+    "grainfile",
     "title",
     "when"
   ],

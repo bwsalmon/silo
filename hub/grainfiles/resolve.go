@@ -1593,6 +1593,7 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 		g.Grainfile = VersionV1
 		g.SpecSummaryPath = SpecSummaryPathV1
 		g.SpecPath = SpecPathV1
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, "grainfile: required field missing (expected \"v1\")"))
 	} else if ver, ok := rawVer.(string); !ok || ver == "" {
 		errs = append(errs, newFinding(CodeSchemaInvalid, where, "grainfile: must be a non-empty version string (e.g. \"v1\")"))
 	} else if spec, ok := LookupVersion(ver); !ok {

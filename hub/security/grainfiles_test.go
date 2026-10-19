@@ -68,6 +68,7 @@ func TestGrainfileSameOriginContentProxy(t *testing.T) {
 	)
 
 	activeTaskMD := `---
+grainfile: v1
 title: Migrate Platform Schema
 recipient: https://github.com/beta/grain-b
 requestor: Alice <alice@example.com>
@@ -80,6 +81,7 @@ references:
 Run schema migration.
 `
 	draftTaskMD := `---
+grainfile: v1
 title: Draft Task
 recipient: https://github.com/beta/grain-b
 draft: true
@@ -332,15 +334,15 @@ func TestWebhookReceiverAndGitHubFetcherHardening(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{"YAML anchor and alias", "---\ntitle: &a Bomb\nrequestor: *a\n---\nBody\n"},
-		{"YAML merge key", "---\ntitle: Merge\n<<: *base\n---\nBody\n"},
-		{"YAML block tag", "---\ntitle: !custom Tag\n---\nBody\n"},
-		{"YAML flow sequence tag", "---\ntitle: FlowTag\nreferences: [!custom /docs/a.md]\n---\nBody\n"},
-		{"YAML flow mapping tag", "---\ntitle: FlowMapTag\non: {push: !!str main}\n---\nBody\n"},
+		{"YAML anchor and alias", "---\ngrainfile: v1\ntitle: &a Bomb\nrequestor: *a\n---\nBody\n"},
+		{"YAML merge key", "---\ngrainfile: v1\ntitle: Merge\n<<: *base\n---\nBody\n"},
+		{"YAML block tag", "---\ngrainfile: v1\ntitle: !custom Tag\n---\nBody\n"},
+		{"YAML flow sequence tag", "---\ngrainfile: v1\ntitle: FlowTag\nreferences: [!custom /docs/a.md]\n---\nBody\n"},
+		{"YAML flow mapping tag", "---\ngrainfile: v1\ntitle: FlowMapTag\non: {push: !!str main}\n---\nBody\n"},
 		{"deeply nested flow collection", "---\ntitle: DeepFlow\nreferences: " + deepFlow + "\n---\nBody\n"},
 		{"deeply nested block mapping", deepBlock.String()},
 		{"oversized front matter (>64KiB)", "---\ntitle: " + strings.Repeat("a", 70*1024) + "\n---\nBody\n"},
-		{"oversized file (>1MiB)", "---\ntitle: Big\n---\n" + strings.Repeat("b", (1<<20)+1024)},
+		{"oversized file (>1MiB)", "---\ngrainfile: v1\ntitle: Big\n---\n" + strings.Repeat("b", (1<<20)+1024)},
 	} {
 		if _, err := grainfiles.Parse("tasks/bad.task.md", []byte(tc.raw)); err == nil {
 			t.Errorf("Parse(%s): succeeded, want error", tc.name)
@@ -440,7 +442,7 @@ func TestTenantRecipientIsolationAndControlStreamSpoofing(t *testing.T) {
 
 	// 4. Control stream spoofing: index upstream task in acme/app (recipient grain-a)
 	// and downstream dependent task in beta/app (recipient grain-b).
-	upGF, err := grainfiles.Parse("tasks/01-build.task.md", []byte("---\ntitle: Upstream Build\nrecipient: https://github.com/acme/grain-a\n---\nBuild.\n"))
+	upGF, err := grainfiles.Parse("tasks/01-build.task.md", []byte("---\ngrainfile: v1\ntitle: Upstream Build\nrecipient: https://github.com/acme/grain-a\n---\nBuild.\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +452,7 @@ func TestTenantRecipientIsolationAndControlStreamSpoofing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	downGF, err := grainfiles.Parse("tasks/02-deploy.task.md", []byte("---\ntitle: Downstream Deploy\nrecipient: https://github.com/beta/grain-b\ndepends_on:\n  - https://github.com/acme/app/blob/main/tasks/01-build.task.md\n---\nDeploy.\n"))
+	downGF, err := grainfiles.Parse("tasks/02-deploy.task.md", []byte("---\ngrainfile: v1\ntitle: Downstream Deploy\nrecipient: https://github.com/beta/grain-b\ndepends_on:\n  - https://github.com/acme/app/blob/main/tasks/01-build.task.md\n---\nDeploy.\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1630,7 +1630,7 @@ func TestConcurrentHostReplacementAndAcceptedUsersEnforcement(t *testing.T) {
 	if _, err := h.Grainfiles.IndexGrainfile(ctx, openGF); err != nil {
 		t.Fatalf("IndexGrainfile(openGF): %v", err)
 	}
-	procGF, err := grainfiles.Parse(".grain/processes/gate.process.grain.md", []byte("---\ntitle: Standing gate\ngate: true\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
+	procGF, err := grainfiles.Parse(".grain/processes/gate.process.grain.md", []byte("---\ngrainfile: v1\ntitle: Standing gate\ngate: true\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
 	if err != nil {
 		t.Fatalf("Parse(procGF): %v", err)
 	}

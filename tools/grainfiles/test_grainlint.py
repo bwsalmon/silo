@@ -305,6 +305,138 @@ class TestGrainlint(unittest.TestCase):
             self.assertEqual(bodyp, "")
             self.assertEqual(grainlint.lint(root), [])
 
+    def test_mandatory_grainfile_v1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "missing.task.grain.md").write_text(
+                "---\ntitle: Missing grainfile version\n---\nBody.\n",
+                encoding="utf-8",
+            )
+            findings = grainlint.lint(root)
+            self.assertEqual([f.code for f in findings], ["GF020"])
+            self.assertIn('grainfile: required field missing (expected "v1")', findings[0].msg)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "missing-proc.process.grain.md").write_text(
+                "---\ntitle: Missing version process\nwhen:\n  manual: {}\n---\nBody.\n",
+                encoding="utf-8",
+            )
+            findings = grainlint.lint(root)
+            self.assertEqual([f.code for f in findings], ["GF020"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "missing-tmpl.task.grain.md.jinja2").write_text(
+                "---\ntitle: Rollout {{ env | default('prod') }}\n---\nBody.\n",
+                encoding="utf-8",
+            )
+            findings = grainlint.lint(root)
+            self.assertEqual([f.code for f in findings], ["GF020"])
+
+    def test_universal_timezone_semantics_and_schedules(self):
+        # 1. RFC 3339 timestamps with Z or explicit ±HH:MM offsets normalize to UTC.
+        t_z = grainlint.parse_time_utc("2026-10-25T07:00:00Z")
+        t_plus = grainlint.parse_time_utc("2026-10-25T09:00:00+02:00")
+        t_minus = grainlint.parse_time_utc("2026-10-25T00:00:00-07:00")
+        t_date = grainlint.parse_time_utc("2026-10-25", allow_date=True)
+        self.assertIsNotNone(t_z)
+        self.assertEqual(t_z, t_plus)
+        self.assertEqual(t_z, t_minus)
+        self.assertEqual(t_date.isoformat(), "2026-10-25T00:00:00+00:00")
+
+        # Reject -00:00, naive timestamps, and out-of-range offsets.
+        for bad_ts in (
+            "2026-10-25T09:00:00-00:00",
+            "2026-10-25T09:00:00",
+            "2026-10-25T09:00:00+24:00",
+            "2026-10-25T09:00:00+02:60",
+            "2026-02-29T09:00:00+02:00",
+        ):
+            self.assertIsNone(grainlint.parse_time_utc(bad_ts, allow_date=True), msg=bad_ts)
+
+        # 2. IANA timezone validation.
+        for valid_tz in ("UTC", "Etc/UTC", "America/Los_Angeles", "Europe/Berlin", "Asia/Tokyo"):
+            self.assertTrue(grainlint.valid_iana_timezone(valid_tz), msg=valid_tz)
+        for bad_tz in ("PST", "EST", "CET", "MST", "+02:00", "-07:00", "UTC+2", "Invalid/Zone", "localtime"):
+            self.assertFalse(grainlint.valid_iana_timezone(bad_tz), msg=bad_tz)
+
+        # 3. End-to-end lint with offset not_before and multi-schedule IANA timezones.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "offset.task.grain.md").write_text(
+                '---\ngrainfile: v1\ntitle: Offset task\nnot_before: "2026-10-25T09:00:00+02:00"\n---\nRun.\n',
+                encoding="utf-8",
+            )
+            (root / "multi-sched.process.grain.md").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: Multi-timezone schedule\n"
+                "not_before: '2026-10-25T09:00:00-07:00'\n"
+                "when:\n"
+                "  schedule:\n"
+                "    - cron: '0 9 * * 1-5'\n"
+                "      timezone: America/Los_Angeles\n"
+                "    - cron: '0 9 * * 1-5'\n"
+                "      timezone: Europe/Berlin\n"
+                "    - cron: '0 9 * * 1-5'\n"
+                "      timezone: Asia/Tokyo\n"
+                "---\n"
+                "Run regional check.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(grainlint.lint(root), [])
+
+        for bad_tz in ("PST", "EST", "CET", "+02:00", "Mars/Olympus"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                (root / "bad-tz.process.grain.md").write_text(
+                    f"---\ngrainfile: v1\ntitle: Bad TZ\nwhen:\n  schedule:\n    cron: '0 2 * * *'\n    timezone: '{bad_tz}'\n---\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual([f.code for f in grainlint.lint(root)], ["GF020"], msg=bad_tz)
+
+    def test_when_workflow_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "ci-triage.process.grain.md").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: Triage CI workflow failures and gate release workflow\n"
+                "gate: true\n"
+                "when:\n"
+                "  workflow:\n"
+                "    - workflows: ['grain CI', 'e2e-*', '.github/workflows/release.yml']\n"
+                "      events: [triggered, succeeded, failed]\n"
+                "      branches: [main, 'release/*']\n"
+                "    - workflow: nightly-qualification\n"
+                "      events: [started, success, failure]\n"
+                "      repo: acme/widgets\n"
+                "      repos: ['https://github.com/acme/payments']\n"
+                "---\n"
+                "Investigate workflow event.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(grainlint.lint(root), [])
+
+        # Missing both workflow and workflows -> GF020
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bad-wf.process.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Bad WF\nwhen:\n  workflow:\n    events: [failed]\n---\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF020"])
+
+        # Invalid workflow event -> GF020
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bad-wf-ev.process.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Bad WF Event\nwhen:\n  workflow:\n    workflow: CI\n    events: [cancelled]\n---\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF020"])
+
 
 if __name__ == "__main__":
     unittest.main()

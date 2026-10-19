@@ -317,6 +317,7 @@ func TestEndToEndSearchAndFiltering(t *testing.T) {
 				"docs/spec.md":      "# Platform Spec\n",
 				"tasks/schema.json": `{"type":"object"}`,
 				"tasks/migrate.task.md": `---
+grainfile: v1
 title: Migrate Platform Schema
 recipient: https://github.com/acme/grain-alpha
 requestor: Alice Smith <alice@example.com>
@@ -331,6 +332,7 @@ depends_on:
 Run schema migration according to spec.
 `,
 				"tasks/draft-cleanup.task.md": `---
+grainfile: v1
 title: Draft Cleanup Task
 recipient: https://github.com/acme/grain-beta
 requestor: https://github.com/acme/grain-orchestrator
@@ -340,6 +342,7 @@ not_before: 2099-01-01T00:00:00Z
 Draft cleanup work.
 `,
 				"processes/release.process.md": `---
+grainfile: v1
 title: Release Gate Process
 recipient: https://github.com/acme/grain-alpha
 requestor: https://github.com/acme/grain-orchestrator
@@ -357,6 +360,7 @@ on:
 Verify release readiness.
 `,
 				"processes/notify.process.md": `---
+grainfile: v1
 title: Release Notification Process
 recipient: https://github.com/acme/grain-beta
 requestor: Alice Smith <alice@example.com>
@@ -378,6 +382,7 @@ Post release notes.
 			// 2. Populate Repo 2: acme/docs
 			_, whDocs := env.sim.MustCommitAndPush(t, "acme", "docs", "main", "Add docs review process", map[string]string{
 				"processes/spellcheck.process.md": `---
+grainfile: v1
 title: Docs Spellcheck Gate
 recipient: https://github.com/acme/grain-gamma
 requestor: Alice Smith <alice@example.com>
@@ -400,6 +405,7 @@ Check spelling across guides.
 			// 3. Populate Repo 3: beta/service
 			_, whBeta := env.sim.MustCommitAndPush(t, "beta", "service", "main", "Add beta bootstrap task", map[string]string{
 				"tasks/bootstrap.task.md": `---
+grainfile: v1
 title: Bootstrap Beta Service
 recipient: https://github.com/acme/grain-beta
 requestor: https://github.com/acme/grain-orchestrator
@@ -610,6 +616,7 @@ func TestEndToEndLiveSubscriptionsDraftNotBeforeAndCatchup(t *testing.T) {
 			// 1. Push a ready task for Node A and a draft task for Node B.
 			env.sim.MustCommitAndPush(t, "acme", "app", "main", "Push ready task A and draft task B", map[string]string{
 				"tasks/ready-a.task.md": `---
+grainfile: v1
 title: Ready Task for A
 recipient: https://github.com/acme/grain-a
 draft: false
@@ -617,6 +624,7 @@ draft: false
 Execute immediately on A.
 `,
 				"tasks/staged-b.task.md": `---
+grainfile: v1
 title: Staged Draft Task for B
 recipient: https://github.com/acme/grain-b
 draft: true
@@ -635,6 +643,7 @@ Still in draft; do not emit task_ready yet.
 			// 2. Promote tasks/staged-b.task.md from draft: true to draft: false in a subsequent commit.
 			env.sim.MustCommitAndPush(t, "acme", "app", "main", "Undraft task B", map[string]string{
 				"tasks/staged-b.task.md": `---
+grainfile: v1
 title: Staged Draft Task for B
 recipient: https://github.com/acme/grain-b
 draft: false
@@ -653,6 +662,7 @@ Now ready for B.
 			notBeforeTime := env.now().Add(10 * time.Second).Truncate(time.Second)
 			env.sim.MustCommitAndPush(t, "acme", "app", "main", "Schedule future task for A", map[string]string{
 				"tasks/scheduled-a.task.md": fmt.Sprintf(`---
+grainfile: v1
 title: Scheduled Task for A
 recipient: https://github.com/acme/grain-a
 not_before: %s
@@ -691,6 +701,7 @@ Run after not_before timestamp.
 
 			env.sim.MustCommitAndPush(t, "acme", "app", "main", "Offline commit 1 for B", map[string]string{
 				"tasks/offline-1.task.md": `---
+grainfile: v1
 title: Offline Task 1
 recipient: https://github.com/acme/grain-b
 ---
@@ -700,6 +711,7 @@ First offline task.
 
 			env.sim.MustCommitAndPush(t, "acme", "app", "main", "Offline commit 2 for B", map[string]string{
 				"processes/offline-2.process.md": `---
+grainfile: v1
 title: Offline Process 2
 recipient: https://github.com/acme/grain-b
 on:
@@ -781,6 +793,7 @@ func TestEndToEndTriggersTriggerWithAndCrossDeploymentDependsOn(t *testing.T) {
 			// and smoke.process.md depends_on lint.process.md.
 			env.sim.MustCommitAndPush(t, "acme", "core", "main", "Register trigger processes and suite", map[string]string{
 				"processes/entry.process.md": `---
+grainfile: v1
 title: Entry Push Process
 recipient: https://github.com/acme/grain-a
 on:
@@ -792,6 +805,7 @@ on:
 Run on matching push.
 `,
 				"processes/lint.process.md": `---
+grainfile: v1
 title: Companion Lint Process
 recipient: https://github.com/acme/grain-a
 depends_on:
@@ -802,6 +816,7 @@ on:
 Run lint when entry triggers.
 `,
 				"processes/smoke.process.md": `---
+grainfile: v1
 title: Companion Smoke Process
 recipient: https://github.com/acme/grain-b
 depends_on:
@@ -812,6 +827,7 @@ on:
 Run smoke suite after lint when entry triggers.
 `,
 				"processes/pr-api.process.md": `---
+grainfile: v1
 title: PR API Review Process
 recipient: https://github.com/acme/grain-a
 on:
@@ -822,6 +838,7 @@ on:
 Review API changes on pull requests.
 `,
 				"processes/post-merge.process.md": `---
+grainfile: v1
 title: Post Merge Deploy Process
 recipient: https://github.com/acme/grain-b
 on:
@@ -931,6 +948,7 @@ Deploy merged PR to staging.
 			// Repo acme/downstream commits tasks/deploy-artifact.task.md for Node B with depends_on pointing to acme/upstream's task.
 			shaUp, _ := env.sim.MustCommitAndPush(t, "acme", "upstream", "main", "Add upstream build task", map[string]string{
 				"tasks/build-artifact.task.md": `---
+grainfile: v1
 title: Build Upstream Artifact
 recipient: https://github.com/acme/grain-a
 ---
@@ -941,6 +959,7 @@ Build shared container image.
 
 			shaDown, _ := env.sim.MustCommitAndPush(t, "acme", "downstream", "main", "Add downstream deploy task", map[string]string{
 				"tasks/deploy-artifact.task.md": `---
+grainfile: v1
 title: Deploy Downstream Service
 recipient: https://github.com/acme/grain-b
 depends_on:
@@ -1017,6 +1036,7 @@ func TestEndToEndCrossRepoContentProxyAndGitHubAppAuth(t *testing.T) {
 			// Populate acme/repo-a with a Grainfile for Node B referencing /docs/spec.md, ./schema.json,
 			// and cross-repo https://github.com/org/repo-c/blob/main/secret.md, plus unreferenced /secret.env.
 			grainfileBody := `---
+grainfile: v1
 title: Audit Repo A Spec
 recipient: https://github.com/acme/grain-b
 references:

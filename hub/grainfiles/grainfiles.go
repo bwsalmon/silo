@@ -81,6 +81,7 @@ const (
 	TriggerPush        = "push"
 	TriggerMerge       = "merge"
 	TriggerPullRequest = "pull_request"
+	TriggerWorkflow    = "workflow"
 	TriggerManual      = "manual"
 	TriggerScenario    = "scenario"
 	TriggerDependsOn   = "depends_on"
@@ -217,6 +218,7 @@ type Triggers struct {
 	Push        *EventFilter     `json:"push,omitempty"`
 	Merge       *EventFilter     `json:"merge,omitempty"`
 	PullRequest *EventFilter     `json:"pull_request,omitempty"`
+	Workflow    []WorkflowFilter `json:"workflow,omitempty"`
 	Manual      *ManualTrigger   `json:"manual,omitempty"`
 	Scenario    *ScenarioTrigger `json:"scenario,omitempty"`
 }
@@ -227,14 +229,103 @@ func (t Triggers) IsZero() bool {
 		t.Push == nil &&
 		t.Merge == nil &&
 		t.PullRequest == nil &&
+		len(t.Workflow) == 0 &&
 		t.Manual == nil &&
 		t.Scenario == nil
 }
 
-// ScheduleTrigger is `when.schedule` (docs/grainfiles-spec.md §7.2.1).
+// ScheduleTrigger is `when.schedule` (docs/grainfiles-spec.md §7.2.1). It may
+// represent either a single schedule object or a list of schedule objects (via
+// Schedules).
 type ScheduleTrigger struct {
+	Cron      string            `json:"cron"`
+	Timezone  string            `json:"timezone,omitempty"`
+	Schedules []ScheduleTrigger `json:"-"`
+}
+
+type singleScheduleJSON struct {
 	Cron     string `json:"cron"`
 	Timezone string `json:"timezone,omitempty"`
+}
+
+// Items returns the list of individual schedule entries in s.
+func (s *ScheduleTrigger) Items() []ScheduleTrigger {
+	if s == nil {
+		return nil
+	}
+	if len(s.Schedules) > 0 {
+		return s.Schedules
+	}
+	return []ScheduleTrigger{*s}
+}
+
+// MarshalJSON serializes a single schedule as a JSON object and a multi-schedule
+// list as a JSON array.
+func (s ScheduleTrigger) MarshalJSON() ([]byte, error) {
+	if len(s.Schedules) > 0 {
+		out := make([]singleScheduleJSON, len(s.Schedules))
+		for i, item := range s.Schedules {
+			out[i] = singleScheduleJSON{
+				Cron:     item.Cron,
+				Timezone: item.Timezone,
+			}
+		}
+		return json.Marshal(out)
+	}
+	return json.Marshal(singleScheduleJSON{
+		Cron:     s.Cron,
+		Timezone: s.Timezone,
+	})
+}
+
+// UnmarshalJSON accepts either a single schedule object or a non-empty array of
+// schedule objects.
+func (s *ScheduleTrigger) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var list []singleScheduleJSON
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return err
+		}
+		s.Schedules = make([]ScheduleTrigger, len(list))
+		for i, item := range list {
+			tz := item.Timezone
+			if tz == "" {
+				tz = "UTC"
+			}
+			s.Schedules[i] = ScheduleTrigger{
+				Cron:     item.Cron,
+				Timezone: tz,
+			}
+		}
+		if len(s.Schedules) > 0 {
+			s.Cron = s.Schedules[0].Cron
+			s.Timezone = s.Schedules[0].Timezone
+		}
+		return nil
+	}
+	var single singleScheduleJSON
+	if err := json.Unmarshal(trimmed, &single); err != nil {
+		return err
+	}
+	s.Cron = single.Cron
+	s.Timezone = single.Timezone
+	if s.Timezone == "" && s.Cron != "" {
+		s.Timezone = "UTC"
+	}
+	s.Schedules = nil
+	return nil
+}
+
+// WorkflowFilter is a single filter rule in `when.workflow`
+// (docs/grainfiles-spec.md §7.2.1).
+type WorkflowFilter struct {
+	Workflow  string   `json:"workflow,omitempty"`
+	Workflows []string `json:"workflows,omitempty"`
+	Events    []string `json:"events,omitempty"`
+	Repo      string   `json:"repo,omitempty"`
+	Repos     []string `json:"repos,omitempty"`
+	Branches  []string `json:"branches,omitempty"`
 }
 
 // EventFilter is `when.push`, `when.merge`, or `when.pull_request`
@@ -347,8 +438,9 @@ var (
 	unknownGrainKindRe = regexp.MustCompile(`^(.+)\.([A-Za-z][A-Za-z0-9-]*)\.grain\.md(?:\.jinja2)?$`)
 	repoSlugRe         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$`)
 	userIdentityRe     = regexp.MustCompile(`^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$`)
-	timeRe             = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$`)
+	timeRe             = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|\+(?:[01]\d|2[0-3]):[0-5]\d|-(?:[01]\d|2[0-3]):[0-5]\d)$`)
 	dateRe             = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	ianaTZRe           = regexp.MustCompile(`^(UTC|Etc/(?:UTC|GMT)|[A-Z][A-Za-z_+-]+(?:/[A-Za-z_+-]+)+)$`)
 )
 
 // ClassifyStrictPath classifies a repository-relative path strictly against
@@ -445,22 +537,52 @@ func IsUserIdentity(s string) bool {
 	return userIdentityRe.MatchString(s)
 }
 
-// ParseTime parses and validates an RFC 3339 UTC timestamp with a Z suffix
-// (`YYYY-MM-DDTHH:MM:SSZ`, with optional fractional seconds;
-// docs/grainfiles-spec.md §1.4).
+// ParseTime parses and validates an RFC 3339 timestamp with an explicit timezone
+// designator (`Z` or `±HH:MM` with `00 <= HH <= 23`, `00 <= MM <= 59`, `-00:00`
+// forbidden) and normalizes it to UTC (`Z`; docs/grainfiles-spec.md §1.4).
 func ParseTime(s string) (time.Time, error) {
+	if strings.HasSuffix(s, "-00:00") {
+		return time.Time{}, fmt.Errorf("invalid timestamp %q: -00:00 unknown local offset is not allowed", s)
+	}
 	m := timeRe.FindStringSubmatch(s)
 	if m == nil {
-		return time.Time{}, fmt.Errorf("invalid UTC timestamp %q", s)
+		return time.Time{}, fmt.Errorf("invalid RFC 3339 timestamp %q", s)
 	}
 	if _, err := time.Parse("2006-01-02T15:04:05", m[1]+"T"+m[2]); err != nil {
 		return time.Time{}, fmt.Errorf("invalid calendar date or UTC time %q: %w", s, err)
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid UTC timestamp %q: %w", s, err)
+		return time.Time{}, fmt.Errorf("invalid RFC 3339 timestamp %q: %w", s, err)
 	}
 	return t.UTC(), nil
+}
+
+// ValidIANATimezone reports whether tz is `"UTC"` or a valid IANA Time Zone
+// Database identifier (e.g. `"America/Los_Angeles"`, `"Europe/Berlin"`,
+// `"Asia/Tokyo"`), rejecting numeric offsets, unknown names, and non-IANA
+// abbreviations (e.g. `"PST"`, `"EST"`, `"CET"`).
+func ValidIANATimezone(tz string) bool {
+	if tz == "" {
+		return false
+	}
+	if tz != "UTC" && tz != "Etc/UTC" && tz != "Etc/GMT" {
+		if strings.HasPrefix(tz, "Etc/") || strings.HasPrefix(tz, "SystemV/") {
+			return false
+		}
+		if !ianaTZRe.MatchString(tz) {
+			return false
+		}
+		for _, seg := range strings.Split(tz, "/") {
+			if seg == "" ||
+				strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "+") || strings.HasPrefix(seg, "-") ||
+				strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, "+") || strings.HasSuffix(seg, "-") {
+				return false
+			}
+		}
+	}
+	_, err := time.LoadLocation(tz)
+	return err == nil
 }
 
 // ParseNotBefore parses and validates a `not_before` string, which may be
@@ -666,6 +788,7 @@ var (
 		TriggerPush:        true,
 		TriggerMerge:       true,
 		TriggerPullRequest: true,
+		TriggerWorkflow:    true,
 		TriggerManual:      true,
 		TriggerScenario:    true,
 	}
@@ -718,11 +841,13 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		}
 	}
 
-	// grainfile (optional format version string, defaults to "v1"; §6.1)
+	// grainfile (required format version string "v1"; §3.1, §6.1)
 	g.Grainfile = VersionV1
 	g.SpecSummaryPath = SpecSummaryPathV1
 	g.SpecPath = SpecPathV1
-	if rawVer, ok := fm["grainfile"]; ok {
+	if rawVer, ok := fm["grainfile"]; !ok {
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, "grainfile: required field missing (expected \"v1\")"))
+	} else {
 		verStr, ok := rawVer.(string)
 		if !ok || verStr == "" {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, "grainfile: must be a non-empty string"))
@@ -1119,42 +1244,10 @@ func validateWhenTriggers(raw any, where string) (Triggers, Errors) {
 		}
 		switch k {
 		case TriggerSchedule:
-			sm, ok := val.(map[string]any)
-			if !ok {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule: must be a mapping"))
-				continue
-			}
-			for sk := range sm {
-				if sk != "cron" && sk != "timezone" {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("when.schedule: unknown property %q", sk)))
-				}
-			}
-			rawCron, hasCron := sm["cron"]
-			if !hasCron {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule: cron is required"))
-				continue
-			}
-			cronStr, ok := rawCron.(string)
-			if !ok || cronStr == "" {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule.cron: must be a non-empty string"))
-				continue
-			}
-			if len(strings.Fields(cronStr)) != 5 {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, "schedule.cron must be a five-field cron expression"))
-				continue
-			}
-			tz := "UTC"
-			if rawTZ, hasTZ := sm["timezone"]; hasTZ {
-				tzStr, ok := rawTZ.(string)
-				if !ok || tzStr == "" {
-					errs = append(errs, newFinding(CodeSchemaInvalid, where, "when.schedule.timezone: must be a non-empty string"))
-					continue
-				}
-				tz = tzStr
-			}
-			t.Schedule = &ScheduleTrigger{
-				Cron:     cronStr,
-				Timezone: tz,
+			sch, schErrs := validateScheduleTrigger(val, "when.schedule", where)
+			errs = append(errs, schErrs...)
+			if len(schErrs) == 0 {
+				t.Schedule = sch
 			}
 
 		case TriggerPush, TriggerMerge, TriggerPullRequest:
@@ -1169,6 +1262,13 @@ func validateWhenTriggers(raw any, where string) (Triggers, Errors) {
 				case TriggerPullRequest:
 					t.PullRequest = ef
 				}
+			}
+
+		case TriggerWorkflow:
+			wfs, wfErrs := validateWorkflowTriggers(val, "when.workflow", where)
+			errs = append(errs, wfErrs...)
+			if len(wfErrs) == 0 {
+				t.Workflow = wfs
 			}
 
 		case TriggerManual:
@@ -1399,6 +1499,220 @@ func validateStringSlice(raw any, fieldPath, where string, nonEmptyList bool) ([
 		out = append(out, s)
 	}
 	return out, errs
+}
+
+func validateScheduleTrigger(raw any, fieldPath, where string) (*ScheduleTrigger, Errors) {
+	if list, isList := raw.([]any); isList {
+		if len(list) == 0 {
+			return nil, Errors{newFinding(CodeSchemaInvalid, where, fieldPath+": must be a non-empty list of schedule mappings")}
+		}
+		var errs Errors
+		var items []ScheduleTrigger
+		for i, item := range list {
+			itemPath := fmt.Sprintf("%s.%d", fieldPath, i)
+			single, sErrs := validateSingleScheduleTrigger(item, itemPath, where)
+			errs = append(errs, sErrs...)
+			if single != nil {
+				items = append(items, *single)
+			}
+		}
+		if len(errs) > 0 || len(items) == 0 {
+			return nil, errs
+		}
+		return &ScheduleTrigger{
+			Cron:      items[0].Cron,
+			Timezone:  items[0].Timezone,
+			Schedules: items,
+		}, nil
+	}
+	return validateSingleScheduleTrigger(raw, fieldPath, where)
+}
+
+func validateSingleScheduleTrigger(raw any, fieldPath, where string) (*ScheduleTrigger, Errors) {
+	var errs Errors
+	sm, ok := raw.(map[string]any)
+	if !ok {
+		return nil, Errors{newFinding(CodeSchemaInvalid, where, fieldPath+": must be a mapping")}
+	}
+	for sk := range sm {
+		if sk != "cron" && sk != "timezone" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: unknown property %q", fieldPath, sk)))
+		}
+	}
+	var cronStr string
+	rawCron, hasCron := sm["cron"]
+	if !hasCron {
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+": cron is required"))
+	} else if cs, ok := rawCron.(string); !ok || cs == "" {
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+".cron: must be a non-empty string"))
+	} else if len(strings.Fields(cs)) != 5 {
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, "schedule.cron must be a five-field cron expression"))
+	} else {
+		cronStr = cs
+	}
+
+	tz := "UTC"
+	if rawTZ, hasTZ := sm["timezone"]; hasTZ {
+		tzStr, ok := rawTZ.(string)
+		if !ok || tzStr == "" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+".timezone: must be a non-empty string"))
+		} else if !ValidIANATimezone(tzStr) {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.timezone: invalid IANA timezone %q", fieldPath, tzStr)))
+		} else {
+			tz = tzStr
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	return &ScheduleTrigger{
+		Cron:     cronStr,
+		Timezone: tz,
+	}, nil
+}
+
+// NormalizeWorkflowEvent normalizes a workflow event or alias to one of the
+// canonical lifecycle transition names: "triggered", "succeeded", or "failed".
+func NormalizeWorkflowEvent(ev string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(ev)) {
+	case "triggered", "started", "requested", "in_progress":
+		return "triggered", true
+	case "succeeded", "success":
+		return "succeeded", true
+	case "failed", "failure", "timed_out", "startup_failure":
+		return "failed", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeDeclaredWorkflowEvent(ev string) (string, bool) {
+	switch ev {
+	case "triggered", "started":
+		return "triggered", true
+	case "succeeded", "success":
+		return "succeeded", true
+	case "failed", "failure":
+		return "failed", true
+	default:
+		return "", false
+	}
+}
+
+func validateWorkflowTriggers(raw any, fieldPath, where string) ([]WorkflowFilter, Errors) {
+	if list, isList := raw.([]any); isList {
+		if len(list) == 0 {
+			return nil, Errors{newFinding(CodeSchemaInvalid, where, fieldPath+": must be a non-empty list of workflow filter mappings")}
+		}
+		var errs Errors
+		var filters []WorkflowFilter
+		for i, item := range list {
+			itemPath := fmt.Sprintf("%s.%d", fieldPath, i)
+			single, sErrs := validateSingleWorkflowFilter(item, itemPath, where)
+			errs = append(errs, sErrs...)
+			if single != nil {
+				filters = append(filters, *single)
+			}
+		}
+		if len(errs) > 0 || len(filters) == 0 {
+			return nil, errs
+		}
+		return filters, nil
+	}
+	single, errs := validateSingleWorkflowFilter(raw, fieldPath, where)
+	if len(errs) > 0 || single == nil {
+		return nil, errs
+	}
+	return []WorkflowFilter{*single}, nil
+}
+
+func validateSingleWorkflowFilter(raw any, fieldPath, where string) (*WorkflowFilter, Errors) {
+	var errs Errors
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, Errors{newFinding(CodeSchemaInvalid, where, fieldPath+": must be a mapping")}
+	}
+	for k := range m {
+		if k != "workflow" && k != "workflows" && k != "events" && k != "repo" && k != "repos" && k != "branches" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: unknown property %q", fieldPath, k)))
+		}
+	}
+
+	wf := &WorkflowFilter{}
+	if rawWF, ok := m["workflow"]; ok {
+		s, ok := rawWF.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+".workflow: must be a non-empty string"))
+		} else {
+			wf.Workflow = strings.TrimSpace(s)
+		}
+	}
+	if rawWFs, ok := m["workflows"]; ok {
+		ws, wErrs := validateStringSlice(rawWFs, fieldPath+".workflows", where, true)
+		errs = append(errs, wErrs...)
+		for i, w := range ws {
+			if strings.TrimSpace(w) == "" {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.workflows.%d: must be a non-empty string", fieldPath, i)))
+			} else {
+				wf.Workflows = append(wf.Workflows, strings.TrimSpace(w))
+			}
+		}
+	}
+	if rawEvents, ok := m["events"]; ok {
+		es, eErrs := validateStringSlice(rawEvents, fieldPath+".events", where, true)
+		errs = append(errs, eErrs...)
+		for i, ev := range es {
+			canon, valid := normalizeDeclaredWorkflowEvent(ev)
+			if !valid {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.events.%d: invalid workflow event %q (expected triggered, succeeded, or failed)", fieldPath, i, ev)))
+			} else {
+				wf.Events = append(wf.Events, canon)
+			}
+		}
+	} else {
+		wf.Events = []string{"succeeded", "failed"}
+	}
+	if rawRepo, ok := m["repo"]; ok {
+		s, ok := rawRepo.(string)
+		if !ok || s == "" {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+".repo: must be a non-empty string"))
+		} else if normRepo, err := NormalizeRepoSlugOrURL(s); err != nil {
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.repo: %v", fieldPath, err)))
+		} else {
+			wf.Repo = normRepo
+		}
+	}
+	if rawRepos, ok := m["repos"]; ok {
+		rs, rErrs := validateStringSlice(rawRepos, fieldPath+".repos", where, true)
+		errs = append(errs, rErrs...)
+		for i, s := range rs {
+			normRepo, err := NormalizeRepoSlugOrURL(s)
+			if err != nil {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.repos.%d: %v", fieldPath, i, err)))
+			} else {
+				wf.Repos = append(wf.Repos, normRepo)
+			}
+		}
+	}
+	if rawBranches, ok := m["branches"]; ok {
+		bs, bErrs := validateStringSlice(rawBranches, fieldPath+".branches", where, true)
+		errs = append(errs, bErrs...)
+		for i, br := range bs {
+			if strings.TrimSpace(br) == "" {
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s.branches.%d: must be a non-empty string", fieldPath, i)))
+			} else {
+				wf.Branches = append(wf.Branches, strings.TrimSpace(br))
+			}
+		}
+	}
+
+	_, hasWF := m["workflow"]
+	_, hasWFs := m["workflows"]
+	if !hasWF && !hasWFs {
+		errs = append(errs, newFinding(CodeSchemaInvalid, where, fieldPath+": at least one of workflow or workflows is required"))
+	}
+
+	return wf, errs
 }
 
 // MaterializedReference is a fetched reference file tagged with its source URL

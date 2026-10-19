@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,7 @@ func TestWebhookIngestionAndContentProxy(t *testing.T) {
 		crossRepoSentinel := "SILO_ATREST_CROSS_REPO_SECRET_778899"
 
 		taskFileContent := `---
+grainfile: v1
 title: Add version header to widget binary schema
 recipient: https://github.com/acme/grain-eu
 requestor: Bruce Salmon <bsalmon@google.com>
@@ -94,6 +96,7 @@ references:
 ` + taskBodySentinel + "\n"
 
 		draftTaskContent := `---
+grainfile: v1
 title: Draft widget cleanup
 recipient: https://github.com/acme/grain-eu
 draft: true
@@ -104,6 +107,7 @@ Draft prompt body.
 `
 
 		deferredTaskContent := `---
+grainfile: v1
 title: Deferred widget v1 removal
 recipient: https://github.com/acme/grain-eu
 not_before: "2026-11-01"
@@ -112,6 +116,7 @@ Drop v1 support on Nov 1.
 `
 
 		gateProcessContent := `---
+grainfile: v1
 title: Schema security review gate
 gate: true
 when:
@@ -127,6 +132,7 @@ Review schema changes.
 `
 
 		coTriggeredProcessContent := `---
+grainfile: v1
 title: Post-merge qualification report
 depends_on:
   - https://github.com/acme/widgets/blob/main/.grain/processes/schema-security-review.process.md
@@ -262,7 +268,7 @@ Generate post-merge report.
 			},
 		}
 		// Even if the PR head contains a malicious task or modified process, pull_request webhooks must never index PR-head grainfiles.
-		fetcher.SetString(repoWidgets, "pr-head-evil-sha", ".grain/tasks/evil-pr-task.task.grain.md", "---\ntitle: Evil PR Task\nrecipient: https://github.com/acme/grain-eu\n---\nExfiltrate.\n")
+		fetcher.SetString(repoWidgets, "pr-head-evil-sha", ".grain/tasks/evil-pr-task.task.grain.md", "---\ngrainfile: v1\ntitle: Evil PR Task\nrecipient: https://github.com/acme/grain-eu\n---\nExfiltrate.\n")
 		fetcher.SetString(repoWidgets, "pr-head-evil-sha", ".grain/processes/schema-security-review.process.md", "---\ntitle: Hijacked PR Process\nrecipient: https://github.com/acme/grain-eu\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\nHijacked.\n")
 
 		respPR, bodyPR := postWebhook("pull_request", "valid", prPayload)
@@ -451,9 +457,9 @@ Generate post-merge report.
 
 		// 5i. Test installation ("created") and installation_repositories ("added") webhooks scanning existing *.grain.md and *.grain.md.jinja2 files.
 		repoScanned := "https://github.com/acme/scanned-repo"
-		fetcher.SetString(repoScanned, "main", ".grain/tasks/existing.task.grain.md", "---\ntitle: Existing scanned task\nrecipient: https://github.com/acme/grain-eu\n---\nScan body.\n")
-		fetcher.SetString(repoScanned, "main", ".grain/processes/existing.process.grain.md", "---\ntitle: Existing scanned process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nScan process.\n")
-		fetcher.SetString(repoScanned, "main", ".grain/tasks/rollout.task.grain.md.jinja2", "---\ntitle: Roll out to {{ region | default('eu') | upper }}\nrecipient: https://github.com/acme/grain-{{ region | default('eu') }}\ndepends_on:\n  - ./existing.task.grain.md\n---\n{# Template comment #}\n{% if env %}\nEnv: {{ env | trim | replace('-', '_') }}\n{% else %}\nEnv: default\n{% endif %}\n")
+		fetcher.SetString(repoScanned, "main", ".grain/tasks/existing.task.grain.md", "---\ngrainfile: v1\ntitle: Existing scanned task\nrecipient: https://github.com/acme/grain-eu\n---\nScan body.\n")
+		fetcher.SetString(repoScanned, "main", ".grain/processes/existing.process.grain.md", "---\ngrainfile: v1\ntitle: Existing scanned process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nScan process.\n")
+		fetcher.SetString(repoScanned, "main", ".grain/tasks/rollout.task.grain.md.jinja2", "---\ngrainfile: v1\ntitle: Roll out to {{ region | default('eu') | upper }}\nrecipient: https://github.com/acme/grain-{{ region | default('eu') }}\ndepends_on:\n  - ./existing.task.grain.md\n---\n{# Template comment #}\n{% if env %}\nEnv: {{ env | trim | replace('-', '_') }}\n{% else %}\nEnv: default\n{% endif %}\n")
 		fetcher.SetString(repoScanned, "main", "README.md", "# Readme\n")
 
 		rInst, bInst := postWebhook("installation_repositories", "valid", map[string]any{
@@ -526,7 +532,7 @@ Generate post-merge report.
 
 func TestGitHubFetcher(t *testing.T) {
 	ctx := context.Background()
-	wantRaw := "---\ntitle: From GitHub API\nrecipient: https://github.com/acme/grain-eu\n---\nHello.\n"
+	wantRaw := "---\ngrainfile: v1\ntitle: From GitHub API\nrecipient: https://github.com/acme/grain-eu\n---\nHello.\n"
 	wantBase64File := "package main\nfunc main() {}\n"
 
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -601,5 +607,155 @@ func TestGitHubFetcher(t *testing.T) {
 	listed, resolvedSHA, err := gh.ListGrainfiles(ctx, "https://github.com/acme/widgets", "sha123")
 	if err != nil || resolvedSHA != "sha123" || len(listed) != 1 || listed[0] != ".grain/tasks/hello.task.grain.md" {
 		t.Fatalf("ListGrainfiles: listed=%v sha=%q err=%v", listed, resolvedSHA, err)
+	}
+}
+
+func TestWorkflowRunWebhookTriggersProcess(t *testing.T) {
+	ctx := context.Background()
+	dbURL := "sqlite:" + filepath.Join(t.TempDir(), "wf.db")
+	store, err := Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fetcher := NewMemoryFetcher()
+	api := NewAPI(store, fetcher)
+	api.WebhookSecret = "wf-secret"
+	srv := httptest.NewServer(api.Handler())
+	defer srv.Close()
+
+	repo := "https://github.com/acme/widgets"
+	procPath := ".grain/processes/ci-triage.process.grain.md"
+	procRaw := `---
+grainfile: v1
+title: Triage failed CI workflow runs on main
+when:
+  workflow:
+    - workflow: "CI"
+      events: ["triggered", "succeeded", "failed"]
+      branches: ["main"]
+---
+Inspect the CI workflow run.
+`
+	fetcher.SetString(repo, "sha-init", procPath, procRaw)
+
+	postWH := func(event string, payload map[string]any) WebhookResponse {
+		t.Helper()
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequest(http.MethodPost, srv.URL+GitHubWebhookPath, bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-GitHub-Event", event)
+		req.Header.Set("X-Hub-Signature-256", SignGitHubWebhook(api.WebhookSecret, raw))
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s (%s): status %d, body: %s", GitHubWebhookPath, event, resp.StatusCode, body)
+		}
+		var out WebhookResponse
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("unmarshal WebhookResponse: %v", err)
+		}
+		return out
+	}
+
+	// 1. Index the process via push webhook.
+	postWH("push", map[string]any{
+		"ref":   "refs/heads/main",
+		"after": "sha-init",
+		"repository": map[string]any{
+			"html_url":       repo,
+			"default_branch": "main",
+		},
+		"added": []string{procPath},
+	})
+
+	// 2. Send workflow_run requested -> maps to "triggered".
+	resTrig := postWH("workflow_run", map[string]any{
+		"action": "requested",
+		"repository": map[string]any{
+			"html_url": repo,
+		},
+		"workflow_run": map[string]any{
+			"name":        "CI",
+			"path":        ".github/workflows/ci.yml",
+			"html_url":    "https://github.com/acme/widgets/actions/runs/1001",
+			"head_branch": "main",
+			"head_sha":    "sha-wf-1",
+		},
+	})
+	if len(resTrig.Events) != 1 {
+		t.Fatalf("workflow_run requested: got %d events, want 1", len(resTrig.Events))
+	}
+	ev1 := resTrig.Events[0]
+	if ev1.Type != EventProcessTriggered || ev1.TriggerSource != TriggerWorkflow || ev1.WorkflowName != "CI" || ev1.WorkflowEvent != "triggered" || ev1.WorkflowURL != "https://github.com/acme/widgets/actions/runs/1001" || ev1.Branch != "main" || ev1.CommitSHA != "sha-wf-1" {
+		t.Errorf("unexpected workflow triggered event: %+v", ev1)
+	}
+
+	// 3. Send workflow_run completed + conclusion=failure -> maps to "failed".
+	resFail := postWH("workflow_run", map[string]any{
+		"action": "completed",
+		"repository": map[string]any{
+			"html_url": repo,
+		},
+		"workflow_run": map[string]any{
+			"name":        "CI",
+			"path":        ".github/workflows/ci.yml",
+			"conclusion":  "failure",
+			"html_url":    "https://github.com/acme/widgets/actions/runs/1002",
+			"head_branch": "main",
+			"head_sha":    "sha-wf-2",
+		},
+	})
+	if len(resFail.Events) != 1 || resFail.Events[0].WorkflowEvent != "failed" || resFail.Events[0].CommitSHA != "sha-wf-2" {
+		t.Fatalf("workflow_run failure: got %+v", resFail.Events)
+	}
+
+	// 4. Send workflow_run completed + conclusion=success -> maps to "succeeded".
+	resSucc := postWH("workflow_run", map[string]any{
+		"action": "completed",
+		"repository": map[string]any{
+			"html_url": repo,
+		},
+		"workflow_run": map[string]any{
+			"name":        "CI",
+			"path":        ".github/workflows/ci.yml",
+			"conclusion":  "success",
+			"html_url":    "https://github.com/acme/widgets/actions/runs/1003",
+			"head_branch": "main",
+			"head_sha":    "sha-wf-3",
+		},
+	})
+	if len(resSucc.Events) != 1 || resSucc.Events[0].WorkflowEvent != "succeeded" {
+		t.Fatalf("workflow_run success: got %+v", resSucc.Events)
+	}
+
+	// 5. Send workflow_run completed + conclusion=cancelled -> no event emitted.
+	resCancel := postWH("workflow_run", map[string]any{
+		"action": "completed",
+		"repository": map[string]any{
+			"html_url": repo,
+		},
+		"workflow_run": map[string]any{
+			"name":        "CI",
+			"path":        ".github/workflows/ci.yml",
+			"conclusion":  "cancelled",
+			"html_url":    "https://github.com/acme/widgets/actions/runs/1004",
+			"head_branch": "main",
+			"head_sha":    "sha-wf-4",
+		},
+	})
+	if len(resCancel.Events) != 0 {
+		t.Fatalf("workflow_run cancelled: expected 0 events, got %+v", resCancel.Events)
 	}
 }

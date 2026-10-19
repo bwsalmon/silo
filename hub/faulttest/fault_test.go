@@ -393,7 +393,7 @@ func TestGrainfileFault_DBOutageMidWebhookAndCatchup(t *testing.T) {
 	// 1. Ingest initial webhook before DB outage -> both nodes receive task_ready.
 	commit1 := "1111111111111111111111111111111111111111"
 	c.SetForgeFile(Repo(0), "tasks/01-pre.task.md", commit1,
-		"---\ntitle: Pre-outage task\nrecipient: "+recipientA+"\n---\nRun pre-outage check.\n")
+		"---\ngrainfile: v1\ntitle: Pre-outage task\nrecipient: "+recipientA+"\n---\nRun pre-outage check.\n")
 	if code, body, err := c.SendWebhook(c.Pods[0].URL, Repo(0), "refs/heads/main", commit1, []string{"tasks/01-pre.task.md"}, nil, nil); err != nil || code != http.StatusOK {
 		t.Fatalf("SendWebhook(commit1): code=%d err=%v body=%s", code, err, body)
 	}
@@ -404,7 +404,7 @@ func TestGrainfileFault_DBOutageMidWebhookAndCatchup(t *testing.T) {
 	// 2. Take PostgreSQL down -> webhook ingestion during outage must fail with 5xx (never silently 200 OK).
 	commit2 := "2222222222222222222222222222222222222222"
 	c.SetForgeFile(Repo(0), "tasks/02-during.task.md", commit2,
-		"---\ntitle: During-outage task\nrecipient: "+recipientA+"\n---\nRun during-outage check.\n")
+		"---\ngrainfile: v1\ntitle: During-outage task\nrecipient: "+recipientA+"\n---\nRun during-outage check.\n")
 
 	c.PGProxy.Down()
 	if code, _, err := c.SendWebhook(c.Pods[1].URL, Repo(0), "refs/heads/main", commit2, []string{"tasks/02-during.task.md"}, nil, nil); err == nil && code < 500 {
@@ -427,7 +427,7 @@ func TestGrainfileFault_DBOutageMidWebhookAndCatchup(t *testing.T) {
 
 	commit3 := "3333333333333333333333333333333333333333"
 	c.SetForgeFile(Repo(0), "processes/03-post.process.md", commit3,
-		"---\ntitle: Post-outage process\nrecipient: "+recipientA+"\non:\n  push:\n    branches: [main]\n---\nRun post-outage process.\n")
+		"---\ngrainfile: v1\ntitle: Post-outage process\nrecipient: "+recipientA+"\non:\n  push:\n    branches: [main]\n---\nRun post-outage process.\n")
 	if code, body, err := c.SendWebhook(c.Pods[0].URL, Repo(0), "refs/heads/main", commit3, []string{"processes/03-post.process.md"}, nil, nil); err != nil || code != http.StatusOK {
 		t.Fatalf("SendWebhook(commit3): code=%d err=%v body=%s", code, err, body)
 	}
@@ -483,7 +483,7 @@ func TestGrainfileFault_MultiPodRollingRestartAndPodKill(t *testing.T) {
 		commit := fmt.Sprintf("%040d", i+1)
 		path := fmt.Sprintf("tasks/batch-%02d.task.md", i)
 		c.SetForgeFile(Repo(teamIdx), path, commit,
-			fmt.Sprintf("---\ntitle: Rolling batch %d\nrecipient: %s\n---\nTask body %d.\n", i, recipient, i))
+			fmt.Sprintf("---\ngrainfile: v1\ntitle: Rolling batch %d\nrecipient: %s\n---\nTask body %d.\n", i, recipient, i))
 
 		// Fault a pod mid-stream on selected iterations: alternate SIGTERM rolling restart and SIGKILL crash.
 		switch {
@@ -616,6 +616,7 @@ func TestGrainfileFault_CrossDeploymentDependsOnAndTriggerWithAcrossPods(t *test
 	// 1. Index upstream.process.md in Repo(0) (Team 0, targeting recipientA).
 	shaA1 := "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
 	c.SetForgeFile(Repo(0), "processes/upstream.process.md", shaA1, fmt.Sprintf(`---
+grainfile: v1
 title: Upstream qualification process
 recipient: %s
 on:
@@ -632,6 +633,7 @@ Run upstream qualification.
 	// 2. Index downstream.process.md in Repo(1) (Team 1, targeting recipientB) with trigger_with and depends_on -> upstreamURL.
 	shaB1 := "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111"
 	c.SetForgeFile(Repo(1), "processes/downstream.process.md", shaB1, fmt.Sprintf(`---
+grainfile: v1
 title: Downstream verification process
 recipient: %s
 trigger_with:
@@ -648,6 +650,7 @@ Run downstream verification after upstream completes.
 	// 3. Index companion.task.md in Repo(2) (Team 2, targeting recipientC) with depends_on -> upstreamURL.
 	shaC1 := "cccc1111cccc1111cccc1111cccc1111cccc1111"
 	c.SetForgeFile(Repo(2), "tasks/companion.task.md", shaC1, fmt.Sprintf(`---
+grainfile: v1
 title: Companion deployment task
 recipient: %s
 depends_on:
@@ -671,6 +674,7 @@ Run companion deployment once upstream is done.
 	// AND co-triggers downstream.process.md (recipientB via trigger_with) across pods!
 	shaA2 := "aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222"
 	c.SetForgeFile(Repo(0), "processes/upstream.process.md", shaA2, fmt.Sprintf(`---
+grainfile: v1
 title: Upstream qualification process
 recipient: %s
 on:

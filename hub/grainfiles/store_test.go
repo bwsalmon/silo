@@ -107,6 +107,7 @@ func TestStoreIndexAndNoCodeAtRest(t *testing.T) {
 
 		secretPrompt := "SILO_SECRET_PROMPT_BODY_9918273645"
 		rawTask := `---
+grainfile: v1
 title: Migrate widget binary header
 recipient: https://github.com/acme/grain-eu
 requestor: Bruce Salmon <bsalmon@google.com>
@@ -199,6 +200,7 @@ func TestStoreDraftAndNotBeforeFiltering(t *testing.T) {
 
 		// 1. Index a draft: true task -> must NOT appear in active events.
 		draftYAML := `---
+grainfile: v1
 title: Draft widget task
 recipient: https://github.com/acme/grain-eu
 draft: true
@@ -235,6 +237,7 @@ Work in progress.
 
 		// 2. Index a non-draft task with future not_before -> deferred until timestamp reached.
 		deferredYAML := `---
+grainfile: v1
 title: Deferred migration task
 recipient: https://github.com/acme/grain-eu
 not_before: "2026-10-25T09:00:00Z"
@@ -257,6 +260,7 @@ Run on Oct 25.
 
 		// Also index a process with future not_before.
 		defProcYAML := `---
+grainfile: v1
 title: Deferred security gate
 not_before: "2026-10-25T09:00:00Z"
 gate: true
@@ -408,6 +412,7 @@ func TestStoreProcessFanoutAndDependsOn(t *testing.T) {
 
 		// 1. Primary process smoke.process.grain.md in acme/widgets (no recipient; subscribed by both node-eu and node-us).
 		smokeYAML := `---
+grainfile: v1
 title: Nightly smoke check on push
 when:
   push:
@@ -432,6 +437,7 @@ Run smoke suite.
 
 		// Verify depends_on on .process.grain.md is rejected with GF020.
 		badProcYAML := `---
+grainfile: v1
 title: Invalid process with depends_on
 depends_on:
   - https://github.com/acme/widgets/blob/main/.grain/tasks/prep.task.grain.md
@@ -446,6 +452,7 @@ Must be rejected.
 
 		// 2. Concrete task prep.task.grain.md in acme/widgets and dependent task rollout.task.grain.md in acme/grain-us.
 		prepYAML := `---
+grainfile: v1
 title: Prepare widget release artifacts
 recipient: https://github.com/acme/grain-eu
 ---
@@ -466,6 +473,7 @@ Prepare release artifacts.
 		}
 
 		rolloutYAML := `---
+grainfile: v1
 title: Roll out widget release to US
 recipient: https://github.com/acme/grain-us
 depends_on:
@@ -629,7 +637,7 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 		}
 
 		// 1. A .task.grain.md pushed on a feature branch (non-default branch) must NOT emit task_ready.
-		featTask, err := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task\nrecipient: https://github.com/acme/grain-eu\n---\nRun once.\n"))
+		featTask, err := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ngrainfile: v1\ntitle: One-off task\nrecipient: https://github.com/acme/grain-eu\n---\nRun once.\n"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -647,7 +655,7 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 		}
 
 		// 2. Pushing the same .task.grain.md on main emits task_ready; editing before completion emits updated task_ready.
-		mainTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task v1\nrecipient: https://github.com/acme/grain-eu\n---\nRun once.\n"))
+		mainTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ngrainfile: v1\ntitle: One-off task v1\nrecipient: https://github.com/acme/grain-eu\n---\nRun once.\n"))
 		_ = mainTask.ResolveSource(Source{
 			RepoURL: "https://github.com/acme/widgets",
 			Ref:     "refs/heads/main",
@@ -664,7 +672,7 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 		}
 
 		// Edit before completion -> emits updated task_ready.
-		editTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task v2\nrecipient: https://github.com/acme/grain-eu\n---\nRun once v2.\n"))
+		editTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ngrainfile: v1\ntitle: One-off task v2\nrecipient: https://github.com/acme/grain-eu\n---\nRun once v2.\n"))
 		_ = editTask.ResolveSource(Source{
 			RepoURL: "https://github.com/acme/widgets",
 			Ref:     "refs/heads/main",
@@ -686,7 +694,7 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 		}
 		_, _, _ = s.CatchupNode(ctx, "node-eu", true)
 
-		repushTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ntitle: One-off task v3\nrecipient: https://github.com/acme/grain-eu\n---\nRun once v3.\n"))
+		repushTask, _ := Parse(".grain/tasks/one-off.task.grain.md", []byte("---\ngrainfile: v1\ntitle: One-off task v3\nrecipient: https://github.com/acme/grain-eu\n---\nRun once v3.\n"))
 		_ = repushTask.ResolveSource(Source{
 			RepoURL: "https://github.com/acme/widgets",
 			Ref:     "refs/heads/main",
@@ -707,7 +715,7 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 		}
 
 		// 4. Deleting a queued (uncompleted) task emits a task_removed event (with action=removed and state=cancelled).
-		qTask, _ := Parse(".grain/tasks/cancel-me.task.grain.md", []byte("---\ntitle: Cancel me\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n"))
+		qTask, _ := Parse(".grain/tasks/cancel-me.task.grain.md", []byte("---\ngrainfile: v1\ntitle: Cancel me\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n"))
 		_ = qTask.ResolveSource(Source{
 			RepoURL: "https://github.com/acme/widgets",
 			Ref:     "refs/heads/main",
@@ -731,10 +739,10 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 			path := fmt.Sprintf(".grain/processes/p%02d.process.md", i)
 			var yamlBody string
 			if i == 0 {
-				yamlBody = "---\ntitle: Root process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nRoot.\n"
+				yamlBody = "---\ngrainfile: v1\ntitle: Root process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nRoot.\n"
 			} else {
 				prevURL := fmt.Sprintf("https://github.com/acme/widgets/blob/main/.grain/processes/p%02d.process.md", i-1)
-				yamlBody = fmt.Sprintf("---\ntitle: Step %d\ndepends_on:\n  - %s\nwhen:\n  manual: {}\n---\nStep.\n", i, prevURL)
+				yamlBody = fmt.Sprintf("---\ngrainfile: v1\ntitle: Step %d\ndepends_on:\n  - %s\nwhen:\n  manual: {}\n---\nStep.\n", i, prevURL)
 			}
 			pg, err := Parse(path, []byte(yamlBody))
 			if err != nil {
@@ -851,7 +859,7 @@ func TestStoreSchemaMigrationColumnUpgrade(t *testing.T) {
 
 		// Verify queries and writes involving migrated columns (not_before, ready_emitted,
 		// completed_*, validation_json, removed, dependency_url, triggered_by) succeed.
-		gf, err := Parse("tasks/01-mig.task.md", []byte("---\ntitle: Migrated task test\nrecipient: https://github.com/acme/agent\nnot_before: \"2026-01-01T00:00:00Z\"\n---\nBody.\n"))
+		gf, err := Parse("tasks/01-mig.task.md", []byte("---\ngrainfile: v1\ntitle: Migrated task test\nrecipient: https://github.com/acme/agent\nnot_before: \"2026-01-01T00:00:00Z\"\n---\nBody.\n"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -920,6 +928,7 @@ func TestCrossRepoWhenTriggersAndFromTemplateStore(t *testing.T) {
 		// 1. Index a central process in acme/grain-eu with from_template and gate: true
 		// watching acme/widgets (folder src/auth/) and acme/payments, plus an unauthorized other/outsider repo.
 		centralProcYAML := `---
+grainfile: v1
 title: Central EU Auth Gate
 from_template: /.grain/templates/auth-gate.process.grain.md.jinja2
 gate: true
@@ -1042,7 +1051,7 @@ func TestCanonicalDeploymentURLRoutingAndReplayForNode(t *testing.T) {
 		}
 
 		// Index a standing process in acme/payments
-		procGF, err := Parse(".grain/processes/ci.process.grain.md", []byte("---\ntitle: Payments CI check\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
+		procGF, err := Parse(".grain/processes/ci.process.grain.md", []byte("---\ngrainfile: v1\ntitle: Payments CI check\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
 		if err != nil {
 			t.Fatalf("Parse(process): %v", err)
 		}
@@ -1115,6 +1124,7 @@ func TestMultiRepoGateCrossRepoAuthorizationAndCoTriggers(t *testing.T) {
 
 		// 1. Multi-repo gate process in control-plane watching control-plane, service-a (same team), and service-b (other team).
 		gateRaw := `---
+grainfile: v1
 title: Multi-Repo Gate Watcher
 gate: true
 when:
@@ -1147,6 +1157,7 @@ Gate verification across repos.
 
 		// 2. Unauthorized cross-team gate process in evil/attacker attempting to co-trigger via depends_on on gateGF!
 		evilRaw := `---
+grainfile: v1
 title: Evil Co-Trigger Gate Process
 recipient: https://hub.example.com/deployments/evil-node
 gate: true
@@ -1173,6 +1184,7 @@ Should never co-trigger a gate across teams.
 
 		// 3. Authorized same-team process in service-a co-triggering via depends_on on gateGF.
 		allyRaw := `---
+grainfile: v1
 title: Authorized Same-Team Co-Trigger
 recipient: https://hub.example.com/deployments/core-ally
 when:
