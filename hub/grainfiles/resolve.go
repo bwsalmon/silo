@@ -1434,6 +1434,9 @@ func LintTreeWithVars(top string, vars map[string]string) ([]Finding, error) {
 			findings = append(findings, *f)
 			return
 		}
+		if r, err := ParseRef(s); err == nil && r.Form == RefRooted && DeploymentIDFromRecipient(s) != "" {
+			return
+		}
 		targetKind, _, fErr := resolveInTree(it, s, field)
 		if fErr != nil {
 			fErr.Path = where
@@ -1681,7 +1684,7 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 		g.DependsOn = extractRefStrings(rawDeps, "depends_on")
 	}
 	if rawFT, ok := fm["from_template"]; ok {
-		ft, fErr := validateFromTemplate(rawFT, g.Kind, g.Path, where)
+		ft, fErr := validateFromTemplate(rawFT, g.Kind, where, g.Path)
 		if fErr != nil {
 			errs = append(errs, *fErr)
 		} else {

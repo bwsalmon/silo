@@ -261,6 +261,9 @@ def render_template(raw_text, path="<template>", cli_vars=None):
         raise Finding("GF033", path, "Jinja2 syntax error: %s" % e)
     for node in ast.find_all(FORBIDDEN_JINJA2_NODES):
         raise Finding("GF034", path, "forbidden Jinja2 tag %s in sandboxed grainfile template" % type(node).__name__.lower())
+    for snode in ast.find_all(jinja2.nodes.Stmt):
+        if not isinstance(snode, (jinja2.nodes.If, jinja2.nodes.For, jinja2.nodes.Output)):
+            raise Finding("GF033", path, "unsupported Jinja2 statement %s in sandboxed grainfile template" % type(snode).__name__.lower())
     for fnode in ast.find_all(jinja2.nodes.Filter):
         if fnode.name not in ALLOWED_JINJA2_FILTERS:
             raise Finding("GF033", path, "unsupported Jinja2 filter %r" % fnode.name)
@@ -283,7 +286,8 @@ def render_template(raw_text, path="<template>", cli_vars=None):
         raise Finding("GF033", path, "unsupported Jinja2 call expression in sandboxed grainfile template")
     for anode in ast.find_all((jinja2.nodes.Getattr, jinja2.nodes.Getitem, jinja2.nodes.Slice)):
         if not (isinstance(anode, jinja2.nodes.Getattr) and isinstance(anode.node, jinja2.nodes.Name)
-                and anode.node.name == "loop"):
+                and anode.node.name == "loop"
+                and anode.attr in ("index", "index0", "revindex", "revindex0", "first", "last", "length")):
             raise Finding("GF033", path, "unsupported Jinja2 attribute or item access in sandboxed grainfile template")
     try:
         template_vars = sorted(jinja2.meta.find_undeclared_variables(ast))
@@ -784,7 +788,7 @@ class Linter:
         try:
             r = parse_ref(s)
         except Finding as e:
-            self.add("GF035", where, "from_template: %s" % e.msg)
+            self.add(e.code, where, "from_template: %s" % e.msg)
             return
         if r.anchor:
             self.add("GF035", where, "from_template: %r may not carry an anchor" % s)
@@ -819,8 +823,8 @@ class Linter:
             for p in raw_paths:
                 if not isinstance(p, str):
                     continue
-                if "\\" in p:
-                    self.add("GF020", where, "when.%s.paths: backslashes are not allowed in %r" % (ev_key, p))
+                if not p or not p.strip() or "\\" in p or "\x00" in p or _has_encoded_path_hazard(p):
+                    self.add("GF020", where, "when.%s.paths: invalid path %r" % (ev_key, p))
                 elif "://" in p or p.startswith(("http:", "https:", "ssh:", "git@", "file:")):
                     try:
                         r = parse_ref(p)
@@ -835,7 +839,16 @@ class Linter:
             for p in raw_ignore:
                 if not isinstance(p, str):
                     continue
-                if "\\" in p or ".." in p.strip("/").split("/"):
+                if (
+                    not p
+                    or not p.strip()
+                    or "\\" in p
+                    or "\x00" in p
+                    or _has_encoded_path_hazard(p)
+                    or "://" in p
+                    or p.startswith(("http:", "https:", "ssh:", "git@", "file:"))
+                    or ".." in p.strip("/").split("/")
+                ):
                     self.add("GF020", where, "when.%s.ignore: invalid path %r" % (ev_key, p))
 
     def check_schedule_item(self, sch, where):
@@ -1080,6 +1093,19 @@ def self_test():
         except Finding as e:
             if e.code != "GF035":
                 fail("parse_ref(%r) raised %s, want GF035" % (bad_ref, e.code))
+    for bad_tmpl in [
+        "---\ngrainfile: v1\ntitle: {{ range(10) }}\n---\n",
+        "---\ngrainfile: v1\ntitle: {{ x.attr }}\n---\n",
+        "---\ngrainfile: v1\ntitle: {{ x['key'] }}\n---\n",
+        "{% set x = 'a' %}---\ngrainfile: v1\ntitle: {{ x }}\n---\n",
+        "{% macro m() %}hi{% endmacro %}---\ngrainfile: v1\ntitle: T\n---\n",
+    ]:
+        try:
+            render_template(bad_tmpl, "bad.task.grain.md.jinja2")
+            fail("render_template(%r) should have raised GF033" % bad_tmpl)
+        except Finding as e:
+            if e.code != "GF033":
+                fail("render_template(%r) raised %s, want GF033" % (bad_tmpl, e.code))
     print("self-test", "passed" if ok else "FAILED")
     return 0 if ok else 1
 

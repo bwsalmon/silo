@@ -2376,23 +2376,10 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 func (a *API) streamRepoReference(w http.ResponseWriter, r *http.Request, repoURL, ref string, targetRef Ref, rawTarget string) {
 	isExplicitTree := targetRef.Mode == "tree" || targetRef.TrailingSlash || strings.HasSuffix(strings.TrimSpace(rawTarget), "/")
 	if !isExplicitTree {
-		data, err := a.fetchFile(r.Context(), repoURL, ref, targetRef.Path)
-		if err == nil {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("Content-Security-Policy", "sandbox")
-			w.Header().Set("X-Grainfile-Kind", "file")
-			w.Header().Set("X-Grainfile-Repo", repoURL)
-			w.Header().Set("X-Grainfile-Path", targetRef.Path)
-			if ref != "" {
-				w.Header().Set("X-Grainfile-Commit", ref)
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(data)
+		if _, err := a.fetchFile(r.Context(), repoURL, ref, targetRef.Path); err == nil {
+			a.streamRepoFile(w, r, repoURL, ref, targetRef.Path)
 			return
-		}
-		if !errors.Is(err, os.ErrNotExist) {
+		} else if !errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "fetching file from repository: "+err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -2568,7 +2555,7 @@ func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainf
 		if err != nil {
 			return "", "", nil, err
 		}
-		if IsTemplatePath(rec.Path) && len(vars) > 0 {
+		if IsTemplatePath(rec.Path) && vars != nil {
 			rendered, _, err := RenderTemplate(string(raw), vars)
 			if err != nil {
 				return "", "", nil, err
@@ -2604,7 +2591,7 @@ func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainf
 	if !isExplicitTree {
 		raw, fErr := a.fetchFile(ctx, rec.Repo, pinnedRef, targetRef.Path)
 		if fErr == nil {
-			if IsTemplatePath(targetRef.Path) && len(vars) > 0 {
+			if IsTemplatePath(targetRef.Path) && vars != nil {
 				rendered, _, err := RenderTemplate(string(raw), vars)
 				if err != nil {
 					return "", "", nil, err
