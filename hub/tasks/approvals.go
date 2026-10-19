@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/bwsalmon/silo/hub/dbaccess"
 )
 
 // A running task's Grain may ask for a human's approval before it goes
@@ -53,13 +55,21 @@ func (s *Store) Answer(ctx context.Context, a Answer) (Answer, error) {
 		return Answer{}, fmt.Errorf("%w: the reason is over %d bytes", ErrInvalid, maxReason)
 	}
 	a.AnsweredAt, a.Delivered = s.now().UTC().Truncate(time.Millisecond), false
-	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_approvals (task, request, decision, answered_by, reason, answered_at, delivered)
-		VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (task, request) DO NOTHING`),
-		a.Task, a.Request, a.Decision, a.AnsweredBy, a.Reason, a.AnsweredAt.UnixMilli())
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_approvals (task, request, decision, answered_by, reason, answered_at, delivered)
+			VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (task, request) DO NOTHING`),
+			a.Task, a.Request, a.Decision, a.AnsweredBy, a.Reason, a.AnsweredAt.UnixMilli())
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
 	if err != nil {
 		return Answer{}, err
 	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
+	if n == 0 {
 		return Answer{}, fmt.Errorf("%w: approval request %s of task %s is already answered", ErrState, a.Request, a.Task)
 	}
 	return a, nil
@@ -72,32 +82,38 @@ func (s *Store) Answers(ctx context.Context, task string, undelivered bool) ([]A
 	if undelivered {
 		q += ` AND delivered = 0`
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY answered_at, request`), task)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Answer{}
-	for rows.Next() {
-		var (
-			a         Answer
-			at        int64
-			delivered int
-		)
-		if err := rows.Scan(&a.Task, &a.Request, &a.Decision, &a.AnsweredBy, &a.Reason, &at, &delivered); err != nil {
-			return nil, err
+	var out []Answer
+	err := dbaccess.Retry(ctx, func() error {
+		out = []Answer{}
+		rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY answered_at, request`), task)
+		if err != nil {
+			return err
 		}
-		a.AnsweredAt, a.Delivered = time.UnixMilli(at).UTC(), delivered != 0
-		out = append(out, a)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				a         Answer
+				at        int64
+				delivered int
+			)
+			if err := rows.Scan(&a.Task, &a.Request, &a.Decision, &a.AnsweredBy, &a.Reason, &at, &delivered); err != nil {
+				return err
+			}
+			a.AnsweredAt, a.Delivered = time.UnixMilli(at).UTC(), delivered != 0
+			out = append(out, a)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // AnswerDelivered records that task's node has been sent the answer to
 // request.
 func (s *Store) AnswerDelivered(ctx context.Context, task, request string) error {
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE task_approvals SET delivered = 1 WHERE task = ? AND request = ?`), task, request)
-	return err
+	return dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`UPDATE task_approvals SET delivered = 1 WHERE task = ? AND request = ?`), task, request)
+		return err
+	})
 }
 
 // approveMessage is a's approve message.

@@ -157,37 +157,48 @@ func (s *Store) Append(ctx context.Context, e Event, c Class) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO task_events (task, seq, type, class, body) VALUES (?, ?, ?, ?, ?)`),
-		e.Task, e.Seq, e.Type, c.String(), string(b))
-	return err
+	return dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_events (task, seq, type, class, body) VALUES (?, ?, ?, ?, ?)`),
+			e.Task, e.Seq, e.Type, c.String(), string(b))
+		return err
+	})
 }
 
 // Since returns task's events with after < seq <= upto, in order.
 func (s *Store) Since(ctx context.Context, task string, after, upto int64) ([]Event, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND seq > ? AND seq <= ? ORDER BY seq`), task, after, upto)
+	var out []Event
+	err := dbaccess.Retry(ctx, func() error {
+		out = nil
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND seq > ? AND seq <= ? ORDER BY seq`), task, after, upto)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var body string
+			if err := rows.Scan(&body); err != nil {
+				return err
+			}
+			var e Event
+			if err := json.Unmarshal([]byte(body), &e); err != nil {
+				return fmt.Errorf("live: task %s's event: %w", task, err)
+			}
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Event
-	for rows.Next() {
-		var body string
-		if err := rows.Scan(&body); err != nil {
-			return nil, err
-		}
-		var e Event
-		if err := json.Unmarshal([]byte(body), &e); err != nil {
-			return nil, fmt.Errorf("live: task %s's event: %w", task, err)
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // Size is how many events the store holds and how many bytes their
 // bodies take: the hub's store-size metric.
 func (s *Store) Size(ctx context.Context) (events, bytes int64, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM task_events`).Scan(&events, &bytes)
+	err = dbaccess.Retry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM task_events`).Scan(&events, &bytes)
+	})
 	return events, bytes, err
 }
 
@@ -200,7 +211,10 @@ func (s *Store) Last(ctx context.Context, task string) (int64, string, error) {
 		seq int64
 		typ string
 	)
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT seq, type FROM task_events WHERE task = ? ORDER BY seq DESC LIMIT 1`), task).Scan(&seq, &typ)
+	err := dbaccess.Retry(ctx, func() error {
+		seq, typ = 0, ""
+		return s.db.QueryRowContext(ctx, s.q(`SELECT seq, type FROM task_events WHERE task = ? ORDER BY seq DESC LIMIT 1`), task).Scan(&seq, &typ)
+	})
 	if err == sql.ErrNoRows {
 		return 0, "", nil
 	}
@@ -213,22 +227,32 @@ func (s *Store) AddRef(ctx context.Context, task, ref string, seq int64) error {
 	if !validRef(ref) {
 		return fmt.Errorf("live: not a ref: %q", ref)
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_refs (task, ref, seq) VALUES (?, ?, ?) ON CONFLICT (task, ref) DO NOTHING`), task, ref, seq)
+	var res sql.Result
+	err := dbaccess.Retry(ctx, func() error {
+		var err error
+		res, err = s.db.ExecContext(ctx, s.q(`INSERT INTO task_refs (task, ref, seq) VALUES (?, ?, ?) ON CONFLICT (task, ref) DO NOTHING`), task, ref, seq)
+		return err
+	})
 	if err != nil {
 		return err
 	}
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
 		return nil
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`DELETE FROM task_refs WHERE task = ? AND seq <= (
-	SELECT seq FROM task_refs WHERE task = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)`), task, task, MaxRefs)
-	return err
+	return dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM task_refs WHERE task = ? AND seq <= (
+		SELECT seq FROM task_refs WHERE task = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)`), task, task, MaxRefs)
+		return err
+	})
 }
 
 // HasRef is whether task's node listed ref.
 func (s *Store) HasRef(ctx context.Context, task, ref string) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM task_refs WHERE task = ? AND ref = ?`), task, ref).Scan(&n)
+	err := dbaccess.Retry(ctx, func() error {
+		n = 0
+		return s.db.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM task_refs WHERE task = ? AND ref = ?`), task, ref).Scan(&n)
+	})
 	return n > 0, err
 }
 
@@ -236,25 +260,36 @@ func (s *Store) HasRef(ctx context.Context, task, ref string) (bool, error) {
 // its node sent one: tasks.API.Requests, which answers only a request
 // the node made.
 func (s *Store) ApprovalRequest(ctx context.Context, task, id string) (events.ApprovalRequest, bool, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND type = ? ORDER BY seq`), task, events.TypeApprovalRequest)
-	if err != nil {
-		return events.ApprovalRequest{}, false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var body string
-		if err := rows.Scan(&body); err != nil {
-			return events.ApprovalRequest{}, false, err
+	var (
+		found events.ApprovalRequest
+		ok    bool
+	)
+	err := dbaccess.Retry(ctx, func() error {
+		found = events.ApprovalRequest{}
+		ok = false
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND type = ? ORDER BY seq`), task, events.TypeApprovalRequest)
+		if err != nil {
+			return err
 		}
-		var e Event
-		if err := json.Unmarshal([]byte(body), &e); err != nil {
-			return events.ApprovalRequest{}, false, fmt.Errorf("live: task %s's event: %w", task, err)
+		defer rows.Close()
+		for rows.Next() {
+			var body string
+			if err := rows.Scan(&body); err != nil {
+				return err
+			}
+			var e Event
+			if err := json.Unmarshal([]byte(body), &e); err != nil {
+				return fmt.Errorf("live: task %s's event: %w", task, err)
+			}
+			if a := e.ApprovalRequest; a != nil && a.ID == id {
+				found = *a
+				ok = true
+				return nil
+			}
 		}
-		if a := e.ApprovalRequest; a != nil && a.ID == id {
-			return *a, true, nil
-		}
-	}
-	return events.ApprovalRequest{}, false, rows.Err()
+		return rows.Err()
+	})
+	return found, ok, err
 }
 
 // TaskInboxState inspects task's kept awaiting_reply, message, and
@@ -262,42 +297,50 @@ func (s *Store) ApprovalRequest(ctx context.Context, task, id string) (events.Ap
 // state is still waiting and returning all approval_request events in
 // sequence order.
 func (s *Store) TaskInboxState(ctx context.Context, task string) (awaiting bool, question string, awaitingAt time.Time, approvals []events.ApprovalRequest, approvalTimes []time.Time, err error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND type IN (?, ?, ?) ORDER BY seq`),
-		task, events.TypeAwaitingReply, events.TypeMessage, events.TypeApprovalRequest)
-	if err != nil {
-		return false, "", time.Time{}, nil, nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var body string
-		if err := rows.Scan(&body); err != nil {
-			return false, "", time.Time{}, nil, nil, err
+	err = dbaccess.Retry(ctx, func() error {
+		awaiting = false
+		question = ""
+		awaitingAt = time.Time{}
+		approvals = nil
+		approvalTimes = nil
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT body FROM task_events WHERE task = ? AND type IN (?, ?, ?) ORDER BY seq`),
+			task, events.TypeAwaitingReply, events.TypeMessage, events.TypeApprovalRequest)
+		if err != nil {
+			return err
 		}
-		var e Event
-		if err := json.Unmarshal([]byte(body), &e); err != nil {
-			return false, "", time.Time{}, nil, nil, fmt.Errorf("live: task %s's event: %w", task, err)
-		}
-		switch e.Type {
-		case events.TypeAwaitingReply:
-			if ar := e.AwaitingReply; ar != nil {
-				if ar.State == events.AwaitingWaiting {
-					awaiting = true
-					question = ar.Question
-					awaitingAt = e.Time
-				} else {
-					awaiting = false
-					question = ""
+		defer rows.Close()
+		for rows.Next() {
+			var body string
+			if err := rows.Scan(&body); err != nil {
+				return err
+			}
+			var e Event
+			if err := json.Unmarshal([]byte(body), &e); err != nil {
+				return fmt.Errorf("live: task %s's event: %w", task, err)
+			}
+			switch e.Type {
+			case events.TypeAwaitingReply:
+				if ar := e.AwaitingReply; ar != nil {
+					if ar.State == events.AwaitingWaiting {
+						awaiting = true
+						question = ar.Question
+						awaitingAt = e.Time
+					} else {
+						awaiting = false
+						question = ""
+					}
+				}
+			case events.TypeMessage:
+				awaiting = false
+				question = ""
+			case events.TypeApprovalRequest:
+				if a := e.ApprovalRequest; a != nil {
+					approvals = append(approvals, *a)
+					approvalTimes = append(approvalTimes, e.Time)
 				}
 			}
-		case events.TypeMessage:
-			awaiting = false
-			question = ""
-		case events.TypeApprovalRequest:
-			if a := e.ApprovalRequest; a != nil {
-				approvals = append(approvals, *a)
-				approvalTimes = append(approvalTimes, e.Time)
-			}
 		}
-	}
-	return awaiting, question, awaitingAt, approvals, approvalTimes, rows.Err()
+		return rows.Err()
+	})
+	return awaiting, question, awaitingAt, approvals, approvalTimes, err
 }

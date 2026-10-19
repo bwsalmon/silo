@@ -302,9 +302,12 @@ func (s *Store) create(ctx context.Context, spec Spec, state State) (Task, error
 	if len(t.DependsOn) > 0 {
 		deps, _ = json.Marshal(t.DependsOn)
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(deps), t.FiledBy, t.FiledByOwner, t.OriginTask, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
-		now.UnixMilli(), now.UnixMilli(), t.version)
+	err = dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, t.ApprovedBy, approved, string(deps), t.FiledBy, t.FiledByOwner, t.OriginTask, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(cons), string(t.State), "", "", "", "", "[]", 0, 0,
+			now.UnixMilli(), now.UnixMilli(), t.version)
+		return err
+	})
 	if err != nil {
 		return Task{}, err
 	}
@@ -313,7 +316,12 @@ func (s *Store) create(ctx context.Context, spec Spec, state State) (Task, error
 
 // Get returns one task.
 func (s *Store) Get(ctx context.Context, id string) (Task, error) {
-	t, err := scanTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+columns+` FROM tasks WHERE id = ?`), id))
+	var t Task
+	err := dbaccess.Retry(ctx, func() error {
+		var err error
+		t, err = scanTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+columns+` FROM tasks WHERE id = ?`), id))
+		return err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
@@ -398,20 +406,24 @@ func (s *Store) list(ctx context.Context, f Filter, oldest bool) ([]Task, error)
 }
 
 func (s *Store) query(ctx context.Context, q string, args []any) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(q), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Task{}
-	for rows.Next() {
-		t, err := scanTask(rows)
+	var out []Task
+	err := dbaccess.Retry(ctx, func() error {
+		out = []Task{}
+		rows, err := s.db.QueryContext(ctx, s.q(q), args...)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			t, err := scanTask(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, t)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // update applies f to task id if it is in one of the states from, and
@@ -466,17 +478,35 @@ func (s *Store) write(ctx context.Context, id string, t Task, f func(*Task)) (_ 
 	if t.ApprovedAt != nil {
 		approved = t.ApprovedAt.UnixMilli()
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET kind = ?, title = ?, prompt = ?, grainfile_url = ?, commit_sha = ?, trigger_source = ?, state = ?, approved_by = ?, approved_at = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
-		attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
-		t.Kind, t.Title, t.Prompt, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(t.State), t.ApprovedBy, approved, t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
-		t.Updated.UnixMilli(), t.version+1, id, t.version)
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(`UPDATE tasks SET kind = ?, title = ?, prompt = ?, grainfile_url = ?, commit_sha = ?, trigger_source = ?, state = ?, approved_by = ?, approved_at = ?, node = ?, node_owner = ?, node_task = ?, reason = ?, excluded = ?,
+			attempts = ?, cancel_pending = ?, updated_at = ?, version = ? WHERE id = ? AND version = ?`),
+			t.Kind, t.Title, t.Prompt, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(t.State), t.ApprovedBy, approved, t.Node, t.NodeOwner, t.NodeTask, t.Reason, string(excl), t.Attempts, boolInt(t.CancelPending),
+			t.Updated.UnixMilli(), t.version+1, id, t.version)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return Task{}, true, err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	if n != 1 {
 		return Task{}, false, nil
 	}
 	t.version++
+	if prevState != Queued && prevState != Proposed && t.State == Queued {
+		_ = dbaccess.Retry(ctx, func() error {
+			_, err := s.db.ExecContext(ctx, s.q(`UPDATE task_approvals SET delivered = 0 WHERE task = ? AND delivered = 1`), id)
+			return err
+		})
+		_ = dbaccess.Retry(ctx, func() error {
+			_, err := s.db.ExecContext(ctx, s.q(`UPDATE task_messages SET delivered = 0 WHERE task = ? AND delivered = 1`), id)
+			return err
+		})
+	}
 	if !prevState.Terminal() && (t.State == Done || t.State == Failed || t.State == Cancelled) && s.OnTerminal != nil {
 		s.OnTerminal(ctx, t)
 	}
@@ -594,50 +624,58 @@ func (s *Store) RequeueLost(ctx context.Context, id, reason string, lostSince ti
 // by team: the hub's backlog-depth metric. Finished tasks are not
 // counted.
 func (s *Store) Counts(ctx context.Context) (map[string]map[State]int, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, state, COUNT(*) FROM tasks WHERE state IN (?, ?, ?, ?, ?) GROUP BY team, state`),
-		string(Proposed), string(Queued), string(Offered), string(Running), string(Lost))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]map[State]int{}
-	for rows.Next() {
-		var (
-			team, state string
-			n           int
-		)
-		if err := rows.Scan(&team, &state, &n); err != nil {
-			return nil, err
+	var out map[string]map[State]int
+	err := dbaccess.Retry(ctx, func() error {
+		out = map[string]map[State]int{}
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, state, COUNT(*) FROM tasks WHERE state IN (?, ?, ?, ?, ?) GROUP BY team, state`),
+			string(Proposed), string(Queued), string(Offered), string(Running), string(Lost))
+		if err != nil {
+			return err
 		}
-		if out[team] == nil {
-			out[team] = map[State]int{}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				team, state string
+				n           int
+			)
+			if err := rows.Scan(&team, &state, &n); err != nil {
+				return err
+			}
+			if out[team] == nil {
+				out[team] = map[State]int{}
+			}
+			out[team][State(state)] = n
 		}
-		out[team][State(state)] = n
-	}
-	return out, rows.Err()
+		return rows.Err()
+	})
+	return out, err
 }
 
 // OldestQueued is, for each team with a queued task, when its oldest
 // queued task was last queued (its last update): how long the team's
 // queue has waited.
 func (s *Store) OldestQueued(ctx context.Context) (map[string]time.Time, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, MIN(updated_at) FROM tasks WHERE state = ? GROUP BY team`), string(Queued))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]time.Time{}
-	for rows.Next() {
-		var (
-			team string
-			ms   int64
-		)
-		if err := rows.Scan(&team, &ms); err != nil {
-			return nil, err
+	var out map[string]time.Time
+	err := dbaccess.Retry(ctx, func() error {
+		out = map[string]time.Time{}
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, MIN(updated_at) FROM tasks WHERE state = ? GROUP BY team`), string(Queued))
+		if err != nil {
+			return err
 		}
-		out[team] = time.UnixMilli(ms).UTC()
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				team string
+				ms   int64
+			)
+			if err := rows.Scan(&team, &ms); err != nil {
+				return err
+			}
+			out[team] = time.UnixMilli(ms).UTC()
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // Stats is the store's connection pool's statistics.
@@ -957,9 +995,12 @@ func (s *Store) RegisterRun(ctx context.Context, r RunRegistration) (Task, error
 			version:   1,
 		}
 		cons, _ := json.Marshal(t.Constraints)
-		_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, "", 0, "[]", t.FiledBy, t.FiledByOwner, t.OriginTask, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(cons), string(t.State), t.Node, t.NodeOwner, t.NodeTask, "", "[]", 0, 0,
-			now.UnixMilli(), now.UnixMilli(), t.version)
+		err = dbaccess.Retry(ctx, func() error {
+			_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO tasks (`+columns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+				t.ID, t.Team, t.Repo, t.Kind, t.Title, t.Prompt, t.Submitter, "", 0, "[]", t.FiledBy, t.FiledByOwner, t.OriginTask, t.GrainfileURL, t.CommitSHA, t.TriggerSource, string(cons), string(t.State), t.Node, t.NodeOwner, t.NodeTask, "", "[]", 0, 0,
+				now.UnixMilli(), now.UnixMilli(), t.version)
+			return err
+		})
 		if err != nil {
 			// If a concurrent call inserted the same ID first, retry and update.
 			if _, gerr := s.Get(ctx, id); gerr == nil {

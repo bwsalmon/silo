@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bwsalmon/silo/hub/dbaccess"
 )
 
 // MinLostRequeueAfter is the shortest grace a team may give a lost
@@ -90,7 +92,9 @@ func (s *Store) settings(ctx context.Context, team string) (Settings, error) {
 		anyoneMayPropose int
 		requireApproval  int
 	)
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT lost_requeue_seconds, anyone_may_propose, require_approval FROM team_settings WHERE team = ?`), team).Scan(&secs, &anyoneMayPropose, &requireApproval)
+	err := dbaccess.Retry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, s.q(`SELECT lost_requeue_seconds, anyone_may_propose, require_approval FROM team_settings WHERE team = ?`), team).Scan(&secs, &anyoneMayPropose, &requireApproval)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Settings{AnyoneMayPropose: true}, nil
 	}
@@ -121,10 +125,8 @@ func (s *Store) SetTeamSettings(ctx context.Context, team string, set Settings) 
 		if err := s.teamExists(ctx, tx, team); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM team_settings WHERE team = ?`), team); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_settings (team, lost_requeue_seconds, anyone_may_propose, require_approval) VALUES (?, ?, ?, ?)`),
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO team_settings (team, lost_requeue_seconds, anyone_may_propose, require_approval) VALUES (?, ?, ?, ?)
+			ON CONFLICT (team) DO UPDATE SET lost_requeue_seconds = excluded.lost_requeue_seconds, anyone_may_propose = excluded.anyone_may_propose, require_approval = excluded.require_approval`),
 			team, int64(set.LostRequeueAfter/time.Second), anyone, reqApp)
 		return err
 	})
@@ -143,29 +145,33 @@ func (s *Store) AllTeamSettings(ctx context.Context) (map[string]Settings, error
 	if s == nil {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT team, lost_requeue_seconds, anyone_may_propose, require_approval FROM team_settings`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]Settings{}
-	for rows.Next() {
-		var (
-			team             string
-			secs             int64
-			anyoneMayPropose int
-			requireApproval  int
-		)
-		if err := rows.Scan(&team, &secs, &anyoneMayPropose, &requireApproval); err != nil {
-			return nil, err
+	var out map[string]Settings
+	err := dbaccess.Retry(ctx, func() error {
+		out = map[string]Settings{}
+		rows, err := s.db.QueryContext(ctx, `SELECT team, lost_requeue_seconds, anyone_may_propose, require_approval FROM team_settings`)
+		if err != nil {
+			return err
 		}
-		out[team] = Settings{
-			LostRequeueAfter: time.Duration(secs) * time.Second,
-			AnyoneMayPropose: anyoneMayPropose != 0,
-			RequireApproval:  requireApproval != 0,
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				team             string
+				secs             int64
+				anyoneMayPropose int
+				requireApproval  int
+			)
+			if err := rows.Scan(&team, &secs, &anyoneMayPropose, &requireApproval); err != nil {
+				return err
+			}
+			out[team] = Settings{
+				LostRequeueAfter: time.Duration(secs) * time.Second,
+				AnyoneMayPropose: anyoneMayPropose != 0,
+				RequireApproval:  requireApproval != 0,
+			}
 		}
-	}
-	return out, rows.Err()
+		return rows.Err()
+	})
+	return out, err
 }
 
 // TeamSettingsFrom returns team's settings from m, or the default
@@ -219,7 +225,9 @@ func (s *Store) UserPreferences(ctx context.Context, email string) (UserPreferen
 		rawNodes   string
 		configured int
 	)
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT theme, inbox_nodes, inbox_configured FROM user_preferences WHERE email = ?`), e).Scan(&theme, &rawNodes, &configured)
+	err = dbaccess.Retry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, s.q(`SELECT theme, inbox_nodes, inbox_configured FROM user_preferences WHERE email = ?`), e).Scan(&theme, &rawNodes, &configured)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return UserPreferences{Theme: ThemeLight, InboxNodes: []string{}, InboxConfigured: false}, nil
 	}
@@ -254,17 +262,9 @@ func (s *Store) SetUserTheme(ctx context.Context, email, theme string) (string, 
 		return "", err
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		rawNodes := "[]"
-		configured := 0
-		err := tx.QueryRowContext(ctx, s.q(`SELECT inbox_nodes, inbox_configured FROM user_preferences WHERE email = ?`), e).Scan(&rawNodes, &configured)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM user_preferences WHERE email = ?`), e); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, ?, ?, ?, ?)`),
-			e, norm, rawNodes, configured, s.now().UnixMilli())
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, ?, '[]', 0, ?)
+			ON CONFLICT (email) DO UPDATE SET theme = excluded.theme, updated_at = excluded.updated_at`),
+			e, norm, s.now().UnixMilli())
 		return err
 	})
 	if err != nil {
@@ -295,19 +295,9 @@ func (s *Store) SetUserInboxNodes(ctx context.Context, email string, nodes []str
 		return nil, err
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		theme := ThemeLight
-		err := tx.QueryRowContext(ctx, s.q(`SELECT theme FROM user_preferences WHERE email = ?`), e).Scan(&theme)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if theme != ThemeDark {
-			theme = ThemeLight
-		}
-		if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM user_preferences WHERE email = ?`), e); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, ?, ?, 1, ?)`),
-			e, theme, string(raw), s.now().UnixMilli())
+		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO user_preferences (email, theme, inbox_nodes, inbox_configured, updated_at) VALUES (?, ?, ?, 1, ?)
+			ON CONFLICT (email) DO UPDATE SET inbox_nodes = excluded.inbox_nodes, inbox_configured = 1, updated_at = excluded.updated_at`),
+			e, ThemeLight, string(raw), s.now().UnixMilli())
 		return err
 	})
 	if err != nil {
