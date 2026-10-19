@@ -41,6 +41,16 @@ const (
 	ChatRoleViewer      = "viewer"
 )
 
+// ProviderGoogleChat is the external binding provider identifier for Google Chat.
+const ProviderGoogleChat = "google_chat"
+
+// GoogleChatBindingRequest is the payload for PUT /v1/chats/{id}/bindings/google-chat.
+type GoogleChatBindingRequest struct {
+	SpaceName  string            `json:"space_name"`
+	ThreadName string            `json:"thread_name,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
 // ErrNoChat is a chat session that does not exist.
 var ErrNoChat = errors.New("tasks: no such chat session")
 
@@ -1126,4 +1136,130 @@ func (s *Store) ProposedTasksForChat(ctx context.Context, taskID string) ([]Task
 		return rows.Err()
 	})
 	return out, err
+}
+
+// BindGoogleChat sets or replaces the google_chat binding on chatID for
+// spaceName (and optional threadName), removing any conflicting binding for the
+// same spaceName and threadName on other chat sessions.
+func (s *Store) BindGoogleChat(ctx context.Context, chatID, spaceName, threadName string, metadata map[string]string) (ChatSession, error) {
+	spaceName = strings.TrimSpace(spaceName)
+	threadName = strings.TrimSpace(threadName)
+	if spaceName == "" || strings.ContainsFunc(spaceName, isControl) || strings.ContainsFunc(threadName, isControl) {
+		return ChatSession{}, fmt.Errorf("%w: space_name is required", ErrInvalid)
+	}
+	cur, err := s.GetChat(ctx, chatID)
+	if err != nil {
+		return ChatSession{}, err
+	}
+
+	// Remove any conflicting google_chat binding with the same space/thread from other chats.
+	allChats, err := s.ListChats(ctx)
+	if err == nil {
+		for _, other := range allChats {
+			if other.ID == chatID {
+				continue
+			}
+			var filtered []ChatExternalBinding
+			changed := false
+			for _, b := range other.ExternalBindings {
+				if b.Provider == ProviderGoogleChat && b.ExternalID == spaceName && b.ThreadID == threadName {
+					changed = true
+					continue
+				}
+				filtered = append(filtered, b)
+			}
+			if changed {
+				_, _ = s.UpdateChat(ctx, other.ID, UpdateChatOptions{
+					ExternalBindings: &filtered,
+				})
+			}
+		}
+	}
+
+	var next []ChatExternalBinding
+	for _, b := range cur.ExternalBindings {
+		if b.Provider == ProviderGoogleChat {
+			continue
+		}
+		next = append(next, b)
+	}
+	next = append(next, ChatExternalBinding{
+		Provider:   ProviderGoogleChat,
+		ExternalID: spaceName,
+		ThreadID:   threadName,
+		Metadata:   metadata,
+	})
+	return s.UpdateChat(ctx, chatID, UpdateChatOptions{
+		ExternalBindings: &next,
+	})
+}
+
+// UnbindGoogleChat removes the google_chat binding from chatID.
+func (s *Store) UnbindGoogleChat(ctx context.Context, chatID string) (ChatSession, error) {
+	cur, err := s.GetChat(ctx, chatID)
+	if err != nil {
+		return ChatSession{}, err
+	}
+	next := []ChatExternalBinding{}
+	for _, b := range cur.ExternalBindings {
+		if b.Provider == ProviderGoogleChat {
+			continue
+		}
+		next = append(next, b)
+	}
+	return s.UpdateChat(ctx, chatID, UpdateChatOptions{
+		ExternalBindings: &next,
+	})
+}
+
+// FindChatByGoogleChat locates the shared chat session bound to a Google Chat
+// spaceName (and optional threadName). It prefers an exact (spaceName, threadName)
+// match, then a space-level (spaceName, "") binding, and finally any binding on
+// spaceName.
+func (s *Store) FindChatByGoogleChat(ctx context.Context, spaceName, threadName string) (ChatSession, bool, error) {
+	spaceName = strings.TrimSpace(spaceName)
+	threadName = strings.TrimSpace(threadName)
+	if spaceName == "" {
+		return ChatSession{}, false, nil
+	}
+	chats, err := s.ListChats(ctx)
+	if err != nil {
+		return ChatSession{}, false, err
+	}
+	if threadName != "" {
+		for _, c := range chats {
+			for _, b := range c.ExternalBindings {
+				if b.Provider == ProviderGoogleChat && b.ExternalID == spaceName && b.ThreadID == threadName {
+					full, err := s.GetChat(ctx, c.ID)
+					if err != nil {
+						return ChatSession{}, false, err
+					}
+					return full, true, nil
+				}
+			}
+		}
+	}
+	for _, c := range chats {
+		for _, b := range c.ExternalBindings {
+			if b.Provider == ProviderGoogleChat && b.ExternalID == spaceName && b.ThreadID == "" {
+				full, err := s.GetChat(ctx, c.ID)
+				if err != nil {
+					return ChatSession{}, false, err
+				}
+				return full, true, nil
+			}
+		}
+	}
+	for _, c := range chats {
+		for _, b := range c.ExternalBindings {
+			if b.Provider == ProviderGoogleChat && b.ExternalID == spaceName {
+				full, err := s.GetChat(ctx, c.ID)
+				if err != nil {
+					return ChatSession{}, false, err
+				}
+				return full, true, nil
+			}
+		}
+	}
+	return ChatSession{}, false, nil
 }

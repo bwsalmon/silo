@@ -36,6 +36,7 @@ import type {
   Decision,
   Deployment,
   DeploymentSettings,
+  GoogleChatBindingInput,
   Grainfile,
   GrainfileEvent,
   GrainfileInspection,
@@ -699,6 +700,14 @@ export class HubClient {
 
   updateChat(id: string, input: UpdateChatInput): Promise<ChatSession> {
     return this.write<ChatSession>('PATCH', chatPath(id), input);
+  }
+
+  bindGoogleChat(id: string, input: GoogleChatBindingInput): Promise<ChatSession> {
+    return this.write<ChatSession>('PUT', `${chatPath(id)}/bindings/google-chat`, input);
+  }
+
+  unbindGoogleChat(id: string): Promise<ChatSession> {
+    return this.write<ChatSession>('DELETE', `${chatPath(id)}/bindings/google-chat`);
   }
 
   postChatMessage(id: string, input: PostChatMessageInput): Promise<ChatMessage> {

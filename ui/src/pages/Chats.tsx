@@ -23,12 +23,14 @@ import {
 } from '@mui/material';
 import {
   approveTask,
+  bindGoogleChat,
   createChat,
   getChat,
   listChats,
   listDeployments,
   postChatMessage,
   subscribeChatEvents,
+  unbindGoogleChat,
   updateChat,
   type ChatEvent,
   type ChatExternalBinding,
@@ -230,6 +232,16 @@ export function Chats({
   const [drawerError, setDrawerError] = useState<string | undefined>(undefined);
   const [savingSettings, setSavingSettings] = useState(false);
 
+  // Google Chat Integration Dialog state
+  const [gchatDialogOpen, setGchatDialogOpen] = useState(false);
+  const [gchatError, setGchatError] = useState<string | undefined>(undefined);
+  const [gchatCopied, setGchatCopied] = useState(false);
+
+  const activeGoogleChatBinding = useMemo(
+    () => (liveChat?.external_bindings ?? []).find((b) => b.provider === 'google_chat'),
+    [liveChat?.external_bindings],
+  );
+
   useEffect(() => {
     if (!liveChat) return;
     setLinkedDraft((liveChat.linked_deployments ?? []).join(', '));
@@ -416,6 +428,62 @@ export function Chats({
     }
   };
 
+  const handleBindGoogleChat = async () => {
+    if (!liveChat) return;
+    if (!bindingSpace.trim()) {
+      setGchatError('Google Chat Space name (e.g. spaces/AAA...) is required.');
+      return;
+    }
+    setSavingSettings(true);
+    setGchatError(undefined);
+    setDrawerError(undefined);
+    try {
+      const updated = await bindGoogleChat(liveChat.id, {
+        space_name: bindingSpace.trim(),
+        thread_name: bindingThread.trim() || undefined,
+      });
+      setLiveChat(updated);
+      chatsLoad.reload();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setGchatError(msg);
+      setDrawerError(msg);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleUnbindGoogleChat = async () => {
+    if (!liveChat) return;
+    setSavingSettings(true);
+    setGchatError(undefined);
+    setDrawerError(undefined);
+    try {
+      const updated = await unbindGoogleChat(liveChat.id);
+      setLiveChat(updated);
+      setBindingSpace('');
+      setBindingThread('');
+      chatsLoad.reload();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setGchatError(msg);
+      setDrawerError(msg);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleCopyGrainLink = async () => {
+    if (!liveChat) return;
+    const cmd = `/grain link ${liveChat.id}`;
+    try {
+      await navigator.clipboard?.writeText(cmd);
+    } catch {
+      // Fallback if clipboard API is unavailable in test environment
+    }
+    setGchatCopied(true);
+  };
+
   const insertMention = (handle: string) => {
     const token = `@${handle} `;
     setDraft((prev) => (prev.endsWith(' ') || prev.length === 0 ? `${prev}${token}` : `${prev} ${token}`));
@@ -485,6 +553,15 @@ export function Chats({
                           label={c.reply_mode === 'all' ? 'All messages' : '@mention'}
                           variant="outlined"
                         />
+                        {(c.external_bindings ?? []).some((b) => b.provider === 'google_chat') && (
+                          <Chip
+                            size="small"
+                            color="success"
+                            variant="outlined"
+                            label="Google Chat"
+                            data-testid={`chat-room-gchat-${c.id}`}
+                          />
+                        )}
                         <Typography variant="caption" color="text.secondary">
                           {(c.participants ?? []).length} participants
                         </Typography>
@@ -531,6 +608,24 @@ export function Chats({
                       />
                     ))}
                     {liveChat.state && <StateChip state={liveChat.state} />}
+                    <Chip
+                      size="small"
+                      color={activeGoogleChatBinding ? 'success' : 'default'}
+                      variant={activeGoogleChatBinding ? 'filled' : 'outlined'}
+                      label={
+                        activeGoogleChatBinding
+                          ? `Google Chat: ${activeGoogleChatBinding.external_id}${
+                              activeGoogleChatBinding.thread_id ? ` (${activeGoogleChatBinding.thread_id})` : ''
+                            }`
+                          : 'Google Chat'
+                      }
+                      onClick={() => {
+                        setGchatError(undefined);
+                        setGchatCopied(false);
+                        setGchatDialogOpen(true);
+                      }}
+                      data-testid="google-chat-badge"
+                    />
                   </Stack>
                   <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                     <Button
@@ -874,8 +969,25 @@ export function Chats({
 
               {/* External Chat Integration Slot */}
               <Stack spacing={1} data-testid="external-chat-bindings-section">
-                <Typography variant="subtitle2" color="text.secondary">
-                  External Chat Integration (Google Chat)
+                <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Typography variant="subtitle2" color="text.secondary">
+                    External Chat Integration (Google Chat)
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={() => {
+                      setGchatError(undefined);
+                      setGchatCopied(false);
+                      setGchatDialogOpen(true);
+                    }}
+                    data-testid="open-google-chat-dialog-btn"
+                  >
+                    Configure
+                  </Button>
+                </Stack>
+                <Typography variant="caption" color="text.secondary" sx={{ fontFamily: mono }}>
+                  /grain link {liveChat.id}
                 </Typography>
                 <TextField
                   size="small"
@@ -894,15 +1006,29 @@ export function Chats({
                   inputProps={{ 'data-testid': 'drawer-google-chat-thread' }}
                 />
                 {canPost && (
-                  <Button
-                    size="small"
-                    variant="contained"
-                    disabled={savingSettings}
-                    onClick={() => void handleSaveContextAndBindings()}
-                    data-testid="save-chat-settings-btn"
-                  >
-                    Save Context & Bindings
-                  </Button>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      disabled={savingSettings}
+                      onClick={() => void handleSaveContextAndBindings()}
+                      data-testid="save-chat-settings-btn"
+                    >
+                      Save Context & Bindings
+                    </Button>
+                    {activeGoogleChatBinding && (
+                      <Button
+                        size="small"
+                        color="error"
+                        variant="outlined"
+                        disabled={savingSettings}
+                        onClick={() => void handleUnbindGoogleChat()}
+                        data-testid="drawer-unbind-google-chat-btn"
+                      >
+                        Unbind
+                      </Button>
+                    )}
+                  </Stack>
                 )}
               </Stack>
             </Stack>
@@ -1005,6 +1131,117 @@ export function Chats({
           >
             Create Room
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Google Chat Integration Configuration Dialog */}
+      <Dialog
+        open={gchatDialogOpen && Boolean(liveChat)}
+        onClose={() => setGchatDialogOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        data-testid="google-chat-dialog"
+      >
+        <DialogTitle>Google Chat Integration</DialogTitle>
+        <DialogContent>
+          {liveChat && (
+            <Stack spacing={2} sx={{ mt: 1 }}>
+              {gchatError && <Alert severity="error">{gchatError}</Alert>}
+              <Typography variant="body2" color="text.secondary">
+                Link this Shared Chat Session with a Google Chat space or thread for bidirectional messaging and interactive approvals.
+              </Typography>
+
+              <Paper variant="outlined" sx={{ p: 1.5 }} data-testid="google-chat-status-summary">
+                <Stack spacing={0.5}>
+                  <Typography variant="subtitle2">Current Binding Status</Typography>
+                  {activeGoogleChatBinding ? (
+                    <Typography variant="body2" sx={{ fontFamily: mono }} data-testid="google-chat-current-binding">
+                      Linked to space {activeGoogleChatBinding.external_id}
+                      {activeGoogleChatBinding.thread_id ? ` · thread ${activeGoogleChatBinding.thread_id}` : ''}
+                    </Typography>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary" data-testid="google-chat-current-binding">
+                      Not currently bound to a Google Chat space.
+                    </Typography>
+                  )}
+                </Stack>
+              </Paper>
+
+              <Paper variant="outlined" sx={{ p: 1.5 }}>
+                <Stack spacing={1}>
+                  <Typography variant="subtitle2">Link from Google Chat</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Run this slash command inside your Google Chat space or thread:
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Typography
+                      variant="body2"
+                      sx={{ fontFamily: mono, bgcolor: 'action.hover', px: 1, py: 0.5, borderRadius: 1, flex: 1 }}
+                      data-testid="google-chat-link-command"
+                    >
+                      /grain link {liveChat.id}
+                    </Typography>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => void handleCopyGrainLink()}
+                      data-testid="copy-grain-link-btn"
+                    >
+                      {gchatCopied ? 'Copied' : 'Copy'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Paper>
+
+              <Divider />
+
+              <Typography variant="subtitle2">Bind or Update Space / Thread Directly</Typography>
+              <TextField
+                size="small"
+                label="Google Chat Space Name (e.g. spaces/AAA...)"
+                value={bindingSpace}
+                disabled={!canPost || savingSettings}
+                onChange={(e) => setBindingSpace(e.target.value)}
+                fullWidth
+                inputProps={{ 'data-testid': 'google-chat-dialog-space' }}
+              />
+              <TextField
+                size="small"
+                label="Google Chat Thread Name (optional, e.g. spaces/AAA.../threads/BBB...)"
+                value={bindingThread}
+                disabled={!canPost || savingSettings}
+                onChange={(e) => setBindingThread(e.target.value)}
+                fullWidth
+                inputProps={{ 'data-testid': 'google-chat-dialog-thread' }}
+              />
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {canPost && activeGoogleChatBinding && (
+            <Button
+              color="error"
+              variant="outlined"
+              disabled={savingSettings}
+              onClick={() => void handleUnbindGoogleChat()}
+              data-testid="unbind-google-chat-btn"
+            >
+              Unbind Google Chat
+            </Button>
+          )}
+          <Button onClick={() => setGchatDialogOpen(false)} data-testid="close-google-chat-dialog-btn">
+            Close
+          </Button>
+          {canPost && (
+            <Button
+              variant="contained"
+              disabled={savingSettings || !bindingSpace.trim()}
+              onClick={() => void handleBindGoogleChat()}
+              data-testid="bind-google-chat-btn"
+            >
+              Bind Google Chat
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
     </Stack>

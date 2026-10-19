@@ -595,3 +595,9 @@ export interface PostChatMessageInput {
   trigger_agent?: boolean;
 }
 
+export interface GoogleChatBindingInput {
+  space_name: string;
+  thread_name?: string;
+  space_display_name?: string;
+}
+

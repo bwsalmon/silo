@@ -72,5 +72,7 @@ export const listChats = hub.listChats.bind(hub);
 export const createChat = hub.createChat.bind(hub);
 export const getChat = hub.getChat.bind(hub);
 export const updateChat = hub.updateChat.bind(hub);
+export const bindGoogleChat = hub.bindGoogleChat.bind(hub);
+export const unbindGoogleChat = hub.unbindGoogleChat.bind(hub);
 export const postChatMessage = hub.postChatMessage.bind(hub);
 export const subscribeChatEvents = hub.subscribeChatEvents.bind(hub);

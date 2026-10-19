@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/events"
+	"github.com/bwsalmon/silo/hub/gchat"
 	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/live"
 	"github.com/bwsalmon/silo/hub/rendezvous"
@@ -282,8 +283,11 @@ func matrix() []row {
 		{route: pub("POST " + tasks.ChatsPath), method: "POST", path: tasks.ChatsPath, body: body(map[string]string{"deployment": teamA, "title": "ops"}), want: human(403, 201, 201, 403)},
 		{route: pub("GET /v1/chats/{id}"), method: "GET", path: "/v1/chats/{chat}", want: human(404, 200, 200, 404)},
 		{route: pub("PATCH /v1/chats/{id}"), method: "PATCH", path: "/v1/chats/{chat}", body: body(map[string]string{"title": "ops-2"}), want: human(404, 200, 200, 404)},
+		{route: pub("PUT /v1/chats/{id}/bindings/google-chat"), method: "PUT", path: "/v1/chats/{chat}/bindings/google-chat", body: body(map[string]string{"space_name": "spaces/sec-room", "thread_name": "spaces/sec-room/threads/t1"}), want: human(404, 200, 200, 404)},
+		{route: pub("DELETE /v1/chats/{id}/bindings/google-chat"), method: "DELETE", path: "/v1/chats/{chat}/bindings/google-chat", want: human(404, 200, 200, 404)},
 		{route: pub("POST /v1/chats/{id}/messages"), method: "POST", path: "/v1/chats/{chat}/messages", body: body(map[string]string{"text": "hi"}), want: human(404, 201, 201, 404)},
 		{route: pub("GET /v1/chats/{id}/events"), method: "GET", path: "/v1/chats/{chat}/events", want: human(404, 200, 200, 404), check: noStore},
+		{route: pub("POST " + gchat.EventsPath), method: "POST", path: gchat.EventsPath, body: body(map[string]string{"type": "MESSAGE"}), want: everyone(http.StatusUnauthorized)},
 		{route: pub("GET " + live.EventsPath), method: "GET", path: "/v1/tasks/{task}/events", want: human(404, 200, 200, 404), check: noStore},
 		{route: pub("GET " + live.ArtifactsPath), method: "GET", path: "/v1/tasks/{task}/artifacts?ref=diff-1", want: human(404, 200, 200, 404), check: func(t *testing.T, c string, h http.Header) {
 			noStore(t, c, h)

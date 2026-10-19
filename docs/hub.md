@@ -1241,8 +1241,11 @@ GET   /v1/chats                                               shared chat sessio
 POST  /v1/chats {"title","deployment","linked_deployments","reply_mode","participants","repos","references","prompt","external_bindings"}
 GET   /v1/chats/{id}                                          shared chat session metadata, participants, external bindings, and transcript
 PATCH /v1/chats/{id} {"title","reply_mode","linked_deployments","participants","repos","references","external_bindings"}
+PUT   /v1/chats/{id}/bindings/google-chat {"space_name","thread_name"}   bind a shared chat session to a Google Chat space/thread
+DELETE /v1/chats/{id}/bindings/google-chat                    unbind Google Chat from a shared chat session
 POST  /v1/chats/{id}/messages {"id","text","attachments","trigger_agent"}
 GET   /v1/chats/{id}/events                                   live SSE stream of shared chat messages, agent replies, approvals, and proposed tasks
+POST  /v1/integrations/google-chat/events                     inbound Google Chat webhook (Bearer JWT verified against --google-chat-audience; docs/google-chat.md)
 ```
 
 #### 6.6.1 Legacy imperative backlog and signed claims in the current build (`hub/tasks`, `hub/claims`)

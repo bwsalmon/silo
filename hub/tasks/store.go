@@ -564,7 +564,8 @@ func (s *Store) Approve(ctx context.Context, id, approver string) (Task, error) 
 	if err != nil {
 		return Task{}, err
 	}
-	if strings.EqualFold(t.Submitter, approver) {
+	_, isChatOrigin, _ := s.GetChatByTask(ctx, t.OriginTask)
+	if !isChatOrigin && strings.EqualFold(t.Submitter, approver) {
 		return t, fmt.Errorf("%w: a task's submitter cannot approve it", ErrInvalid)
 	}
 	return s.update(ctx, id, []State{Proposed}, func(t *Task) {
