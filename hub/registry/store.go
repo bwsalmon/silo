@@ -139,11 +139,16 @@ func (s *Store) q(query string) string {
 }
 
 func (s *Store) exec(ctx context.Context, query string, args ...any) (int64, error) {
-	res, err := s.db.ExecContext(ctx, s.q(query), args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(query), args...)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
 }
 
 // renewPod writes pod's lease, until until.
@@ -222,26 +227,36 @@ func (s *Store) close(ctx context.Context, id, conn string) error {
 	return err
 }
 
+// disconnect takes the node offline regardless of which pod or connection
+// currently holds it (for example, when its node token is rotated or revoked).
+func (s *Store) disconnect(ctx context.Context, id string) (bool, error) {
+	n, err := s.exec(ctx, `UPDATE hub_nodes SET pod = '', conn = '', free = 0 WHERE id = ? AND conn <> ''`, id)
+	return n > 0, err
+}
+
 // clearPod takes offline the nodes rows say pod holds that it does not:
 // an earlier process under the same pod name ended without closing them.
 func (s *Store) clearPod(ctx context.Context, pod string, held map[string]string) error {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, conn FROM hub_nodes WHERE pod = ?`), pod)
-	if err != nil {
-		return err
-	}
 	var stale [][2]string
-	for rows.Next() {
-		var id, conn string
-		if err := rows.Scan(&id, &conn); err != nil {
-			rows.Close()
+	err := dbaccess.Retry(ctx, func() error {
+		stale = nil
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, conn FROM hub_nodes WHERE pod = ?`), pod)
+		if err != nil {
 			return err
 		}
-		if held[id] != conn {
-			stale = append(stale, [2]string{id, conn})
+		defer rows.Close()
+		for rows.Next() {
+			var id, conn string
+			if err := rows.Scan(&id, &conn); err != nil {
+				return err
+			}
+			if held[id] != conn {
+				stale = append(stale, [2]string{id, conn})
+			}
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		return rows.Err()
+	})
+	if err != nil {
 		return err
 	}
 	for _, r := range stale {
@@ -267,53 +282,57 @@ func (s *Store) unbind(ctx context.Context, id string) error {
 
 // load reads every node, with its pod's lease.
 func (s *Store) load(ctx context.Context) ([]row, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner, n.pod, n.conn, n.repos, n.slots, n.version, n.labels, n.features, n.recipients, n.ui,
-		n.free, n.settled, n.connected_at, n.last_seen, p.lease_until
-		FROM hub_nodes n LEFT JOIN hub_pods p ON p.pod = n.pod`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var out []row
-	for rows.Next() {
-		var (
-			r                   row
-			repos, labels       string
-			features            string
-			recipients, uiJSON  string
-			connected, lastSeen int64
-			until               sql.NullInt64
-		)
-		if err := rows.Scan(&r.ID, &r.Owner, &r.pod, &r.conn, &repos, &r.Slots, &r.Version, &labels, &features, &recipients, &uiJSON,
-			&r.Free, &r.settled, &connected, &lastSeen, &until); err != nil {
-			return nil, err
+	err := dbaccess.Retry(ctx, func() error {
+		out = nil
+		rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner, n.pod, n.conn, n.repos, n.slots, n.version, n.labels, n.features, n.recipients, n.ui,
+			n.free, n.settled, n.connected_at, n.last_seen, p.lease_until
+			FROM hub_nodes n LEFT JOIN hub_pods p ON p.pod = n.pod`)
+		if err != nil {
+			return err
 		}
-		if err := json.Unmarshal([]byte(repos), &r.Repos); err != nil {
-			return nil, fmt.Errorf("registry: node %s: repos: %w", r.ID, err)
-		}
-		if err := json.Unmarshal([]byte(labels), &r.Labels); err != nil {
-			return nil, fmt.Errorf("registry: node %s: labels: %w", r.ID, err)
-		}
-		if err := json.Unmarshal([]byte(features), &r.Features); err != nil {
-			return nil, fmt.Errorf("registry: node %s: features: %w", r.ID, err)
-		}
-		if err := json.Unmarshal([]byte(recipients), &r.Recipients); err != nil {
-			return nil, fmt.Errorf("registry: node %s: recipients: %w", r.ID, err)
-		}
-		if uiJSON != "" {
-			var ui NodeUI
-			if err := json.Unmarshal([]byte(uiJSON), &ui); err != nil {
-				return nil, fmt.Errorf("registry: node %s: ui: %w", r.ID, err)
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				r                   row
+				repos, labels       string
+				features            string
+				recipients, uiJSON  string
+				connected, lastSeen int64
+				until               sql.NullInt64
+			)
+			if err := rows.Scan(&r.ID, &r.Owner, &r.pod, &r.conn, &repos, &r.Slots, &r.Version, &labels, &features, &recipients, &uiJSON,
+				&r.Free, &r.settled, &connected, &lastSeen, &until); err != nil {
+				return err
 			}
-			r.UI = &ui
+			if err := json.Unmarshal([]byte(repos), &r.Repos); err != nil {
+				return fmt.Errorf("registry: node %s: repos: %w", r.ID, err)
+			}
+			if err := json.Unmarshal([]byte(labels), &r.Labels); err != nil {
+				return fmt.Errorf("registry: node %s: labels: %w", r.ID, err)
+			}
+			if err := json.Unmarshal([]byte(features), &r.Features); err != nil {
+				return fmt.Errorf("registry: node %s: features: %w", r.ID, err)
+			}
+			if err := json.Unmarshal([]byte(recipients), &r.Recipients); err != nil {
+				return fmt.Errorf("registry: node %s: recipients: %w", r.ID, err)
+			}
+			if uiJSON != "" {
+				var ui NodeUI
+				if err := json.Unmarshal([]byte(uiJSON), &ui); err != nil {
+					return fmt.Errorf("registry: node %s: ui: %w", r.ID, err)
+				}
+				r.UI = &ui
+			}
+			r.ConnectedAt, r.LastSeen = time.UnixMilli(connected), time.UnixMilli(lastSeen)
+			if until.Valid {
+				r.leaseUntil = time.UnixMilli(until.Int64)
+			}
+			out = append(out, r)
 		}
-		r.ConnectedAt, r.LastSeen = time.UnixMilli(connected), time.UnixMilli(lastSeen)
-		if until.Valid {
-			r.leaseUntil = time.UnixMilli(until.Int64)
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+		return rows.Err()
+	})
+	return out, err
 }
 
 func encode(n Node) (repos, labels string, err error) {
@@ -332,8 +351,10 @@ func encode(n Node) (repos, labels string, err error) {
 // address and its lease; pod is empty when no pod holds it.
 func (s *Store) holder(ctx context.Context, id string) (pod, addr string, until time.Time, err error) {
 	var ms int64
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT n.pod, p.addr, p.lease_until FROM hub_nodes n
-		JOIN hub_pods p ON p.pod = n.pod WHERE n.id = ? AND n.conn <> ''`), id).Scan(&pod, &addr, &ms)
+	err = dbaccess.Retry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, s.q(`SELECT n.pod, p.addr, p.lease_until FROM hub_nodes n
+			JOIN hub_pods p ON p.pod = n.pod WHERE n.id = ? AND n.conn <> ''`), id).Scan(&pod, &addr, &ms)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", time.Time{}, nil
 	}

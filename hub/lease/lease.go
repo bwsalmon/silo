@@ -73,6 +73,22 @@ func lockKey(name string) (int32, int32) {
 // ErrClosed is a lease asked of a closed Store.
 var ErrClosed = errors.New("lease: the store is closed")
 
+var (
+	sharedSemsMu sync.Mutex
+	sharedSems   = map[string]map[string]chan struct{}{}
+)
+
+func sharedSemMap(sqlitePath string) map[string]chan struct{} {
+	sharedSemsMu.Lock()
+	defer sharedSemsMu.Unlock()
+	m, ok := sharedSems[sqlitePath]
+	if !ok {
+		m = map[string]chan struct{}{}
+		sharedSems[sqlitePath] = m
+	}
+	return m
+}
+
 // Store holds leases in the hub's database.
 type Store struct {
 	db       *sql.DB
@@ -83,8 +99,9 @@ type Store struct {
 	cancel  context.CancelFunc
 	running sync.WaitGroup
 
-	mu   sync.Mutex
-	sems map[string]chan struct{}
+	mu     sync.Mutex
+	shared bool
+	sems   map[string]chan struct{}
 }
 
 // Open opens the lease store at url, as the hub's other stores take it:
@@ -118,6 +135,10 @@ func open(ctx context.Context, url string, create bool) (*Store, error) {
 		s.db, err = sql.Open("pgx", url)
 	} else {
 		path := strings.TrimPrefix(url, "sqlite:")
+		if path != "" && path != ":memory:" && !strings.HasPrefix(path, "file::memory:") {
+			s.sems = sharedSemMap(path)
+			s.shared = true
+		}
 		s.db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 		s.db.SetMaxOpenConns(1)
 	}
@@ -182,13 +203,21 @@ func (s *Store) Lead(ctx context.Context, name string, retry time.Duration) (<-c
 	if retry <= 0 {
 		retry = DefaultRetry
 	}
-	s.mu.Lock()
+	if s.shared {
+		sharedSemsMu.Lock()
+	} else {
+		s.mu.Lock()
+	}
 	sem, ok := s.sems[name]
 	if !ok {
 		sem = make(chan struct{}, 1)
 		s.sems[name] = sem
 	}
-	s.mu.Unlock()
+	if s.shared {
+		sharedSemsMu.Unlock()
+	} else {
+		s.mu.Unlock()
+	}
 	select {
 	case sem <- struct{}{}:
 	case <-ctx.Done():
@@ -325,7 +354,10 @@ func (s *Store) Holder(ctx context.Context, name string) (int64, string, error) 
 		epoch  int64
 		holder string
 	)
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT epoch, holder FROM hub_leases WHERE name = ?`), name).Scan(&epoch, &holder)
+	err := dbaccess.Retry(ctx, func() error {
+		epoch, holder = 0, ""
+		return s.db.QueryRowContext(ctx, s.q(`SELECT epoch, holder FROM hub_leases WHERE name = ?`), name).Scan(&epoch, &holder)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", nil
 	}

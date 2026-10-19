@@ -1006,18 +1006,26 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 	}
 	at = at.UTC()
 	var hasDue int
-	err := s.db.QueryRowContext(ctx, s.q(`
+	err := dbaccess.Retry(ctx, func() error {
+		hasDue = 0
+		return s.db.QueryRowContext(ctx, s.q(`
 		SELECT 1 FROM grainfile_index
 		WHERE removed = 0 AND draft = 0 AND ready_emitted = 0 AND not_before <= ?
 		LIMIT 1
 	`), at.UnixMilli()).Scan(&hasDue)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	precheck, err := s.loadLatestIndexQ(s.db, ctx, "")
+	var precheck []IndexRecord
+	err = dbaccess.Retry(ctx, func() error {
+		var err error
+		precheck, err = s.loadLatestIndexQ(s.db, ctx, "")
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1169,9 +1177,14 @@ func (s *Store) GetIndex(ctx context.Context, repo, filePath, commitSHA string) 
 		return IndexRecord{}, err
 	}
 	cleanPath := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(filePath), "/"))
-	row := s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC, commit_sha DESC LIMIT 1`),
-		canonRepo, cleanPath)
-	rec, err := scanIndexRecord(row)
+	var rec IndexRecord
+	err = dbaccess.Retry(ctx, func() error {
+		row := s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE LOWER(repo) = LOWER(?) AND path = ? AND removed = 0 ORDER BY updated_at DESC, commit_sha DESC LIMIT 1`),
+			canonRepo, cleanPath)
+		var scanErr error
+		rec, scanErr = scanIndexRecord(row)
+		return scanErr
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return IndexRecord{}, ErrNotFound
 	}
@@ -1214,9 +1227,15 @@ func (s *Store) GetIndexByURL(ctx context.Context, rawURL, commitSHA string) (In
 			return rec, nil
 		}
 		canonURL := parsed.CanonicalURL()
-		row := s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND removed = 0 ORDER BY updated_at DESC, commit_sha DESC LIMIT 1`),
-			canonURL)
-		if rec, scanErr := scanIndexRecord(row); scanErr == nil {
+		var rec IndexRecord
+		scanErr := dbaccess.Retry(ctx, func() error {
+			row := s.db.QueryRowContext(ctx, s.q(`SELECT `+selectIndexCols+` FROM grainfile_index WHERE url = ? AND removed = 0 ORDER BY updated_at DESC, commit_sha DESC LIMIT 1`),
+				canonURL)
+			var err error
+			rec, err = scanIndexRecord(row)
+			return err
+		})
+		if scanErr == nil {
 			if refMatchesIndexRecord(parsed.GitRef, rec) && refMatchesIndexRecord(commitSHA, rec) {
 				return rec, nil
 			}
@@ -1236,7 +1255,13 @@ func (s *Store) ListIndexByRepo(ctx context.Context, repoURL string) ([]IndexRec
 			return nil, err
 		}
 	}
-	return s.loadLatestIndexQ(s.db, ctx, canonRepo)
+	var out []IndexRecord
+	err := dbaccess.Retry(ctx, func() error {
+		var err error
+		out, err = s.loadLatestIndexQ(s.db, ctx, canonRepo)
+		return err
+	})
+	return out, err
 }
 
 // ListIndexByRecipient returns the latest non-removed IndexRecord per
@@ -2011,7 +2036,10 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 // grainfile_events, or 0 when none exist.
 func (s *Store) MaxEventSeq(ctx context.Context) (int64, error) {
 	var seq int64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM grainfile_events`).Scan(&seq)
+	err := dbaccess.Retry(ctx, func() error {
+		seq = 0
+		return s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM grainfile_events`).Scan(&seq)
+	})
 	return seq, err
 }
 
@@ -2022,24 +2050,31 @@ func (s *Store) EventsSince(ctx context.Context, sinceSeq int64) ([]Event, error
 	if _, err := s.PromoteDeferred(ctx, s.now()); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+selectEventCols+` FROM grainfile_events WHERE seq > ? ORDER BY seq ASC`), sinceSeq)
+	var out []Event
+	err := dbaccess.Retry(ctx, func() error {
+		out = nil
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+selectEventCols+` FROM grainfile_events WHERE seq > ? ORDER BY seq ASC`), sinceSeq)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		now := s.now()
+		for rows.Next() {
+			ev, err := scanEvent(rows)
+			if err != nil {
+				return err
+			}
+			if !ev.NotBefore.IsZero() && now.Before(ev.NotBefore) {
+				continue
+			}
+			out = append(out, ev)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Event
-	now := s.now()
-	for rows.Next() {
-		ev, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		if !ev.NotBefore.IsZero() && now.Before(ev.NotBefore) {
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // EventsForRecipient returns all discoverable Grainfile events for recipientURL
@@ -2109,26 +2144,28 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 
 	sameTeamOwners := map[string]bool{}
 	if len(out.Recipients) > 0 && out.Owner != "" && s.SameTeam != nil {
-		rows, err := s.db.QueryContext(ctx, s.q(`SELECT DISTINCT owner FROM grainfile_subscriptions WHERE node_id <> ? AND owner <> ''`), nodeID)
+		var otherOwners []string
+		err := dbaccess.Retry(ctx, func() error {
+			otherOwners = nil
+			rows, err := s.db.QueryContext(ctx, s.q(`SELECT DISTINCT owner FROM grainfile_subscriptions WHERE node_id <> ? AND owner <> ''`), nodeID)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var oOwner string
+				if err := rows.Scan(&oOwner); err != nil {
+					return err
+				}
+				if !strings.EqualFold(oOwner, out.Owner) {
+					otherOwners = append(otherOwners, oOwner)
+				}
+			}
+			return rows.Err()
+		})
 		if err != nil {
 			return Subscriptions{}, err
 		}
-		var otherOwners []string
-		for rows.Next() {
-			var oOwner string
-			if err := rows.Scan(&oOwner); err != nil {
-				rows.Close()
-				return Subscriptions{}, err
-			}
-			if !strings.EqualFold(oOwner, out.Owner) {
-				otherOwners = append(otherOwners, oOwner)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return Subscriptions{}, err
-		}
-		rows.Close()
 		for _, oOwner := range otherOwners {
 			if s.SameTeam(ctx, out.Owner, oOwner) {
 				sameTeamOwners[strings.ToLower(oOwner)] = true
@@ -2259,9 +2296,14 @@ func (s *Store) Subscribe(ctx context.Context, nodeID string, sub Subscriptions)
 
 // GetSubscriptions returns the stored Subscriptions for nodeID.
 func (s *Store) GetSubscriptions(ctx context.Context, nodeID string) (Subscriptions, error) {
-	row := s.db.QueryRowContext(ctx, s.q(`SELECT node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
-		FROM grainfile_subscriptions WHERE node_id = ?`), nodeID)
-	sub, err := scanSubscriptions(row)
+	var sub Subscriptions
+	err := dbaccess.Retry(ctx, func() error {
+		row := s.db.QueryRowContext(ctx, s.q(`SELECT node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
+			FROM grainfile_subscriptions WHERE node_id = ?`), nodeID)
+		var err error
+		sub, err = scanSubscriptions(row)
+		return err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Subscriptions{}, ErrNotFound
 	}
@@ -2270,21 +2312,28 @@ func (s *Store) GetSubscriptions(ctx context.Context, nodeID string) (Subscripti
 
 // ListSubscriptions returns all registered node subscriptions ordered by node_id.
 func (s *Store) ListSubscriptions(ctx context.Context) ([]Subscriptions, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
-		FROM grainfile_subscriptions ORDER BY node_id ASC`)
+	var out []Subscriptions
+	err := dbaccess.Retry(ctx, func() error {
+		out = nil
+		rows, err := s.db.QueryContext(ctx, `SELECT node_id, owner, recipients, repos, folders, grainfiles, cursor, revision, updated_at
+			FROM grainfile_subscriptions ORDER BY node_id ASC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			sub, err := scanSubscriptions(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, sub)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Subscriptions
-	for rows.Next() {
-		sub, err := scanSubscriptions(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sub)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // AdvanceCursor monotonically advances nodeID's delivery cursor in
@@ -2313,8 +2362,10 @@ func (s *Store) AdvanceCursor(ctx context.Context, nodeID string, cursor int64) 
 
 // DeleteSubscriptions deletes nodeID's subscription record.
 func (s *Store) DeleteSubscriptions(ctx context.Context, nodeID string) error {
-	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM grainfile_subscriptions WHERE node_id = ?`), nodeID)
-	return err
+	return dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM grainfile_subscriptions WHERE node_id = ?`), nodeID)
+		return err
+	})
 }
 
 // EventsForNode returns all discoverable events with seq > sinceSeq that match

@@ -424,7 +424,7 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	if hb <= 0 {
 		hb = rendezvous.DefaultHeartbeat
 	}
-	h.Registry.StaleAfter = 3 * hb
+	h.Registry.StaleAfter = 3 * max(hb, time.Second)
 	for _, adm := range cfg.HubAdmins {
 		if p, legacy := directory.HubAdminPrincipal(adm); legacy {
 			cfg.logf("hub: hub admin %q has no user: or group: prefix; treating it as %s (write group:NAME if a group was meant)", adm, p)
@@ -899,6 +899,8 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 	}()
 	dispatchCtx, stopDispatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopDispatch()
+	h.Dispatcher.SetLeased(true)
+	defer h.Dispatcher.SetLeased(false)
 	// The dispatcher runs only while this process holds its lease, and
 	// each term starts it afresh: its Run recovers the backlog first.
 	// A term whose dispatcher fails gives the lease up and asks again.
@@ -939,15 +941,15 @@ func (h *Hub) Serve(ctx context.Context, l net.Listener) error {
 		h.cfg.logf("hub: nodes did not all close their connections: %v", err)
 	}
 	endRequests()
-	if err := srv.Shutdown(sctx); err != nil {
-		h.cfg.logf("hub: requests did not all finish: %v", err)
-		srv.Close()
-	}
 	stopDispatch()
 	select {
 	case <-dispatched:
 	case <-sctx.Done():
 		h.cfg.logf("hub: the dispatcher did not stop in time")
+	}
+	if err := srv.Shutdown(sctx); err != nil {
+		h.cfg.logf("hub: requests did not all finish: %v", err)
+		srv.Close()
 	}
 	stopPod()
 	select {

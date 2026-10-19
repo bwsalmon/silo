@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/dbaccess"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
 )
@@ -74,41 +75,52 @@ func (s *Store) mintNodeToken(ctx context.Context, owner, node string) (string, 
 	if _, err := registry.Validate(registry.Node{ID: node}); err != nil {
 		return "", NodeToken{}, 0, fmt.Errorf("%w node: %v", ErrInvalid, err)
 	}
-	var revoked int64
-	idb := make([]byte, 8)
-	secret := make([]byte, 32)
-	rand.Read(idb)
-	rand.Read(secret)
-	t := NodeToken{ID: hex.EncodeToString(idb), Owner: o, Node: node, Created: s.now().UTC().Truncate(time.Millisecond)}
-	tok := tokenPrefix + t.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
-	err = s.tx(ctx, func(tx *sql.Tx) error {
-		var other string
-		err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND released_at IS NULL LIMIT 1`), node, o).Scan(&other)
-		if err == nil {
-			return fmt.Errorf("%w: %s", ErrNodeOwner, node)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+	var (
+		revoked int64
+		t       NodeToken
+		tok     string
+		errSame = errors.New("concurrent mint by same owner")
+	)
+	for range 32 {
+		idb := make([]byte, 8)
+		secret := make([]byte, 32)
+		rand.Read(idb)
+		rand.Read(secret)
+		t = NodeToken{ID: hex.EncodeToString(idb), Owner: o, Node: node, Created: s.now().UTC().Truncate(time.Millisecond)}
+		tok = tokenPrefix + t.ID + "_" + base64.RawURLEncoding.EncodeToString(secret)
+		err = s.tx(ctx, func(tx *sql.Tx) error {
+			var other string
+			err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND released_at IS NULL LIMIT 1`), node, o).Scan(&other)
+			if err == nil {
+				return fmt.Errorf("%w: %s", ErrNodeOwner, node)
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			res, err := tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE node = ? AND owner = ? AND revoked_at IS NULL`),
+				t.Created.UnixMilli(), node, o)
+			if err != nil {
+				return err
+			}
+			if revoked, err = res.RowsAffected(); err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, s.q(`INSERT INTO node_tokens (id, hash, owner, node, created_at) VALUES (?, ?, ?, ?, ?)`),
+				t.ID, hashToken(tok), o, node, t.Created.UnixMilli())
+			if isUnique(err) {
+				return errSame
+			}
 			return err
+		})
+		if errors.Is(err, errSame) {
+			continue
 		}
-		res, err := tx.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE node = ? AND owner = ? AND revoked_at IS NULL`),
-			t.Created.UnixMilli(), node, o)
 		if err != nil {
-			return err
+			return "", NodeToken{}, 0, err
 		}
-		if revoked, err = res.RowsAffected(); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO node_tokens (id, hash, owner, node, created_at) VALUES (?, ?, ?, ?, ?)`),
-			t.ID, hashToken(tok), o, node, t.Created.UnixMilli())
-		if isUnique(err) { // another owner's mint for this node won a race
-			return fmt.Errorf("%w: %s", ErrNodeOwner, node)
-		}
-		return err
-	})
-	if err != nil {
-		return "", NodeToken{}, 0, err
+		return tok, t, revoked, nil
 	}
-	return tok, t, revoked, nil
+	return "", NodeToken{}, 0, fmt.Errorf("%w: %s", ErrNodeOwner, node)
 }
 
 // VerifyNodeToken is the owner and node a live token proves.
@@ -116,7 +128,9 @@ func (s *Store) VerifyNodeToken(ctx context.Context, tok string) (owner, node st
 	if !tokenShape.MatchString(tok) {
 		return "", "", errors.New("directory: not a node token")
 	}
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT owner, node FROM node_tokens WHERE hash = ? AND revoked_at IS NULL`), hashToken(tok)).Scan(&owner, &node)
+	err = dbaccess.Retry(ctx, func() error {
+		return s.db.QueryRowContext(ctx, s.q(`SELECT owner, node FROM node_tokens WHERE hash = ? AND revoked_at IS NULL`), hashToken(tok)).Scan(&owner, &node)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", errors.New("directory: unknown or revoked node token")
 	}
@@ -147,25 +161,34 @@ func (s *Store) NodeTokens(ctx context.Context, owner string) ([]NodeToken, erro
 		q += ` WHERE owner = ?`
 		args = append(args, o)
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY created_at DESC, id`), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []NodeToken{}
-	for rows.Next() {
-		t, err := scanToken(rows)
+	var out []NodeToken
+	err := dbaccess.Retry(ctx, func() error {
+		out = []NodeToken{}
+		rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY created_at DESC, id`), args...)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			t, err := scanToken(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, t)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // NodeToken is the record of the token id.
 func (s *Store) NodeToken(ctx context.Context, id string) (NodeToken, error) {
-	t, err := scanToken(s.db.QueryRowContext(ctx, s.q(`SELECT id, owner, node, created_at, revoked_at, released_at FROM node_tokens WHERE id = ?`), id))
+	var t NodeToken
+	err := dbaccess.Retry(ctx, func() error {
+		var err error
+		t, err = scanToken(s.db.QueryRowContext(ctx, s.q(`SELECT id, owner, node, created_at, revoked_at, released_at FROM node_tokens WHERE id = ?`), id))
+		return err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, fmt.Errorf("%w: node token %s", ErrNotFound, id)
 	}
@@ -198,11 +221,19 @@ func scanToken(r interface{ Scan(...any) error }) (NodeToken, error) {
 // presents it is refused. (It does not end a connection the token
 // already made; the API disconnects that node too.)
 func (s *Store) RevokeNodeToken(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`), s.now().UnixMilli(), id)
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(`UPDATE node_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`), s.now().UnixMilli(), id)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		return fmt.Errorf("%w: live node token %s", ErrNotFound, id)
 	}
 	return nil
@@ -224,11 +255,19 @@ func (s *Store) ReleaseNodeID(ctx context.Context, owner, node string) error {
 		q += ` AND owner = ?`
 		args = append(args, o)
 	}
-	res, err := s.db.ExecContext(ctx, s.q(q), args...)
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(q), args...)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		return fmt.Errorf("%w: a node ID %s to release", ErrNotFound, node)
 	}
 	return nil

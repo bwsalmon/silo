@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bwsalmon/silo/events"
+	"github.com/bwsalmon/silo/hub/dbaccess"
 )
 
 // An interactive task's humans talk to its session through the hub
@@ -115,14 +116,22 @@ func (s *Store) Post(ctx context.Context, m TaskMessage) (_ TaskMessage, dup boo
 	}
 	m.SentAt, m.Delivered = s.now().UTC().Truncate(time.Millisecond), false
 	att, _ := json.Marshal(m.Attachments)
-	res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_messages (task, id, text, attachments, sender, sent_at, delivered)
-		VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (task, id) DO NOTHING`),
-		m.Task, m.ID, m.Text, string(att), m.Sender, m.SentAt.UnixMilli())
+	var n int64
+	err = dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_messages (task, id, text, attachments, sender, sent_at, delivered)
+			VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (task, id) DO NOTHING`),
+			m.Task, m.ID, m.Text, string(att), m.Sender, m.SentAt.UnixMilli())
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
 	if err != nil {
 		return TaskMessage{}, false, err
 	}
-	if n, err := res.RowsAffected(); err != nil || n > 0 {
-		return m, false, err
+	if n > 0 {
+		return m, false, nil
 	}
 	kept, ok, err := s.message(ctx, m.Task, m.ID)
 	switch {
@@ -156,7 +165,12 @@ func scanMessage(r scanner) (TaskMessage, error) {
 }
 
 func (s *Store) message(ctx context.Context, task, id string) (TaskMessage, bool, error) {
-	m, err := scanMessage(s.db.QueryRowContext(ctx, s.q(`SELECT `+messageColumns+` FROM task_messages WHERE task = ? AND id = ?`), task, id))
+	var m TaskMessage
+	err := dbaccess.Retry(ctx, func() error {
+		var err error
+		m, err = scanMessage(s.db.QueryRowContext(ctx, s.q(`SELECT `+messageColumns+` FROM task_messages WHERE task = ? AND id = ?`), task, id))
+		return err
+	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return TaskMessage{}, false, nil
@@ -173,26 +187,32 @@ func (s *Store) Messages(ctx context.Context, task string, undelivered bool) ([]
 	if undelivered {
 		q += ` AND delivered = 0`
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY sent_at, id`), task)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []TaskMessage{}
-	for rows.Next() {
-		m, err := scanMessage(rows)
+	var out []TaskMessage
+	err := dbaccess.Retry(ctx, func() error {
+		out = []TaskMessage{}
+		rows, err := s.db.QueryContext(ctx, s.q(q+` ORDER BY sent_at, id`), task)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			m, err := scanMessage(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, m)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // MessageDelivered records that task's node has been sent message id.
 func (s *Store) MessageDelivered(ctx context.Context, task, id string) error {
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE task_messages SET delivered = 1 WHERE task = ? AND id = ?`), task, id)
-	return err
+	return dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`UPDATE task_messages SET delivered = 1 WHERE task = ? AND id = ?`), task, id)
+		return err
+	})
 }
 
 // MessageEvent is the hub's record of task's message id as a message

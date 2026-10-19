@@ -493,6 +493,46 @@ func (r *Registry) Unbind(id string) error {
 	return nil
 }
 
+// Disconnect marks node id offline in the directory and, with a Store, in
+// the database without unbinding its owner, ending any connection this pod
+// or another pod holds for it.
+func (r *Registry) Disconnect(id string) bool {
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
+	var disconnected bool
+	if r.Store != nil {
+		ctx, cancel := storeContext()
+		ok, err := r.Store.disconnect(ctx, id)
+		cancel()
+		if err != nil {
+			r.logf("registry: disconnecting %s: %v", id, err)
+		}
+		disconnected = ok
+		defer r.announce(id)
+	}
+	r.mu.Lock()
+	var l *Lease
+	if n := r.nodes[id]; n != nil {
+		if n.lease != nil {
+			l = n.lease
+			l.offline(n)
+			disconnected = true
+		} else if n.conn != "" {
+			n.pod, n.conn = "", ""
+			n.entry.Free, n.entry.Claimed = 0, 0
+			r.seq++
+			n.changed = r.seq
+			r.notify()
+			disconnected = true
+		}
+	}
+	r.mu.Unlock()
+	if l != nil {
+		l.end()
+	}
+	return disconnected
+}
+
 // status is n's status at now; r.mu is held. A node held by another pod
 // is offline once that pod's lease has lapsed, with no pod having to
 // notice; one the database says this pod holds, but whose connection
