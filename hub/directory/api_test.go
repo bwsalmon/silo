@@ -1095,7 +1095,7 @@ func TestConcurrentSelfServiceDeploymentClaimAndGrainfilesReplayRace(t *testing.
 		if _, err := gfStore.IndexGrainfile(ctx, openTask); err != nil {
 			t.Fatalf("IndexGrainfile(openTask): %v", err)
 		}
-		standingProc, err := grainfiles.Parse(".grain/processes/gate.process.grain.md", []byte("---\ntitle: Standing gate\ngate: true\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
+		standingProc, err := grainfiles.Parse(".grain/processes/gate.process.grain.md", []byte("---\ngrainfile: v1\ntitle: Standing gate\ngate: true\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
 		if err != nil {
 			t.Fatalf("Parse(standingProc): %v", err)
 		}

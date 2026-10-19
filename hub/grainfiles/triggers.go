@@ -1,18 +1,20 @@
 package grainfiles
 
 import (
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 )
 
-// ForgeEvent describes a forge webhook event (`push`, `pull_request`, or
-// `merge`) evaluated against a `.process.grain.md` file's `when` trigger rules
-// (docs/grainfiles-spec.md §7.2.1, §9; docs/hub.md §6.4).
+// ForgeEvent describes a forge webhook event (`push`, `pull_request`,
+// `merge`, or `workflow`) evaluated against a `.process.grain.md` file's `when`
+// trigger rules (docs/grainfiles-spec.md §7.2.1, §9; docs/hub.md §6.4).
 type ForgeEvent struct {
 	// Source is the trigger source: TriggerPush ("push"),
-	// TriggerPullRequest ("pull_request"), or TriggerMerge ("merge").
+	// TriggerPullRequest ("pull_request"), TriggerMerge ("merge"), or
+	// TriggerWorkflow ("workflow").
 	Source string
 	// Repo is the repository URL or `owner/repo` slug where the webhook event
 	// occurred. When empty, it defaults to the repository containing the
@@ -20,13 +22,23 @@ type ForgeEvent struct {
 	Repo string
 	// Branch is the target branch name or ref (e.g. "main" or "refs/heads/main").
 	Branch string
-	// CommitSHA is the commit SHA of the push, PR head/base, or merge commit.
+	// CommitSHA is the commit SHA of the push, PR head/base, merge, or workflow run.
 	CommitSHA string
 	// PRNumber is the pull request number for `pull_request` or `merge` events.
 	PRNumber int
 	// ChangedPaths is the list of repository-relative file paths touched by
 	// the push, pull request, or merge.
 	ChangedPaths []string
+	// WorkflowName is the CI workflow or check suite name for `workflow` events.
+	WorkflowName string
+	// WorkflowPath is the repository-relative workflow file path (e.g.
+	// ".github/workflows/release.yml") for `workflow` events.
+	WorkflowPath string
+	// WorkflowEvent is the workflow lifecycle transition ("triggered",
+	// "succeeded", or "failed") for `workflow` events.
+	WorkflowEvent string
+	// WorkflowURL is the HTML URL of the workflow run or check run.
+	WorkflowURL string
 	// At is the UTC timestamp at which the event is evaluated against
 	// `not_before`. If zero, `time.Now().UTC()` is used.
 	At time.Time
@@ -85,6 +97,11 @@ func (g *Grainfile) MatchedEventPaths(ev ForgeEvent) (bool, []string) {
 		filter = triggers.PullRequest
 	case TriggerMerge:
 		filter = triggers.Merge
+	case TriggerWorkflow:
+		if triggers.MatchesWorkflowInRepo(g.Repo, ev.Repo, ev.Branch, ev.WorkflowName, ev.WorkflowPath, ev.WorkflowEvent) {
+			return true, nil
+		}
+		return false, nil
 	default:
 		return false, nil
 	}
@@ -92,6 +109,172 @@ func (g *Grainfile) MatchedEventPaths(ev ForgeEvent) (bool, []string) {
 		return false, nil
 	}
 	return filter.MatchedPathsForRepo(g.Repo, ev.Repo, ev.Branch, ev.ChangedPaths)
+}
+
+// MatchesWorkflow reports whether a `.process.grain.md` Grainfile g fires on a
+// CI workflow event for (repo, branch, workflowName, workflowPath, event),
+// respecting `draft: true` and `when.workflow` filter rules.
+func (g *Grainfile) MatchesWorkflow(repo, branch, workflowName, workflowPath, event string) bool {
+	if g == nil || g.Kind != KindProcess || g.Draft {
+		return false
+	}
+	triggers := g.When
+	if triggers.IsZero() {
+		triggers = g.On
+	}
+	return triggers.MatchesWorkflowInRepo(g.Repo, repo, branch, workflowName, workflowPath, event)
+}
+
+// MatchesWorkflow reports whether any `when.workflow` filter in t matches
+// (repo, branch, workflowName, workflowPath, event).
+func (t Triggers) MatchesWorkflow(repo, branch, workflowName, workflowPath, event string) bool {
+	return t.MatchesWorkflowInRepo("", repo, branch, workflowName, workflowPath, event)
+}
+
+// MatchesWorkflowInRepo reports whether any `when.workflow` filter in t matches
+// (eventRepo, branch, workflowName, workflowPath, event) when evaluated for a
+// `.process.grain.md` residing in defaultRepo.
+func (t Triggers) MatchesWorkflowInRepo(defaultRepo, eventRepo, branch, workflowName, workflowPath, event string) bool {
+	if len(t.Workflow) == 0 {
+		return false
+	}
+	for _, wf := range t.Workflow {
+		if wf.MatchesWorkflow(defaultRepo, eventRepo, branch, workflowName, workflowPath, event) {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesWorkflow reports whether wf matches (defaultRepo, eventRepo, branch,
+// workflowName, workflowPath, event).
+func (wf WorkflowFilter) MatchesWorkflow(defaultRepo, eventRepo, branch, workflowName, workflowPath, event string) bool {
+	canonEvent, ok := NormalizeWorkflowEvent(event)
+	if !ok {
+		return false
+	}
+	allowedEvents := wf.Events
+	if len(allowedEvents) == 0 {
+		allowedEvents = []string{"succeeded", "failed"}
+	}
+	eventMatched := false
+	for _, allowed := range allowedEvents {
+		if normAllowed, ok := NormalizeWorkflowEvent(allowed); ok && normAllowed == canonEvent {
+			eventMatched = true
+			break
+		}
+	}
+	if !eventMatched {
+		return false
+	}
+
+	var patterns []string
+	if strings.TrimSpace(wf.Workflow) != "" {
+		patterns = append(patterns, strings.TrimSpace(wf.Workflow))
+	}
+	for _, w := range wf.Workflows {
+		if strings.TrimSpace(w) != "" {
+			patterns = append(patterns, strings.TrimSpace(w))
+		}
+	}
+	if len(patterns) == 0 {
+		return false
+	}
+
+	var canonDefault, canonEventRepo string
+	if strings.TrimSpace(defaultRepo) != "" {
+		if c, err := NormalizeRepoSlugOrURL(defaultRepo); err == nil {
+			canonDefault = c
+		} else {
+			canonDefault = strings.TrimSpace(defaultRepo)
+		}
+	}
+	if strings.TrimSpace(eventRepo) != "" {
+		if c, err := NormalizeRepoSlugOrURL(eventRepo); err == nil {
+			canonEventRepo = c
+		} else {
+			canonEventRepo = strings.TrimSpace(eventRepo)
+		}
+	}
+
+	var explicitRepos []string
+	if strings.TrimSpace(wf.Repo) != "" {
+		explicitRepos = append(explicitRepos, wf.Repo)
+	}
+	explicitRepos = append(explicitRepos, wf.Repos...)
+
+	if len(explicitRepos) > 0 {
+		targetRepo := canonEventRepo
+		if targetRepo == "" {
+			targetRepo = canonDefault
+		}
+		if targetRepo == "" {
+			return false
+		}
+		repoMatched := false
+		for _, r := range explicitRepos {
+			normR, err := NormalizeRepoSlugOrURL(r)
+			if err != nil {
+				normR = strings.TrimSpace(r)
+			}
+			if IsSameRepo(normR, targetRepo) {
+				repoMatched = true
+				break
+			}
+		}
+		if !repoMatched {
+			return false
+		}
+	} else if canonDefault != "" && canonEventRepo != "" && !IsSameRepo(canonDefault, canonEventRepo) {
+		return false
+	}
+
+	normBranch := normalizeBranchName(branch)
+	if len(wf.Branches) > 0 {
+		if normBranch == "" {
+			return false
+		}
+		branchMatched := false
+		for _, pat := range wf.Branches {
+			if MatchGlob(normalizeBranchName(pat), normBranch) {
+				branchMatched = true
+				break
+			}
+		}
+		if !branchMatched {
+			return false
+		}
+	}
+
+	cleanName := strings.TrimSpace(workflowName)
+	cleanPath := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(workflowPath)), "/")
+	if cleanName == "" && cleanPath == "" {
+		return false
+	}
+	for _, pat := range patterns {
+		if cleanName != "" && (pat == cleanName || matchWorkflowPattern(pat, cleanName)) {
+			return true
+		}
+		if cleanPath != "" {
+			cleanPat := strings.TrimPrefix(filepath.ToSlash(pat), "/")
+			if cleanPat == cleanPath || MatchGlob(cleanPat, cleanPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchWorkflowPattern(pattern, value string) bool {
+	if pattern == value {
+		return true
+	}
+	reStr := globToRegex(pattern)
+	re, err := regexp.Compile(reStr)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(value)
 }
 
 // MatchesTrigger reports whether a `.process.grain.md` Grainfile g fires for the

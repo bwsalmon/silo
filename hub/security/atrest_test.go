@@ -79,7 +79,7 @@ func noCodeAtRest(t *testing.T, database string) {
 		refContent    = sentinel("refcontent")
 	)
 	const gfCommit = "1111111111111111111111111111111111111111"
-	gfRaw := fmt.Sprintf("---\ntitle: Migrate App Database\nrecipient: https://github.com/acme/grain-a\nreferences:\n  - /docs/spec.md\n---\n%s\n", grainfileBody)
+	gfRaw := fmt.Sprintf("---\ngrainfile: v1\ntitle: Migrate App Database\nrecipient: https://github.com/acme/grain-a\nreferences:\n  - /docs/spec.md\n---\n%s\n", grainfileBody)
 	fetcher := memoryRepoFetcher{
 		"https://github.com/acme/app|.grain/tasks/migrate.task.md|" + gfCommit: []byte(gfRaw),
 		"https://github.com/acme/app|docs/spec.md|" + gfCommit:                 []byte(refContent),

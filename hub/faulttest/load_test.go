@@ -284,7 +284,7 @@ func TestLoad_Grainfiles(t *testing.T) {
 					isDraft := fIdx == filesPerWebhook-1 // 1 draft per webhook, rest active
 					if fIdx%2 == 0 {
 						path := fmt.Sprintf("tasks/w%03d-f%02d.task.md", wIdx, fIdx)
-						content := fmt.Sprintf("---\ntitle: Load task %d-%d\nrecipient: %s\ndraft: %v\nreferences:\n  - /docs/spec.md\n---\nTask body %d-%d.\n",
+						content := fmt.Sprintf("---\ngrainfile: v1\ntitle: Load task %d-%d\nrecipient: %s\ndraft: %v\nreferences:\n  - /docs/spec.md\n---\nTask body %d-%d.\n",
 							wIdx, fIdx, recipient, isDraft, wIdx, fIdx)
 						c.SetForgeFile(repo, path, commit, content)
 						added = append(added, path)
@@ -300,7 +300,7 @@ func TestLoad_Grainfiles(t *testing.T) {
 						}
 					} else {
 						path := fmt.Sprintf("processes/w%03d-f%02d.process.md", wIdx, fIdx)
-						content := fmt.Sprintf("---\ntitle: Load process %d-%d\nrecipient: %s\ndraft: %v\nreferences:\n  - /docs/spec.md\non:\n  manual: {}\n---\nProcess body %d-%d.\n",
+						content := fmt.Sprintf("---\ngrainfile: v1\ntitle: Load process %d-%d\nrecipient: %s\ndraft: %v\nreferences:\n  - /docs/spec.md\non:\n  manual: {}\n---\nProcess body %d-%d.\n",
 							wIdx, fIdx, recipient, isDraft, wIdx, fIdx)
 						c.SetForgeFile(repo, path, commit, content)
 						added = append(added, path)

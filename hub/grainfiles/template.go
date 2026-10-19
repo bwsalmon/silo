@@ -76,12 +76,15 @@ func renderTemplateAtPath(path, raw string, vars map[string]string) (string, []s
 	}
 
 	var out strings.Builder
-	if fErr := evalNodes(path, nodes, env, &out); fErr != nil {
+	if fErr := evalNodes(path, nodes, env, &out, newRenderBudget(path)); fErr != nil {
 		return "", undeclared, Errors{*fErr}
 	}
 
 	rendered := out.String()
 	if ft := strings.TrimSpace(vars["from_template"]); ft != "" {
+		if !safeFromTemplateValue(ft) {
+			return "", undeclared, Errors{newFinding(CodeMalformedRef, path, "from_template: must be a non-empty URL or path without whitespace or control characters")}
+		}
 		rendered = EnsureFromTemplate(rendered, ft)
 	}
 	if len(rendered) > MaxFileBytes {
@@ -90,12 +93,30 @@ func renderTemplateAtPath(path, raw string, vars map[string]string) (string, []s
 	return rendered, undeclared, nil
 }
 
+// safeFromTemplateValue reports whether v can be written as a bare
+// `from_template:` YAML scalar without changing the structure of the front
+// matter: it must contain no whitespace or control characters (a newline
+// would let a caller-supplied `?var.from_template=` inject arbitrary
+// front-matter keys) and must not start with a YAML indicator character.
+func safeFromTemplateValue(v string) bool {
+	if v == "" || !utf8.ValidString(v) {
+		return false
+	}
+	for _, r := range v {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '\ufeff' {
+			return false
+		}
+	}
+	return !strings.ContainsRune("-?:,[]{}#&*!|>'\"%@`", rune(v[0]))
+}
+
 // EnsureFromTemplate injects `from_template: <templateURL>` into rendered's YAML
 // front matter if `templateURL` is non-empty and `from_template` is not already
-// set in the front matter.
+// set in the front matter. A templateURL that is not safe to write as a bare
+// YAML scalar (safeFromTemplateValue) is never injected.
 func EnsureFromTemplate(rendered, templateURL string) string {
 	templateURL = strings.TrimSpace(templateURL)
-	if templateURL == "" {
+	if templateURL == "" || !safeFromTemplateValue(templateURL) {
 		return rendered
 	}
 	fm, _, fErr := splitAndParseFrontMatter("", []byte(rendered))
@@ -925,38 +946,100 @@ func parseCondExpr(path, s string, recordVar func(string)) (*condExpr, *Finding)
 	return &condExpr{kind: condVal, val: pe}, nil
 }
 
-func evalNodes(path string, nodes []astNode, env map[string]tmplVal, out *strings.Builder) *Finding {
+// maxRenderSteps bounds the number of template nodes, loop iterations and
+// filter applications one render may evaluate, so a template whose output
+// stays small (for example nested loops with empty bodies over a large
+// comma-separated variable) still cannot pin a Hub CPU.
+const maxRenderSteps = 1 << 20
+
+// renderBudget enforces MaxFileBytes and maxRenderSteps while a template is
+// being evaluated, rather than only checking the finished output: an
+// output-expansion template (nested loops, chained `replace` filters) would
+// otherwise allocate unbounded memory before the post-render size check ran.
+type renderBudget struct {
+	path  string
+	steps int
+}
+
+func newRenderBudget(path string) *renderBudget {
+	return &renderBudget{path: path}
+}
+
+func (b *renderBudget) step() *Finding {
+	b.steps++
+	if b.steps > maxRenderSteps {
+		f := newFinding(CodeLimitExceeded, b.path, "grainfile template evaluation exceeds the render step limit")
+		return &f
+	}
+	return nil
+}
+
+func (b *renderBudget) tooBig(n int) *Finding {
+	if n > MaxFileBytes {
+		f := newFinding(CodeLimitExceeded, b.path, "rendered grainfile template exceeds 1 MiB")
+		return &f
+	}
+	return nil
+}
+
+// write appends s to out unless doing so would exceed MaxFileBytes.
+func (b *renderBudget) write(out *strings.Builder, s string) *Finding {
+	if fErr := b.tooBig(out.Len() + len(s)); fErr != nil {
+		return fErr
+	}
+	out.WriteString(s)
+	return nil
+}
+
+// replacedLen is the length strings.ReplaceAll(s, old, repl) would return,
+// computed without allocating it.
+func replacedLen(s, old, repl string) int {
+	if old == "" {
+		return len(s) + (utf8.RuneCountInString(s)+1)*len(repl)
+	}
+	n := strings.Count(s, old)
+	return len(s) + n*(len(repl)-len(old))
+}
+
+func evalNodes(path string, nodes []astNode, env map[string]tmplVal, out *strings.Builder, b *renderBudget) *Finding {
 	for _, n := range nodes {
+		if fErr := b.step(); fErr != nil {
+			return fErr
+		}
 		switch node := n.(type) {
 		case textNode:
-			out.WriteString(node.text)
+			if fErr := b.write(out, node.text); fErr != nil {
+				return fErr
+			}
 		case exprNode:
-			v, fErr := evalPipeline(path, node.expr, env)
+			v, fErr := evalPipeline(path, node.expr, env, b)
 			if fErr != nil {
 				return fErr
 			}
-			out.WriteString(v.String())
+			if fErr := b.write(out, v.String()); fErr != nil {
+				return fErr
+			}
 		case ifNode:
 			for _, br := range node.branches {
 				if br.cond == nil {
-					if fErr := evalNodes(path, br.body, env, out); fErr != nil {
+					if fErr := evalNodes(path, br.body, env, out, b); fErr != nil {
 						return fErr
 					}
 					break
 				}
-				matched, fErr := evalCond(path, br.cond, env)
+				matched, fErr := evalCond(path, br.cond, env, b)
 				if fErr != nil {
 					return fErr
 				}
 				if matched {
-					if fErr := evalNodes(path, br.body, env, out); fErr != nil {
+					if fErr := evalNodes(path, br.body, env, out, b); fErr != nil {
 						return fErr
 					}
 					break
 				}
 			}
 		case forNode:
-			iterVal, fErr := evalPipeline(path, node.iterable, env)
+			iterVal, fErr := evalPipeline(path, node.iterable, env, b)
 			if fErr != nil {
 				return fErr
 			}
@@ -973,6 +1056,9 @@ func evalNodes(path string, nodes []astNode, env map[string]tmplVal, out *string
 			}
 			total := len(items)
 			for idx, item := range items {
+				if fErr := b.step(); fErr != nil {
+					return fErr
+				}
 				env[node.loopVar] = item
 				env["loop.index"] = tmplVal{defined: true, kind: valNumber, num: float64(idx + 1)}
 				env["loop.index0"] = tmplVal{defined: true, kind: valNumber, num: float64(idx)}
@@ -981,7 +1067,7 @@ func evalNodes(path string, nodes []astNode, env map[string]tmplVal, out *string
 				env["loop.first"] = tmplVal{defined: true, kind: valBool, b: idx == 0}
 				env["loop.last"] = tmplVal{defined: true, kind: valBool, b: idx == total-1}
 				env["loop.length"] = tmplVal{defined: true, kind: valNumber, num: float64(total)}
-				if fErr := evalNodes(path, node.body, env, out); fErr != nil {
+				if fErr := evalNodes(path, node.body, env, out, b); fErr != nil {
 					return fErr
 				}
 			}
@@ -1037,29 +1123,29 @@ func iterValToList(v tmplVal) []tmplVal {
 	return nil
 }
 
-func evalCond(path string, c *condExpr, env map[string]tmplVal) (bool, *Finding) {
+func evalCond(path string, c *condExpr, env map[string]tmplVal, b *renderBudget) (bool, *Finding) {
 	switch c.kind {
 	case condOr:
-		l, fErr := evalCond(path, c.left, env)
+		l, fErr := evalCond(path, c.left, env, b)
 		if fErr != nil || l {
 			return l, fErr
 		}
-		return evalCond(path, c.right, env)
+		return evalCond(path, c.right, env, b)
 	case condAnd:
-		l, fErr := evalCond(path, c.left, env)
+		l, fErr := evalCond(path, c.left, env, b)
 		if fErr != nil || !l {
 			return false, fErr
 		}
-		return evalCond(path, c.right, env)
+		return evalCond(path, c.right, env, b)
 	case condNot:
-		v, fErr := evalCond(path, c.left, env)
+		v, fErr := evalCond(path, c.left, env, b)
 		return !v, fErr
 	case condCmp:
-		lv, fErr := evalPipeline(path, c.left.val, env)
+		lv, fErr := evalPipeline(path, c.left.val, env, b)
 		if fErr != nil {
 			return false, fErr
 		}
-		rv, fErr := evalPipeline(path, c.right.val, env)
+		rv, fErr := evalPipeline(path, c.right.val, env, b)
 		if fErr != nil {
 			return false, fErr
 		}
@@ -1075,7 +1161,7 @@ func evalCond(path string, c *condExpr, env map[string]tmplVal) (bool, *Finding)
 		}
 		return false, nil
 	case condVal:
-		v, fErr := evalPipeline(path, c.val, env)
+		v, fErr := evalPipeline(path, c.val, env, b)
 		if fErr != nil {
 			return false, fErr
 		}
@@ -1113,15 +1199,18 @@ func valueIn(needle, haystack tmplVal) bool {
 	return strings.Contains(haystack.String(), needle.String())
 }
 
-func evalPipeline(path string, pe *pipelineExpr, env map[string]tmplVal) (tmplVal, *Finding) {
-	v, fErr := evalAtom(path, pe.base, env)
+func evalPipeline(path string, pe *pipelineExpr, env map[string]tmplVal, b *renderBudget) (tmplVal, *Finding) {
+	v, fErr := evalAtom(path, pe.base, env, b)
 	if fErr != nil {
 		return tmplVal{}, fErr
 	}
 	for _, fc := range pe.filters {
+		if fErr := b.step(); fErr != nil {
+			return tmplVal{}, fErr
+		}
 		var argVals []tmplVal
 		for _, a := range fc.args {
-			av, fErr := evalPipeline(path, a, env)
+			av, fErr := evalPipeline(path, a, env, b)
 			if fErr != nil {
 				return tmplVal{}, fErr
 			}
@@ -1140,13 +1229,17 @@ func evalPipeline(path string, pe *pipelineExpr, env map[string]tmplVal) (tmplVa
 		case "trim":
 			v = tmplVal{defined: true, kind: valString, str: strings.TrimSpace(v.String())}
 		case "replace":
-			v = tmplVal{defined: true, kind: valString, str: strings.ReplaceAll(v.String(), argVals[0].String(), argVals[1].String())}
+			s, old, repl := v.String(), argVals[0].String(), argVals[1].String()
+			if fErr := b.tooBig(replacedLen(s, old, repl)); fErr != nil {
+				return tmplVal{}, fErr
+			}
+			v = tmplVal{defined: true, kind: valString, str: strings.ReplaceAll(s, old, repl)}
 		}
 	}
 	return v, nil
 }
 
-func evalAtom(path string, a *atomExpr, env map[string]tmplVal) (tmplVal, *Finding) {
+func evalAtom(path string, a *atomExpr, env map[string]tmplVal, b *renderBudget) (tmplVal, *Finding) {
 	if a.isVar {
 		if v, ok := env[a.varName]; ok {
 			return v, nil
@@ -1156,7 +1249,7 @@ func evalAtom(path string, a *atomExpr, env map[string]tmplVal) (tmplVal, *Findi
 	if len(a.list) > 0 {
 		items := make([]tmplVal, len(a.list))
 		for i, pe := range a.list {
-			iv, fErr := evalPipeline(path, pe, env)
+			iv, fErr := evalPipeline(path, pe, env, b)
 			if fErr != nil {
 				return tmplVal{}, fErr
 			}

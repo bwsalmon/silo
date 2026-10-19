@@ -453,6 +453,10 @@ type Event struct {
 	TemplateVars         []string  `json:"template_vars,omitempty"`
 	TriggerSource        string    `json:"trigger_source,omitempty"`
 	TriggeredBy          string    `json:"triggered_by,omitempty"`
+	WorkflowName         string    `json:"workflow_name,omitempty"`
+	WorkflowPath         string    `json:"workflow_path,omitempty"`
+	WorkflowEvent        string    `json:"workflow_event,omitempty"`
+	WorkflowURL          string    `json:"workflow_url,omitempty"`
 	ChangedPaths         []string  `json:"changed_paths,omitempty"`
 	DependencyURL        string    `json:"dependency_url,omitempty"`
 	DependencyState      string    `json:"dependency_state,omitempty"`
@@ -470,6 +474,10 @@ type eventPayload struct {
 	Paths                []string `json:"paths,omitempty"`
 	TriggerRepo          string   `json:"trigger_repo,omitempty"`
 	TriggerCommitSHA     string   `json:"trigger_commit_sha,omitempty"`
+	WorkflowName         string   `json:"workflow_name,omitempty"`
+	WorkflowPath         string   `json:"workflow_path,omitempty"`
+	WorkflowEvent        string   `json:"workflow_event,omitempty"`
+	WorkflowURL          string   `json:"workflow_url,omitempty"`
 	NotBeforeMillis      int64    `json:"not_before_ms,omitempty"`
 	References           []string `json:"references,omitempty"`
 	AuthorizedReferences []string `json:"authorized_references,omitempty"`
@@ -1380,7 +1388,13 @@ func (s *Store) sameTeamForCrossRepo(ctx context.Context, repoA, repoB string) b
 	return true
 }
 
-// EvaluateTriggers evaluates when: triggers (push, pull_request, merge) for all
+// EvaluateForgeEvent is an alias for EvaluateTriggers that evaluates when:
+// triggers (push, pull_request, merge, workflow) against ev.
+func (s *Store) EvaluateForgeEvent(ctx context.Context, repoURL, commitSHA string, ev ForgeEvent) ([]Event, error) {
+	return s.EvaluateTriggers(ctx, repoURL, commitSHA, ev)
+}
+
+// EvaluateTriggers evaluates when: triggers (push, pull_request, merge, workflow) for all
 // active non-draft .process.grain.md files targeting repoURL (local or same-team
 // cross-repo) against ev, records process_triggered events, and transitively
 // evaluates depends_on co-triggers across all active indexed Grainfiles.
@@ -1660,6 +1674,10 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				TriggeredBy:          curr.triggeredBy,
 				TriggerRepo:          canonRepo,
 				TriggerCommitSHA:     commitSHA,
+				WorkflowName:         ev.WorkflowName,
+				WorkflowPath:         ev.WorkflowPath,
+				WorkflowEvent:        ev.WorkflowEvent,
+				WorkflowURL:          ev.WorkflowURL,
 				Paths:                touchedPaths,
 				ChangedPaths:         slices.Clone(ev.ChangedPaths),
 				CreatedAt:            at.Truncate(time.Millisecond),
@@ -1981,6 +1999,10 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 		ChangedPaths:         ev.ChangedPaths,
 		TriggerRepo:          ev.TriggerRepo,
 		TriggerCommitSHA:     ev.TriggerCommitSHA,
+		WorkflowName:         ev.WorkflowName,
+		WorkflowPath:         ev.WorkflowPath,
+		WorkflowEvent:        ev.WorkflowEvent,
+		WorkflowURL:          ev.WorkflowURL,
 		Reason:               ev.Reason,
 	}
 	plBytes, err := json.Marshal(pl)
@@ -2050,6 +2072,10 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.ChangedPaths = pl.ChangedPaths
 		ev.TriggerRepo = pl.TriggerRepo
 		ev.TriggerCommitSHA = pl.TriggerCommitSHA
+		ev.WorkflowName = pl.WorkflowName
+		ev.WorkflowPath = pl.WorkflowPath
+		ev.WorkflowEvent = pl.WorkflowEvent
+		ev.WorkflowURL = pl.WorkflowURL
 		ev.Reason = pl.Reason
 	}
 	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {

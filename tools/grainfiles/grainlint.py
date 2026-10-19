@@ -14,7 +14,7 @@ repository is external and is not resolved.
 
 Needs python3-yaml, python3-jsonschema, and python3-jinja2.
 """
-import datetime, json, pathlib, posixpath, re, sys, urllib.parse
+import datetime, json, pathlib, posixpath, re, sys, urllib.parse, zoneinfo
 import jinja2, jinja2.meta, jinja2.nodes, jinja2.sandbox
 import jsonschema, yaml
 
@@ -47,7 +47,7 @@ def resolve_version(version=None):
 
 
 KINDS = ["task", "process"]
-SOURCES = ["schedule", "push", "merge", "pull_request", "manual", "scenario"]
+SOURCES = ["schedule", "push", "merge", "pull_request", "workflow", "manual", "scenario"]
 SEVERITY = {"GF005": "warning", "GF022": "warning"}
 CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
          "GF030", "GF032", "GF033", "GF034", "GF035", "GF036"]
@@ -55,24 +55,68 @@ STEM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 USER_IDENTITY = re.compile(r"^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$")
 ANCHOR_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$")
+TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|\+(?:[01]\d|2[0-3]):[0-5]\d|-(?!00:00)(?:[01]\d|2[0-3]):[0-5]\d)$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+IANA_TZ_RE = re.compile(r"^(UTC|Etc/(?:UTC|GMT)|[A-Z][A-Za-z_+-]+(?:/[A-Za-z_+-]+)+)$")
+WORKFLOW_EVENTS = {
+    "triggered": "triggered",
+    "started": "triggered",
+    "succeeded": "succeeded",
+    "success": "succeeded",
+    "failed": "failed",
+    "failure": "failed",
+}
+
+
+def parse_time_utc(s, allow_date=False):
+    if not isinstance(s, str):
+        return None
+    if allow_date and DATE_RE.match(s):
+        try:
+            d = datetime.date.fromisoformat(s)
+            return datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        except ValueError:
+            return None
+    m = TIME_RE.match(s)
+    if not m:
+        return None
+    try:
+        dt = datetime.datetime.strptime(m.group(1) + "T" + m.group(2), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    frac = m.group(3)
+    if frac:
+        dt = dt.replace(microsecond=int((frac + "000000")[:6]))
+    tz_part = m.group(4)
+    if tz_part == "Z":
+        tz = datetime.timezone.utc
+    else:
+        sign = 1 if tz_part[0] == "+" else -1
+        hh = int(tz_part[1:3])
+        mm = int(tz_part[4:6])
+        tz = datetime.timezone(datetime.timedelta(minutes=sign * (hh * 60 + mm)))
+    return dt.replace(tzinfo=tz).astimezone(datetime.timezone.utc)
 
 
 def valid_time_or_date(s, allow_date=False):
-    if allow_date and DATE_RE.match(s):
-        try:
-            datetime.date.fromisoformat(s)
-            return True
-        except ValueError:
-            return False
-    m = TIME_RE.match(s)
-    if not m:
+    return parse_time_utc(s, allow_date=allow_date) is not None
+
+
+def valid_iana_timezone(tz):
+    if not isinstance(tz, str) or not tz:
         return False
+    if tz not in ("UTC", "Etc/UTC", "Etc/GMT"):
+        if tz.startswith(("Etc/", "SystemV/")):
+            return False
+        if not IANA_TZ_RE.match(tz):
+            return False
+        for seg in tz.split("/"):
+            if not seg or seg.startswith((".", "+", "-")) or seg.endswith((".", "+", "-")):
+                return False
     try:
-        datetime.datetime.strptime(m.group(1) + "T" + m.group(2), "%Y-%m-%dT%H:%M:%S")
+        zoneinfo.ZoneInfo(tz)
         return True
-    except ValueError:
+    except (zoneinfo.ZoneInfoNotFoundError, KeyError, ValueError):
         return False
 
 
@@ -186,6 +230,17 @@ def _strip_yaml_quoted_and_comments(src):
     return "".join(out)
 
 
+def _bounded_replace(path, s, old, new, count=None):
+    """Jinja2's `replace` filter, refusing (GF006) any result over MAX_FILE_BYTES before allocating it."""
+    s, old, new = str(s), str(old), str(new)
+    n = len(s) + 1 if old == "" else s.count(old)
+    if count is not None:
+        n = min(n, max(int(count), 0))
+    if len(s.encode("utf-8")) + n * (len(new.encode("utf-8")) - len(old.encode("utf-8"))) > MAX_FILE_BYTES:
+        raise Finding("GF006", path, "rendered grainfile template exceeds 1 MiB")
+    return s.replace(old, new) if count is None else s.replace(old, new, int(count))
+
+
 def render_template(raw_text, path="<template>", cli_vars=None):
     """Render a sandboxed .grain.md.jinja2 template -> (rendered_text, template_vars) or raises Finding."""
     if isinstance(raw_text, bytes):
@@ -199,6 +254,7 @@ def render_template(raw_text, path="<template>", cli_vars=None):
         raise Finding("GF006", path, "grainfile template exceeds 1 MiB")
     raw_text = raw_text.replace("\r\n", "\n")
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(loader=None, keep_trailing_newline=True)
+    env.filters["replace"] = lambda s, old, new, count=None: _bounded_replace(path, s, old, new, count)
     try:
         ast = env.parse(raw_text)
     except jinja2.TemplateSyntaxError as e:
@@ -219,9 +275,29 @@ def render_template(raw_text, path="<template>", cli_vars=None):
         jinja2.nodes.Concat,
     )):
         raise Finding("GF033", path, "unsupported Jinja2 operator %s" % type(mnode).__name__.lower())
+    # Like the Go renderer, the sandboxed grammar has no function or method
+    # calls and no attribute/item access beyond `loop.<attr>`: a sandboxed
+    # str method call such as "x".ljust(10**9) would otherwise allocate
+    # unbounded memory before the rendered-size check below ever ran.
+    for cnode in ast.find_all(jinja2.nodes.Call):
+        raise Finding("GF033", path, "unsupported Jinja2 call expression in sandboxed grainfile template")
+    for anode in ast.find_all((jinja2.nodes.Getattr, jinja2.nodes.Getitem, jinja2.nodes.Slice)):
+        if not (isinstance(anode, jinja2.nodes.Getattr) and isinstance(anode.node, jinja2.nodes.Name)
+                and anode.node.name == "loop"):
+            raise Finding("GF033", path, "unsupported Jinja2 attribute or item access in sandboxed grainfile template")
     try:
         template_vars = sorted(jinja2.meta.find_undeclared_variables(ast))
-        rendered = env.from_string(raw_text).render(**(cli_vars or {}))
+        # Stream the output and stop as soon as it exceeds MAX_FILE_BYTES,
+        # rather than materializing an output-expansion bomb first.
+        chunks, total = [], 0
+        for chunk in env.from_string(raw_text).generate(**(cli_vars or {})):
+            total += len(chunk.encode("utf-8"))
+            if total > MAX_FILE_BYTES:
+                raise Finding("GF006", path, "rendered grainfile template exceeds 1 MiB")
+            chunks.append(chunk)
+        rendered = "".join(chunks)
+    except Finding:
+        raise
     except jinja2.TemplateError as e:
         raise Finding("GF033", path, "Jinja2 render error: %s" % e)
     except Exception as e:
@@ -540,7 +616,10 @@ class Schemas:
             if p in (["recipient"], ["requestor"]) and isinstance(e.instance, str) and e.instance and not any(ch in e.instance for ch in "<>@\\ "):
                 continue
             where = ".".join(str(x) for x in p) or "(top)"
-            out.append(Finding("GF020", path, "%s: %s" % (where, e.message)))
+            if p == [] and "'grainfile' is a required property" in e.message:
+                out.append(Finding("GF020", path, 'grainfile: required field missing (expected "v1")'))
+            else:
+                out.append(Finding("GF020", path, "%s: %s" % (where, e.message)))
         return out
 
 
@@ -759,6 +838,41 @@ class Linter:
                 if "\\" in p or ".." in p.strip("/").split("/"):
                     self.add("GF020", where, "when.%s.ignore: invalid path %r" % (ev_key, p))
 
+    def check_schedule_item(self, sch, where):
+        if not isinstance(sch, dict):
+            return
+        cron = sch.get("cron")
+        if isinstance(cron, str) and len(cron.split()) != 5:
+            self.add("GF020", where, "schedule.cron must be a five-field cron expression")
+        tz = sch.get("timezone")
+        if isinstance(tz, str) and not valid_iana_timezone(tz):
+            self.add("GF020", where, "when.schedule.timezone: invalid IANA timezone %r" % tz)
+
+    def check_workflow_filter(self, flt, where):
+        if not isinstance(flt, dict):
+            return
+        raw_wf = flt.get("workflow")
+        if isinstance(raw_wf, str) and not raw_wf.strip():
+            self.add("GF020", where, "when.workflow.workflow: must be a non-empty string")
+        raw_wfs = flt.get("workflows")
+        if isinstance(raw_wfs, list):
+            for w in raw_wfs:
+                if isinstance(w, str) and not w.strip():
+                    self.add("GF020", where, "when.workflow.workflows: must be non-empty strings")
+        raw_repo = flt.get("repo")
+        if isinstance(raw_repo, str) and not valid_repo_slug_or_url(raw_repo):
+            self.add("GF020", where, "when.workflow.repo: invalid repository %r" % raw_repo)
+        raw_repos = flt.get("repos")
+        if isinstance(raw_repos, list):
+            for rp in raw_repos:
+                if isinstance(rp, str) and not valid_repo_slug_or_url(rp):
+                    self.add("GF020", where, "when.workflow.repos: invalid repository %r" % rp)
+        raw_branches = flt.get("branches")
+        if isinstance(raw_branches, list):
+            for br in raw_branches:
+                if isinstance(br, str) and not br.strip():
+                    self.add("GF020", where, "when.workflow.branches: must be non-empty strings")
+
     def refs_of(self, it):
         fm, out = it.fm, []
         def add(field, v):
@@ -776,7 +890,7 @@ class Linter:
         where = self.show(it.repo, it.rel)
         self.findings += self.schemas.validate(it.kind, it.fm, where)
         fm = it.fm
-        vinfo = resolve_version(fm.get("grainfile"))
+        vinfo = resolve_version(fm["grainfile"]) if "grainfile" in fm else None
         if vinfo is not None:
             it.grainfile = vinfo["grainfile"]
             it.spec_summary_path = vinfo["spec_summary_path"]
@@ -802,8 +916,11 @@ class Linter:
             when = fm.get("when")
             if isinstance(when, dict):
                 sch = when.get("schedule")
-                if isinstance(sch, dict) and isinstance(sch.get("cron"), str) and len(sch["cron"].split()) != 5:
-                    self.add("GF020", where, "schedule.cron must be a five-field cron expression")
+                if isinstance(sch, dict):
+                    self.check_schedule_item(sch, where)
+                elif isinstance(sch, list):
+                    for item in sch:
+                        self.check_schedule_item(item, where)
                 for ev_key in ("push", "pull_request", "merge"):
                     raw_ev = when.get(ev_key)
                     if isinstance(raw_ev, dict):
@@ -811,6 +928,12 @@ class Linter:
                     elif isinstance(raw_ev, list):
                         for flt in raw_ev:
                             self.check_when_filter(ev_key, flt, where)
+                raw_wf = when.get("workflow")
+                if isinstance(raw_wf, dict):
+                    self.check_workflow_filter(raw_wf, where)
+                elif isinstance(raw_wf, list):
+                    for flt in raw_wf:
+                        self.check_workflow_filter(flt, where)
         it.targets = {}
         for field, s in self.refs_of(it):
             try:

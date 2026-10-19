@@ -406,7 +406,7 @@ func TestGrainfileSubscriptionsNotificationsAndCompletions(t *testing.T) {
 	}
 
 	// 3. Index a .task.md targeting Node B and notify: Node B receives task_ready live.
-	taskB, err := grainfiles.Parse("tasks/build.task.md", []byte("---\ntitle: Build artifact\nrecipient: https://github.com/acme/grain-b\n---\nBuild.\n"))
+	taskB, err := grainfiles.Parse("tasks/build.task.md", []byte("---\ngrainfile: v1\ntitle: Build artifact\nrecipient: https://github.com/acme/grain-b\n---\nBuild.\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +436,7 @@ func TestGrainfileSubscriptionsNotificationsAndCompletions(t *testing.T) {
 		return e.Status == registry.Offline
 	})
 
-	procB, err := grainfiles.Parse("processes/audit.process.md", []byte("---\ntitle: Security audit\nrecipient: https://github.com/acme/grain-b\non:\n  push:\n    branches: [\"main\"]\n    paths: [\"src/**\"]\n---\nAudit.\n"))
+	procB, err := grainfiles.Parse("processes/audit.process.md", []byte("---\ngrainfile: v1\ntitle: Security audit\nrecipient: https://github.com/acme/grain-b\non:\n  push:\n    branches: [\"main\"]\n    paths: [\"src/**\"]\n---\nAudit.\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +476,7 @@ func TestGrainfileSubscriptionsNotificationsAndCompletions(t *testing.T) {
 	// 5. Node C connects and subscribes via conn.Subscribe to recipient grain-c,
 	// which has a task depending on taskB (depends_on). When Node B reports completion
 	// of taskB via CompleteGrainfile, Node C receives dependency_completed live.
-	taskC, err := grainfiles.Parse("tasks/deploy.task.md", []byte("---\ntitle: Deploy artifact\nrecipient: https://github.com/acme/grain-c\ndepends_on:\n  - https://github.com/acme/repo-a/blob/main/tasks/build.task.md\n---\nDeploy.\n"))
+	taskC, err := grainfiles.Parse("tasks/deploy.task.md", []byte("---\ngrainfile: v1\ntitle: Deploy artifact\nrecipient: https://github.com/acme/grain-c\ndepends_on:\n  - https://github.com/acme/repo-a/blob/main/tasks/build.task.md\n---\nDeploy.\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

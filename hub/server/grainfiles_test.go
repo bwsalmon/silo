@@ -37,6 +37,7 @@ func TestGrainfileEndToEndWebhookNotifyProxyAndCompletion(t *testing.T) {
 	)
 
 	taskMD := `---
+grainfile: v1
 title: Deploy service to staging
 recipient: https://github.com/acme/node-b
 requestor: Alice <alice@example.com>
@@ -47,6 +48,7 @@ references:
 Deploy the staging service according to docs/arch.md.
 `
 	processMD := `---
+grainfile: v1
 title: Continuous verification process
 recipient: https://github.com/acme/node-b
 on:
@@ -62,6 +64,7 @@ Run verification checks on every push to main.
 	unlistedMD := "# Unlisted\n\nThis file is not listed in references.\n"
 
 	dependentTaskMD := `---
+grainfile: v1
 title: Post-deploy verification
 recipient: https://github.com/acme/node-c
 depends_on:
