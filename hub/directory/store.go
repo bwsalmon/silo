@@ -898,9 +898,9 @@ func (s *Store) RemoveMember(ctx context.Context, team, principal string) error 
 // tasks earlier teams filed in it stay visible only to those teams
 // (Access.SeesTask). A repository another team owns is refused
 // (ErrOwned): it has to be released first, so no team can take another
-// team's repository. Only a hub admin assigns repositories through the
-// API (SA1-M2): a team admin could otherwise claim any repository no
-// team owned at that moment.
+// team's repository. Through the API, a non-sys-admin deployment admin
+// must prove write access to an unowned repository via .grain/hub-claim
+// on its default branch before claiming it (SA1-M2).
 func (s *Store) AssignRepo(ctx context.Context, team, repo string) error {
 	return s.assignRepo(ctx, team, repo, false)
 }

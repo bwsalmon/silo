@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,12 @@ import (
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/route"
 )
+
+// ClaimFilePath is the file on a repository's default branch that a
+// self-service deployment admin must populate with the deployment ID (or
+// canonical deployment URL) to prove repository write access before claiming
+// an unowned repository via PUT /v1/deployments/{id}/repos/{owner}/{name}.
+const ClaimFilePath = ".grain/hub-claim"
 
 // Paths the API serves.
 const (
@@ -59,9 +66,81 @@ type API struct {
 	// ReplayGrainfiles, when set, resets nodeID's Grainfile delivery cursor
 	// and replays active standing processes and tasks when its host is replaced.
 	ReplayGrainfiles func(ctx context.Context, nodeID string) (int, error)
+	// VerifyRepoClaim, when set, checks that team is authorized to claim the
+	// unowned repository repo (owner/name) on a self-service request by reading
+	// ClaimFilePath (.grain/hub-claim) from the repository's default branch.
+	// Hub sys admins (acc.HubAdmin) may assign unowned repositories without it;
+	// non-sys-admin claims of unowned repositories are refused (403 Forbidden)
+	// when VerifyRepoClaim is nil or returns an error.
+	VerifyRepoClaim func(ctx context.Context, team, repo string) error
 	// Logf, when set, receives the audit lines of changes to which team
 	// owns what: deleting a team, assigning and releasing a repository.
 	Logf func(format string, args ...any)
+}
+
+// NewRepoClaimVerifier returns a VerifyRepoClaim callback that reads
+// ClaimFilePath (.grain/hub-claim) from the default branch of
+// https://github.com/{owner}/{name} via fetch and checks that it names team.
+func NewRepoClaimVerifier(fetch func(ctx context.Context, repoURL, ref, filePath string) ([]byte, error), hubURL func() string) func(ctx context.Context, team, repo string) error {
+	return func(ctx context.Context, team, repo string) error {
+		if fetch == nil {
+			return fmt.Errorf("repository claim verification unavailable: cannot verify %s in %s", ClaimFilePath, repo)
+		}
+		r, err := normRepo(repo)
+		if err != nil {
+			return err
+		}
+		raw, err := fetch(ctx, "https://github.com/"+r, "", ClaimFilePath)
+		if err != nil {
+			return fmt.Errorf("claiming unowned repository %s requires %s on its default branch naming deployment %q: %w", r, ClaimFilePath, team, err)
+		}
+		var u string
+		if hubURL != nil {
+			u = hubURL()
+		}
+		if !MatchRepoClaim(raw, team, u) {
+			return fmt.Errorf("claiming unowned repository %s rejected: %s on the default branch does not name deployment %q", r, ClaimFilePath, team)
+		}
+		return nil
+	}
+}
+
+// MatchRepoClaim reports whether the contents of a .grain/hub-claim file
+// authorize deployment team. Blank lines and #-comments are ignored; each
+// remaining line may be a bare deployment ID ("acme-payments"), a canonical
+// deployment path ("/deployments/acme-payments"), a canonical deployment URL
+// ("https://<hub>/deployments/acme-payments" matching hubURL when set), or a
+// "deployment: <value>" line with any of those forms.
+func MatchRepoClaim(raw []byte, team, hubURL string) bool {
+	team = strings.ToLower(strings.TrimSpace(team))
+	if team == "" || len(raw) == 0 {
+		return false
+	}
+	canonURL := strings.ToLower(strings.TrimRight(CanonicalDeploymentURL(hubURL, team), "/"))
+	for _, line := range strings.Split(string(raw), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), "deployment:") {
+			line = strings.TrimSpace(line[len("deployment:"):])
+		}
+		line = strings.Trim(line, `"'`)
+		cand := strings.ToLower(strings.TrimRight(strings.TrimSpace(line), "/"))
+		if cand == "" {
+			continue
+		}
+		if cand == team || cand == "/deployments/"+team || cand == "deployments/"+team {
+			return true
+		}
+		if canonURL != "" && cand == canonURL {
+			return true
+		}
+	}
+	return false
 }
 
 // audit logs one change to the directory, with the principal who made
@@ -756,6 +835,32 @@ func (a *API) assignRepo(w http.ResponseWriter, r *http.Request, acc *Access) er
 	for t, role := range acc.Teams {
 		if role == Admin {
 			allowedSourceTeams[t] = true
+		}
+	}
+	if !acc.HubAdmin {
+		currentOwner, err := a.Store.RepoOwner(r.Context(), repo)
+		if err != nil {
+			return err
+		}
+		if currentOwner != "" && currentOwner != team && !allowedSourceTeams[currentOwner] {
+			return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, strings.ToLower(repo), currentOwner)
+		}
+		if currentOwner == "" {
+			if a.VerifyRepoClaim == nil {
+				return &httpError{
+					code: http.StatusForbidden,
+					msg:  "claiming an unowned repository requires proof of repository access (" + ClaimFilePath + " on the default branch) or a hub sys admin",
+				}
+			}
+			if err := a.VerifyRepoClaim(r.Context(), team, repo); err != nil {
+				if errors.Is(err, ErrInvalid) {
+					return err
+				}
+				return &httpError{
+					code: http.StatusForbidden,
+					msg:  err.Error(),
+				}
+			}
 		}
 	}
 	if err := a.Store.TransferRepoByAdmin(r.Context(), team, repo, req.History, allowedSourceTeams, false); err != nil {

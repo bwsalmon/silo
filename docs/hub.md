@@ -878,12 +878,17 @@ Grain deployments:
   of its repositories. The node directory and the teams list are
   filtered this way. A team the caller is not in answers 404, as one
   that does not exist would.
-- **Only a hub admin assigns a repository to a team** (SA1-M2). Team
-  admins manage their team's members and settings, and may release a
-  repository of their team, but not claim one: nothing ties a
-  repository to a team except the assignment, so a team admin who
-  could assign would claim, first come first served, any repository no
-  team owned at that moment.
+- **Claiming an unowned repository requires a hub sys admin or proof of
+  repository write access** (SA1-M2). Deployment admins manage their
+  deployment's members and settings and may release a repository of their
+  deployment, but a self-service deployment admin may only claim an
+  unowned repository (`PUT /v1/deployments/{id}/repos/{owner}/{name}`) when
+  `.grain/hub-claim` on that repository's default branch names the
+  deployment ID (or its canonical `/deployments/{id}` URL). Without that
+  proof, a self-service deployment admin could claim any repository no
+  deployment owned at the moment the GitHub App was installed on it and
+  read its Grainfiles and referenced files. Hub sys admins may assign any
+  unowned repository directly.
 - **A task stays with the team it was recorded under.** `SeesTask` shows
   a task to the members of the team recorded on it (`Task.Team`) and, for
   a repository's task, to the members of the team that owns the

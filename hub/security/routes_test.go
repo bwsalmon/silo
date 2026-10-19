@@ -78,7 +78,12 @@ type world struct {
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
-	hb := startHub(t, options{})
+	hb := startHub(t, options{
+		grainfileFetcher: memoryRepoFetcher{
+			"https://github.com/acme/new|.grain/hub-claim":     []byte(teamA + "\n"),
+			"https://github.com/acme/new-dep|.grain/hub-claim": []byte(teamA + "\n"),
+		},
+	})
 	hb.teams()
 	r := hb.user(root)
 	hb.must(r, "PUT", "/v1/teams/"+teamA+"/members/user:zed2@example.com", map[string]string{"role": "member"}, http.StatusNoContent, nil)

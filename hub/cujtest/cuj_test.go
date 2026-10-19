@@ -166,6 +166,14 @@ func (th *testHub) mustCall(method, path, user string, body any, out any) []byte
 	return raw
 }
 
+func (th *testHub) claimRepo(deploymentID, owner, name, user string) {
+	th.t.Helper()
+	th.gh.MustCommitAndPush(th.t, owner, name, "main", "Authorize Grain Hub deployment "+deploymentID, map[string]string{
+		directory.ClaimFilePath: deploymentID + "\n",
+	}, nil)
+	th.mustCall("PUT", fmt.Sprintf("/v1/deployments/%s/repos/%s/%s", deploymentID, owner, name), user, nil, nil)
+}
+
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
@@ -490,7 +498,8 @@ func TestCUJ01_SysAdminAllowlistAndDeploymentCreation(t *testing.T) {
 		t.Fatalf("outsider GET /v1/me: got %d, want 403", code)
 	}
 
-	// 3. Allowed user Alice signs in, creates deployment "acme-payments", and claims acme/payments.
+	// 3. Allowed user Alice signs in, creates deployment "acme-payments", proves repository
+	// access via .grain/hub-claim on acme/payments's default branch, and claims acme/payments.
 	var me struct {
 		Email string `json:"email"`
 	}
@@ -508,6 +517,14 @@ func TestCUJ01_SysAdminAllowlistAndDeploymentCreation(t *testing.T) {
 		t.Fatalf("created deployment = %+v", dep)
 	}
 
+	// Claiming an unowned repository before .grain/hub-claim is committed to its default branch is rejected (403 Forbidden).
+	if code, _ := th.call("PUT", "/v1/deployments/acme-payments/repos/acme/payments", "alice@example.com", nil, nil); code != http.StatusForbidden {
+		t.Fatalf("unverified repo claim: got %d, want 403 Forbidden", code)
+	}
+
+	th.gh.MustCommitAndPush(t, "acme", "payments", "main", "Authorize acme-payments deployment claim", map[string]string{
+		directory.ClaimFilePath: dep.RecipientURL + "\n",
+	}, nil)
 	th.mustCall("PUT", "/v1/deployments/acme-payments/repos/acme/payments", "alice@example.com", nil, nil)
 
 	// 4. Alice mints a deployment token and connects node "acme-payments".
@@ -529,12 +546,21 @@ func TestCUJ01_SysAdminAllowlistAndDeploymentCreation(t *testing.T) {
 		return len(dir.Nodes) == 1 && dir.Nodes[0].ID == "acme-payments" && dir.Nodes[0].Status == registry.Online
 	})
 
-	// 5. Bob creates deployment "rogue-team" and attempts to claim acme/payments;
-	// the Hub rejects the conflicting repository claim with 409 Conflict.
+	// 5. Bob creates deployment "rogue-team":
+	//    - Attempting to claim an unowned repository (victim-org/private-repo) without
+	//      a matching .grain/hub-claim is rejected with 403 Forbidden.
+	//    - Attempting to claim acme/payments (already owned by acme-payments) is
+	//      rejected with 409 Conflict.
 	th.mustCall("POST", directory.DeploymentsPath, "bob@example.com", map[string]any{
 		"id":   "rogue-team",
 		"name": "Rogue Team",
 	}, nil)
+	th.gh.MustCommitAndPush(t, "victim-org", "private-repo", "main", "Add private grainfile", map[string]string{
+		".grain/tasks/secret.task.md": "---\ngrainfile: v1\ntitle: Private task\n---\nSecret.\n",
+	}, nil)
+	if code, _ := th.call("PUT", "/v1/deployments/rogue-team/repos/victim-org/private-repo", "bob@example.com", nil, nil); code != http.StatusForbidden {
+		t.Fatalf("rogue unowned repo claim without proof: got %d, want 403 Forbidden", code)
+	}
 	code, _ = th.call("PUT", "/v1/deployments/rogue-team/repos/acme/payments", "bob@example.com", nil, nil)
 	if code != http.StatusConflict {
 		t.Fatalf("conflicting repo claim: got %d, want 409 Conflict", code)
@@ -561,7 +587,7 @@ func TestCUJ02_MultiAdminTakeoverAndStateRecovery(t *testing.T) {
 	th.mustCall("PUT", "/v1/deployments/infra-core/members/user:carol@example.com", "alice@example.com", map[string]any{
 		"role": "member",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/infra-core/repos/acme/infra", "alice@example.com", nil, nil)
+	th.claimRepo("infra-core", "acme", "infra", "alice@example.com")
 
 	// Carol (member, not admin) cannot mint deployment tokens or replace the host.
 	if code, _ := th.call("POST", "/v1/deployments/infra-core/replace-host", "carol@example.com", nil, nil); code != http.StatusForbidden {
@@ -693,7 +719,7 @@ func TestCUJ03_PersonalHubGrainfileAuthoringAndCrossDeploymentDispatch(t *testin
 		"id":   "platform",
 		"name": "Platform",
 	}, &dep)
-	th.mustCall("PUT", "/v1/deployments/platform/repos/acme/platform-api", "alice@example.com", nil, nil)
+	th.claimRepo("platform", "acme", "platform-api", "alice@example.com")
 
 	node := mintAndConnectNode(t, th, "alice@example.com", registry.Node{
 		ID:         "node-platform-1",
@@ -881,8 +907,8 @@ func TestCUJ05_GitHubGrainfileWebhookCrossRepoTriggerAndGate(t *testing.T) {
 		"id":   "security",
 		"name": "Security",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/security/repos/acme/web-service", "alice@example.com", nil, nil)
-	th.mustCall("PUT", "/v1/deployments/security/repos/acme/security-automation", "alice@example.com", nil, nil)
+	th.claimRepo("security", "acme", "web-service", "alice@example.com")
+	th.claimRepo("security", "acme", "security-automation", "alice@example.com")
 
 	node := mintAndConnectNode(t, th, "alice@example.com", registry.Node{
 		ID:       "node-sec-1",
@@ -1007,13 +1033,13 @@ func TestCUJ06_CrossRepoTaskDispatchAndScopedReferenceFetch(t *testing.T) {
 		"id":   "control-team",
 		"name": "Control Team",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/control-team/repos/acme/migration-control", "alice@example.com", nil, nil)
+	th.claimRepo("control-team", "acme", "migration-control", "alice@example.com")
 
 	th.mustCall("POST", directory.DeploymentsPath, "bob@example.com", map[string]any{
 		"id":   "billing-team",
 		"name": "Billing Team",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/billing-team/repos/acme/billing-service", "bob@example.com", nil, nil)
+	th.claimRepo("billing-team", "acme", "billing-service", "bob@example.com")
 
 	recipientBilling := "https://github.com/acme/billing-service"
 	workerNode := mintAndConnectNode(t, th, "bob@example.com", registry.Node{
@@ -1127,7 +1153,7 @@ func TestCUJ07_Jinja2TemplatesAndDependsOnDAG(t *testing.T) {
 		"id":   "release",
 		"name": "Release",
 	}, &dep)
-	th.mustCall("PUT", "/v1/deployments/release/repos/acme/monorepo", "alice@example.com", nil, nil)
+	th.claimRepo("release", "acme", "monorepo", "alice@example.com")
 
 	node := mintAndConnectNode(t, th, "alice@example.com", registry.Node{
 		ID:         "node-rel-1",
@@ -1370,7 +1396,7 @@ func TestCUJ09_CapabilityRoutingAndLostNodeReclamation(t *testing.T) {
 		"id":   "compute",
 		"name": "Compute",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/compute/repos/acme/ml-train", "alice@example.com", nil, nil)
+	th.claimRepo("compute", "acme", "ml-train", "alice@example.com")
 
 	// Connect three nodes:
 	// - node-cpu: labels {"accel": "cpu"}
@@ -1460,7 +1486,7 @@ func TestCUJ10_InteractiveTaskStreamingArtifactsApprovalsAndInbox(t *testing.T) 
 		"id":   "interactive-team",
 		"name": "Interactive Team",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/interactive-team/repos/acme/webapp", "alice@example.com", nil, nil)
+	th.claimRepo("interactive-team", "acme", "webapp", "alice@example.com")
 
 	diffBytes := []byte("--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n-old\n+new\n")
 	node := mintAndConnectNode(t, th, "alice@example.com", registry.Node{
@@ -1615,7 +1641,7 @@ func TestCUJ11_HubUIDeploymentSwitcherThemeAndRoleProxy(t *testing.T) {
 	}
 
 	// 3. Connect node "team-alpha" under team-alpha and verify role-aware node UI reverse proxy.
-	th.mustCall("PUT", "/v1/deployments/team-alpha/repos/acme/alpha", "alice@example.com", nil, nil)
+	th.claimRepo("team-alpha", "acme", "alpha", "alice@example.com")
 	var tokResp struct {
 		Token string `json:"token"`
 	}
@@ -1722,13 +1748,13 @@ func TestCUJ12_TaskProposalAndApprovalMatrix(t *testing.T) {
 		"id":   "team-a",
 		"name": "Team A",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/team-a/repos/acme/service-a", "alice@example.com", nil, nil)
+	th.claimRepo("team-a", "acme", "service-a", "alice@example.com")
 
 	th.mustCall("POST", directory.DeploymentsPath, "bob@example.com", map[string]any{
 		"id":   "team-b",
 		"name": "Team B",
 	}, nil)
-	th.mustCall("PUT", "/v1/deployments/team-b/repos/acme/service-b", "bob@example.com", nil, nil)
+	th.claimRepo("team-b", "acme", "service-b", "bob@example.com")
 
 	nodeA := mintAndConnectNode(t, th, "alice@example.com", registry.Node{
 		ID:       "node-a",
