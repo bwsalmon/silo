@@ -52,7 +52,7 @@ test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, file
       'title: Accessible CI process',
       'draft: true',
       'gate: true',
-      'depends_on:',
+      'references:',
       '  - /tasks/01-a11y.task.grain.md',
       'when:',
       '  schedule:',

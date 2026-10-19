@@ -314,7 +314,7 @@ describe('the SDK against silo hub serve', () => {
         '---',
         'title: Verify Migration',
         'gate: true',
-        'depends_on:',
+        'references:',
         `  - https://github.com/${repoDocs}/blob/main/processes/lint.process.grain.md`,
         'when:',
         '  push:',
@@ -485,10 +485,31 @@ describe('the SDK against silo hub serve', () => {
     expect(inspection.subscriptions.some((s) => s.node_id === node)).toBe(true);
 
     const procInspection = await h.inspectGrainfile(`https://github.com/${repo}/blob/main/tasks/verify.process.grain.md`);
-    expect(procInspection.grainfile?.depends_on).toEqual([
+    expect(procInspection.grainfile?.references).toEqual([
       `https://github.com/${repoDocs}/blob/main/processes/lint.process.grain.md`,
     ]);
+    expect(procInspection.grainfile?.depends_on).toBeUndefined();
     expect(procInspection.grainfile?.when?.push?.branches).toEqual(['main']);
+
+    // Index and inspect a Jinja2 Grainfile template (.task.grain.md.jinja2)
+    await commitAndPushWebhook(repo, 'main', {
+      'tasks/rollout.task.grain.md.jinja2': [
+        '---',
+        'grainfile: v1',
+        'title: "Roll out {{ service_name | default(\'api\') }} to {{ region | default(\'eu-west-1\') }}"',
+        `recipient: "{{ recipient_url | default('${recipientAlpha}') }}"`,
+        '---',
+        '# Roll out {{ service_name | default("api") }} to {{ region | default("eu-west-1") }}',
+        '',
+        'Deploy {{ service_name | default("api") }} in {{ region | default("eu-west-1") }}.',
+      ].join('\n'),
+    });
+    const tmplInspection = await h.inspectGrainfile(
+      `https://github.com/${repo}/blob/main/tasks/rollout.task.grain.md.jinja2`,
+    );
+    expect(tmplInspection.grainfile?.is_template).toBe(true);
+    expect(tmplInspection.grainfile?.template_vars).toEqual(['recipient_url', 'region', 'service_name']);
+    expect(tmplInspection.grainfile?.title).toBe('Roll out api to eu-west-1');
 
     // Verify the live fakegrain node received the grainfile_events for recipientAlpha
     await until('fakegrain to receive grainfile_events', async () => {

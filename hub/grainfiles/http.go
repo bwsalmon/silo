@@ -1689,13 +1689,37 @@ func (a *API) authenticateNode(r *http.Request) (string, error) {
 }
 
 func hasRawQueryEncodingHazard(rawQuery string) bool {
-	lower := strings.ToLower(rawQuery)
-	return strings.Contains(lower, "%2e") ||
-		strings.Contains(lower, "%5c") ||
-		strings.Contains(lower, "%00") ||
-		strings.Contains(lower, "%252e") ||
-		strings.Contains(lower, "%252f") ||
-		strings.Contains(lower, "%255c")
+	for _, part := range strings.Split(rawQuery, "&") {
+		k, _, _ := strings.Cut(part, "=")
+		lower := strings.ToLower(part)
+		if strings.Contains(lower, "%00") {
+			return true
+		}
+		if strings.HasPrefix(k, "var.") {
+			continue
+		}
+		if strings.Contains(lower, "%2e") ||
+			strings.Contains(lower, "%5c") ||
+			strings.Contains(lower, "%252e") ||
+			strings.Contains(lower, "%252f") ||
+			strings.Contains(lower, "%255c") {
+			return true
+		}
+	}
+	return false
+}
+
+func extractQueryTemplateVars(q url.Values) map[string]string {
+	var vars map[string]string
+	for k, vals := range q {
+		if name, ok := strings.CutPrefix(k, "var."); ok && name != "" && len(vals) > 0 {
+			if vars == nil {
+				vars = make(map[string]string)
+			}
+			vars[name] = vals[0]
+		}
+	}
+	return vars
 }
 
 func hasPathTraversalOrHazard(v string) bool {
@@ -2103,6 +2127,33 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 		http.Error(w, "fetching file from repository: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	q := r.URL.Query()
+	vars := extractQueryTemplateVars(q)
+	wantsRender := len(vars) > 0 || q.Get("render") == "true" || q.Get("render") == "1"
+	if IsTemplatePath(filePath) && wantsRender {
+		rendered, _, err := RenderTemplate(string(data), vars)
+		if err != nil {
+			http.Error(w, "rendering template: "+err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		gf, err := ParseWithVars(filePath, data, vars)
+		if err != nil {
+			http.Error(w, "validating rendered template: "+err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		strippedPath, _ := StripTemplateSuffix(filePath)
+		if err := gf.ResolveSource(Source{
+			RepoURL: repoURL,
+			Ref:     ref,
+			Commit:  ref,
+			Path:    strippedPath,
+		}); err != nil {
+			http.Error(w, "resolving rendered template: "+err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		data = []byte(rendered)
+		w.Header().Set("X-Grainfile-Rendered", "true")
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -2255,6 +2306,13 @@ func encodeTreeTar(baseDir string, entries []TreeEntry) ([]byte, error) {
 // "tree"), the resolved commit SHA, and the payload bytes (for a tree, a JSON
 // TreeListing or a tar archive when format == "tar").
 func (a *API) FetchAuthorizedContent(ctx context.Context, nodeID, grainfileURL, commitSHA, reference, format string) (kind, resolvedCommit string, data []byte, err error) {
+	return a.FetchAuthorizedContentWithVars(ctx, nodeID, grainfileURL, commitSHA, reference, format, nil)
+}
+
+// FetchAuthorizedContentWithVars is like FetchAuthorizedContent, and when vars
+// is non-empty and the target is a .jinja2 Grainfile template, renders the
+// template with vars and validates the rendered Grainfile before returning it.
+func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainfileURL, commitSHA, reference, format string, vars map[string]string) (kind, resolvedCommit string, data []byte, err error) {
 	if a.Store == nil || a.Fetcher == nil {
 		return "", "", nil, errors.New("content proxy not configured")
 	}
@@ -2298,6 +2356,26 @@ func (a *API) FetchAuthorizedContent(ctx context.Context, nodeID, grainfileURL, 
 		raw, err := a.Fetcher.FetchFile(ctx, rec.Repo, pinnedRef, rec.Path)
 		if err != nil {
 			return "", "", nil, err
+		}
+		if IsTemplatePath(rec.Path) && len(vars) > 0 {
+			rendered, _, err := RenderTemplate(string(raw), vars)
+			if err != nil {
+				return "", "", nil, err
+			}
+			gf, err := ParseWithVars(rec.Path, raw, vars)
+			if err != nil {
+				return "", "", nil, err
+			}
+			strippedPath, _ := StripTemplateSuffix(rec.Path)
+			if err := gf.ResolveSource(Source{
+				RepoURL: rec.Repo,
+				Ref:     rec.Ref,
+				Commit:  pinnedRef,
+				Path:    strippedPath,
+			}); err != nil {
+				return "", "", nil, err
+			}
+			raw = []byte(rendered)
 		}
 		return "file", pinnedRef, raw, nil
 	}

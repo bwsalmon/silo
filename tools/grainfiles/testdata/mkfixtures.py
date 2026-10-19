@@ -64,6 +64,10 @@ case("gf020-bad-requestor", ["GF020"], {
 case("gf020-process-recipient", ["GF020"], {
     "r/processes/p.process.grain.md": process(extra='recipient: "%s"\nwhen:\n  manual: {}\n' % DEP),
 })
+case("gf020-process-depends-on", ["GF020"], {
+    "r/tasks/b.task.grain.md": A,
+    "r/processes/p.process.grain.md": process(extra="when:\n  manual: {}\ndepends_on: [../tasks/b.task.grain.md]\n"),
+})
 case("gf020-trigger-with-removed", ["GF020"], {
     "r/processes/p.process.grain.md": process(extra="when:\n  manual: {}\ntrigger_with: [./b.process.grain.md]\n"),
 })
@@ -106,17 +110,23 @@ case("gf032-task-depends-on-process", ["GF032"], {
     "r/processes/p.process.grain.md": process(),
     "r/tasks/a.task.grain.md": task("depends_on: [../processes/p.process.grain.md]\n"),
 })
+case("gf032-depends-on-template", ["GF032"], {
+    "r/tasks/tmpl.task.grain.md.jinja2": task(title='Rollout {{ region | default("eu") }}'),
+    "r/tasks/a.task.grain.md": task("depends_on: [./tmpl.task.grain.md.jinja2]\n"),
+})
 case("gf032-recipient-is-file", ["GF032"], {
     "r/tasks/b.task.grain.md": A,
     "r/tasks/a.task.grain.md": task(recipient="./b.task.grain.md"),
+})
+case("gf033-jinja2-syntax", ["GF033"], {
+    "r/tasks/a.task.grain.md.jinja2": task(body="Run {{ unclosed\n"),
 })
 case("gf034-depends-cycle", ["GF034"], {
     "r/tasks/a.task.grain.md": task("depends_on: [./b.task.grain.md]\n"),
     "r/tasks/b.task.grain.md": task("depends_on: [./a.task.grain.md]\n"),
 })
-case("gf034-process-depends-cycle", ["GF034"], {
-    "r/processes/a.process.grain.md": process(extra="when:\n  manual: {}\ndepends_on: [./b.process.grain.md]\n"),
-    "r/processes/b.process.grain.md": process(extra="when:\n  manual: {}\ndepends_on: [./a.process.grain.md]\n"),
+case("gf034-jinja2-include", ["GF034"], {
+    "r/tasks/a.task.grain.md.jinja2": task(body='{% include "other.md" %}\n'),
 })
 case("gf035-malformed-ref", ["GF035"], {
     "r/tasks/a.task.grain.md": task('references: ["git::https://github.com/acme/widgets.git//docs/d.md"]\n'),

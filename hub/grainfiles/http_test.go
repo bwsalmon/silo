@@ -449,10 +449,11 @@ Generate post-merge report.
 			t.Errorf("fetching reference through draft grainfile: got %d, want 403", rDraftRef.StatusCode)
 		}
 
-		// 5i. Test installation ("created") and installation_repositories ("added") webhooks scanning existing *.grain.md files.
+		// 5i. Test installation ("created") and installation_repositories ("added") webhooks scanning existing *.grain.md and *.grain.md.jinja2 files.
 		repoScanned := "https://github.com/acme/scanned-repo"
 		fetcher.SetString(repoScanned, "main", ".grain/tasks/existing.task.grain.md", "---\ntitle: Existing scanned task\nrecipient: https://github.com/acme/grain-eu\n---\nScan body.\n")
 		fetcher.SetString(repoScanned, "main", ".grain/processes/existing.process.grain.md", "---\ntitle: Existing scanned process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nScan process.\n")
+		fetcher.SetString(repoScanned, "main", ".grain/tasks/rollout.task.grain.md.jinja2", "---\ntitle: Roll out to {{ region | default('eu') | upper }}\nrecipient: https://github.com/acme/grain-{{ region | default('eu') }}\ndepends_on:\n  - ./existing.task.grain.md\n---\n{# Template comment #}\n{% if env %}\nEnv: {{ env | trim | replace('-', '_') }}\n{% else %}\nEnv: default\n{% endif %}\n")
 		fetcher.SetString(repoScanned, "main", "README.md", "# Readme\n")
 
 		rInst, bInst := postWebhook("installation_repositories", "valid", map[string]any{
@@ -468,8 +469,42 @@ Generate post-merge report.
 		if err := json.Unmarshal(bInst, &instResp); err != nil {
 			t.Fatal(err)
 		}
-		if len(instResp.Indexed) != 2 {
-			t.Fatalf("expected installation_repositories webhook to scan and index 2 *.grain.md files, got %d (%+v)", len(instResp.Indexed), instResp)
+		if len(instResp.Indexed) != 3 {
+			t.Fatalf("expected installation_repositories webhook to scan and index 3 grainfiles (including .jinja2), got %d (%+v)", len(instResp.Indexed), instResp)
+		}
+		var foundTpl *IndexRecord
+		for i := range instResp.Indexed {
+			if instResp.Indexed[i].Path == ".grain/tasks/rollout.task.grain.md.jinja2" {
+				foundTpl = &instResp.Indexed[i]
+			}
+		}
+		if foundTpl == nil || !foundTpl.IsTemplate || len(foundTpl.TemplateVars) != 2 || foundTpl.TemplateVars[0] != "env" || foundTpl.TemplateVars[1] != "region" {
+			t.Fatalf("unexpected indexed template record: %+v", foundTpl)
+		}
+
+		// 5j. Fetching .task.grain.md.jinja2 without ?var.* returns raw template; with ?var.<name>=<value> returns rendered .grain.md.
+		tplURL := "https://github.com/acme/scanned-repo/blob/main/.grain/tasks/rollout.task.grain.md.jinja2"
+		rRawTpl, bodyRawTpl := getContent(tokEU, map[string]string{"grainfile_url": tplURL})
+		if rRawTpl.StatusCode != http.StatusOK || !strings.Contains(bodyRawTpl, "{{ region | default('eu') | upper }}") {
+			t.Fatalf("fetching raw .jinja2 template: status=%d body=%q", rRawTpl.StatusCode, bodyRawTpl)
+		}
+		rRendTpl, bodyRendTpl := getContent(tokEU, map[string]string{
+			"grainfile_url": tplURL,
+			"var.region":    "eu",
+			"var.env":       " prod-blue ",
+		})
+		if rRendTpl.StatusCode != http.StatusOK ||
+			!strings.Contains(bodyRendTpl, "title: Roll out to EU") ||
+			!strings.Contains(bodyRendTpl, "Env: prod_blue") ||
+			strings.Contains(bodyRendTpl, "Template comment") {
+			t.Fatalf("fetching rendered .jinja2 template via ?var.*: status=%d body=%q", rRendTpl.StatusCode, bodyRendTpl)
+		}
+		_, _, muxBytes, err := api.FetchAuthorizedContentWithVars(ctx, "node-eu", tplURL, "main", "", "", map[string]string{
+			"region": "eu",
+			"env":    "canary-1",
+		})
+		if err != nil || !strings.Contains(string(muxBytes), "Env: canary_1") {
+			t.Fatalf("FetchAuthorizedContentWithVars: err=%v body=%q", err, muxBytes)
 		}
 
 		// 6. Verify that none of the file bodies or sentinels were stored in the database!

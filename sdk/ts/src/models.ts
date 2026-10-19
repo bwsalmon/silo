@@ -162,6 +162,8 @@ export interface Grainfile {
   url: string;
   kind: GrainfileKind;
   title: string;
+  is_template?: boolean;
+  template_vars?: string[];
   recipient?: string;
   requestor?: string;
   draft?: boolean;
@@ -226,6 +228,8 @@ export interface GrainfileEvent {
   grainfile_url: string;
   kind?: GrainfileKind;
   title?: string;
+  is_template?: boolean;
+  template_vars?: string[];
   recipient?: string;
   requestor?: string;
   not_before?: string;

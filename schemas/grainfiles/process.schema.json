@@ -18,9 +18,6 @@
     "not_before": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/notBefore"
     },
-    "depends_on": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
-    },
     "references": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
     },
