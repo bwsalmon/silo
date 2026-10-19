@@ -512,7 +512,11 @@ func (a *API) createTeam(w http.ResponseWriter, r *http.Request, acc *Access) er
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
-	if err := a.Store.CreateDeployment(r.Context(), req.ID, req.Name, acc.Email); err != nil {
+	creator := acc.Email
+	if acc.HubAdmin && strings.HasSuffix(r.URL.Path, "/teams") {
+		creator = ""
+	}
+	if err := a.Store.CreateDeployment(r.Context(), req.ID, req.Name, creator); err != nil {
 		return err
 	}
 	a.audit(acc, "created deployment %s", req.ID)
@@ -521,8 +525,8 @@ func (a *API) createTeam(w http.ResponseWriter, r *http.Request, acc *Access) er
 		name = req.ID
 	}
 	members := map[string]Role{}
-	if strings.TrimSpace(acc.Email) != "" {
-		members[UserPrefix+strings.ToLower(strings.TrimSpace(acc.Email))] = Admin
+	if strings.TrimSpace(creator) != "" {
+		members[UserPrefix+strings.ToLower(strings.TrimSpace(creator))] = Admin
 	}
 	return writeJSON(w, http.StatusCreated, a.decorateTeam(r, Team{
 		ID:      req.ID,

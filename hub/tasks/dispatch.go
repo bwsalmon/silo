@@ -115,8 +115,19 @@ type Dispatcher struct {
 
 	mu      sync.Mutex
 	running bool
+	leased  bool
 	live    map[string]*live // tasks with a stream open, by ID
 	hold    map[[2]string]time.Time
+}
+
+// SetLeased marks the dispatcher as managed by a lease loop (such as
+// server.Hub.Serve), so a follower replica that does not currently hold the
+// dispatcher lease delegates task stream deliveries to the active leader
+// instead of opening a competing direct stream.
+func (d *Dispatcher) SetLeased(v bool) {
+	d.mu.Lock()
+	d.leased = v
+	d.mu.Unlock()
 }
 
 // Event is something the dispatcher did or saw, for Observe.
@@ -308,13 +319,13 @@ func (d *Dispatcher) Cancel(ctx context.Context, id, reason string) (Task, error
 	d.finished(t)
 	d.mu.Lock()
 	l := d.live[id]
-	running := d.running
+	direct := !d.running && !d.leased
 	d.mu.Unlock()
 	if l != nil {
 		l.signal()
 	} else if t.CancelPending {
 		d.wakeLocal()
-		if !running && d.Open != nil {
+		if direct && d.Open != nil {
 			d.deliverDirect(ctx, id)
 		}
 	}
@@ -338,13 +349,13 @@ func (d *Dispatcher) Answered(ctx context.Context, task string) {
 	d.init()
 	d.mu.Lock()
 	l := d.live[task]
-	running := d.running
+	direct := !d.running && !d.leased
 	d.mu.Unlock()
 	if l != nil {
 		l.answered()
 	} else {
 		d.wakeLocal()
-		if !running && d.Open != nil {
+		if direct && d.Open != nil {
 			d.deliverDirect(ctx, task)
 		}
 	}
@@ -366,13 +377,13 @@ func (d *Dispatcher) Posted(ctx context.Context, task string) {
 	d.init()
 	d.mu.Lock()
 	l := d.live[task]
-	running := d.running
+	direct := !d.running && !d.leased
 	d.mu.Unlock()
 	if l != nil {
 		l.posted()
 	} else {
 		d.wakeLocal()
-		if !running && d.Open != nil {
+		if direct && d.Open != nil {
 			d.deliverDirect(ctx, task)
 		}
 	}
@@ -1161,7 +1172,11 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					// running it: queue it afresh, the node included.
 					exclude = ""
 				}
-				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Requeue(ctx, t.ID, reason, exclude) })
+				d.record(ctx, t.ID, func() (Task, error) {
+					wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+					defer cancel()
+					return d.Store.Requeue(wctx, t.ID, reason, exclude)
+				})
 				return
 			case TypeResult:
 				if r.m.State != Done && r.m.State != Failed {
@@ -1169,7 +1184,11 @@ func (d *Dispatcher) follow(ctx context.Context, t Task, c *registry.Claim, l *l
 					continue
 				}
 				d.logf("tasks: %s %s on node %s", t.ID, r.m.State, t.Node)
-				d.record(ctx, t.ID, func() (Task, error) { return d.Store.Finish(ctx, t.ID, r.m.State, truncate(r.m.Reason, maxReason)) })
+				d.record(ctx, t.ID, func() (Task, error) {
+					wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+					defer cancel()
+					return d.Store.Finish(wctx, t.ID, r.m.State, truncate(r.m.Reason, maxReason))
+				})
 				return
 			default:
 				d.logf("tasks: node %s sent an unknown %s message for %s", t.Node, logsafe.Quote(r.m.Type), t.ID)
@@ -1195,7 +1214,10 @@ func (d *Dispatcher) deliverAnswers(ctx context.Context, st *Stream, t Task) {
 			return
 		}
 		d.logf("tasks: sent node %s %s's answer to %s: %s", t.Node, t.ID, logsafe.Quote(a.Request), a.Decision)
-		if err := d.Store.AnswerDelivered(ctx, t.ID, a.Request); err != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		err := d.Store.AnswerDelivered(wctx, t.ID, a.Request)
+		cancel()
+		if err != nil {
 			d.logf("tasks: recording %s's answer to %s sent: %v", t.ID, logsafe.Quote(a.Request), err)
 		}
 	}
@@ -1221,7 +1243,10 @@ func (d *Dispatcher) deliverMessages(ctx context.Context, st *Stream, t Task) {
 			return
 		}
 		d.logf("tasks: sent node %s %s's message %s", t.Node, t.ID, logsafe.Quote(m.ID))
-		if err := d.Store.MessageDelivered(ctx, t.ID, m.ID); err != nil {
+		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		err := d.Store.MessageDelivered(wctx, t.ID, m.ID)
+		cancel()
+		if err != nil {
 			d.logf("tasks: recording %s's message %s sent: %v", t.ID, logsafe.Quote(m.ID), err)
 		}
 	}

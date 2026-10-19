@@ -490,26 +490,30 @@ func (s *Store) SeedUsers(ctx context.Context, hubAdmins, acceptedUsers []string
 
 // Users returns all accepted users ordered by email.
 func (s *Store) Users(ctx context.Context) ([]AcceptedUser, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT email, sys_admin, added_by, created_at FROM accepted_users ORDER BY email ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []AcceptedUser{}
-	for rows.Next() {
-		var (
-			u        AcceptedUser
-			sysAdmin int
-			created  int64
-		)
-		if err := rows.Scan(&u.Email, &sysAdmin, &u.AddedBy, &created); err != nil {
-			return nil, err
+	var out []AcceptedUser
+	err := dbaccess.Retry(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, `SELECT email, sys_admin, added_by, created_at FROM accepted_users ORDER BY email ASC`)
+		if err != nil {
+			return err
 		}
-		u.SysAdmin = sysAdmin != 0
-		u.CreatedAt = time.UnixMilli(created).UTC()
-		out = append(out, u)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		out = []AcceptedUser{}
+		for rows.Next() {
+			var (
+				u        AcceptedUser
+				sysAdmin int
+				created  int64
+			)
+			if err := rows.Scan(&u.Email, &sysAdmin, &u.AddedBy, &created); err != nil {
+				return err
+			}
+			u.SysAdmin = sysAdmin != 0
+			u.CreatedAt = time.UnixMilli(created).UTC()
+			out = append(out, u)
+		}
+		return rows.Err()
+	})
+	return out, err
 }
 
 // SetUser adds or updates email in accepted_users. It returns ErrLastSysAdmin
@@ -584,23 +588,29 @@ func (s *Store) DeleteUser(ctx context.Context, email string) error {
 // sys_admin = 1, and whether accepted_users has any rows at all.
 func (s *Store) CheckAcceptedUser(ctx context.Context, email string) (accepted bool, sysAdmin bool, hasAnyUsers bool, err error) {
 	e := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(email)), UserPrefix)
-	var sysInt int
-	qErr := s.db.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&sysInt)
-	if qErr == nil {
-		return true, sysInt != 0, true, nil
-	}
-	if !errors.Is(qErr, sql.ErrNoRows) {
-		return false, false, false, qErr
-	}
-	var one int
-	anyErr := s.db.QueryRowContext(ctx, `SELECT 1 FROM accepted_users LIMIT 1`).Scan(&one)
-	if anyErr == nil {
-		return false, false, true, nil
-	}
-	if errors.Is(anyErr, sql.ErrNoRows) {
-		return false, false, false, nil
-	}
-	return false, false, false, anyErr
+	err = dbaccess.Retry(ctx, func() error {
+		accepted, sysAdmin, hasAnyUsers = false, false, false
+		var sysInt int
+		qErr := s.db.QueryRowContext(ctx, s.q(`SELECT sys_admin FROM accepted_users WHERE email = ?`), e).Scan(&sysInt)
+		if qErr == nil {
+			accepted, sysAdmin, hasAnyUsers = true, sysInt != 0, true
+			return nil
+		}
+		if !errors.Is(qErr, sql.ErrNoRows) {
+			return qErr
+		}
+		var one int
+		anyErr := s.db.QueryRowContext(ctx, `SELECT 1 FROM accepted_users LIMIT 1`).Scan(&one)
+		if anyErr == nil {
+			hasAnyUsers = true
+			return nil
+		}
+		if errors.Is(anyErr, sql.ErrNoRows) {
+			return nil
+		}
+		return anyErr
+	})
+	return accepted, sysAdmin, hasAnyUsers, err
 }
 
 // CreateTeam creates a team. Its ID is a valid DNS-safe deployment slug
@@ -612,7 +622,10 @@ func (s *Store) CreateTeam(ctx context.Context, id, name string) error {
 	if name == "" {
 		name = id
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)`), id, name, s.now().UnixMilli())
+	err := dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)`), id, name, s.now().UnixMilli())
+		return err
+	})
 	if isUnique(err) {
 		return fmt.Errorf("%w: team %s", ErrExists, id)
 	}
@@ -680,62 +693,69 @@ func (s *Store) DeleteTeam(ctx context.Context, id string) error {
 
 // Teams lists every team, with its members and repositories, by ID.
 func (s *Store) Teams(ctx context.Context) ([]Team, error) {
-	byID := map[string]*Team{}
-	var ids []string
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name FROM teams`)
+	var out []Team
+	err := dbaccess.Retry(ctx, func() error {
+		byID := map[string]*Team{}
+		var ids []string
+		rows, err := s.db.QueryContext(ctx, `SELECT id, name FROM teams`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			t := &Team{Members: map[string]Role{}, Repos: []string{}}
+			if err := rows.Scan(&t.ID, &t.Name); err != nil {
+				rows.Close()
+				return err
+			}
+			byID[t.ID] = t
+			ids = append(ids, t.ID)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		rows, err = s.db.QueryContext(ctx, `SELECT team, principal, role FROM team_members`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var team, p, role string
+			if err := rows.Scan(&team, &p, &role); err != nil {
+				rows.Close()
+				return err
+			}
+			if t := byID[team]; t != nil {
+				t.Members[p] = Role(role)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		rows, err = s.db.QueryContext(ctx, `SELECT team, repo FROM team_repos ORDER BY repo`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var team, repo string
+			if err := rows.Scan(&team, &repo); err != nil {
+				rows.Close()
+				return err
+			}
+			if t := byID[team]; t != nil {
+				t.Repos = append(t.Repos, repo)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		sort.Strings(ids)
+		out = make([]Team, len(ids))
+		for i, id := range ids {
+			out[i] = *byID[id]
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	for rows.Next() {
-		t := &Team{Members: map[string]Role{}, Repos: []string{}}
-		if err := rows.Scan(&t.ID, &t.Name); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		byID[t.ID] = t
-		ids = append(ids, t.ID)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	rows, err = s.db.QueryContext(ctx, `SELECT team, principal, role FROM team_members`)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var team, p, role string
-		if err := rows.Scan(&team, &p, &role); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if t := byID[team]; t != nil {
-			t.Members[p] = Role(role)
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	rows, err = s.db.QueryContext(ctx, `SELECT team, repo FROM team_repos ORDER BY repo`)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var team, repo string
-		if err := rows.Scan(&team, &repo); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if t := byID[team]; t != nil {
-			t.Repos = append(t.Repos, repo)
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	sort.Strings(ids)
-	out := make([]Team, len(ids))
-	for i, id := range ids {
-		out[i] = *byID[id]
 	}
 	return out, nil
 }
@@ -744,7 +764,9 @@ func (s *Store) teamExists(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, id string) error {
 	var one int
-	err := q.QueryRowContext(ctx, s.q(`SELECT 1 FROM teams WHERE id = ?`), id).Scan(&one)
+	err := dbaccess.Retry(ctx, func() error {
+		return q.QueryRowContext(ctx, s.q(`SELECT 1 FROM teams WHERE id = ?`), id).Scan(&one)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: team %s", ErrNotFound, id)
 	}
@@ -807,7 +829,12 @@ func (s *Store) RemoveMember(ctx context.Context, team, principal string) error 
 	if err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM team_members WHERE team = ? AND principal = ?`), team, p)
+	var res sql.Result
+	err = dbaccess.Retry(ctx, func() error {
+		var err error
+		res, err = s.db.ExecContext(ctx, s.q(`DELETE FROM team_members WHERE team = ? AND principal = ?`), team, p)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -837,6 +864,8 @@ func (s *Store) TransferRepo(ctx context.Context, team, repo string) error {
 	return s.assignRepo(ctx, team, repo, true)
 }
 
+var errAssignConflict = errors.New("directory: concurrent repo assignment conflict")
+
 func (s *Store) assignRepo(ctx context.Context, team, repo string, history bool) error {
 	r, err := normRepo(repo)
 	if err != nil {
@@ -846,29 +875,36 @@ func (s *Store) assignRepo(ctx context.Context, team, repo string, history bool)
 	if history {
 		h = 1
 	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		if err := s.teamExists(ctx, tx, team); err != nil {
+	for attempt := 0; attempt < 4; attempt++ {
+		err = s.tx(ctx, func(tx *sql.Tx) error {
+			if err := s.teamExists(ctx, tx, team); err != nil {
+				return err
+			}
+			var owner string
+			err := tx.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&owner)
+			switch {
+			case err == nil && owner == team:
+				// Already its own: only whether it carries the history
+				// changes.
+				_, err = tx.ExecContext(ctx, s.q(`UPDATE team_repos SET history = ? WHERE repo = ?`), h, r)
+				return err
+			case err == nil:
+				return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, r, owner)
+			case !errors.Is(err, sql.ErrNoRows):
+				return err
+			}
+			_, err = tx.ExecContext(ctx, s.q(`INSERT INTO team_repos (repo, team, history) VALUES (?, ?, ?)`), r, team, h)
+			if isUnique(err) {
+				return errAssignConflict
+			}
 			return err
-		}
-		var owner string
-		err := tx.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&owner)
-		switch {
-		case err == nil && owner == team:
-			// Already its own: only whether it carries the history
-			// changes.
-			_, err = tx.ExecContext(ctx, s.q(`UPDATE team_repos SET history = ? WHERE repo = ?`), h, r)
-			return err
-		case err == nil:
-			return fmt.Errorf("%w: %s belongs to team %s", ErrOwned, r, owner)
-		case !errors.Is(err, sql.ErrNoRows):
-			return err
-		}
-		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO team_repos (repo, team, history) VALUES (?, ?, ?)`), r, team, h)
-		if isUnique(err) {
-			return fmt.Errorf("%w: %s", ErrOwned, r)
+		})
+		if errors.Is(err, errAssignConflict) {
+			continue
 		}
 		return err
-	})
+	}
+	return fmt.Errorf("%w: %s", ErrOwned, r)
 }
 
 // TransferRepoByAdmin assigns repo to team if it is unowned, or transfers it
@@ -916,7 +952,12 @@ func (s *Store) ReleaseRepo(ctx context.Context, team, repo string) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM team_repos WHERE repo = ? AND team = ?`), r, team)
+	var res sql.Result
+	err = dbaccess.Retry(ctx, func() error {
+		var err error
+		res, err = s.db.ExecContext(ctx, s.q(`DELETE FROM team_repos WHERE repo = ? AND team = ?`), r, team)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -933,7 +974,10 @@ func (s *Store) RepoOwner(ctx context.Context, repo string) (string, error) {
 		return "", err
 	}
 	var team string
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&team)
+	err = dbaccess.Retry(ctx, func() error {
+		team = ""
+		return s.db.QueryRowContext(ctx, s.q(`SELECT team FROM team_repos WHERE repo = ?`), r).Scan(&team)
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -946,20 +990,27 @@ func (s *Store) TeamRepos(ctx context.Context, team string) ([]string, error) {
 	if err := s.teamExists(ctx, s.db, team); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo FROM team_repos WHERE team = ? ORDER BY repo`), team)
+	var repos []string
+	err := dbaccess.Retry(ctx, func() error {
+		repos = []string{}
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo FROM team_repos WHERE team = ? ORDER BY repo`), team)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r string
+			if err := rows.Scan(&r); err != nil {
+				return err
+			}
+			repos = append(repos, r)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	repos := []string{}
-	for rows.Next() {
-		var r string
-		if err := rows.Scan(&r); err != nil {
-			return nil, err
-		}
-		repos = append(repos, r)
-	}
-	return repos, rows.Err()
+	return repos, nil
 }
 
 // memberships are the teams any of principals is in, with the highest
@@ -973,21 +1024,28 @@ func (s *Store) memberships(ctx context.Context, principals []string) (map[strin
 	for i, p := range principals {
 		args[i] = p
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, role FROM team_members WHERE principal IN (?`+strings.Repeat(", ?", len(principals)-1)+`)`), args...)
+	err := dbaccess.Retry(ctx, func() error {
+		out = map[string]Role{}
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT team, role FROM team_members WHERE principal IN (?`+strings.Repeat(", ?", len(principals)-1)+`)`), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var team, role string
+			if err := rows.Scan(&team, &role); err != nil {
+				return err
+			}
+			if r := Role(role); r.rank() > out[team].rank() {
+				out[team] = r
+			}
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var team, role string
-		if err := rows.Scan(&team, &role); err != nil {
-			return nil, err
-		}
-		if r := Role(role); r.rank() > out[team].rank() {
-			out[team] = r
-		}
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // membershipsOf is memberships for each of principals apart: it adds
@@ -1000,23 +1058,25 @@ func (s *Store) membershipsOf(ctx context.Context, principals []string, out map[
 	for i, p := range principals {
 		args[i] = p
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT principal, team, role FROM team_members WHERE principal IN (?`+strings.Repeat(", ?", len(principals)-1)+`)`), args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var p, team, role string
-		if err := rows.Scan(&p, &team, &role); err != nil {
+	return dbaccess.Retry(ctx, func() error {
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT principal, team, role FROM team_members WHERE principal IN (?`+strings.Repeat(", ?", len(principals)-1)+`)`), args...)
+		if err != nil {
 			return err
 		}
-		if teams := out[p]; teams != nil {
-			if r := Role(role); r.rank() > teams[team].rank() {
-				teams[team] = r
+		defer rows.Close()
+		for rows.Next() {
+			var p, team, role string
+			if err := rows.Scan(&p, &team, &role); err != nil {
+				return err
+			}
+			if teams := out[p]; teams != nil {
+				if r := Role(role); r.rank() > teams[team].rank() {
+					teams[team] = r
+				}
 			}
 		}
-	}
-	return rows.Err()
+		return rows.Err()
+	})
 }
 
 // repoOwners sets out[repo] to the team that owns each of repos, which
@@ -1030,20 +1090,23 @@ func (s *Store) repoOwners(ctx context.Context, repos []string, out map[string]s
 		for i, r := range chunk {
 			args[i] = r
 		}
-		rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team FROM team_repos WHERE repo IN (?`+strings.Repeat(", ?", len(chunk)-1)+`)`), args...)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var r, team string
-			if err := rows.Scan(&r, &team); err != nil {
-				rows.Close()
+		err := dbaccess.Retry(ctx, func() error {
+			rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team FROM team_repos WHERE repo IN (?`+strings.Repeat(", ?", len(chunk)-1)+`)`), args...)
+			if err != nil {
 				return err
 			}
-			out[r] = team
-		}
-		err = rows.Err()
-		rows.Close()
+			for rows.Next() {
+				var r, team string
+				if err := rows.Scan(&r, &team); err != nil {
+					rows.Close()
+					return err
+				}
+				out[r] = team
+			}
+			err = rows.Err()
+			rows.Close()
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -1061,20 +1124,27 @@ func (s *Store) reposOf(ctx context.Context, teams map[string]Role) (map[string]
 	for t := range teams {
 		args = append(args, t)
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team, history FROM team_repos WHERE team IN (?`+strings.Repeat(", ?", len(args)-1)+`)`), args...)
+	err := dbaccess.Retry(ctx, func() error {
+		out = map[string]ownership{}
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT repo, team, history FROM team_repos WHERE team IN (?`+strings.Repeat(", ?", len(args)-1)+`)`), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				repo, team string
+				history    int64
+			)
+			if err := rows.Scan(&repo, &team, &history); err != nil {
+				return err
+			}
+			out[repo] = ownership{team: team, history: history != 0}
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			repo, team string
-			history    int64
-		)
-		if err := rows.Scan(&repo, &team, &history); err != nil {
-			return nil, err
-		}
-		out[repo] = ownership{team: team, history: history != 0}
-	}
-	return out, rows.Err()
+	return out, nil
 }

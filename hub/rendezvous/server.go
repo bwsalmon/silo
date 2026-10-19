@@ -147,6 +147,7 @@ type nodeConn struct {
 	ctl    *lines
 	lease  *registry.Lease
 	wakeCh chan struct{}
+	done   chan struct{}
 }
 
 func (nc *nodeConn) wakeGrainfiles() {
@@ -413,6 +414,9 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 			return
 		}
 	}
+	nc := &nodeConn{id: node.ID, m: m, ctl: l, wakeCh: make(chan struct{}, 1), done: make(chan struct{})}
+	defer close(nc.done)
+
 	lease, err := s.Registry.Register(node, owner)
 	if err != nil && !errors.Is(err, registry.ErrOwner) && !errors.Is(err, registry.ErrInvalid) {
 		// The shared registry could not be written: not a refusal, so
@@ -424,6 +428,7 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		refuse(err)
 		return
 	}
+	nc.lease = lease
 	defer lease.Close()
 
 	var welcomeSub *grainfiles.Subscriptions
@@ -452,7 +457,6 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		}
 	}
 
-	nc := &nodeConn{id: node.ID, m: m, ctl: l, lease: lease, wakeCh: make(chan struct{}, 1)}
 	s.mu.Lock()
 	if s.closing != "" {
 		// Shutdown has already said goodbye to the connections it saw.
@@ -477,6 +481,16 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 		}
 		s.mu.Unlock()
 	}()
+	if s.Authenticate != nil && c.Request() != nil {
+		if _, err := s.Authenticate(c.Request()); err != nil {
+			return
+		}
+	}
+	select {
+	case <-lease.Done():
+		return
+	default:
+	}
 
 	hb := s.Heartbeat
 	if hb <= 0 {
@@ -513,7 +527,16 @@ func (s *Server) serveNode(ctx context.Context, id Identity, c *websocket.Conn) 
 	}
 
 	var filing atomic.Int32
-	go s.acceptNodeStreams(node.ID, m)
+	streamsDone := make(chan struct{})
+	go func() {
+		defer close(streamsDone)
+		s.acceptNodeStreams(node.ID, m)
+	}()
+	defer func() {
+		m.Close()
+		<-streamsDone
+	}()
+	defer lease.Close()
 	go func() {
 		select {
 		case <-lease.Done(): // superseded by a newer connection
@@ -600,12 +623,18 @@ func (s *Server) fileTask(ctx context.Context, nodeID, owner string, l *lines, m
 }
 
 func (s *Server) acceptNodeStreams(nodeID string, m *mux.Mux) {
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
 		st, err := m.AcceptStream()
 		if err != nil {
 			return
 		}
-		go s.handleNodeStream(nodeID, st)
+		wg.Add(1)
+		go func(st *mux.Stream) {
+			defer wg.Done()
+			s.handleNodeStream(nodeID, st)
+		}(st)
 	}
 }
 
@@ -776,18 +805,24 @@ func (s *Server) Open(ctx context.Context, nodeID string) (net.Conn, error) {
 	return s.openRemote(ctx, nodeID)
 }
 
-// Disconnect ends nodeID's connection, if it has one, and says whether
-// it had: how a revoked credential stops serving at once rather than at
-// its next reconnect, which the revocation then refuses.
+// Disconnect ends nodeID's connection, if it has one on this pod or in
+// the shared registry, and says whether it had: how a revoked credential
+// stops serving at once rather than at its next reconnect, which the
+// revocation then refuses.
 func (s *Server) Disconnect(nodeID string) bool {
 	s.mu.Lock()
 	nc := s.conns[nodeID]
 	s.mu.Unlock()
-	if nc == nil {
-		return false
+	local := false
+	if nc != nil {
+		nc.m.Close()
+		local = true
 	}
-	nc.m.Close()
-	return true
+	reg := false
+	if s.Registry != nil {
+		reg = s.Registry.Disconnect(nodeID)
+	}
+	return local || reg
 }
 
 // Shutdown ends every node's connection, as a hub that is going away
@@ -828,6 +863,10 @@ func (s *Server) Shutdown(ctx context.Context, reason string) error {
 			err = ctx.Err()
 		}
 		nc.m.Close()
+		select {
+		case <-nc.done:
+		case <-ctx.Done():
+		}
 	}
 	if err == nil {
 		s.logf("rendezvous: said goodbye to %d nodes: %s", len(conns), reason)
@@ -1192,16 +1231,15 @@ func (s *Server) CompleteGrainfileRun(ctx context.Context, grainfileURL, commitS
 			return evs, nil
 		}
 	}
-	s.completedMu.Unlock()
 
 	evs, err := s.Grainfiles.RecordDependencyCompleted(ctx, grainfileURL, commitSHA, state, reason)
 	if err != nil {
+		s.completedMu.Unlock()
 		return nil, err
 	}
 	if evs == nil {
 		evs = []grainfiles.Event{}
 	}
-	s.completedMu.Lock()
 	s.completed[keyExact] = evs
 	s.completed[keyWildcard] = evs
 	s.completedMu.Unlock()

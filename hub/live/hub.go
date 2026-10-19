@@ -502,9 +502,14 @@ func resultStateReason(r *events.Result) (state tasks.State, rawState, reason st
 		state, rawState = tasks.Done, "completed"
 	case st == "done":
 		state, rawState = tasks.Done, "done"
-	case st == "failed" || st == "error":
+	case st == "failed" || st == "error" ||
+		r.Exit.Reason == events.ReasonDeadline ||
+		r.Exit.Reason == events.ReasonCLIError ||
+		r.Exit.Reason == events.ReasonConnectionLost ||
+		r.Exit.Reason == events.ReasonSetupFailed ||
+		r.Exit.Reason == "failed" || r.Exit.Reason == "error":
 		state, rawState = tasks.Failed, "failed"
-	case r.Exit.Code == 0 && (r.Exit.Reason == "" || r.Exit.Reason == events.ReasonCompleted || r.Exit.Reason == "done"):
+	case r.Exit.Code == 0:
 		state, rawState = tasks.Done, "done"
 	default:
 		state, rawState = tasks.Failed, "failed"

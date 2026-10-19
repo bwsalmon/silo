@@ -31,9 +31,20 @@ func (r *Registry) Run(ctx context.Context) error {
 		// A change notice refills the mirror at once, between renewals.
 		for renew := false; !renew; {
 			select {
+			case <-t.C:
+				renew = true
+				continue
+			default:
+			}
+			select {
 			case <-r.kick:
-				if err := r.Refill(ctx); err != nil && ctx.Err() == nil {
-					r.logf("registry: refilling from the database: %v", err)
+				select {
+				case <-t.C:
+					renew = true
+				default:
+					if err := r.Refill(ctx); err != nil && ctx.Err() == nil {
+						r.logf("registry: refilling from the database: %v", err)
+					}
 				}
 			case <-ctx.Done():
 				dctx, cancel := storeContext()
@@ -89,14 +100,20 @@ func (r *Registry) Refill(ctx context.Context) error {
 		return err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	changed := false
 	seen := make(map[string]bool, len(rows))
+	var expired []*Lease
 	for _, row := range rows {
 		seen[row.ID] = true
 		cur := r.nodes[row.ID]
-		if cur != nil && (cur.lease != nil || cur.changed > seq) {
+		if cur != nil && cur.changed > seq {
 			continue
+		}
+		if cur != nil && cur.lease != nil {
+			if row.conn == cur.conn {
+				continue
+			}
+			expired = append(expired, cur.lease)
 		}
 		n := &node{entry: row.Entry, conn: row.conn, pod: row.pod, podUntil: row.leaseUntil, settled: row.settled}
 		if n.conn == "" {
@@ -110,19 +127,26 @@ func (r *Registry) Refill(ctx context.Context) error {
 				n.entry.Claimed = 0
 			}
 		}
-		if cur == nil || cur.conn != n.conn || cur.pod != n.pod || !reflect.DeepEqual(cur.entry, n.entry) {
+		if cur == nil || cur.lease != nil || cur.conn != n.conn || cur.pod != n.pod || !reflect.DeepEqual(cur.entry, n.entry) {
 			changed = true
 		}
 		r.nodes[row.ID] = n
 	}
 	for id, n := range r.nodes {
-		if !seen[id] && n.lease == nil && n.changed <= seq {
+		if !seen[id] && n.changed <= seq {
+			if n.lease != nil {
+				expired = append(expired, n.lease)
+			}
 			delete(r.nodes, id)
 			changed = true
 		}
 	}
 	if changed {
 		r.notify()
+	}
+	r.mu.Unlock()
+	for _, l := range expired {
+		l.end()
 	}
 	return nil
 }

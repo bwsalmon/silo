@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bwsalmon/silo/hub/dbaccess"
 )
 
 // A task's dependencies (Spec.DependsOn) are hub tasks it waits for: the
@@ -32,22 +34,24 @@ func (s *Store) States(ctx context.Context, ids []string) (map[string]Ended, err
 		for _, id := range ids[:n] {
 			args = append(args, id)
 		}
-		rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, state, reason FROM tasks WHERE id IN (?`+strings.Repeat(", ?", n-1)+`)`), args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var e Ended
-			var st string
-			if err := rows.Scan(&e.ID, &st, &e.Reason); err != nil {
-				rows.Close()
-				return nil, err
+		err := dbaccess.Retry(ctx, func() error {
+			rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, state, reason FROM tasks WHERE id IN (?`+strings.Repeat(", ?", n-1)+`)`), args...)
+			if err != nil {
+				return err
 			}
-			e.State = State(st)
-			out[e.ID] = e
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+			defer rows.Close()
+			for rows.Next() {
+				var e Ended
+				var st string
+				if err := rows.Scan(&e.ID, &st, &e.Reason); err != nil {
+					return err
+				}
+				e.State = State(st)
+				out[e.ID] = e
+			}
+			return rows.Err()
+		})
+		if err != nil {
 			return nil, err
 		}
 		ids = ids[n:]
@@ -86,10 +90,12 @@ func (s *Store) Watch(ctx context.Context, w Watcher) error {
 	if !nodeID.MatchString(w.Node) || w.NodeOwner == "" {
 		return fmt.Errorf("%w watching node %q", ErrInvalid, w.Node)
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_watchers (task, node, node_owner, node_task, created_at, delivered)
-		VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT (task, node, node_task) DO NOTHING`),
-		w.Task, w.Node, w.NodeOwner, w.NodeTask, s.now().UTC().UnixMilli())
-	return err
+	return dbaccess.Retry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO task_watchers (task, node, node_owner, node_task, created_at, delivered)
+			VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT (task, node, node_task) DO NOTHING`),
+			w.Task, w.Node, w.NodeOwner, w.NodeTask, s.now().UTC().UnixMilli())
+		return err
+	})
 }
 
 // Watchers returns the watchers of task, delivered or not.
@@ -107,38 +113,50 @@ func (s *Store) Unnotified(ctx context.Context) ([]Watcher, error) {
 }
 
 func (s *Store) watchers(ctx context.Context, q string, args ...any) ([]Watcher, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(q), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Watcher{}
-	for rows.Next() {
-		var (
-			w       Watcher
-			created int64
-			st      string
-		)
-		if err := rows.Scan(&w.Task, &w.Node, &w.NodeOwner, &w.NodeTask, &created, &st, &w.Ended.Reason); err != nil {
-			return nil, err
+	var out []Watcher
+	err := dbaccess.Retry(ctx, func() error {
+		out = []Watcher{}
+		rows, err := s.db.QueryContext(ctx, s.q(q), args...)
+		if err != nil {
+			return err
 		}
-		w.Created = time.UnixMilli(created).UTC()
-		w.Ended.ID, w.Ended.State = w.Task, State(st)
-		if !w.Ended.State.Terminal() {
-			w.Ended = Ended{}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				w       Watcher
+				created int64
+				st      string
+			)
+			if err := rows.Scan(&w.Task, &w.Node, &w.NodeOwner, &w.NodeTask, &created, &st, &w.Ended.Reason); err != nil {
+				return err
+			}
+			w.Created = time.UnixMilli(created).UTC()
+			w.Ended.ID, w.Ended.State = w.Task, State(st)
+			if !w.Ended.State.Terminal() {
+				w.Ended = Ended{}
+			}
+			out = append(out, w)
 		}
-		out = append(out, w)
-	}
-	return out, rows.Err()
+		return rows.Err()
+	})
+	return out, err
 }
 
 // Notified records that w's node has been told its task ended.
 func (s *Store) Notified(ctx context.Context, w Watcher) error {
-	res, err := s.db.ExecContext(ctx, s.q(`UPDATE task_watchers SET delivered = 1 WHERE task = ? AND node = ? AND node_task = ?`), w.Task, w.Node, w.NodeTask)
+	var n int64
+	err := dbaccess.Retry(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, s.q(`UPDATE task_watchers SET delivered = 1 WHERE task = ? AND node = ? AND node_task = ?`), w.Task, w.Node, w.NodeTask)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	if n != 1 {
 		return fmt.Errorf("%w: no watcher %s of %s on %s", ErrNotFound, w.NodeTask, w.Task, w.Node)
 	}
 	return nil

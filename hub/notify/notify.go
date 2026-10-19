@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,11 +50,56 @@ type Message struct {
 	Reconnected bool `json:"-"`
 }
 
+type localHub struct {
+	mu   sync.Mutex
+	subs map[chan Message]struct{}
+}
+
+func (lh *localHub) add(ch chan Message) {
+	lh.mu.Lock()
+	defer lh.mu.Unlock()
+	lh.subs[ch] = struct{}{}
+}
+
+func (lh *localHub) remove(ch chan Message) {
+	lh.mu.Lock()
+	defer lh.mu.Unlock()
+	delete(lh.subs, ch)
+}
+
+func (lh *localHub) broadcast(m Message) {
+	lh.mu.Lock()
+	defer lh.mu.Unlock()
+	for ch := range lh.subs {
+		select {
+		case ch <- m:
+		default:
+		}
+	}
+}
+
+var (
+	localMu   sync.Mutex
+	localHubs = map[string]*localHub{}
+)
+
+func getLocalHub(path string) *localHub {
+	localMu.Lock()
+	defer localMu.Unlock()
+	lh := localHubs[path]
+	if lh == nil {
+		lh = &localHub{subs: map[chan Message]struct{}{}}
+		localHubs[path] = lh
+	}
+	return lh
+}
+
 // Bus sends and receives the hub's notices. Its handlers are called,
 // one at a time, on the goroutine running Run: they must not block.
 type Bus struct {
-	url string
-	db  *sql.DB
+	url   string
+	db    *sql.DB
+	local *localHub
 	// Logf, when set, receives the listening connection's failures.
 	Logf func(format string, args ...any)
 
@@ -86,11 +132,31 @@ const (
 	postWait   = 5 * time.Second
 )
 
-// Open returns a bus over the PostgreSQL database at url, or nil for
-// any other database: SQLite keeps its signals in memory.
+// Open returns a bus over the PostgreSQL database at url, an in-process
+// bus for a file-backed SQLite database shared by replicas in the same
+// process, or nil for an in-memory SQLite database.
 func Open(url string) (*Bus, error) {
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
-		return nil, nil
+		if strings.Contains(url, "mode=memory") {
+			return nil, nil
+		}
+		path := strings.TrimPrefix(url, "sqlite://")
+		path = strings.TrimPrefix(path, "sqlite:")
+		path = strings.TrimPrefix(path, "file:")
+		if i := strings.IndexByte(path, '?'); i >= 0 {
+			path = path[:i]
+		}
+		if path == "" || path == ":memory:" {
+			return nil, nil
+		}
+		return &Bus{
+			url:     url,
+			local:   getLocalHub(filepath.Clean(path)),
+			pending: map[string]Message{},
+			posted:  make(chan struct{}, 1),
+			stop:    make(chan struct{}),
+			sent:    make(chan struct{}),
+		}, nil
 	}
 	db, err := sql.Open("pgx", url)
 	if err != nil {
@@ -115,6 +181,9 @@ func (b *Bus) Close() error {
 		b.startOne.Do(func() { close(b.sent) })
 		<-b.sent
 	})
+	if b.db == nil {
+		return nil
+	}
 	return b.db.Close()
 }
 
@@ -137,6 +206,10 @@ func (b *Bus) Listening() bool { return b.listening.Load() }
 
 // Notify sends m to every pod.
 func (b *Bus) Notify(ctx context.Context, m Message) error {
+	if b.local != nil {
+		b.local.broadcast(m)
+		return nil
+	}
 	p, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -221,6 +294,12 @@ func (b *Bus) flush() {
 	order, pending := b.order, b.pending
 	b.order, b.pending = nil, make(map[string]Message, len(pending))
 	b.pmu.Unlock()
+	if b.local != nil {
+		for _, k := range order {
+			b.local.broadcast(pending[k])
+		}
+		return
+	}
 	for len(order) > 0 {
 		n := min(len(order), postBatch)
 		ps := make([]string, 0, n)
@@ -276,6 +355,21 @@ func (b *Bus) Run(ctx context.Context) error {
 
 // listen runs one listening connection until it fails or ctx ends.
 func (b *Bus) listen(ctx context.Context) error {
+	if b.local != nil {
+		ch := make(chan Message, 512)
+		b.local.add(ch)
+		defer b.local.remove(ch)
+		b.listening.Store(true)
+		b.deliver(Message{Reconnected: true})
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case m := <-ch:
+				b.deliver(m)
+			}
+		}
+	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	conn, err := pgx.Connect(cctx, b.url)
 	cancel()

@@ -508,7 +508,7 @@ func (a *API) answer(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 	if !ok {
 		return &httpError{http.StatusNotFound, "no such approval request"}
 	}
-	if t.State != Running {
+	if t.State != Running && t.State != Offered {
 		return &httpError{http.StatusConflict, "stale approval request: task " + t.ID + " is " + string(t.State)}
 	}
 	if ar.Deadline != nil && time.Now().After(*ar.Deadline) {
