@@ -25,6 +25,7 @@ test('proxied single-tenant Grain UI renders via Deployment Switcher and /deploy
 
   // Create deployment ws-ui-${world.n} as world.admin (owner), configure admin/member/proposer/viewer roles, claim uiRepo, and make it private (anyone_may_propose: false).
   await hub.must(world.admin, 'POST', '/v1/deployments', { id, name: `Workspace UI ${world.n}` });
+  await hub.pushGitHub(uiRepo, 'main', { '.grain/hub-claim': `${id}\n` });
   await hub.must(world.admin, 'PUT', `/v1/deployments/${id}/repos/${uiRepo}`);
   await hub.must(world.admin, 'PUT', `/v1/deployments/${id}/members/user:${adminRoleUser}`, { role: 'admin' });
   await hub.must(world.admin, 'PUT', `/v1/deployments/${id}/members/user:${memberUser}`, { role: 'member' });

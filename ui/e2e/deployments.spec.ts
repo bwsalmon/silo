@@ -74,8 +74,12 @@ test('deployment member roles (admin, member, proposer, viewer), repo claims, su
   await ownerPage.getByRole('option', { name: 'viewer', exact: true }).click();
   await expect(ownerPage.getByLabel(`Role of user:${viewerUser}`).first()).toContainText('viewer');
 
-  // Claim a repository for the deployment.
+  // Claim a repository for the deployment (requires .grain/hub-claim proof on default branch for non-sys-admin).
   await ownerPage.getByLabel('Repository').fill(claimedRepo);
+  await ownerPage.getByRole('button', { name: 'Assign' }).click();
+  await expect(ownerPage.getByRole('alert')).toContainText(/\.grain\/hub-claim/i);
+
+  await hub.pushGitHub(claimedRepo, 'main', { '.grain/hub-claim': `${deployId}\n` });
   await ownerPage.getByRole('button', { name: 'Assign' }).click();
   await expect(ownerPage.getByRole('cell', { name: claimedRepo })).toBeVisible();
 
@@ -131,6 +135,7 @@ test('deployment member roles (admin, member, proposer, viewer), repo claims, su
 
 test('host replacement / blank install cutover (replace_host: true) disconnects old host and reconnects fresh host (CUJ-2)', async ({
   world,
+  hub,
   pageAs,
   grain,
   fileTask,
@@ -144,6 +149,7 @@ test('host replacement / blank install cutover (replace_host: true) disconnects 
   await page.getByRole('button', { name: 'Create deployment' }).click();
   await expect(page).toHaveURL(new RegExp(`/deployments/${deployId}$`));
 
+  await hub.pushGitHub(repo, 'main', { '.grain/hub-claim': `${deployId}\n` });
   await page.getByLabel('Repository').fill(repo);
   await page.getByRole('button', { name: 'Assign' }).click();
   await expect(page.getByRole('cell', { name: repo })).toBeVisible();
