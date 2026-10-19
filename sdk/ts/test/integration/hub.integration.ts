@@ -303,6 +303,7 @@ describe('the SDK against silo hub serve', () => {
       ].join('\n'),
       'tasks/draft-idea.task.grain.md': [
         '---',
+        'grainfile: v1',
         'title: Draft Idea',
         `recipient: ${recipientAlpha}`,
         'requestor: https://github.com/sdk/grain-beta',
@@ -314,6 +315,7 @@ describe('the SDK against silo hub serve', () => {
       ].join('\n'),
       'tasks/verify.process.grain.md': [
         '---',
+        'grainfile: v1',
         'title: Verify Migration',
         'gate: true',
         'references:',
@@ -332,6 +334,7 @@ describe('the SDK against silo hub serve', () => {
     await commitAndPushWebhook(repoDocs, 'main', {
       'processes/lint.process.grain.md': [
         '---',
+        'grainfile: v1',
         'title: Lint Docs',
         'gate: false',
         'when:',
@@ -344,6 +347,7 @@ describe('the SDK against silo hub serve', () => {
       ].join('\n'),
       'tasks/beta-followup.task.grain.md': [
         '---',
+        'grainfile: v1',
         'title: Beta Followup',
         `recipient: ${recipientBeta}`,
         'requestor: https://github.com/sdk/grain-alpha',

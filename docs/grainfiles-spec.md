@@ -37,7 +37,10 @@ Where this specification makes a normative design choice, the choice is marked *
 
 1.3. "Front matter" is the YAML mapping at the head of a grainfile (§5). A field is written `name`, a nested field `parent.child`.
 
-1.4. Times are RFC 3339 timestamps in UTC with a `Z` suffix (`2026-10-16T13:58:30Z`, with optional fractional seconds). A "UTC date" is a calendar date `YYYY-MM-DD` (`2026-10-25`), representing `00:00:00Z` at the start of that day in UTC. Both timestamps and dates MUST be valid calendar dates and clock times (GF020).
+1.4. **Timestamps, dates, and timezones:**
+- **Full timestamps** (such as `not_before` when given as a date-time, or any timestamp metadata) MUST be RFC 3339 timestamps with an explicit timezone designator: either `Z` (UTC, e.g. `2026-10-16T13:58:30Z`) or an explicit numeric UTC offset `+HH:MM` or `-HH:MM` (`00 <= HH <= 23`, `00 <= MM <= 59`, e.g. `2026-10-25T09:00:00+02:00` or `2026-10-25T09:00:00-07:00`), with optional fractional seconds. Naive timestamps without an offset (`2026-10-25T09:00:00`) and RFC 3339's unknown-local-offset `-00:00` (`2026-10-25T09:00:00-00:00`) are forbidden (GF020). All parsed timestamps MUST be normalized to UTC (`Z`) for comparison and storage.
+- **Bare calendar dates** (`YYYY-MM-DD`, such as `2026-10-25` in `not_before`) always represent `00:00:00Z` at the start of that calendar day in UTC.
+- Both timestamps and dates MUST be valid calendar dates and clock times (GF020).
 
 1.5. Lint codes (`GF001`…) are defined in §10. "Is an error (GF030)" means a linter MUST report that code, and every other conformance class MUST treat the condition as §10.2 specifies.
 
@@ -101,7 +104,7 @@ The reference linter is `tools/grainfiles/grainlint.py`; where it differs from t
 
 ## 3. Versioning and extension
 
-3.1. **Kind by suffix and version by `grainfile`.** A grainfile's kind is determined solely by its filename suffix: `.task.grain.md` (`task`) or `.process.grain.md` (`process`) (§4.1). Front matter MAY declare `grainfile: v1` (string); when omitted, `grainfile` defaults to `"v1"`. A non-string `grainfile` value or an unrecognised version string is an error (GF020).
+3.1. **Kind by suffix and mandatory version by `grainfile`.** A grainfile's kind is determined solely by its filename suffix: `.task.grain.md` (`task`) or `.process.grain.md` (`process`) (§4.1). Front matter on every `.task.grain.md` and `.process.grain.md` file (and on the rendered output of every `.task.grain.md.jinja2` and `.process.grain.md.jinja2` template) MUST declare `grainfile: v1` (string). Omitting `grainfile`, providing a non-string `grainfile` value, or specifying an unrecognised version string is a validation error (GF020).
 
 3.1.1. **Programmatic version mapping.** Version `"v1"` maps programmatically to:
 - `spec_summary_path`: `"docs/grainfile-v1.md"` (concise agent quick-reference summary)
@@ -137,7 +140,7 @@ kind                    = %s"task" / %s"process"            ; registered in §12
 
 4.1.2. The **name** of a grainfile (or grainfile template) is its stem: `2026-10-16-widget-schema-v2` is the name of `2026-10-16-widget-schema-v2.task.grain.md`, and `rollout-region` is the name of `rollout-region.task.grain.md.jinja2`.
 
-4.1.3. A stem MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (GF001): upper-case and lower-case ASCII letters, digits, `.`, `-`, and `_`, starting with an ASCII letter or digit (including ISO/compact UTC timestamps such as `2026-10-18T143000Z-fix-API.task.grain.md`).
+4.1.3. A stem MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (GF001): upper-case and lower-case ASCII letters, digits, `.`, `-`, and `_`, starting with an ASCII letter or digit. Compact ISO timestamps in filename stems MUST use `Z` (UTC), such as `2026-10-18T143000Z-fix-API.task.grain.md`.
 
 4.1.4. Each path segment MUST be at most 255 bytes, a repository-relative path at most 1024 bytes, and two paths in the same repository MUST NOT differ only in ASCII case (GF006).
 
@@ -191,10 +194,10 @@ Every `.task.grain.md` and `.process.grain.md` shares the following base fields 
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `grainfile` | `"v1"` | Opt. | `"v1"` | Grainfile specification version (§3.1, GF020). |
-| `title` | single-line string | Req. | | Non-empty one-line summary of the task or process (GF020). |
+| `grainfile` | `"v1"` | **Req.** | `"v1"` | Mandatory Grainfile specification version (§3.1, GF020). |
+| `title` | single-line string | **Req.** | | Non-empty one-line summary of the task or process (GF020). |
 | `draft` | boolean | Opt. | `false` | When `true`, marks the grainfile as a work-in-progress draft that deployments MUST ignore until `draft` is `false` or omitted (§6.3, §9). |
-| `not_before` | *time* or `YYYY-MM-DD` (§1.4) | Opt. | | Earliest UTC timestamp (`2026-10-25T09:00:00Z`) or UTC date (`2026-10-25`, meaning `00:00:00Z` of that day) at which the task may execute or the process may fire (§6.4, §9). |
+| `not_before` | *time* or `YYYY-MM-DD` (§1.4) | Opt. | | Earliest activation timestamp (`2026-10-25T09:00:00Z` or `2026-10-25T09:00:00+02:00`, normalized to UTC) or UTC date (`2026-10-25`, meaning `00:00:00Z` of that day) at which the task may execute or the process may fire (§6.4, §9). |
 | `references` | list of *ref* (§8) | Opt. | `[]` | References to relevant documents, code paths, design docs, or grainfiles provided as context to the run. |
 | `from_template` | *ref* to `.grain.md.jinja2` (§6.5) | Opt. | | Optional provenance link to the `.task.grain.md.jinja2` or `.process.grain.md.jinja2` template from which this grainfile was rendered or materialized (GF035). |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
@@ -240,10 +243,10 @@ A **deployment identity** is a reference (§8.1) naming the canonical Hub deploy
 
 ### 6.4 Deferred execution (`not_before`)
 
-- **`not_before`** (OPTIONAL on both `.task.grain.md` and `.process.grain.md`, string) specifies the earliest UTC instant at which the grainfile takes effect:
-  - Either an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`, with optional fractional seconds, such as `2026-10-25T09:00:00Z`), or
-  - A UTC calendar date (`YYYY-MM-DD`, such as `2026-10-25`), which means `00:00:00Z` at the start of that calendar day in UTC.
-- A value that does not match either format or that specifies an invalid calendar date or clock time (such as `2026-02-30`) is an error (GF020).
+- **`not_before`** (OPTIONAL on both `.task.grain.md` and `.process.grain.md`, string) specifies the earliest instant at which the grainfile takes effect (§1.4):
+  - Either an RFC 3339 timestamp with `Z` or an explicit `±HH:MM` offset (`00 <= HH <= 23`, `00 <= MM <= 59`, with optional fractional seconds, such as `2026-10-25T09:00:00Z`, `2026-10-25T09:00:00+02:00`, or `2026-10-25T09:00:00-07:00`), which is converted to and stored in UTC (`Z`), or
+  - A calendar date (`YYYY-MM-DD`, such as `2026-10-25`), which means `00:00:00Z` at the start of that calendar day in UTC.
+- Naive timestamps without an offset (`2026-10-25T09:00:00`), RFC 3339's unknown-local-offset `-00:00` (`2026-10-25T09:00:00-00:00`), out-of-range offsets, or invalid calendar dates/clock times (such as `2026-02-30`) are validation errors (GF020).
 - On a `.task.grain.md`, the recipient deployment holds the task as deferred and MUST NOT execute it before `not_before` (in addition to waiting for any `depends_on`; §9.2).
 - On a `.process.grain.md`, when present, the process MUST NOT fire before `not_before` (§9.2).
 
@@ -264,12 +267,12 @@ A `task` grainfile describes a discrete unit of work to be executed once by its 
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `grainfile` | `"v1"` | Opt. | `"v1"` | Specification version (§3.1). |
-| `title` | string | Req. | | One-line summary. |
+| `grainfile` | `"v1"` | **Req.** | `"v1"` | Mandatory specification version (§3.1, GF020). |
+| `title` | string | **Req.** | | One-line summary. |
 | `requestor` | *user identity* or *deployment identity* | Opt. | | Optional attribution: who requested the task (§6.2). |
 | `recipient` | *deployment identity* | Opt. | `"/"` | Deployment that executes the task (§6.2.2); defaults to `"/"` (enclosing repo). |
 | `draft` | boolean | Opt. | `false` | When `true`, recipient deployments ignore the task until `draft` is `false` or omitted (§6.3, §9). |
-| `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest UTC timestamp or UTC date (`00:00:00Z`) at which the task may execute (§6.4, §9). |
+| `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest RFC 3339 timestamp (`Z` or `±HH:MM`, normalized to UTC) or UTC date (`00:00:00Z`) at which the task may execute (§6.4, §9). |
 | `depends_on` | list of *ref* to `task` | Opt. | `[]` | `.task.grain.md` files that must finish before this task runs (§8.3). |
 | `references` | list of *ref* | Opt. | `[]` | Relevant files, folders, repositories, design docs, or grainfiles made available to the run. |
 | `from_template` | *ref* to `.task.grain.md.jinja2` | Opt. | | Optional provenance link to the source `.task.grain.md.jinja2` template (§6.5, GF035). |
@@ -300,25 +303,27 @@ A `process` grainfile describes a standing, repeatable 1-to-many process that an
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `grainfile` | `"v1"` | Opt. | `"v1"` | Specification version (§3.1). |
-| `title` | string | Req. | | One-line summary. |
+| `grainfile` | `"v1"` | **Req.** | `"v1"` | Mandatory specification version (§3.1, GF020). |
+| `title` | string | **Req.** | | One-line summary. |
 | `draft` | boolean | Opt. | `false` | When `true`, subscribed deployments ignore the process until `draft` is `false` or omitted (§6.3, §9). |
-| `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest UTC timestamp or UTC date (`00:00:00Z`) at which the process may fire (§6.4, §9). |
+| `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest RFC 3339 timestamp (`Z` or `±HH:MM`, normalized to UTC) or UTC date (`00:00:00Z`) at which the process may fire (§6.4, §9). |
 | `references` | list of *ref* | Opt. | `[]` | Relevant files, folders, repositories, design docs, or grainfiles made available to each run. |
 | `from_template` | *ref* to `.process.grain.md.jinja2` | Opt. | | Optional provenance link to the source `.process.grain.md.jinja2` template (§6.5, GF035). |
-| `when` | mapping of source → options | Req. | | Structured triggers specifying when the process fires (§7.2.1). |
+| `when` | mapping of source → options | **Req.** | | Structured triggers specifying when the process fires (§7.2.1). |
 | `gate` | boolean | Opt. | `false` | When `true`, gates the triggering commit or pull request on this process passing (§7.2.2). |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
 
-A `.process.grain.md` MUST specify `when` (GF020) and MUST NOT specify `recipient`, `requestor`, `depends_on`, or `trigger_with` (GF020).
+A `.process.grain.md` MUST specify `grainfile: v1` and `when` (GF020) and MUST NOT specify `recipient`, `requestor`, `depends_on`, or `trigger_with` (GF020).
 
 #### 7.2.1 Trigger sources (`when`)
 
 `when` is a non-empty mapping from one or more registered trigger sources (§12.2) to their options. An unknown trigger source key is an error (GF020, §3.4).
 
-- **`schedule: {cron, timezone}`**
+- **`schedule: {cron, timezone} | [{cron, timezone}, ...]`**
+  - Either a single schedule object `{cron, timezone?}` or a non-empty list of schedule objects (allowing multi-timezone or multi-cadence schedules on one process).
   - `cron` (REQUIRED, string): A five-field POSIX `crontab(5)` expression (`minute hour day-of-month month day-of-week`). A `cron` string that does not consist of five whitespace-separated fields is an error (GF020).
-  - `timezone` (OPTIONAL, string, default `"UTC"`): An IANA timezone name (such as `"UTC"` or `"Europe/Berlin"`).
+  - `timezone` (OPTIONAL, string, default `"UTC"`): MUST be `"UTC"` or a valid IANA Time Zone Database identifier (such as `"America/Los_Angeles"`, `"Europe/Berlin"`, or `"Asia/Tokyo"`). Numeric offsets (`"+02:00"`), unknown zone names, and non-IANA abbreviations (`"PST"`, `"EST"`, `"CET"`) are rejected (GF020).
+  - **DST evaluation semantics:** For non-UTC IANA zones, cron fields are evaluated against local wall-clock time in that zone; during spring-forward transitions a skipped local wall-clock minute does not fire (or fires once at the transition boundary per scheduler policy), and during fall-back transitions an ambiguous repeated local wall-clock minute fires only on its first occurrence.
 - **`push`, `merge`, `pull_request: <filter> | [<filter>, ...]`**
   - Each of `when.push`, `when.pull_request`, and `when.merge` MAY be either a single filter object or a non-empty list of filter objects (so a single process or merge gate can specify different branches/paths per repository).
   - Each filter object supports:
@@ -329,6 +334,14 @@ A `.process.grain.md` MUST specify `when` (GF020) and MUST NOT specify `recipien
       - A full forge file or folder URL (e.g. `https://github.com/acme/payments/tree/main/src/auth` or `https://github.com/acme/payments/blob/main/schemas/v2.sql`), which matches edits to that file or folder in that repository (and branch, if `/blob/<branch>/` or `/tree/<branch>/` is given).
     - `ignore` (OPTIONAL, list of strings): File paths, folder paths (`docs/`), or globs excluded from matching.
     - At least one of `repo`, `repos`, `branches`, or `paths` MUST be specified on each filter object (GF020).
+- **`workflow: <workflow-filter> | [<workflow-filter>, ...]`**
+  - Fires when a CI workflow run or check suite is triggered, succeeds, or fails (e.g., to investigate CI failures, gate releases on a qualification suite passing, or run post-build analysis).
+  - Accepts either a single workflow filter object or a non-empty list of workflow filter objects (GF020). Each filter object supports:
+    - `workflow` (OPTIONAL, non-empty string) and/or `workflows` (OPTIONAL, non-empty list of non-empty strings): CI workflow name(s), glob pattern(s), or workflow file path(s) (e.g. `"grain CI"`, `"e2e-*"`, `".github/workflows/release.yml"`). At least one of `workflow` or `workflows` MUST be specified on each filter object (GF020).
+    - `events` (OPTIONAL, non-empty list of `"triggered"` | `"succeeded"` | `"failed"`): Lifecycle transitions that fire the process. Defaults to `["succeeded", "failed"]` when omitted. Aliases `"started"` -> `"triggered"`, `"success"` -> `"succeeded"`, and `"failure"` -> `"failed"` are accepted and normalized to the canonical names; any other value is an error (GF020).
+    - `repo` (OPTIONAL, string) and/or `repos` (OPTIONAL, non-empty list of strings): Target repository URL(s) or `owner/repo` slug(s) (same-repo by default; cross-repo allowed within the same team in `hub/directory`).
+    - `branches` (OPTIONAL, non-empty list of strings): Branch names or globs matched against the workflow run's head branch (e.g. `["main", "release/*"]`).
+  - **Webhook ingestion and event metadata:** In `POST /v1/webhooks/github` (and `/v1/grainfiles/webhook/github`), `X-GitHub-Event: workflow_run` (as well as `check_suite` and `check_run`) maps `action: "requested" | "in_progress"` to `"triggered"`, `action: "completed"` with `conclusion: "success"` to `"succeeded"`, and `action: "completed"` with `conclusion: "failure" | "timed_out" | "startup_failure"` to `"failed"`, emitting `process_triggered` events with `trigger_source: "workflow"` and workflow metadata (`workflow_name`, `workflow_path`, `workflow_event`, `workflow_url`, `repo`, `branch`, `commit_sha`).
 - **`manual: {}`**
   - Empty mapping `{}`. Allows the process to be triggered on demand by a human or operator.
 - **`scenario: <string> | {description: <string>}`**
@@ -451,7 +464,7 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 | GF004 | error | Front matter outside the YAML subset: not a mapping, non-string key, duplicate key, or uses YAML anchors, aliases, merge keys, or tags (§5.3). |
 | GF005 | warning | A Markdown file has an unregistered `.<kind>.grain.md` (or `.<kind>.grain.md.jinja2`) suffix (§4.2.3). |
 | GF006 | error | A path or file size limit of §4.1.4 or §4.3 is exceeded (including rendered `.jinja2` output), or two paths in a repository differ only in case. |
-| GF020 | error | Schema or field validation failure: unsupported or non-string `grainfile` version, missing required field (`title`, or `when` on `process`), prohibited field (`trigger_with`, `recipient`/`requestor`/`depends_on` on a `process`, or `when`/`gate` on a `task`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `not_before` date/time, unknown `when` trigger source, or invalid `schedule.cron` / event filter (§3.1, §6, §7). |
+| GF020 | error | Schema or field validation failure: missing, unsupported, or non-string `grainfile` version (`"v1"` required), missing required field (`grainfile`, `title`, or `when` on `process`), prohibited field (`trigger_with`, `recipient`/`requestor`/`depends_on` on a `process`, or `when`/`gate` on a `task`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `not_before` date/time or `-00:00`/naive offset, unknown `when` trigger source, or invalid `schedule.cron` / `schedule.timezone` (non-IANA timezone) / event or workflow filter (§3.1, §6, §7). |
 | GF022 | warning | Unknown front-matter field not beginning with `x_` (§3.3). |
 | GF030 | error | A reference does not resolve: missing file, missing directory, or missing Markdown heading `#<anchor>` (§8.2). |
 | GF032 | error | A reference resolves to the wrong kind: `task` `depends_on` targets a `process` or an unrendered `.jinja2` template instead of a concrete `.task.grain.md`, `depends_on` target is not a grainfile, or a deployment identity resolves to a file instead of a repository or folder (§6.2.2, §8.3). |
@@ -482,7 +495,7 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 
 12.1. **Kinds:** `task`, `process`.
 
-12.2. **Trigger sources:** `schedule`, `push`, `merge`, `pull_request`, `manual`, `scenario`.
+12.2. **Trigger sources:** `schedule`, `push`, `merge`, `pull_request`, `workflow`, `manual`, `scenario`.
 
 12.3. **Versions:** `v1` (`docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, `schemas/grainfiles/`).
 
@@ -500,7 +513,7 @@ Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/te
 ## Appendix B. Decisions made by this specification
 
 1. **Two directly executed kinds (`<name>.task.grain.md` and `<name>.process.grain.md`) and self-contained `.grain.md.jinja2` templates.** Discrete one-off tasks are `<name>.task.grain.md` and standing/repeatable processes are `<name>.process.grain.md` (`**/*.grain.md`, 100% literal), while `<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2` apply sandboxed Jinja2 to the whole file to produce a standard `.task.grain.md` or `.process.grain.md` (§2.1, §4.1, §5.7, §7, §9).
-2. **Version field (`grainfile: v1`) and agent quick-reference.** Front matter optionally declares `grainfile: v1` (defaulting to `"v1"`), programmatically mapped to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3.1).
+2. **Mandatory version field (`grainfile: v1`) and agent quick-reference.** Front matter on every `.task.grain.md` and `.process.grain.md` (and rendered `.grain.md.jinja2` output) MUST declare `grainfile: v1` (omission or unsupported version fails with `GF020`), programmatically mapped to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3.1).
 3. **Lower-case ASCII stems (`^[a-z0-9][a-z0-9._-]*$`).** Grainfile stems use only lower-case ASCII letters, digits, `.`, `-`, and `_` (without uppercase compact-UTC `T`/`Z` exceptions) so filenames are portable across case-insensitive file systems (§4.1.3).
 4. **Nine orthogonal front-matter fields: `when` trigger key, no `created_at` or `trigger_with`, and `recipient`, `requestor`, and `depends_on` on `.task.grain.md` only.** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` and `trigger_with` are omitted (§6.1, §7.2); and `recipient` (defaulting to `"/"`), `requestor`, and `depends_on` are restricted to `.task.grain.md` because tasks are 1-to-1 with a single completion state while processes are standing 1-to-many triggers (§6.1, §6.2.3, §7, §8.3).
 5. **Unknown fields warn; `x_*` extends; unknown trigger sources fail closed.** Unrecognised fields emit a warning (`GF022`) while `x_*` extension fields are silent; unknown `when` trigger sources are an error (`GF020`) (§3.3, §3.4).

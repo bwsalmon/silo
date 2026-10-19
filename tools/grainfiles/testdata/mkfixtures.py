@@ -44,13 +44,16 @@ case("gf003-no-front-matter", ["GF003"], {"r/tasks/a.task.grain.md": "Just text.
 case("gf003-unclosed-front-matter", ["GF003"], {"r/tasks/a.task.grain.md": "---\ntitle: T\n"})
 case("gf004-duplicate-key", ["GF004"], {"r/tasks/a.task.grain.md": task("title: Again\n")})
 case("gf004-yaml-anchor", ["GF004"], {
-    "r/tasks/a.task.grain.md": '---\ntitle: &t T\nrequestor: "%s"\nrecipient: "%s"\n---\nBody.\n' % (USR, DEP),
+    "r/tasks/a.task.grain.md": '---\ngrainfile: v1\ntitle: &t T\nrequestor: "%s"\nrecipient: "%s"\n---\nBody.\n' % (USR, DEP),
 })
-case("gf005-unknown-suffix", ["GF005"], {"r/notes/x.widget.grain.md": "---\ntitle: x\n---\n"})
+case("gf005-unknown-suffix", ["GF005"], {"r/notes/x.widget.grain.md": "---\ngrainfile: v1\ntitle: x\n---\n"})
 case("gf006-case-collision", ["GF006"], {
     "r/docs/note.md": "# Note\n",
     "r/docs/Note.md": "# Note\n",
     "r/tasks/a.task.grain.md": A,
+})
+case("gf020-missing-grainfile-version", ["GF020"], {
+    "r/tasks/a.task.grain.md": "---\ntitle: T\n---\nDo it.\n",
 })
 case("gf020-bad-grainfile-version", ["GF020"], {
     "r/tasks/a.task.grain.md": "---\ngrainfile: v2\ntitle: T\n---\nDo it.\n",
@@ -90,7 +93,13 @@ case("gf020-bad-not-before", ["GF020"], {
     "r/tasks/a.task.grain.md": task('not_before: "2026-02-30"\n'),
 })
 case("gf020-bad-not-before-format", ["GF020"], {
-    "r/processes/p.process.grain.md": process(extra='when:\n  manual: {}\nnot_before: "2026-10-25T09:00:00+02:00"\n'),
+    "r/processes/p.process.grain.md": process(extra='when:\n  manual: {}\nnot_before: "2026-10-25T09:00:00-00:00"\n'),
+})
+case("gf020-bad-schedule-timezone", ["GF020"], {
+    "r/processes/p.process.grain.md": process(extra='when:\n  schedule:\n    cron: "0 2 * * *"\n    timezone: "PST"\n'),
+})
+case("gf020-bad-workflow-trigger", ["GF020"], {
+    "r/processes/p.process.grain.md": process(extra='when:\n  workflow:\n    branches: ["main"]\n'),
 })
 case("gf022-unknown-field", ["GF022"], {
     "r/tasks/a.task.grain.md": task("colour: blue\nx_note: allowed\n", requestor=None),

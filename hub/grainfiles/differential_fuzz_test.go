@@ -186,6 +186,7 @@ func TestDifferentialPythonGoCorpus(t *testing.T) {
 			Name: "all-filters-chained",
 			Path: "deploy.task.grain.md.jinja2",
 			Raw: `---
+grainfile: v1
 title: "{{ raw_title | default('  Deploy_Widget_Service  ', true) | trim | lower | replace('_', '-') | upper }}"
 recipient: "https://github.com/acme/{{ target_env | d('staging') | lower }}"
 ---
@@ -202,6 +203,7 @@ Deploy service to {{ region | default(fallback_region | lower, boolean = true) }
 			Name: "if-elif-else-and-parenthesized-conditions",
 			Path: "cond.task.grain.md.jinja2",
 			Raw: `---
+grainfile: v1
 title: "Conditional rollout"
 recipient: https://github.com/acme/grain-eu
 {% if (env == 'prod' or env == 'staging') and not (dry_run == 'true') %}
@@ -229,6 +231,7 @@ Disabled
 			Name: "nested-loops-and-loop-vars",
 			Path: "matrix.process.grain.md.jinja2",
 			Raw: `---
+grainfile: v1
 title: "Matrix verification {{ suite | default('core') }}"
 on:
   push:
@@ -263,6 +266,7 @@ Undefined var renders empty: [{{ missing_var }}]
 			Name: "template-vars-extraction-order",
 			Path: "vars.task.grain.md.jinja2",
 			Raw: `---
+grainfile: v1
 title: "{{ zeta }} and {{ alpha | default(beta) }}"
 recipient: https://github.com/acme/grain-eu
 ---
@@ -277,22 +281,22 @@ recipient: https://github.com/acme/grain-eu
 		{
 			Name: "forbidden-include-gf034",
 			Path: "bad-include.task.grain.md.jinja2",
-			Raw:  "---\ntitle: Bad\nrecipient: https://github.com/acme/grain-eu\n---\n{% include 'other.md' %}\n",
+			Raw:  "---\ngrainfile: v1\ntitle: Bad\nrecipient: https://github.com/acme/grain-eu\n---\n{% include 'other.md' %}\n",
 		},
 		{
 			Name: "forbidden-extends-gf034",
 			Path: "bad-extends.task.grain.md.jinja2",
-			Raw:  "{% extends 'base.md' %}\n---\ntitle: Bad\n---\nBody\n",
+			Raw:  "{% extends 'base.md' %}\n---\ngrainfile: v1\ntitle: Bad\n---\nBody\n",
 		},
 		{
 			Name: "forbidden-import-gf034",
 			Path: "bad-import.task.grain.md.jinja2",
-			Raw:  "{% import 'macros.md' as m %}\n---\ntitle: Bad\n---\nBody\n",
+			Raw:  "{% import 'macros.md' as m %}\n---\ngrainfile: v1\ntitle: Bad\n---\nBody\n",
 		},
 		{
 			Name: "forbidden-from-import-gf034",
 			Path: "bad-from.task.grain.md.jinja2",
-			Raw:  "{% from 'macros.md' import helper %}\n---\ntitle: Bad\n---\nBody\n",
+			Raw:  "{% from 'macros.md' import helper %}\n---\ngrainfile: v1\ntitle: Bad\n---\nBody\n",
 		},
 		{
 			Name: "syntax-unclosed-expr-gf033",
@@ -302,17 +306,17 @@ recipient: https://github.com/acme/grain-eu
 		{
 			Name: "syntax-unclosed-if-gf033",
 			Path: "unclosed-if.task.grain.md.jinja2",
-			Raw:  "---\ntitle: T\n---\n{% if x %}Body\n",
+			Raw:  "---\ngrainfile: v1\ntitle: T\n---\n{% if x %}Body\n",
 		},
 		{
 			Name: "syntax-unclosed-for-gf033",
 			Path: "unclosed-for.task.grain.md.jinja2",
-			Raw:  "---\ntitle: T\n---\n{% for x in ['a'] %}Body\n",
+			Raw:  "---\ngrainfile: v1\ntitle: T\n---\n{% for x in ['a'] %}Body\n",
 		},
 		{
 			Name: "syntax-elif-after-else-gf033",
 			Path: "elif-after-else.task.grain.md.jinja2",
-			Raw:  "---\ntitle: T\n---\n{% if x %}A{% else %}B{% elif y %}C{% endif %}\n",
+			Raw:  "---\ngrainfile: v1\ntitle: T\n---\n{% if x %}A{% else %}B{% elif y %}C{% endif %}\n",
 		},
 		{
 			Name: "syntax-string-concat-operator-gf033",
@@ -327,7 +331,7 @@ recipient: https://github.com/acme/grain-eu
 		{
 			Name: "expansion-cap-exceeds-1mib-gf006",
 			Path: "bomb.task.grain.md.jinja2",
-			Raw: "---\ntitle: Bomb\nrecipient: https://github.com/acme/grain-eu\n---\n" +
+			Raw: "---\ngrainfile: v1\ntitle: Bomb\nrecipient: https://github.com/acme/grain-eu\n---\n" +
 				"{% for a in ['0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'] %}" +
 				"{% for b in ['0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'] %}" +
 				strings.Repeat("X", 4200) +
@@ -336,7 +340,7 @@ recipient: https://github.com/acme/grain-eu
 		{
 			Name:        "raw-input-exceeds-1mib-gf006",
 			Path:        "huge-input.task.grain.md.jinja2",
-			Raw:         "---\ntitle: Huge\nrecipient: https://github.com/acme/grain-eu\n---\n" + strings.Repeat("A", MaxFileBytes+64),
+			Raw:         "---\ngrainfile: v1\ntitle: Huge\nrecipient: https://github.com/acme/grain-eu\n---\n" + strings.Repeat("A", MaxFileBytes+64),
 			SkipBodyCmp: true,
 		},
 	}
@@ -398,8 +402,9 @@ references:
 ---
 Prepare the schema migration.
 `,
-				".grain/tasks/2026-10-17-follow.task.grain.md": "---\r\ntitle: 'no'\r\nrecipient: https://github.com/acme/grain-eu\r\ndepends_on:\r\n  - ./2026-10-16-prep.task.grain.md\r\n---\r\nFollow up after prep.\r\n",
+				".grain/tasks/2026-10-17-follow.task.grain.md": "---\r\ngrainfile: v1\r\ntitle: 'no'\r\nrecipient: https://github.com/acme/grain-eu\r\ndepends_on:\r\n  - ./2026-10-16-prep.task.grain.md\r\n---\r\nFollow up after prep.\r\n",
 				".grain/processes/review.process.grain.md.jinja2": `---
+grainfile: v1
 title: "Review on {{ env | upper }}"
 recipient: "https://github.com/acme/{{ team }}"
 gate: true
@@ -419,6 +424,7 @@ Run automated review for {{ env }}.
 			Name: "yaml11-bool-strings-rejected-for-draft-gf020",
 			Files: map[string]string{
 				"tasks/bad-bool.task.grain.md": `---
+grainfile: v1
 title: Unquoted yes is a string in YAML 1.2
 recipient: https://github.com/acme/grain-eu
 draft: yes
@@ -431,6 +437,7 @@ Body.
 			Name: "yaml-duplicate-key-gf004",
 			Files: map[string]string{
 				"tasks/dup.task.grain.md": `---
+grainfile: v1
 title: First
 recipient: https://github.com/acme/grain-eu
 title: Second
@@ -443,18 +450,21 @@ Body.
 			Name: "yaml-empty-and-non-string-keys",
 			Files: map[string]string{
 				"processes/empty-key.process.grain.md": `---
+grainfile: v1
 title: Empty key in flow map
 on: {: 1}
 ---
 Body.
 `,
 				"processes/null-key.process.grain.md": `---
+grainfile: v1
 title: Null key in flow map
 on: {null: 1}
 ---
 Body.
 `,
 				"processes/bool-key.process.grain.md": `---
+grainfile: v1
 title: Bool key in block map
 on:
   true: 1
@@ -462,6 +472,7 @@ on:
 Body.
 `,
 				"processes/int-key.process.grain.md": `---
+grainfile: v1
 title: Int key in block map
 on:
   123: 1
@@ -474,12 +485,14 @@ Body.
 			Name: "yaml-anchor-and-tag-gf004",
 			Files: map[string]string{
 				"tasks/anchor.task.grain.md": `---
+grainfile: v1
 title: &a Anchor
 recipient: *a
 ---
 Body.
 `,
 				"tasks/flow-tag.task.grain.md": `---
+grainfile: v1
 title: Tag in flow list
 recipient: https://github.com/acme/grain-eu
 references: [!!str /docs/a.md]
@@ -487,6 +500,7 @@ references: [!!str /docs/a.md]
 Body.
 `,
 				"tasks/doc-end-marker.task.grain.md": `---
+grainfile: v1
 title: Document end marker inside front matter
 recipient: https://github.com/acme/grain-eu
 ...
@@ -498,7 +512,7 @@ Body.
 		{
 			Name: "empty-body-warning-gf005",
 			Files: map[string]string{
-				"tasks/empty-body.task.grain.md": "---\ntitle: Empty body\nrecipient: https://github.com/acme/grain-eu\n---\n   \n",
+				"tasks/empty-body.task.grain.md": "---\ngrainfile: v1\ntitle: Empty body\nrecipient: https://github.com/acme/grain-eu\n---\n   \n",
 			},
 		},
 		{
@@ -506,6 +520,7 @@ Body.
 			Files: map[string]string{
 				"docs/readme.md": "# Readme\n",
 				"processes/p.process.grain.md": `---
+grainfile: v1
 title: Process P
 on:
   manual: {}
@@ -513,12 +528,14 @@ on:
 Process body.
 `,
 				"tasks/tmpl.task.grain.md.jinja2": `---
+grainfile: v1
 title: "{{ name }}"
 recipient: https://github.com/acme/grain-eu
 ---
 Template task body.
 `,
 				"tasks/bad-deps.task.grain.md": `---
+grainfile: v1
 title: Task with invalid depends_on targets
 recipient: https://github.com/acme/grain-eu
 depends_on:
@@ -534,15 +551,16 @@ Task body.
 		{
 			Name: "depends-on-3-node-cycle-gf034",
 			Files: map[string]string{
-				"tasks/a.task.grain.md": "---\ntitle: A\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./b.task.grain.md\n---\nBody A.\n",
-				"tasks/b.task.grain.md": "---\ntitle: B\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./c.task.grain.md\n---\nBody B.\n",
-				"tasks/c.task.grain.md": "---\ntitle: C\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./a.task.grain.md\n---\nBody C.\n",
+				"tasks/a.task.grain.md": "---\ngrainfile: v1\ntitle: A\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./b.task.grain.md\n---\nBody A.\n",
+				"tasks/b.task.grain.md": "---\ngrainfile: v1\ntitle: B\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./c.task.grain.md\n---\nBody B.\n",
+				"tasks/c.task.grain.md": "---\ngrainfile: v1\ntitle: C\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - ./a.task.grain.md\n---\nBody C.\n",
 			},
 		},
 		{
 			Name: "encoded-traversal-in-references-gf035-and-climbing-gf036",
 			Files: map[string]string{
 				"tasks/traversal.task.grain.md": `---
+grainfile: v1
 title: Traversal check
 recipient: https://github.com/acme/grain-eu
 references:
@@ -709,7 +727,7 @@ func FuzzDifferentialGrainfileAndJinja2(f *testing.F) {
 		},
 		{
 			isTemplate: false,
-			raw:        "---\ntitle: yes\nrecipient: https://github.com/acme/grain-eu\nreferences:\n  - /docs/spec.md\n---\nBody text.\n",
+			raw:        "---\ngrainfile: v1\ntitle: yes\nrecipient: https://github.com/acme/grain-eu\nreferences:\n  - /docs/spec.md\n---\nBody text.\n",
 			varVal:     "",
 			ref:        "/docs/%2e%2e/secret.md",
 		},

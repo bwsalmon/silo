@@ -51,7 +51,18 @@ const sampleOverview = {
       references: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
       when: {
         push: { repos: ['acme/infra', 'acme/app'], branches: ['main'], paths: ['src/auth/'] },
-        schedule: { cron: '0 * * * *' },
+        schedule: [
+          { cron: '0 * * * *' },
+          { cron: '0 9 * * 1-5', timezone: 'Europe/London' },
+        ],
+        workflow: [
+          {
+            workflow: 'CI',
+            workflows: ['Nightly *'],
+            events: ['failed', 'succeeded'],
+            branches: ['main'],
+          },
+        ],
       },
       gate: true,
       updated_at: '2026-10-18T10:06:00Z',
@@ -99,6 +110,21 @@ const sampleOverview = {
       reason: 'commit 2222222 on main',
       created_at: '2026-10-18T10:06:00Z',
     },
+    {
+      seq: 3,
+      type: 'process_triggered',
+      repo: 'https://github.com/acme/infra',
+      path: '.grain/processes/ci.process.grain.md.jinja2',
+      grainfile_url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md.jinja2',
+      kind: 'process',
+      title: 'Continuous verification gate',
+      trigger_source: 'workflow',
+      branch: 'main',
+      workflow_name: 'CI',
+      workflow_event: 'failed',
+      workflow_url: 'https://github.com/acme/infra/actions/runs/9001',
+      created_at: '2026-10-18T10:07:00Z',
+    },
   ],
 };
 
@@ -135,6 +161,8 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getByText('from_template: acme/app:.grain/templates/deploy.task.grain.md.jinja2')).toBeTruthy();
     expect(screen.getByText('push (repos: acme/infra, acme/app; branches: main; paths: src/auth/)')).toBeTruthy();
     expect(screen.getByText('schedule: 0 * * * *')).toBeTruthy();
+    expect(screen.getByText('schedule: 0 9 * * 1-5 (Europe/London)')).toBeTruthy();
+    expect(screen.getByText('workflow (CI, Nightly *; events: failed, succeeded; branches: main)')).toBeTruthy();
     expect(screen.getByText('acme/app:tasks/00-prep.task.grain.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md',
     );
@@ -152,7 +180,7 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
 
     // Click the second row to inspect the process Grainfile template and its trigger event
     fireEvent.click(screen.getByText('Continuous verification gate'));
-    expect(await screen.findByText('process_triggered')).toBeTruthy();
+    expect((await screen.findAllByText('process_triggered')).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Template variables (template_vars):')).toBeTruthy();
     expect(screen.getByText('branch')).toBeTruthy();
     expect(screen.getByText('region')).toBeTruthy();
@@ -161,6 +189,9 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     );
     expect(screen.getByText('trigger: push')).toBeTruthy();
     expect(screen.getByText('commit 2222222 on main')).toBeTruthy();
+    expect(screen.getByText('trigger: workflow (main)')).toBeTruthy();
+    expect(screen.getByText('CI').getAttribute('href')).toBe('https://github.com/acme/infra/actions/runs/9001');
+    expect(screen.getByText(/\[failed\]/)).toBeTruthy();
 
     // Filter by repository and recipient
     fireEvent.change(screen.getByLabelText('Repository'), { target: { value: 'acme/app' } });

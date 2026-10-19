@@ -229,7 +229,7 @@ func TestGrainfileAndNodeUIMetrics(t *testing.T) {
 		DevUserHeader:    userHeader,
 		HubAdmins:        []string{"admin@example.com"},
 		WebhookSecret:    "wh-secret",
-		GrainfileFetcher: &metricsRepoFetcher{files: map[string][]byte{"tasks/a.task.md": []byte("---\ntitle: Task A\nrecipient: https://github.com/bwsalmon/silo\n---\nBody\n")}},
+		GrainfileFetcher: &metricsRepoFetcher{files: map[string][]byte{"tasks/a.task.md": []byte("---\ngrainfile: v1\ntitle: Task A\nrecipient: https://github.com/bwsalmon/silo\n---\nBody\n")}},
 		Logf:             logf(t),
 	})
 	if err != nil {
@@ -240,7 +240,7 @@ func TestGrainfileAndNodeUIMetrics(t *testing.T) {
 	defer srv.Close()
 
 	// 1. Index 1 active task, 1 active process, and 1 draft task.
-	gfTask, err := grainfiles.Parse("tasks/a.task.md", []byte("---\ntitle: Task A\nrecipient: https://github.com/bwsalmon/silo\n---\nBody\n"))
+	gfTask, err := grainfiles.Parse("tasks/a.task.md", []byte("---\ngrainfile: v1\ntitle: Task A\nrecipient: https://github.com/bwsalmon/silo\n---\nBody\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestGrainfileAndNodeUIMetrics(t *testing.T) {
 	if _, err := h.Grainfiles.IndexGrainfile(ctx, gfTask); err != nil {
 		t.Fatal(err)
 	}
-	gfProc, err := grainfiles.Parse("processes/p.process.md", []byte("---\ntitle: Process P\nrecipient: https://github.com/bwsalmon/silo\non:\n  push:\n    branches:\n      - main\n---\nBody\n"))
+	gfProc, err := grainfiles.Parse("processes/p.process.md", []byte("---\ngrainfile: v1\ntitle: Process P\nrecipient: https://github.com/bwsalmon/silo\non:\n  push:\n    branches:\n      - main\n---\nBody\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestGrainfileAndNodeUIMetrics(t *testing.T) {
 	if _, err := h.Grainfiles.IndexGrainfile(ctx, gfProc); err != nil {
 		t.Fatal(err)
 	}
-	gfDraft, err := grainfiles.Parse("tasks/d.task.md", []byte("---\ntitle: Draft D\nrecipient: https://github.com/bwsalmon/silo\ndraft: true\n---\nBody\n"))
+	gfDraft, err := grainfiles.Parse("tasks/d.task.md", []byte("---\ngrainfile: v1\ntitle: Draft D\nrecipient: https://github.com/bwsalmon/silo\ndraft: true\n---\nBody\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

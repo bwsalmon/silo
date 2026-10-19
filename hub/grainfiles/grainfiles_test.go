@@ -1,6 +1,7 @@
 package grainfiles
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -442,6 +443,7 @@ func TestPythonGrainlintCrossCheckParity(t *testing.T) {
 func TestParseAndValidateFields(t *testing.T) {
 	t.Run("task with default recipient, grainfile v1, x_ extensions, and unknown field warning", func(t *testing.T) {
 		raw := []byte(`---
+grainfile: v1
 title: Compact task
 requestor: https://github.com/acme/team-a
 not_before: 2026-10-20
@@ -526,7 +528,7 @@ Check the release branch.
 			"tasks/GoodName.task.grain.md",
 			"tasks/2026-10-18T143000Z-fix-API.task.grain.md",
 		} {
-			if _, err := Parse(validPath, []byte("---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n")); err != nil {
+			if _, err := Parse(validPath, []byte("---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n")); err != nil {
 				t.Fatalf("Parse(%q) failed unexpectedly: %v", validPath, err)
 			}
 		}
@@ -546,13 +548,13 @@ Check the release branch.
 			{
 				name: "leading underscore stem",
 				path: "tasks/_bad.task.grain.md",
-				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeBadName,
 			},
 			{
 				name: "invalid punctuation in stem",
 				path: "tasks/bad$name.task.grain.md",
-				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeBadName,
 			},
 			{
@@ -570,37 +572,37 @@ Check the release branch.
 			{
 				name: "trigger_with on task",
 				path: "tasks/a.task.grain.md",
-				body: "---\ntitle: T\ntrigger_with: ./p.process.grain.md\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\ntrigger_with: ./p.process.grain.md\n---\n",
 				code: CodeSchemaInvalid,
 			},
 			{
 				name: "task depends_on process",
 				path: "tasks/a.task.grain.md",
-				body: "---\ntitle: T\ndepends_on:\n  - ./p.process.grain.md\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\ndepends_on:\n  - ./p.process.grain.md\n---\n",
 				code: CodeWrongTargetKind,
 			},
 			{
 				name: "unknown suffix",
 				path: "notes/foo.widget.grain.md",
-				body: "---\ntitle: T\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\n---\n",
 				code: CodeUnknownSuffix,
 			},
 			{
 				name: "from_template wrong suffix on task",
 				path: "tasks/a.task.grain.md",
-				body: "---\ntitle: T\nfrom_template: /templates/p.process.grain.md.jinja2\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nfrom_template: /templates/p.process.grain.md.jinja2\n---\n",
 				code: CodeMalformedRef,
 			},
 			{
 				name: "from_template wrong suffix on process",
 				path: "processes/p.process.grain.md",
-				body: "---\ntitle: P\nfrom_template: /templates/t.task.grain.md.jinja2\nwhen:\n  manual: {}\n---\n",
+				body: "---\ngrainfile: v1\ntitle: P\nfrom_template: /templates/t.task.grain.md.jinja2\nwhen:\n  manual: {}\n---\n",
 				code: CodeMalformedRef,
 			},
 			{
 				name: "when.push empty filter object",
 				path: "processes/p.process.grain.md",
-				body: "---\ntitle: P\nwhen:\n  push: {}\n---\n",
+				body: "---\ngrainfile: v1\ntitle: P\nwhen:\n  push: {}\n---\n",
 				code: CodeSchemaInvalid,
 			},
 			{
@@ -612,61 +614,61 @@ Check the release branch.
 			{
 				name: "BOM in file",
 				path: "tasks/a.task.md",
-				body: "\xef\xbb\xbf---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "\xef\xbb\xbf---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeMalformedFile,
 			},
 			{
 				name: "NUL byte in file",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: T\x00\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\x00\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeMalformedFile,
 			},
 			{
 				name: "duplicate key in nested mapping",
 				path: "processes/p.process.md",
-				body: "---\ntitle: P\nrecipient: https://github.com/acme/grain-eu\non:\n  manual: {}\n  manual: {}\n---\n",
+				body: "---\ngrainfile: v1\ntitle: P\nrecipient: https://github.com/acme/grain-eu\non:\n  manual: {}\n  manual: {}\n---\n",
 				code: CodeInvalidYAML,
 			},
 			{
 				name: "YAML merge key",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: T\n<<: *base\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\n<<: *base\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeInvalidYAML,
 			},
 			{
 				name: "YAML explicit tag",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: !!str T\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "---\ngrainfile: v1\ntitle: !!str T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeInvalidYAML,
 			},
 			{
 				name: "multiline title",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: |\n  Line 1\n  Line 2\nrecipient: https://github.com/acme/grain-eu\n---\n",
+				body: "---\ngrainfile: v1\ntitle: |\n  Line 1\n  Line 2\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeSchemaInvalid,
 			},
 			{
 				name: "recipient with anchor",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu#sec\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu#sec\n---\n",
 				code: CodeMalformedRef,
 			},
 			{
 				name: "recipient is blob URL",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu/blob/main/README.md\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu/blob/main/README.md\n---\n",
 				code: CodeWrongTargetKind,
 			},
 			{
 				name: "depends_on points to tree URL",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - https://github.com/acme/widgets/tree/main/src\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu\ndepends_on:\n  - https://github.com/acme/widgets/tree/main/src\n---\n",
 				code: CodeWrongTargetKind,
 			},
 			{
 				name: "relative reference climbs above repo root",
 				path: "tasks/a.task.md",
-				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\nreferences:\n  - ../../secret.md\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\nrecipient: https://github.com/acme/grain-eu\nreferences:\n  - ../../secret.md\n---\n",
 				code: CodeEscapesRepo,
 			},
 		}
@@ -698,6 +700,7 @@ Check the release branch.
 
 func TestResolutionAndSameRepoAuthorization(t *testing.T) {
 	raw := []byte(`---
+grainfile: v1
 title: Multi-ref task
 recipient: ../deployments/grain-eu
 requestor: /teams/platform
@@ -750,6 +753,7 @@ Prompt body.
 	}
 
 	procRaw := []byte(`---
+grainfile: v1
 title: Co-triggered process
 depends_on:
   - ../processes/nightly.process.grain.md
@@ -763,6 +767,7 @@ Run co-triggered check.
 	}
 
 	taskDepOnProcRaw := []byte(`---
+grainfile: v1
 title: Task depending on process
 depends_on:
   - ../processes/nightly.process.grain.md
@@ -774,6 +779,7 @@ Rejected because depends_on must target a concrete .task.grain.md.
 	}
 
 	taskDepOnTplRaw := []byte(`---
+grainfile: v1
 title: Task depending on unrendered jinja2 template
 depends_on:
   - ./rollout-region.task.grain.md.jinja2
@@ -836,6 +842,7 @@ Rejected because depends_on cannot target an unrendered .jinja2 template.
 
 func TestTriggerMatchingAndDeferral(t *testing.T) {
 	raw := []byte(`---
+grainfile: v1
 title: Gated PR and merge process
 recipient: https://github.com/acme/grain-eu
 not_before: "2026-10-25T09:00:00Z"
@@ -1003,6 +1010,7 @@ func TestFromTemplateAndMultiRepoWhenTriggers(t *testing.T) {
 	// 1. Same-repo from_template grants AuthorizedReferences and CheckReferenceAccess;
 	// cross-repo from_template is recorded as provenance without granting read access.
 	sameRepoTask, err := Parse(".grain/tasks/2026-10-18T143000Z-fix-API.task.grain.md", []byte(`---
+grainfile: v1
 title: Fix API from template
 recipient: https://github.com/acme/grain-eu
 from_template: /.grain/templates/rollout.task.grain.md.jinja2
@@ -1035,6 +1043,7 @@ Fix API.
 	}
 
 	crossRepoTask, err := Parse(".grain/tasks/cross-tpl.task.grain.md", []byte(`---
+grainfile: v1
 title: Task from cross-repo template
 recipient: https://github.com/acme/grain-eu
 from_template: https://github.com/acme/central-templates/blob/main/templates/rollout.task.grain.md.jinja2
@@ -1062,6 +1071,7 @@ Cross-repo template task.
 
 	// 2. RenderTemplate and ParseWithVars auto-populate from_template when unset.
 	tplBytes := []byte(`---
+grainfile: v1
 title: "Rollout {{ region }}"
 template_vars:
   region:
@@ -1089,6 +1099,7 @@ Deploy to {{ region }}.
 
 	// 3. Multi-repo and file/folder/URL triggers in when.push, when.pull_request, when.merge.
 	procRaw := []byte(`---
+grainfile: v1
 title: Multi-repo auth and schema gate
 gate: true
 when:
@@ -1213,25 +1224,25 @@ func TestOptionalEmptyMarkdownBodyAndCanonicalDeploymentRecipient(t *testing.T) 
 		{
 			name: "task with completely empty body and canonical Hub deployment recipient",
 			path: ".grain/tasks/2026-10-20-rotate-keys.task.grain.md",
-			raw:  "---\ntitle: Rotate staging API signing keys and verify health checks\nrecipient: https://hub.example.com/deployments/payments-prod\n---\n",
+			raw:  "---\ngrainfile: v1\ntitle: Rotate staging API signing keys and verify health checks\nrecipient: https://hub.example.com/deployments/payments-prod\n---\n",
 			kind: KindTask,
 		},
 		{
 			name: "task with whitespace-only body",
 			path: ".grain/tasks/2026-10-20-whitespace.task.grain.md",
-			raw:  "---\ntitle: Bump Go toolchain to 1.24.2 across all module files\n---\n   \n\t\n",
+			raw:  "---\ngrainfile: v1\ntitle: Bump Go toolchain to 1.24.2 across all module files\n---\n   \n\t\n",
 			kind: KindTask,
 		},
 		{
 			name: "process with completely empty body",
 			path: ".grain/processes/smoke-check.process.grain.md",
-			raw:  "---\ntitle: Run go test ./... and verify zero linter warnings on every pull request\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n",
+			raw:  "---\ngrainfile: v1\ntitle: Run go test ./... and verify zero linter warnings on every pull request\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n",
 			kind: KindProcess,
 		},
 		{
 			name: "process with whitespace-only body",
 			path: ".grain/processes/nightly-audit.process.grain.md",
-			raw:  "---\ntitle: Run govulncheck ./... nightly and file a task for any reported vulnerability\nwhen:\n  schedule:\n    cron: \"0 4 * * *\"\n---\n  \n",
+			raw:  "---\ngrainfile: v1\ntitle: Run govulncheck ./... nightly and file a task for any reported vulnerability\nwhen:\n  schedule:\n    cron: \"0 4 * * *\"\n---\n  \n",
 			kind: KindProcess,
 		},
 	} {
@@ -1265,5 +1276,233 @@ func TestOptionalEmptyMarkdownBodyAndCanonicalDeploymentRecipient(t *testing.T) 
 	}
 	if got := CanonicalDeploymentURL("https://hub.example.com/", "payments-prod"); got != "https://hub.example.com/deployments/payments-prod" {
 		t.Errorf("CanonicalDeploymentURL = %q", got)
+	}
+}
+
+func TestMandatoryGrainfileVersionAndUniversalTimezoneSemantics(t *testing.T) {
+	t.Run("missing grainfile version emits GF020 on task, process, and rendered template", func(t *testing.T) {
+		for _, tc := range []struct {
+			path string
+			raw  string
+		}{
+			{
+				path: "tasks/missing-ver.task.grain.md",
+				raw:  "---\ntitle: Missing grainfile version\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n",
+			},
+			{
+				path: "processes/missing-ver.process.grain.md",
+				raw:  "---\ntitle: Missing grainfile version\nwhen:\n  manual: {}\n---\nBody.\n",
+			},
+		} {
+			_, err := Parse(tc.path, []byte(tc.raw))
+			if err == nil {
+				t.Fatalf("Parse(%s): expected GF020 error for missing grainfile, got nil", tc.path)
+			}
+			errs, ok := err.(Errors)
+			if !ok || len(errs) == 0 || errs[0].Code != CodeSchemaInvalid || !strings.Contains(errs[0].Message, `grainfile: required field missing (expected "v1")`) {
+				t.Fatalf("Parse(%s): unexpected error %v", tc.path, err)
+			}
+		}
+
+		_, err := Parse("tasks/tpl.task.grain.md.jinja2", []byte("---\ntitle: \"{{ name }}\"\n---\nBody.\n"))
+		if err == nil || !strings.Contains(err.Error(), `grainfile: required field missing (expected "v1")`) {
+			t.Fatalf("Parse template without grainfile: v1: got %v, want GF020 missing grainfile", err)
+		}
+	})
+
+	t.Run("not_before and created_at accept Z, explicit offsets, and bare dates, normalizing to UTC", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			notBef  string
+			wantUTC time.Time
+		}{
+			{
+				name:    "UTC Z suffix",
+				notBef:  "2026-11-01T07:00:00Z",
+				wantUTC: time.Date(2026, 11, 1, 7, 0, 0, 0, time.UTC),
+			},
+			{
+				name:    "positive offset +02:00",
+				notBef:  "2026-11-01T09:00:00+02:00",
+				wantUTC: time.Date(2026, 11, 1, 7, 0, 0, 0, time.UTC),
+			},
+			{
+				name:    "negative offset -07:00 with fractional seconds",
+				notBef:  "2026-11-01T00:00:00.500-07:00",
+				wantUTC: time.Date(2026, 11, 1, 7, 0, 0, 500_000_000, time.UTC),
+			},
+			{
+				name:    "bare calendar date YYYY-MM-DD",
+				notBef:  "2026-11-01",
+				wantUTC: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := fmt.Sprintf("---\ngrainfile: v1\ntitle: Timezone test\nnot_before: %q\n---\nBody.\n", tc.notBef)
+				g, err := Parse("tasks/tz.task.grain.md", []byte(raw))
+				if err != nil {
+					t.Fatalf("Parse failed: %v", err)
+				}
+				if !g.NotBefore.Equal(tc.wantUTC) || g.NotBefore.Location() != time.UTC {
+					t.Errorf("NotBefore = %v (%v), want %v (UTC)", g.NotBefore, g.NotBefore.Location(), tc.wantUTC)
+				}
+				parsedTS, err := ParseTime("2026-10-16T11:30:00+05:30")
+				if err != nil {
+					t.Fatalf("ParseTime(+05:30): %v", err)
+				}
+				wantCreated := time.Date(2026, 10, 16, 6, 0, 0, 0, time.UTC)
+				if !parsedTS.Equal(wantCreated) || parsedTS.Location() != time.UTC {
+					t.Errorf("ParseTime(+05:30) = %v (%v), want %v (UTC)", parsedTS, parsedTS.Location(), wantCreated)
+				}
+				if g.ActiveAt(tc.wantUTC.Add(-time.Second)) {
+					t.Errorf("expected ActiveAt(before) = false")
+				}
+				if !g.ActiveAt(tc.wantUTC) {
+					t.Errorf("expected ActiveAt(exact) = true")
+				}
+			})
+		}
+
+		for _, badTS := range []string{
+			"2026-11-01T09:00:00",       // naive timestamp without Z or offset
+			"2026-11-01T09:00:00-00:00", // RFC 3339 unknown local offset
+			"2026-11-01T09:00:00+24:00", // out-of-range hour offset
+			"2026-11-01T09:00:00+02:60", // out-of-range minute offset
+			"2026-02-30T00:00:00Z",      // invalid calendar date
+		} {
+			raw := fmt.Sprintf("---\ngrainfile: v1\ntitle: Bad timestamp\nnot_before: %q\n---\nBody.\n", badTS)
+			if _, err := Parse("tasks/bad-ts.task.grain.md", []byte(raw)); err == nil {
+				t.Errorf("Parse with not_before=%q succeeded, want GF020 error", badTS)
+			}
+		}
+	})
+
+	t.Run("when.schedule single and list with IANA timezones", func(t *testing.T) {
+		raw := []byte(`---
+grainfile: v1
+title: Multi-region schedule
+when:
+  schedule:
+    - cron: "0 9 * * 1-5"
+      timezone: Europe/London
+    - cron: "0 9 * * 1-5"
+      timezone: America/Los_Angeles
+    - cron: "30 4 * * *"
+---
+Run weekday checks.
+`)
+		g, err := Parse("processes/multi-sched.process.grain.md", []byte(raw))
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		items := g.When.Schedule.Items()
+		if len(items) != 3 {
+			t.Fatalf("Schedule.Items() len = %d, want 3", len(items))
+		}
+		if items[0].Timezone != "Europe/London" || items[1].Timezone != "America/Los_Angeles" || items[2].Timezone != "UTC" {
+			t.Errorf("unexpected schedule items: %+v", items)
+		}
+
+		for _, badTZ := range []string{"+02:00", "-05:00", "PST", "EST", "CET", "Mars/Phobos", "UTC+2"} {
+			badRaw := fmt.Sprintf("---\ngrainfile: v1\ntitle: Bad schedule tz\nwhen:\n  schedule:\n    cron: \"0 9 * * 1-5\"\n    timezone: %q\n---\nBody.\n", badTZ)
+			if _, err := Parse("processes/bad-tz.process.grain.md", []byte(badRaw)); err == nil {
+				t.Errorf("Parse with schedule.timezone=%q succeeded, want GF020 error", badTZ)
+			}
+		}
+	})
+}
+
+func TestWhenWorkflowTriggerParsingAndMatching(t *testing.T) {
+	raw := []byte(`---
+grainfile: v1
+title: Triage CI failures and post-release smoke tests
+when:
+  workflow:
+    - workflow: "CI"
+      workflows:
+        - "Nightly *"
+        - ".github/workflows/e2e-*.yml"
+      events: ["failed", "started"]
+      branches: ["main", "release/*"]
+    - workflow: "Release"
+      events: ["success"]
+      repo: acme/widgets
+      branches: ["main"]
+---
+Investigate workflow run.
+`)
+	g, err := Parse("processes/ci-triage.process.grain.md", raw)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if err := g.ResolveSource(Source{
+		RepoURL: "https://github.com/acme/widgets",
+		Ref:     "refs/heads/main",
+		Commit:  "abc1234",
+		Path:    "processes/ci-triage.process.grain.md",
+	}); err != nil {
+		t.Fatalf("ResolveSource: %v", err)
+	}
+	if len(g.When.Workflow) != 2 {
+		t.Fatalf("len(When.Workflow) = %d, want 2", len(g.When.Workflow))
+	}
+	// Verify alias normalization: "started" -> "triggered", "success" -> "succeeded".
+	if !slices.Equal(g.When.Workflow[0].Events, []string{"failed", "triggered"}) {
+		t.Errorf("Workflow[0].Events = %v, want [failed triggered]", g.When.Workflow[0].Events)
+	}
+	if !slices.Equal(g.When.Workflow[1].Events, []string{"succeeded"}) {
+		t.Errorf("Workflow[1].Events = %v, want [succeeded]", g.When.Workflow[1].Events)
+	}
+
+	// Exact workflow name + failed event on main
+	if !g.MatchesWorkflow("https://github.com/acme/widgets", "main", "CI", ".github/workflows/ci.yml", "failed") {
+		t.Error("expected CI failed on main to match")
+	}
+	// Glob workflow name + triggered (via alias "started") on release/v1.2
+	if !g.MatchesWorkflow("https://github.com/acme/widgets", "refs/heads/release/v1.2", "Nightly Integration", "", "started") {
+		t.Error("expected Nightly Integration started on release/v1.2 to match")
+	}
+	// Workflow file path glob match
+	if !g.MatchesWorkflow("https://github.com/acme/widgets", "main", "Unrelated Display Name", ".github/workflows/e2e-browser.yml", "failed") {
+		t.Error("expected .github/workflows/e2e-browser.yml failed on main to match")
+	}
+	// Non-matching event (CI succeeded should not match filter 0)
+	if g.MatchesWorkflow("https://github.com/acme/widgets", "main", "CI", ".github/workflows/ci.yml", "succeeded") {
+		t.Error("expected CI succeeded on main NOT to match")
+	}
+	// Second filter: Release succeeded on main
+	if !g.MatchesWorkflow("https://github.com/acme/widgets", "main", "Release", ".github/workflows/release.yml", "succeeded") {
+		t.Error("expected Release succeeded on main to match")
+	}
+	// Non-matching branch
+	if g.MatchesWorkflow("https://github.com/acme/widgets", "feature/wip", "CI", ".github/workflows/ci.yml", "failed") {
+		t.Error("expected CI failed on feature/wip NOT to match")
+	}
+	// Non-matching repo
+	if g.MatchesWorkflow("https://github.com/acme/other", "main", "CI", ".github/workflows/ci.yml", "failed") {
+		t.Error("expected CI failed on acme/other NOT to match")
+	}
+
+	// Default events when `events` is omitted: ["succeeded", "failed"] (not "triggered").
+	defRaw := []byte("---\ngrainfile: v1\ntitle: Default workflow events\nwhen:\n  workflow:\n    workflow: CI\n---\nBody.\n")
+	defGF, err := Parse("processes/def-wf.process.grain.md", defRaw)
+	if err != nil {
+		t.Fatalf("Parse default workflow events: %v", err)
+	}
+	if !defGF.MatchesWorkflow("", "main", "CI", "", "succeeded") || !defGF.MatchesWorkflow("", "main", "CI", "", "failed") {
+		t.Error("expected default workflow events to match succeeded and failed")
+	}
+	if defGF.MatchesWorkflow("", "main", "CI", "", "triggered") {
+		t.Error("expected default workflow events NOT to match triggered")
+	}
+
+	// Invalid workflow triggers must fail with GF020.
+	for _, badWF := range []string{
+		"---\ngrainfile: v1\ntitle: Missing workflow name\nwhen:\n  workflow:\n    events: [\"failed\"]\n---\nBody.\n",
+		"---\ngrainfile: v1\ntitle: Bad workflow event\nwhen:\n  workflow:\n    workflow: CI\n    events: [\"cancelled\"]\n---\nBody.\n",
+	} {
+		if _, err := Parse("processes/bad-wf.process.grain.md", []byte(badWF)); err == nil {
+			t.Errorf("expected GF020 error for invalid when.workflow:\n%s", badWF)
+		}
 	}
 }

@@ -1161,6 +1161,51 @@ type githubWebhookPayload struct {
 	ChangedPaths []string        `json:"changed_paths"`
 	Files        json.RawMessage `json:"files"`
 
+	Conclusion    string          `json:"conclusion"`
+	WorkflowName  string          `json:"workflow_name"`
+	WorkflowPath  string          `json:"workflow_path"`
+	WorkflowEvent string          `json:"workflow_event"`
+	WorkflowURL   string          `json:"workflow_url"`
+	Workflow      json.RawMessage `json:"workflow"`
+
+	WorkflowRun *struct {
+		Name       string `json:"name"`
+		Path       string `json:"path"`
+		Event      string `json:"event"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		HTMLURL    string `json:"html_url"`
+		URL        string `json:"url"`
+		HeadBranch string `json:"head_branch"`
+		HeadSHA    string `json:"head_sha"`
+	} `json:"workflow_run"`
+
+	CheckSuite *struct {
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		HTMLURL    string `json:"html_url"`
+		URL        string `json:"url"`
+		HeadBranch string `json:"head_branch"`
+		HeadSHA    string `json:"head_sha"`
+		App        *struct {
+			Name string `json:"name"`
+			Slug string `json:"slug"`
+		} `json:"app"`
+	} `json:"check_suite"`
+
+	CheckRun *struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		HTMLURL    string `json:"html_url"`
+		URL        string `json:"url"`
+		HeadSHA    string `json:"head_sha"`
+		CheckSuite *struct {
+			HeadBranch string `json:"head_branch"`
+			HeadSHA    string `json:"head_sha"`
+		} `json:"check_suite"`
+	} `json:"check_run"`
+
 	PullRequest *struct {
 		Number         int    `json:"number"`
 		Merged         bool   `json:"merged"`
@@ -1312,7 +1357,7 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		a.serveInstallationWebhook(w, r, source, pl)
 		return
 	}
-	if source != TriggerPush && source != TriggerPullRequest && source != TriggerMerge {
+	if source != TriggerPush && source != TriggerPullRequest && source != TriggerMerge && source != TriggerWorkflow {
 		http.Error(w, fmt.Sprintf("unsupported webhook event %q", source), http.StatusBadRequest)
 		return
 	}
@@ -1340,12 +1385,12 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 	var indexed []IndexRecord
 	// Security invariant (§9, §11.1):
-	//   - On pull_request events, never index or remove Grainfile definitions
-	//     from the untrusted PR head; evaluate triggers against the base branch's
+	//   - On pull_request and workflow events, never index or remove Grainfile
+	//     definitions from the untrusted head; evaluate triggers against the
 	//     indexed .process.grain.md definitions.
 	//   - On push events to non-default/unprotected branches, never index or
 	//     execute .task.grain.md files.
-	if source != TriggerPullRequest {
+	if source != TriggerPullRequest && source != TriggerWorkflow {
 		for _, remPath := range removedPaths {
 			if kind, _, isGF, _ := ClassifyPath(remPath); isGF {
 				if kind == KindTask && !isDefaultBranch {
@@ -1414,14 +1459,22 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if pl.PullRequest != nil {
 		prNum = pl.PullRequest.Number
 	}
-	trigEvents, err := a.Store.EvaluateTriggers(r.Context(), canonRepo, commitSHA, ForgeEvent{
-		Source:       source,
-		Repo:         canonRepo,
-		Branch:       ref,
-		CommitSHA:    commitSHA,
-		PRNumber:     prNum,
-		ChangedPaths: allChangedPaths,
-		At:           a.Store.now(),
+	var wfName, wfPath, wfEvent, wfURL string
+	if source == TriggerWorkflow {
+		wfName, wfPath, wfEvent, wfURL = extractWorkflowInfo(pl)
+	}
+	trigEvents, err := a.Store.EvaluateForgeEvent(r.Context(), canonRepo, commitSHA, ForgeEvent{
+		Source:        source,
+		Repo:          canonRepo,
+		Branch:        ref,
+		CommitSHA:     commitSHA,
+		PRNumber:      prNum,
+		ChangedPaths:  allChangedPaths,
+		WorkflowName:  wfName,
+		WorkflowPath:  wfPath,
+		WorkflowEvent: wfEvent,
+		WorkflowURL:   wfURL,
+		At:            a.Store.now(),
 	})
 	if err != nil {
 		http.Error(w, "evaluating triggers: "+err.Error(), http.StatusInternalServerError)
@@ -1533,7 +1586,12 @@ func resolveWebhookSource(header string, pl githubWebhookPayload) string {
 			return TriggerMerge
 		}
 		return TriggerPullRequest
+	case TriggerWorkflow, "workflow_run", "check_suite", "check_run":
+		return TriggerWorkflow
 	case "":
+		if pl.WorkflowRun != nil || pl.CheckSuite != nil || pl.CheckRun != nil || pl.WorkflowName != "" || len(pl.Workflow) > 0 {
+			return TriggerWorkflow
+		}
 		if pl.PullRequest != nil {
 			if pl.PullRequest.Merged {
 				return TriggerMerge
@@ -1544,6 +1602,71 @@ func resolveWebhookSource(header string, pl githubWebhookPayload) string {
 	default:
 		return ev
 	}
+}
+
+func extractWorkflowInfo(pl githubWebhookPayload) (wfName, wfPath, wfEvent, wfURL string) {
+	var rawWf struct {
+		Name    string `json:"name"`
+		Path    string `json:"path"`
+		HTMLURL string `json:"html_url"`
+		URL     string `json:"url"`
+	}
+	var rawWfStr string
+	if len(pl.Workflow) > 0 {
+		if err := json.Unmarshal(pl.Workflow, &rawWfStr); err != nil {
+			_ = json.Unmarshal(pl.Workflow, &rawWf)
+		}
+	}
+
+	wfName = firstNonEmpty(pl.WorkflowName, rawWfStr, rawWf.Name)
+	wfPath = firstNonEmpty(pl.WorkflowPath, rawWf.Path)
+	wfURL = firstNonEmpty(pl.WorkflowURL, rawWf.HTMLURL, rawWf.URL)
+	conclusion := pl.Conclusion
+
+	if pl.WorkflowRun != nil {
+		wfName = firstNonEmpty(wfName, pl.WorkflowRun.Name)
+		wfPath = firstNonEmpty(wfPath, pl.WorkflowRun.Path)
+		wfURL = firstNonEmpty(wfURL, pl.WorkflowRun.HTMLURL, pl.WorkflowRun.URL)
+		conclusion = firstNonEmpty(conclusion, pl.WorkflowRun.Conclusion)
+	}
+	if pl.CheckRun != nil {
+		wfName = firstNonEmpty(wfName, pl.CheckRun.Name)
+		wfURL = firstNonEmpty(wfURL, pl.CheckRun.HTMLURL, pl.CheckRun.URL)
+		conclusion = firstNonEmpty(conclusion, pl.CheckRun.Conclusion)
+	}
+	if pl.CheckSuite != nil {
+		if wfName == "" && pl.CheckSuite.App != nil {
+			wfName = firstNonEmpty(pl.CheckSuite.App.Name, pl.CheckSuite.App.Slug)
+		}
+		wfURL = firstNonEmpty(wfURL, pl.CheckSuite.HTMLURL, pl.CheckSuite.URL)
+		conclusion = firstNonEmpty(conclusion, pl.CheckSuite.Conclusion)
+	}
+
+	if pl.WorkflowEvent != "" {
+		if norm, ok := NormalizeWorkflowEvent(pl.WorkflowEvent); ok {
+			wfEvent = norm
+		}
+	}
+	if wfEvent == "" {
+		action := strings.ToLower(strings.TrimSpace(pl.Action))
+		conc := strings.ToLower(strings.TrimSpace(conclusion))
+		switch action {
+		case "requested", "in_progress", "triggered", "started":
+			wfEvent = "triggered"
+		case "succeeded", "success":
+			wfEvent = "succeeded"
+		case "failed", "failure":
+			wfEvent = "failed"
+		case "completed", "":
+			switch conc {
+			case "success", "succeeded":
+				wfEvent = "succeeded"
+			case "failure", "failed", "timed_out", "startup_failure":
+				wfEvent = "failed"
+			}
+		}
+	}
+	return strings.TrimSpace(wfName), strings.TrimSpace(wfPath), wfEvent, strings.TrimSpace(wfURL)
 }
 
 func extractRefAndCommit(source string, pl githubWebhookPayload) (ref, commitSHA string) {
@@ -1561,6 +1684,33 @@ func extractRefAndCommit(source string, pl githubWebhookPayload) (ref, commitSHA
 				commitSHA = pl.PullRequest.MergeCommitSHA
 			} else {
 				commitSHA = firstNonEmpty(pl.PullRequest.Head.SHA, pl.PullRequest.MergeCommitSHA)
+			}
+		}
+	}
+	if pl.WorkflowRun != nil {
+		if ref == "" {
+			ref = pl.WorkflowRun.HeadBranch
+		}
+		if commitSHA == "" {
+			commitSHA = pl.WorkflowRun.HeadSHA
+		}
+	}
+	if pl.CheckSuite != nil {
+		if ref == "" {
+			ref = pl.CheckSuite.HeadBranch
+		}
+		if commitSHA == "" {
+			commitSHA = pl.CheckSuite.HeadSHA
+		}
+	}
+	if pl.CheckRun != nil {
+		if ref == "" && pl.CheckRun.CheckSuite != nil {
+			ref = pl.CheckRun.CheckSuite.HeadBranch
+		}
+		if commitSHA == "" {
+			commitSHA = pl.CheckRun.HeadSHA
+			if commitSHA == "" && pl.CheckRun.CheckSuite != nil {
+				commitSHA = pl.CheckRun.CheckSuite.HeadSHA
 			}
 		}
 	}

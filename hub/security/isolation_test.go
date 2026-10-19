@@ -39,7 +39,7 @@ func TestCrossTeamIsolation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	gfA, err := grainfiles.Parse("tasks/a.task.md", []byte("---\ntitle: Team A Secret Task\nrecipient: https://github.com/acme/grain-a\n---\nTeam A body\n"))
+	gfA, err := grainfiles.Parse("tasks/a.task.md", []byte("---\ngrainfile: v1\ntitle: Team A Secret Task\nrecipient: https://github.com/acme/grain-a\n---\nTeam A body\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestCrossTeamIsolation(t *testing.T) {
 	if _, err := hb.h.Grainfiles.IndexGrainfile(ctx, gfA); err != nil {
 		t.Fatal(err)
 	}
-	gfB, err := grainfiles.Parse("tasks/b.task.md", []byte("---\ntitle: Team B Secret Task\nrecipient: https://github.com/beta/grain-b\n---\nTeam B body\n"))
+	gfB, err := grainfiles.Parse("tasks/b.task.md", []byte("---\ngrainfile: v1\ntitle: Team B Secret Task\nrecipient: https://github.com/beta/grain-b\n---\nTeam B body\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

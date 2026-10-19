@@ -214,6 +214,7 @@ func TestConcurrentWebhookSyncTickerAndDAGCompletionRace(t *testing.T) {
 		return map[string]string{
 			"docs/spec.md": fmt.Sprintf("# Spec rev %d\n\nDetails.\n", iter),
 			"tasks/step1.task.grain.md": fmt.Sprintf(`---
+grainfile: v1
 title: "Step 1 rev %d"
 recipient: %s
 references:
@@ -222,6 +223,7 @@ references:
 Execute step 1 iteration %d.
 `, iter, recipient, iter),
 			"tasks/step2.task.grain.md": fmt.Sprintf(`---
+grainfile: v1
 title: "Step 2 rev %d"
 recipient: %s
 not_before: %q
@@ -233,6 +235,7 @@ references:
 Execute step 2 iteration %d.
 `, iter, recipient, nb, iter),
 			"tasks/step3.task.grain.md.jinja2": fmt.Sprintf(`---
+grainfile: v1
 title: "Step 3 rev %d ({{ env | default('prod') | lower }})"
 recipient: %s
 depends_on:
@@ -243,6 +246,7 @@ references:
 Execute step 3 in {{ env | default('prod') | upper }} iteration %d.
 `, iter, recipient, iter),
 			"processes/deploy.process.grain.md.jinja2": fmt.Sprintf(`---
+grainfile: v1
 title: "Deploy process rev %d"
 when:
   push:
@@ -327,6 +331,7 @@ Run deployment checks for {{ service | default('widgets') }} rev %d.
 		for i := 1; i <= iterations; i++ {
 			sha := fmt.Sprintf("hub-edit-%d", i)
 			raw := fmt.Sprintf(`---
+grainfile: v1
 title: "Team Hub Task %d"
 recipient: %s
 depends_on:
@@ -409,12 +414,14 @@ Team task body %d.
 	const finalSHA = "commit-final-converged"
 	finalFiles := buildDAGFiles(999, "2026-01-01T00:00:00Z")
 	finalFiles["tasks/final-a.task.grain.md"] = fmt.Sprintf(`---
+grainfile: v1
 title: "Final A"
 recipient: %s
 ---
 Step A.
 `, recipient)
 	finalFiles["tasks/final-b.task.grain.md"] = fmt.Sprintf(`---
+grainfile: v1
 title: "Final B"
 recipient: %s
 not_before: "2099-01-01T00:00:00Z"
@@ -541,6 +548,7 @@ func TestConcurrentContentProxyAndMuxFetchDuringDraftAndRemovalTransitions(t *te
 
 	v1Files := map[string]string{
 		grainfilePath: `---
+grainfile: v1
 title: "Rollout {{ service | default('api') | upper }} to {{ env | default('staging') | lower }}"
 recipient: https://github.com/acme/grain-eu
 draft: false
@@ -557,6 +565,7 @@ Active rollout for {{ service | default('api') | upper }} in {{ env | default('s
 
 	v2Files := map[string]string{
 		grainfilePath: `---
+grainfile: v1
 title: "Rollout {{ service | default('api') | upper }} to {{ env | default('staging') | lower }}"
 recipient: https://github.com/acme/grain-eu
 draft: false
@@ -572,6 +581,7 @@ Active v2 rollout for {{ service | default('api') | upper }} in {{ env | default
 
 	v3DraftFiles := map[string]string{
 		grainfilePath: `---
+grainfile: v1
 title: "Draft Rollout {{ service | default('api') | upper }}"
 recipient: https://github.com/acme/grain-eu
 draft: true

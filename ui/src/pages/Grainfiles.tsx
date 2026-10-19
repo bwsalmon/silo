@@ -32,6 +32,7 @@ import {
   type GrainfileQuery,
   type GrainfileSubscriptions,
   type GrainfileTriggers,
+  type GrainfileWorkflowFilter,
   type Me,
 } from '../api';
 import { safeUrl } from '../components/Markdown';
@@ -82,11 +83,43 @@ function formatEventFilter(name: string, f?: EventFilter): string | null {
   return details.length > 0 ? `${name} (${details.join('; ')})` : name;
 }
 
+function formatWorkflowFilter(f?: GrainfileWorkflowFilter): string | null {
+  if (!f) return null;
+  const names: string[] = [];
+  if (f.workflow) names.push(f.workflow);
+  if (f.workflows && f.workflows.length > 0) {
+    for (const w of f.workflows) {
+      if (w && !names.includes(w)) names.push(w);
+    }
+  }
+  const details: string[] = [];
+  if (names.length === 1) details.push(names[0]);
+  else if (names.length > 1) details.push(names.join(', '));
+  const events = f.events && f.events.length > 0 ? f.events : ['succeeded', 'failed'];
+  details.push(`events: ${events.join(', ')}`);
+  const repoItems: string[] = [];
+  if (f.repo) repoItems.push(shortRepo(f.repo));
+  if (f.repos && f.repos.length > 0) {
+    for (const r of f.repos) {
+      const s = shortRepo(r);
+      if (!repoItems.includes(s)) repoItems.push(s);
+    }
+  }
+  if (repoItems.length === 1) details.push(`repo: ${repoItems[0]}`);
+  else if (repoItems.length > 1) details.push(`repos: ${repoItems.join(', ')}`);
+  if (f.branches && f.branches.length > 0) details.push(`branches: ${f.branches.join(', ')}`);
+  return details.length > 0 ? `workflow (${details.join('; ')})` : 'workflow';
+}
+
 export function summarizeTriggers(on?: GrainfileTriggers): string[] {
   if (!on) return [];
   const items: string[] = [];
   if (on.schedule) {
-    const schedules = Array.isArray(on.schedule) ? on.schedule : [on.schedule];
+    const schedules = Array.isArray(on.schedule)
+      ? on.schedule
+      : on.schedule.schedules && on.schedule.schedules.length > 0
+        ? on.schedule.schedules
+        : [on.schedule];
     for (const s of schedules) {
       if (s?.cron) {
         items.push(`schedule: ${s.cron}${s.timezone ? ` (${s.timezone})` : ''}`);
@@ -104,6 +137,13 @@ export function summarizeTriggers(on?: GrainfileTriggers): string[] {
     const filters = Array.isArray(rawFilter) ? rawFilter : [rawFilter];
     for (const filter of filters) {
       const formatted = formatEventFilter(label, filter);
+      if (formatted) items.push(formatted);
+    }
+  }
+  if (on.workflow) {
+    const wfFilters = Array.isArray(on.workflow) ? on.workflow : [on.workflow];
+    for (const wf of wfFilters) {
+      const formatted = formatWorkflowFilter(wf);
       if (formatted) items.push(formatted);
     }
   }
@@ -621,6 +661,21 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                                 trigger: {ev.trigger_source}
                                 {ev.branch ? ` (${ev.branch})` : ''}
                                 {ev.pr_number ? ` #${ev.pr_number}` : ''}
+                              </Typography>
+                            )}
+                            {(ev.workflow_name || ev.workflow_event || ev.workflow_url) && (
+                              <Typography variant="caption" sx={{ fontFamily: mono }}>
+                                workflow:{' '}
+                                {ev.workflow_url ? (
+                                  <SafeExternalLink
+                                    url={ev.workflow_url}
+                                    label={ev.workflow_name || ev.workflow_url}
+                                    sx={{ fontFamily: mono, fontSize: 12 }}
+                                  />
+                                ) : (
+                                  ev.workflow_name || 'workflow'
+                                )}
+                                {ev.workflow_event ? ` [${ev.workflow_event}]` : ''}
                               </Typography>
                             )}
                             {ev.paths && ev.paths.length > 0 && (

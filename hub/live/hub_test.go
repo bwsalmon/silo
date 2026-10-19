@@ -629,6 +629,7 @@ func TestGrainfileAndNodeOriginatedRunsEndToEnd(t *testing.T) {
 	// 1. upstream .task.md executed by ws-1
 	// 2. downstream .task.md with depends_on pointing to upstream .task.md
 	gUp, err := grainfiles.Parse(".grain/tasks/upstream.task.md", []byte(`---
+grainfile: v1
 title: Upstream schema migration
 recipient: https://github.com/bwsalmon/silo
 requestor: Alice <alice@example.com>
@@ -647,6 +648,7 @@ Run upstream migration.
 	check(t, err)
 
 	gDown, err := grainfiles.Parse(".grain/tasks/downstream.task.md", []byte(`---
+grainfile: v1
 title: Downstream consumer update
 recipient: https://github.com/bwsalmon/silo
 requestor: Alice <alice@example.com>

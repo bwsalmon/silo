@@ -168,7 +168,45 @@ export const GRAINFILE_KINDS: GrainfileKind[] = ['task', 'process'];
 export interface ScheduleTrigger {
   cron: string;
   timezone?: string;
+  schedules?: ScheduleTrigger[];
 }
+
+export type GrainfileScheduleTrigger = ScheduleTrigger;
+
+export type GrainfileWorkflowEvent = 'triggered' | 'succeeded' | 'failed';
+
+export interface GrainfileWorkflowFilter {
+  workflow?: string;
+  workflows?: string[];
+  events?: GrainfileWorkflowEvent[];
+  repo?: string;
+  repos?: string[];
+  branches?: string[];
+}
+
+export type WorkflowFilter = GrainfileWorkflowFilter;
+
+export type GrainfileTriggerSource =
+  | 'schedule'
+  | 'push'
+  | 'merge'
+  | 'pull_request'
+  | 'workflow'
+  | 'manual'
+  | 'scenario'
+  | 'depends_on'
+  | (string & {});
+
+export const GRAINFILE_TRIGGER_SOURCES: GrainfileTriggerSource[] = [
+  'schedule',
+  'push',
+  'merge',
+  'pull_request',
+  'workflow',
+  'manual',
+  'scenario',
+  'depends_on',
+];
 
 export interface EventFilter {
   repo?: string;
@@ -197,10 +235,11 @@ export interface ScenarioTrigger {
 }
 
 export interface GrainfileTriggers {
-  schedule?: ScheduleTrigger | ScheduleTrigger[];
+  schedule?: GrainfileScheduleTrigger | GrainfileScheduleTrigger[];
   push?: EventFilterOrList;
   merge?: EventFilterOrList;
   pull_request?: EventFilterOrList;
+  workflow?: GrainfileWorkflowFilter | GrainfileWorkflowFilter[];
   workflow_run?: EventFilterOrList;
   release?: EventFilterOrList;
   manual?: ManualTrigger;
@@ -300,10 +339,14 @@ export interface GrainfileEvent {
   on?: GrainfileTriggers;
   on_spec?: GrainfileTriggers;
   gate?: boolean;
-  trigger_source?: string;
+  trigger_source?: GrainfileTriggerSource;
   triggered_by?: string;
   trigger_repo?: string;
   trigger_commit_sha?: string;
+  workflow_name?: string;
+  workflow_path?: string;
+  workflow_event?: GrainfileWorkflowEvent | string;
+  workflow_url?: string;
   branch?: string;
   pr_number?: number;
   paths?: string[];

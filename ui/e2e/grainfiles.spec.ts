@@ -62,6 +62,7 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
     ].join('\n'),
     'tasks/02-draft.task.grain.md': [
       '---',
+      'grainfile: v1',
       `title: Draft rollout plan ${world.n}`,
       `recipient: ${recipientAlpha}`,
       `requestor: ${recipientBeta}`,
