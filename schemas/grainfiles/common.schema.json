@@ -59,6 +59,18 @@
     "eventFilter": {
       "type": "object",
       "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repos": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "branches": {
           "type": "array",
           "minItems": 1,
@@ -86,6 +98,16 @@
       "anyOf": [
         {
           "required": [
+            "repo"
+          ]
+        },
+        {
+          "required": [
+            "repos"
+          ]
+        },
+        {
+          "required": [
             "branches"
           ]
         },
@@ -96,6 +118,20 @@
         }
       ],
       "additionalProperties": false
+    },
+    "eventFilterOrList": {
+      "oneOf": [
+        {
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+          }
+        }
+      ]
     },
     "when": {
       "type": "object",
@@ -118,13 +154,13 @@
           "additionalProperties": false
         },
         "push": {
-          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilterOrList"
         },
         "merge": {
-          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilterOrList"
         },
         "pull_request": {
-          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilter"
+          "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/eventFilterOrList"
         },
         "manual": {
           "type": "object",

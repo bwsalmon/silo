@@ -5,7 +5,12 @@ when:
   schedule:
     cron: "0 2 * * *"
     timezone: "Europe/Berlin"
+  merge:
+    repo: https://github.com/acme/widgets
+    branches: ["main", "release/*"]
+    paths: ["src/", "/docs/widget-schema.md"]
   manual: {}
+from_template: https://github.com/acme/widgets/blob/main/.grain/processes/branch-audit.process.grain.md.jinja2
 references:
   - ./smoke.process.grain.md
   - https://github.com/acme/widgets/blob/main/docs/widget-schema.md

@@ -8,14 +8,14 @@
   - Forbidden Jinja2 tags (`{% include %}`, `{% extends %}`, `{% import %}`, `{% from %}`) are rejected (`GF034`).
   - Jinja2 syntax or evaluation errors are rejected (`GF033`), and both raw and rendered size must fit within `MaxFileBytes` (`GF006`).
   - Undeclared variables are extracted from the AST in deterministic sorted order (`template_vars`).
-- `<stem>` MUST match `^[a-z0-9][a-z0-9._-]*$` (lowercase ASCII letters, digits, `.`, `_`, `-`; no uppercase `T`/`Z` timestamps).
-- Legacy `.task.md` / `.process.md` filenames are rejected by the linter (`GF005`).
+- `<stem>` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (uppercase and lowercase ASCII letters, digits, `.`, `_`, `-`, starting with an ASCII letter or digit, including ISO/compact UTC timestamps like `2026-10-18T143000Z-fix-API.task.grain.md`). Two Grainfiles in the same repository MUST NOT collide when compared case-insensitively (`GF006`).
+- Files ending in `.grain.md` or `.grain.md.jinja2` with an unknown `<kind>` suffix (e.g. `foo.unknown.grain.md`) warn with `GF005`. Ordinary `.md` files without `.grain.md` (including `*.task.md` or `*.process.md`) are regular Markdown assets and do not trigger `GF005`.
 
 ## 2. Front Matter (`---` YAML `---` + Non-Empty Markdown Body)
 Standard YAML 1.2 Core Schema (`GF004`: no anchors `&`, aliases `*`, merge keys `<<`, or tags `!`). Unknown non-`x_*` keys warn (`GF022`); vendor extensions MUST start with `x_`.
 
-The finalized `grainfile: v1` front-matter vocabulary consists of **9 fields** (plus `title` and `x_*` extensions):
-- **Shared (4):** `grainfile`, `draft`, `not_before`, `references`
+The finalized `grainfile: v1` front-matter vocabulary consists of **10 fields** (plus `title` and `x_*` extensions):
+- **Shared (5):** `grainfile`, `draft`, `not_before`, `references`, `from_template`
 - **`.task.grain.md` only (3):** `recipient` (optional, default `"/"`), `requestor` (optional), `depends_on` (optional; targets must resolve to concrete `.task.grain.md` files, never `.process.grain.md` and never unrendered `.jinja2` templates)
 - **`.process.grain.md` only (2):** `when` (required), `gate` (optional, default `false`)
 
@@ -26,6 +26,7 @@ The finalized `grainfile: v1` front-matter vocabulary consists of **9 fields** (
 | `draft` | both | `boolean` | `false` | When `true`, indexed for inspection only; never executes or grants `references` access. |
 | `not_before` | both | `string` | *(none)* | Earliest activation time: `YYYY-MM-DD` (00:00:00Z) or RFC 3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`). |
 | `references` | both | `string[]` | `[]` | Read-only context files/folders (`https://...`, `/repo-rooted`, `./relative`, `../relative`). |
+| `from_template` | both | `string` | *(none)* | Optional provenance link to the source `.task.grain.md.jinja2` or `.process.grain.md.jinja2` template (`GF035`). Same-repo templates are added to `authorized_references` at `commit_sha`; auto-populated on `.grain.md.jinja2` rendering. |
 | `recipient` | task | `string` | `"/"` | Target Grain deployment identity (`https://...` repo/folder URL or repo-local path). |
 | `requestor` | task | `string` | *(none)* | Attribution (`Name <email@domain>` or deployment URL/path). |
 | `depends_on` | task | `string[]` | `[]` | Prerequisite concrete `.task.grain.md` files that must complete before this task runs (`GF032`). |
@@ -34,9 +35,12 @@ The finalized `grainfile: v1` front-matter vocabulary consists of **9 fields** (
 
 ### `when` Trigger Sources (`.process.grain.md` only)
 - `schedule: { cron: "0 2 * * *", timezone?: "UTC" }` (or list of `{ cron, timezone? }` objects)
-- `push: { branches?: ["main"], paths?: ["src/**"] }`
-- `pull_request: { branches?: ["main"], paths?: ["src/**"] }` *(evaluated from the PR base branch; untrusted PR diff is passed as delimited data)*
-- `merge: { branches?: ["main"], paths?: ["src/**"] }`
+- `push`, `pull_request`, `merge`: Either a single filter object or a non-empty list of filter objects (`GF020`). Each filter object supports:
+  - `repo?: "owner/repo" | "https://github.com/owner/repo"` and/or `repos?: ["owner/repo", ...]` (defaults to the `.process.grain.md` repository; cross-repo triggers require both repositories to belong to the same team in `hub/directory`).
+  - `branches?: ["main", "release/*"]` (branch names or globs).
+  - `paths?: ["src/handler.go", "src/auth/", "/src/auth", "schemas/**/*.sql", "https://github.com/acme/payments/tree/main/src/auth"]` (repo-relative file paths, folder paths `dir/` or `/dir` matching `dir/**`, globs, or full forge `https://` file/folder URLs).
+  - `ignore?: ["docs/", "**/*.md"]` (excluded file paths, folder paths, or globs).
+  - At least one of `repo`, `repos`, `branches`, or `paths` MUST be specified on each filter object (`GF020`).
 - `manual: {}`
 - `scenario: "Description"` or `scenario: { description: "..." }` (or list)
 

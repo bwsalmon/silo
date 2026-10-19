@@ -580,6 +580,21 @@ func (g *Grainfile) ResolveSource(src Source) error {
 		}
 	}
 
+	// Resolve from_template (always a .grain.md.jinja2 template -> "blob").
+	var resolvedFromTemplate string
+	if g.FromTemplate != "" {
+		u, _, err := ResolveRefWithSource(Source{
+			RepoURL: canonRepo,
+			Ref:     urlRef,
+			Commit:  src.Commit,
+			Path:    cleanFile,
+		}, g.FromTemplate, "blob")
+		if err != nil {
+			return wrapFieldError("from_template", cleanFile, err)
+		}
+		resolvedFromTemplate = u
+	}
+
 	g.Repo = canonRepo
 	if src.Ref != "" {
 		g.Ref = src.Ref
@@ -606,6 +621,7 @@ func (g *Grainfile) ResolveSource(src Source) error {
 	g.Requestor = resolvedRequestor
 	g.References = resolvedRefs
 	g.DependsOn = resolvedDeps
+	g.FromTemplate = resolvedFromTemplate
 	return nil
 }
 
@@ -777,6 +793,23 @@ func needsGitLabDash(canonRepo string) bool {
 	return strings.Count(repoPath, "/") >= 2
 }
 
+// RepoSlug returns the normalized `owner/repo` slug (or repo path) for repoURL,
+// or empty string if repoURL is invalid.
+func RepoSlug(repoURL string) string {
+	canon, err := NormalizeRepoSlugOrURL(repoURL)
+	if err != nil {
+		return ""
+	}
+	if strings.HasPrefix(canon, "file://") {
+		return strings.TrimPrefix(canon, "file://")
+	}
+	u, err := url.Parse(canon)
+	if err != nil {
+		return ""
+	}
+	return strings.Trim(u.Path, "/")
+}
+
 // IsSameRepo reports whether repoA and repoB refer to the same canonical
 // repository (docs/grainfiles-spec.md §8.5; docs/hub.md §6.4.1).
 func IsSameRepo(repoA, repoB string) bool {
@@ -795,7 +828,7 @@ func canonicalRepoFromAnyRef(s string) (string, error) {
 	return CanonicalRepoURL(s)
 }
 
-// AuthorizedReferences partitions g's `references` into:
+// AuthorizedReferences partitions g's `references` (and same-repo `from_template`) into:
 //   - sameRepo: references targeting sourceRepoURL (which a non-draft Grainfile
 //     in sourceRepoURL is authorized to grant `recipient` read access to through
 //     Grain Hub; docs/hub.md §6.4.1, docs/hub-interface.md).
@@ -803,10 +836,11 @@ func canonicalRepoFromAnyRef(s string) (string, error) {
 //     sourceRepoURL cannot authorize on its own: "a repository can only grant
 //     access to itself").
 //
-// If any reference in g.References is still repo-local (`/`-rooted or relative),
-// it is resolved against sourceRepoURL using g.Ref, g.Commit, and g.Path.
+// If any reference in g.References (or g.FromTemplate) is still repo-local
+// (`/`-rooted or relative), it is resolved against sourceRepoURL using g.Ref,
+// g.Commit, and g.Path.
 func (g *Grainfile) AuthorizedReferences(sourceRepoURL string) (sameRepo, crossRepo []string) {
-	if g == nil || len(g.References) == 0 {
+	if g == nil || (len(g.References) == 0 && g.FromTemplate == "") {
 		return nil, nil
 	}
 	repoURL := sourceRepoURL
@@ -839,6 +873,23 @@ func (g *Grainfile) AuthorizedReferences(sourceRepoURL string) (sameRepo, crossR
 			crossRepo = append(crossRepo, u)
 		}
 	}
+	if g.FromTemplate != "" {
+		u, r, err := ResolveRefWithSource(Source{
+			RepoURL: canonSource,
+			Ref:     urlRef,
+			Commit:  g.Commit,
+			Path:    g.Path,
+		}, g.FromTemplate, "blob")
+		if err == nil && IsSameRepo(r.Repo, canonSource) {
+			if strings.TrimSpace(g.Commit) != "" && (r.Mode == "blob" || r.Mode == "tree") {
+				r.GitRef = strings.TrimSpace(g.Commit)
+				u = r.CanonicalURL()
+			}
+			if !slices.Contains(sameRepo, u) {
+				sameRepo = append(sameRepo, u)
+			}
+		}
+	}
 	return sameRepo, crossRepo
 }
 
@@ -856,9 +907,9 @@ func AuthorizedReferences(sourceRepoURL string, references []string) (sameRepo, 
 //  1. g must not be a draft (`g.Draft == false`).
 //  2. requestedRef must resolve to a target within sourceRepoURL (same-origin
 //     authority rule: a Grainfile in Repo A cannot grant access to Repo C).
-//  3. requestedRef must match an entry in g.References (exact file path,
-//     a path under a `/tree/` folder reference in g.References, or any path in
-//     sourceRepoURL when g.References includes sourceRepoURL's root).
+//  3. requestedRef must match an entry in g.References or a same-repo g.FromTemplate
+//     (exact file path, a path under a `/tree/` folder reference in g.References,
+//     or any path in sourceRepoURL when g.References includes sourceRepoURL's root).
 func (g *Grainfile) AuthorizesReference(sourceRepoURL, requestedRef string) bool {
 	_, err := g.CheckReferenceAccess(sourceRepoURL, requestedRef)
 	return err == nil
@@ -905,7 +956,12 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 	commitTrim := strings.TrimSpace(g.Commit)
 	refTrim := normalizeURLRef(g.Ref, "")
 
-	for _, raw := range g.References {
+	candidates := slices.Clone(g.References)
+	if g.FromTemplate != "" {
+		candidates = append(candidates, g.FromTemplate)
+	}
+
+	for _, raw := range candidates {
 		_, allowed, err := ResolveRefWithSource(Source{
 			RepoURL: canonSource,
 			Ref:     urlRef,
@@ -1367,6 +1423,9 @@ func LintTreeWithVars(top string, vars map[string]string) ([]Finding, error) {
 		for _, s := range gf.References {
 			refs = append(refs, fieldRef{"references", s, false})
 		}
+		if gf.FromTemplate != "" {
+			refs = append(refs, fieldRef{"from_template", gf.FromTemplate, false})
+		}
 
 		for _, fr := range refs {
 			tKind, tItem, fErr := resolveInTree(it, fr.ref, fr.field)
@@ -1564,6 +1623,14 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 	}
 	if rawDeps, ok := fm["depends_on"]; ok && g.Kind == KindTask {
 		g.DependsOn = extractRefStrings(rawDeps, "depends_on")
+	}
+	if rawFT, ok := fm["from_template"]; ok {
+		ft, fErr := validateFromTemplate(rawFT, g.Kind, g.Path, where)
+		if fErr != nil {
+			errs = append(errs, *fErr)
+		} else {
+			g.FromTemplate = ft
+		}
 	}
 
 	if g.Kind == KindProcess {

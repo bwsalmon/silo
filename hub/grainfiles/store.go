@@ -50,6 +50,12 @@ var Tables = []string{
 	"grainfile_events",
 }
 
+// RepoTeamResolver resolves the team owning a repository slug ("owner/repo")
+// in hub/directory.
+type RepoTeamResolver interface {
+	RepoOwner(ctx context.Context, repo string) (string, error)
+}
+
 // Store persists indexed Grainfile front-matter metadata, node subscriptions,
 // and discoverable Grainfile events in PostgreSQL or SQLite. It stores
 // metadata only—never source files or Grainfile Markdown bodies at rest
@@ -68,6 +74,13 @@ type Store struct {
 	// the Hub directory for the repository of a recipient, repo, folder, or
 	// grainfile URL.
 	AuthorizeOwnerRepo func(ctx context.Context, owner, repoURL string) bool
+	// TeamResolver, when set, resolves the team owning a repository ("owner/repo")
+	// in hub/directory so cross-repository `when` triggers only fire across
+	// repositories belonging to the same team.
+	TeamResolver RepoTeamResolver
+	// SameRepoTeam, when set, reports whether two repository URLs belong to the
+	// same team in hub/directory.
+	SameRepoTeam func(ctx context.Context, repoA, repoB string) bool
 }
 
 // Open opens the Grainfile store at url: "postgres://..." (or
@@ -151,6 +164,7 @@ CREATE TABLE IF NOT EXISTS grainfile_index (
 	title TEXT NOT NULL,
 	recipient TEXT NOT NULL,
 	requestor TEXT NOT NULL DEFAULT '',
+	from_template TEXT NOT NULL DEFAULT '',
 	draft INTEGER NOT NULL DEFAULT 0,
 	not_before BIGINT NOT NULL DEFAULT 0,
 	created_at BIGINT NOT NULL DEFAULT 0,
@@ -204,6 +218,7 @@ CREATE INDEX IF NOT EXISTS grainfile_events_url ON grainfile_events (grainfile_u
 `
 
 var added = []dbaccess.Column{
+	{Table: "grainfile_index", Name: "from_template", Add: `ALTER TABLE grainfile_index ADD COLUMN from_template TEXT NOT NULL DEFAULT ''`},
 	{Table: "grainfile_index", Name: "not_before", Add: `ALTER TABLE grainfile_index ADD COLUMN not_before BIGINT NOT NULL DEFAULT 0`},
 	{Table: "grainfile_index", Name: "created_at", Add: `ALTER TABLE grainfile_index ADD COLUMN created_at BIGINT NOT NULL DEFAULT 0`},
 	{Table: "grainfile_index", Name: "authorized_references", Add: `ALTER TABLE grainfile_index ADD COLUMN authorized_references TEXT NOT NULL DEFAULT '[]'`},
@@ -310,6 +325,7 @@ type IndexRecord struct {
 	Title                string    `json:"title"`
 	Recipient            string    `json:"recipient"`
 	Requestor            string    `json:"requestor,omitempty"`
+	FromTemplate         string    `json:"from_template,omitempty"`
 	Draft                bool      `json:"draft"`
 	NotBefore            time.Time `json:"not_before,omitempty,omitzero"`
 	CreatedAt            time.Time `json:"created_at,omitempty,omitzero"`
@@ -367,6 +383,7 @@ func (r IndexRecord) ToGrainfile() *Grainfile {
 		Title:           r.Title,
 		Recipient:       r.Recipient,
 		Requestor:       r.Requestor,
+		FromTemplate:    r.FromTemplate,
 		Draft:           r.Draft,
 		NotBefore:       r.NotBefore,
 		CreatedAt:       r.CreatedAt,
@@ -409,11 +426,17 @@ type Event struct {
 	Path                 string    `json:"path,omitempty"`
 	CommitSHA            string    `json:"commit_sha,omitempty"`
 	Ref                  string    `json:"ref,omitempty"`
+	Branch               string    `json:"branch,omitempty"`
+	PRNumber             int       `json:"pr_number,omitempty"`
+	Paths                []string  `json:"paths,omitempty"`
+	TriggerRepo          string    `json:"trigger_repo,omitempty"`
+	TriggerCommitSHA     string    `json:"trigger_commit_sha,omitempty"`
 	GrainfileURL         string    `json:"grainfile_url"`
 	Kind                 Kind      `json:"kind,omitempty"`
 	Title                string    `json:"title,omitempty"`
 	Recipient            string    `json:"recipient,omitempty"`
 	Requestor            string    `json:"requestor,omitempty"`
+	FromTemplate         string    `json:"from_template,omitempty"`
 	NotBefore            time.Time `json:"not_before,omitempty,omitzero"`
 	References           []string  `json:"references,omitempty"`
 	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
@@ -437,6 +460,12 @@ type eventPayload struct {
 	Action               string   `json:"action,omitempty"`
 	Grainfile            string   `json:"grainfile,omitempty"`
 	Requestor            string   `json:"requestor,omitempty"`
+	FromTemplate         string   `json:"from_template,omitempty"`
+	Branch               string   `json:"branch,omitempty"`
+	PRNumber             int      `json:"pr_number,omitempty"`
+	Paths                []string `json:"paths,omitempty"`
+	TriggerRepo          string   `json:"trigger_repo,omitempty"`
+	TriggerCommitSHA     string   `json:"trigger_commit_sha,omitempty"`
 	NotBeforeMillis      int64    `json:"not_before_ms,omitempty"`
 	References           []string `json:"references,omitempty"`
 	AuthorizedReferences []string `json:"authorized_references,omitempty"`
@@ -470,7 +499,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 
 	cp := *g
 	cp.Body = ""
-	if cp.URL == "" || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) {
+	if cp.URL == "" || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) || (cp.FromTemplate != "" && !strings.Contains(cp.FromTemplate, "://")) {
 		if err := cp.ResolveSource(Source{
 			RepoURL: cp.Repo,
 			Ref:     cp.Ref,
@@ -557,6 +586,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		Title:                cp.Title,
 		Recipient:            cp.Recipient,
 		Requestor:            cp.Requestor,
+		FromTemplate:         cp.FromTemplate,
 		Draft:                cp.Draft,
 		NotBefore:            cp.NotBefore.UTC(),
 		CreatedAt:            cp.CreatedAt.UTC(),
@@ -656,11 +686,11 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		}
 
 		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO grainfile_index (
-			repo, path, commit_sha, ref, url, kind, title, recipient, requestor,
+			repo, path, commit_sha, ref, url, kind, title, recipient, requestor, from_template,
 			draft, not_before, created_at, "references", authorized_references,
 			depends_on, trigger_with, on_spec, gate, is_template, template_vars,
 			ready_emitted, removed, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, 0, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, 0, ?)
 		ON CONFLICT (repo, path, commit_sha) DO UPDATE SET
 			ref = EXCLUDED.ref,
 			url = EXCLUDED.url,
@@ -668,6 +698,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			title = EXCLUDED.title,
 			recipient = EXCLUDED.recipient,
 			requestor = EXCLUDED.requestor,
+			from_template = EXCLUDED.from_template,
 			draft = EXCLUDED.draft,
 			not_before = EXCLUDED.not_before,
 			created_at = EXCLUDED.created_at,
@@ -683,7 +714,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			removed = 0,
 			updated_at = EXCLUDED.updated_at`),
 			rec.Repo, rec.Path, rec.CommitSHA, rec.Ref, rec.URL, string(rec.Kind),
-			rec.Title, rec.Recipient, rec.Requestor, boolToInt(rec.Draft),
+			rec.Title, rec.Recipient, rec.Requestor, rec.FromTemplate, boolToInt(rec.Draft),
 			notBeforeMS, createdAtMS, string(refsJSON), string(authRefsJSON),
 			string(depsJSON), string(onJSON), boolToInt(rec.Gate),
 			boolToInt(rec.IsTemplate), string(tvarsJSON),
@@ -715,6 +746,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 					GrainfileURL:         rec.URL,
 					Kind:                 rec.Kind,
 					Title:                rec.Title,
+					FromTemplate:         rec.FromTemplate,
 					NotBefore:            rec.NotBefore,
 					References:           rec.References,
 					AuthorizedReferences: rec.AuthorizedReferences,
@@ -749,6 +781,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 					Title:                rec.Title,
 					Recipient:            firstNonEmpty(rec.Recipient, prevLatestRecipient),
 					Requestor:            rec.Requestor,
+					FromTemplate:         rec.FromTemplate,
 					NotBefore:            rec.NotBefore,
 					References:           rec.References,
 					AuthorizedReferences: rec.AuthorizedReferences,
@@ -784,6 +817,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 				Title:                rec.Title,
 				Recipient:            rec.Recipient,
 				Requestor:            rec.Requestor,
+				FromTemplate:         rec.FromTemplate,
 				NotBefore:            rec.NotBefore,
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
@@ -903,6 +937,7 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 				Kind:                 latest.Kind,
 				Title:                latest.Title,
 				NotBefore:            latest.NotBefore,
+				FromTemplate:         latest.FromTemplate,
 				References:           latest.References,
 				AuthorizedReferences: latest.AuthorizedReferences,
 				DependsOn:            latest.DependsOn,
@@ -947,6 +982,7 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 			Recipient:            latest.Recipient,
 			Requestor:            latest.Requestor,
 			NotBefore:            latest.NotBefore,
+			FromTemplate:         latest.FromTemplate,
 			References:           latest.References,
 			AuthorizedReferences: latest.AuthorizedReferences,
 			DependsOn:            latest.DependsOn,
@@ -1047,6 +1083,7 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				Recipient:            rec.Recipient,
 				Requestor:            rec.Requestor,
 				NotBefore:            rec.NotBefore,
+				FromTemplate:         rec.FromTemplate,
 				References:           rec.References,
 				AuthorizedReferences: rec.AuthorizedReferences,
 				DependsOn:            rec.DependsOn,
@@ -1072,7 +1109,7 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 }
 
 const selectIndexCols = `repo, path, commit_sha, ref, url, kind, title, recipient, requestor,
-	draft, not_before, created_at, "references", authorized_references,
+	draft, not_before, created_at, from_template, "references", authorized_references,
 	depends_on, trigger_with, on_spec, gate, is_template, template_vars, ready_emitted, removed, updated_at`
 
 func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
@@ -1089,7 +1126,7 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	if err := r.Scan(
 		&rec.Repo, &rec.Path, &rec.CommitSHA, &rec.Ref, &rec.URL, &kindStr,
 		&rec.Title, &rec.Recipient, &rec.Requestor,
-		&draftInt, &notBeforeMS, &createdMS, &refsStr, &authRefsStr,
+		&draftInt, &notBeforeMS, &createdMS, &rec.FromTemplate, &refsStr, &authRefsStr,
 		&depsStr, &twStr, &onStr, &gateInt, &isTemplateInt, &tvarsStr,
 		&readyInt, &removedInt, &updatMS,
 	); err != nil {
@@ -1266,14 +1303,53 @@ func (s *Store) loadLatestIndexQ(q rowQueryer, ctx context.Context, canonRepo st
 	return out, rows.Err()
 }
 
-// EvaluateTriggers evaluates on: triggers (push, pull_request, merge) for all
-// active non-draft .process.md files in repoURL against ev, records
-// process_triggered events, and transitively evaluates trigger_with co-triggers
-// across all active indexed Grainfiles.
+func (s *Store) sameTeamForCrossRepo(ctx context.Context, repoA, repoB string) bool {
+	if IsSameRepo(repoA, repoB) {
+		return true
+	}
+	if s.SameRepoTeam != nil {
+		return s.SameRepoTeam(ctx, repoA, repoB)
+	}
+	if s.TeamResolver != nil {
+		slugA := RepoSlug(repoA)
+		if slugA == "" {
+			slugA = strings.TrimSpace(repoA)
+		}
+		slugB := RepoSlug(repoB)
+		if slugB == "" {
+			slugB = strings.TrimSpace(repoB)
+		}
+		teamA, errA := s.TeamResolver.RepoOwner(ctx, slugA)
+		if errA != nil || teamA == "" {
+			return false
+		}
+		teamB, errB := s.TeamResolver.RepoOwner(ctx, slugB)
+		if errB != nil || teamB == "" {
+			return false
+		}
+		return strings.EqualFold(teamA, teamB)
+	}
+	return true
+}
+
+// EvaluateTriggers evaluates when: triggers (push, pull_request, merge) for all
+// active non-draft .process.grain.md files targeting repoURL (local or same-team
+// cross-repo) against ev, records process_triggered events, and transitively
+// evaluates depends_on co-triggers across all active indexed Grainfiles.
 func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string, ev ForgeEvent) ([]Event, error) {
 	canonRepo, err := canonicalRepoFromAnyRef(repoURL)
 	if err != nil {
 		return nil, err
+	}
+	if ev.Repo == "" {
+		ev.Repo = canonRepo
+	} else if r, rErr := canonicalRepoFromAnyRef(ev.Repo); rErr == nil {
+		ev.Repo = r
+	}
+	if ev.CommitSHA == "" {
+		ev.CommitSHA = commitSHA
+	} else if commitSHA == "" {
+		commitSHA = ev.CommitSHA
 	}
 	at := ev.At
 	if at.IsZero() {
@@ -1291,21 +1367,22 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 		}
 	}
 
-	repoRecords, err := s.loadLatestIndexQ(s.db, ctx, canonRepo)
+	precheckRecords, err := s.loadLatestIndexQ(s.db, ctx, "")
 	if err != nil {
 		return nil, err
 	}
 	hasMatch := false
-	for _, rec := range repoRecords {
+	for _, rec := range precheckRecords {
 		if rec.removed || rec.Draft {
 			continue
 		}
 		gf := rec.ToGrainfile()
-		if rec.Kind == KindProcess && gf.MatchesEvent(ev) {
-			hasMatch = true
-			break
-		}
-		if rec.Kind == KindTask && changedTaskSet[rec.Path] && gf.ActiveAt(at) {
+		if rec.Kind == KindProcess {
+			if (IsSameRepo(rec.Repo, canonRepo) || s.sameTeamForCrossRepo(ctx, rec.Repo, canonRepo)) && gf.MatchesEvent(ev) {
+				hasMatch = true
+				break
+			}
+		} else if rec.Kind == KindTask && IsSameRepo(rec.Repo, canonRepo) && changedTaskSet[rec.Path] && gf.ActiveAt(at) {
 			hasMatch = true
 			break
 		}
@@ -1329,11 +1406,12 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 		})
 
 		type trigItem struct {
-			rec         IndexRecord
-			source      string
-			triggeredBy string
-			emit        bool
-			depth       int
+			rec          IndexRecord
+			source       string
+			triggeredBy  string
+			matchedPaths []string
+			emit         bool
+			depth        int
 		}
 		var queue []trigItem
 		var discovered []trigItem
@@ -1341,22 +1419,25 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 		coTriggeredCount := 0
 
 		for _, rec := range allRecords {
-			if rec.removed || rec.Draft || rec.Repo != canonRepo {
+			if rec.removed || rec.Draft {
 				continue
 			}
 			gf := rec.ToGrainfile()
-			if rec.Kind == KindProcess && gf.MatchesEvent(ev) {
-				key := rec.Repo + "\x00" + rec.Path
-				visited[key] = true
-				item := trigItem{
-					rec:    rec,
-					source: ev.Source,
-					emit:   true,
-					depth:  0,
+			if rec.Kind == KindProcess && (IsSameRepo(rec.Repo, canonRepo) || s.sameTeamForCrossRepo(ctx, rec.Repo, canonRepo)) {
+				if ok, paths := gf.MatchedEventPaths(ev); ok {
+					key := rec.Repo + "\x00" + rec.Path
+					visited[key] = true
+					item := trigItem{
+						rec:          rec,
+						source:       ev.Source,
+						matchedPaths: paths,
+						emit:         true,
+						depth:        0,
+					}
+					queue = append(queue, item)
+					discovered = append(discovered, item)
 				}
-				queue = append(queue, item)
-				discovered = append(discovered, item)
-			} else if rec.Kind == KindTask && changedTaskSet[rec.Path] && gf.ActiveAt(at) {
+			} else if rec.Kind == KindTask && IsSameRepo(rec.Repo, canonRepo) && changedTaskSet[rec.Path] && gf.ActiveAt(at) {
 				key := rec.Repo + "\x00" + rec.Path
 				visited[key] = true
 				queue = append(queue, trigItem{
@@ -1405,11 +1486,12 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 						visited[candKey] = true
 						coTriggeredCount++
 						item := trigItem{
-							rec:         candidate,
-							source:      TriggerDependsOn,
-							triggeredBy: curr.rec.URL,
-							emit:        true,
-							depth:       curr.depth + 1,
+							rec:          candidate,
+							source:       TriggerDependsOn,
+							triggeredBy:  curr.rec.URL,
+							matchedPaths: slices.Clone(ev.ChangedPaths),
+							emit:         true,
+							depth:        curr.depth + 1,
 						}
 						queue = append(queue, item)
 						discovered = append(discovered, item)
@@ -1474,14 +1556,27 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 			}
 		}
 
+		branchName := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
 		for _, curr := range ordered {
 			cSHA := commitSHA
-			if curr.rec.Repo != canonRepo || cSHA == "" || ev.Source == TriggerPullRequest {
+			if curr.source == TriggerDependsOn {
+				cSHA = curr.rec.CommitSHA
+			} else if IsSameRepo(curr.rec.Repo, canonRepo) && ev.Source == TriggerPullRequest && curr.rec.CommitSHA != "" {
+				cSHA = curr.rec.CommitSHA
+			} else if cSHA == "" {
 				cSHA = curr.rec.CommitSHA
 			}
 			ref := ev.Branch
-			if curr.rec.Repo != canonRepo || ref == "" || ev.Source == TriggerPullRequest {
+			if curr.source == TriggerDependsOn || ref == "" || (IsSameRepo(curr.rec.Repo, canonRepo) && ev.Source == TriggerPullRequest) {
 				ref = curr.rec.Ref
+			}
+			evRepo := curr.rec.Repo
+			if curr.source != TriggerDependsOn && canonRepo != "" {
+				evRepo = canonRepo
+			}
+			touchedPaths := curr.matchedPaths
+			if len(touchedPaths) == 0 && len(ev.ChangedPaths) > 0 {
+				touchedPaths = slices.Clone(ev.ChangedPaths)
 			}
 
 			recorded, err := s.insertEventTx(tx, ctx, Event{
@@ -1489,16 +1584,19 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				Grainfile:            curr.rec.Grainfile,
 				SpecSummaryPath:      curr.rec.SpecSummaryPath,
 				SpecPath:             curr.rec.SpecPath,
-				Repo:                 curr.rec.Repo,
+				Repo:                 evRepo,
 				Path:                 curr.rec.Path,
 				CommitSHA:            cSHA,
 				Ref:                  ref,
+				Branch:               branchName,
+				PRNumber:             ev.PRNumber,
 				GrainfileURL:         curr.rec.URL,
 				Kind:                 curr.rec.Kind,
 				Title:                curr.rec.Title,
 				Recipient:            curr.rec.Recipient,
 				Requestor:            curr.rec.Requestor,
 				NotBefore:            curr.rec.NotBefore,
+				FromTemplate:         curr.rec.FromTemplate,
 				References:           curr.rec.References,
 				AuthorizedReferences: curr.rec.AuthorizedReferences,
 				DependsOn:            curr.rec.DependsOn,
@@ -1509,6 +1607,9 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				TemplateVars:         curr.rec.TemplateVars,
 				TriggerSource:        curr.source,
 				TriggeredBy:          curr.triggeredBy,
+				TriggerRepo:          canonRepo,
+				TriggerCommitSHA:     commitSHA,
+				Paths:                touchedPaths,
 				ChangedPaths:         slices.Clone(ev.ChangedPaths),
 				CreatedAt:            at.Truncate(time.Millisecond),
 			})
@@ -1809,13 +1910,19 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 		Grainfile:            ev.Grainfile,
 		Requestor:            ev.Requestor,
 		NotBeforeMillis:      nbMS,
+		FromTemplate:         ev.FromTemplate,
 		References:           ev.References,
 		AuthorizedReferences: ev.AuthorizedReferences,
 		DependsOn:            ev.DependsOn,
 		OnSpec:               ev.OnSpec,
 		IsTemplate:           ev.IsTemplate,
 		TemplateVars:         ev.TemplateVars,
+		Branch:               ev.Branch,
+		PRNumber:             ev.PRNumber,
+		Paths:                ev.Paths,
 		ChangedPaths:         ev.ChangedPaths,
+		TriggerRepo:          ev.TriggerRepo,
+		TriggerCommitSHA:     ev.TriggerCommitSHA,
 		Reason:               ev.Reason,
 	}
 	plBytes, err := json.Marshal(pl)
@@ -1870,6 +1977,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		if pl.NotBeforeMillis > 0 {
 			ev.NotBefore = time.UnixMilli(pl.NotBeforeMillis).UTC()
 		}
+		ev.FromTemplate = pl.FromTemplate
 		ev.References = pl.References
 		ev.AuthorizedReferences = pl.AuthorizedReferences
 		ev.DependsOn = pl.DependsOn
@@ -1878,7 +1986,12 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.On = pl.OnSpec
 		ev.IsTemplate = pl.IsTemplate || IsTemplatePath(ev.Path)
 		ev.TemplateVars = pl.TemplateVars
+		ev.Branch = pl.Branch
+		ev.PRNumber = pl.PRNumber
+		ev.Paths = pl.Paths
 		ev.ChangedPaths = pl.ChangedPaths
+		ev.TriggerRepo = pl.TriggerRepo
+		ev.TriggerCommitSHA = pl.TriggerCommitSHA
 		ev.Reason = pl.Reason
 	}
 	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
@@ -2291,6 +2404,21 @@ func (sub Subscriptions) MatchesEvent(ev Event) bool {
 	}
 	if sub.MatchesRecord(rec) {
 		return true
+	}
+	if ev.GrainfileURL != "" {
+		if parsed, err := ParseRef(ev.GrainfileURL); err == nil && parsed.Repo != "" && !IsSameRepo(parsed.Repo, ev.Repo) {
+			gfRec := IndexRecord{
+				Repo:      parsed.Repo,
+				Path:      parsed.Path,
+				CommitSHA: ev.CommitSHA,
+				Ref:       parsed.GitRef,
+				URL:       ev.GrainfileURL,
+				Recipient: ev.Recipient,
+			}
+			if sub.MatchesRecord(gfRec) {
+				return true
+			}
+		}
 	}
 	if ev.DependencyURL != "" {
 		for _, gf := range sub.Grainfiles {

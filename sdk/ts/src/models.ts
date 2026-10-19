@@ -169,13 +169,18 @@ export interface ScheduleTrigger {
 }
 
 export interface EventFilter {
+  repo?: string;
+  repos?: string[];
   branches?: string[];
   paths?: string[];
   ignore?: string[];
   types?: string[];
   action?: string;
   base?: string;
+  filters?: EventFilter[];
 }
+
+export type EventFilterOrList = EventFilter | (EventFilter[] & Partial<EventFilter>);
 
 export interface ManualTrigger {
   inputs?: Record<string, string>;
@@ -191,11 +196,11 @@ export interface ScenarioTrigger {
 
 export interface GrainfileTriggers {
   schedule?: ScheduleTrigger | ScheduleTrigger[];
-  push?: EventFilter;
-  merge?: EventFilter;
-  pull_request?: EventFilter;
-  workflow_run?: EventFilter;
-  release?: EventFilter;
+  push?: EventFilterOrList;
+  merge?: EventFilterOrList;
+  pull_request?: EventFilterOrList;
+  workflow_run?: EventFilterOrList;
+  release?: EventFilterOrList;
   manual?: ManualTrigger;
   scenario?: ScenarioTrigger | ScenarioTrigger[];
 }
@@ -215,6 +220,7 @@ export interface Grainfile {
   title: string;
   is_template?: boolean;
   template_vars?: string[];
+  from_template?: string;
   recipient?: string;
   requestor?: string;
   draft?: boolean;
@@ -281,6 +287,7 @@ export interface GrainfileEvent {
   title?: string;
   is_template?: boolean;
   template_vars?: string[];
+  from_template?: string;
   recipient?: string;
   requestor?: string;
   not_before?: string;
@@ -293,6 +300,11 @@ export interface GrainfileEvent {
   gate?: boolean;
   trigger_source?: string;
   triggered_by?: string;
+  trigger_repo?: string;
+  trigger_commit_sha?: string;
+  branch?: string;
+  pr_number?: number;
+  paths?: string[];
   changed_paths?: string[];
   dependency_url?: string;
   dependency_state?: string;

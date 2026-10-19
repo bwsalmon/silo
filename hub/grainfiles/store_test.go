@@ -885,3 +885,124 @@ func TestStoreSchemaMigrationColumnUpgrade(t *testing.T) {
 		runUpgrade(t, pg.URL)
 	})
 }
+
+type fakeRepoTeamResolver struct {
+	teams map[string]string
+}
+
+func (f *fakeRepoTeamResolver) RepoOwner(_ context.Context, repo string) (string, error) {
+	return f.teams[strings.ToLower(strings.TrimSpace(repo))], nil
+}
+
+func TestCrossRepoWhenTriggersAndFromTemplateStore(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+		s.Now = func() time.Time { return time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC) }
+		s.TeamResolver = &fakeRepoTeamResolver{
+			teams: map[string]string{
+				"acme/grain-eu":  "team-eu",
+				"acme/widgets":   "team-eu",
+				"acme/payments":  "team-eu",
+				"other/outsider": "team-other",
+			},
+		}
+
+		// Subscribe node-eu to acme/grain-eu (central process repo).
+		if _, err := s.SetSubscriptions(ctx, Subscriptions{
+			NodeID:     "node-eu",
+			Recipients: []string{"https://github.com/acme/grain-eu"},
+			Repos:      []string{"https://github.com/acme/grain-eu"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1. Index a central process in acme/grain-eu with from_template and gate: true
+		// watching acme/widgets (folder src/auth/) and acme/payments, plus an unauthorized other/outsider repo.
+		centralProcYAML := `---
+title: Central EU Auth Gate
+from_template: /.grain/templates/auth-gate.process.grain.md.jinja2
+gate: true
+when:
+  pull_request:
+    - repos:
+        - acme/widgets
+        - https://github.com/acme/payments
+        - other/outsider
+      branches: ["main"]
+      paths:
+        - src/auth/
+        - https://github.com/acme/payments/blob/main/schemas/v2.sql
+---
+Verify auth changes.
+`
+		procGF, err := Parse("processes/CentralAuthGate.process.grain.md", []byte(centralProcYAML))
+		if err != nil {
+			t.Fatalf("Parse centralProc: %v", err)
+		}
+		if err := procGF.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/grain-eu",
+			Ref:     "refs/heads/main",
+			Commit:  "sha-eu-1",
+			Path:    "processes/CentralAuthGate.process.grain.md",
+		}); err != nil {
+			t.Fatalf("ResolveSource centralProc: %v", err)
+		}
+		rec, err := s.IndexGrainfile(ctx, procGF)
+		if err != nil {
+			t.Fatalf("IndexGrainfile centralProc: %v", err)
+		}
+		if rec.FromTemplate != "https://github.com/acme/grain-eu/blob/main/.grain/templates/auth-gate.process.grain.md.jinja2" {
+			t.Errorf("rec.FromTemplate = %q", rec.FromTemplate)
+		}
+		_, _, _ = s.CatchupNode(ctx, "node-eu", true)
+
+		// 2. PR webhook on acme/widgets (same team-eu) touching src/auth/login.go triggers the central gate!
+		evs, err := s.EvaluateTriggers(ctx, "https://github.com/acme/widgets", "pr-head-99", ForgeEvent{
+			Source:       TriggerPullRequest,
+			Repo:         "https://github.com/acme/widgets",
+			Branch:       "refs/heads/main",
+			CommitSHA:    "pr-head-99",
+			PRNumber:     77,
+			ChangedPaths: []string{"src/auth/login.go", "docs/readme.md"},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateTriggers(acme/widgets): %v", err)
+		}
+		if len(evs) != 1 {
+			t.Fatalf("expected 1 process_triggered event on acme/widgets, got %+v", evs)
+		}
+		got := evs[0]
+		if got.Type != EventProcessTriggered ||
+			!got.Gate ||
+			got.Repo != "https://github.com/acme/widgets" ||
+			got.Branch != "main" ||
+			got.CommitSHA != "pr-head-99" ||
+			got.PRNumber != 77 ||
+			!reflect.DeepEqual(got.Paths, []string{"src/auth/login.go"}) ||
+			got.FromTemplate != rec.FromTemplate {
+			t.Errorf("unexpected process_triggered event: %+v", got)
+		}
+
+		// Verify node-eu receives the cross-repo process_triggered event via CatchupNode.
+		caught, _, err := s.CatchupNode(ctx, "node-eu", true)
+		if err != nil || len(caught) != 1 || caught[0].Seq != got.Seq {
+			t.Errorf("expected node-eu catchup to receive cross-repo process_triggered event, got %+v (err=%v)", caught, err)
+		}
+
+		// 3. PR webhook on other/outsider (different team) must NOT trigger the central gate in team-eu!
+		outsiderEvs, err := s.EvaluateTriggers(ctx, "https://github.com/other/outsider", "pr-outsider-1", ForgeEvent{
+			Source:       TriggerPullRequest,
+			Repo:         "https://github.com/other/outsider",
+			Branch:       "main",
+			CommitSHA:    "pr-outsider-1",
+			PRNumber:     12,
+			ChangedPaths: []string{"src/auth/login.go"},
+		})
+		if err != nil {
+			t.Fatalf("EvaluateTriggers(other/outsider): %v", err)
+		}
+		if len(outsiderEvs) != 0 {
+			t.Errorf("expected 0 events for cross-team repository other/outsider, got %+v", outsiderEvs)
+		}
+	})
+}

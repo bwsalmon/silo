@@ -495,6 +495,7 @@ Generate post-merge report.
 		})
 		if rRendTpl.StatusCode != http.StatusOK ||
 			!strings.Contains(bodyRendTpl, "title: Roll out to EU") ||
+			!strings.Contains(bodyRendTpl, "from_template: "+tplURL) ||
 			!strings.Contains(bodyRendTpl, "Env: prod_blue") ||
 			strings.Contains(bodyRendTpl, "Template comment") {
 			t.Fatalf("fetching rendered .jinja2 template via ?var.*: status=%d body=%q", rRendTpl.StatusCode, bodyRendTpl)
@@ -503,7 +504,7 @@ Generate post-merge report.
 			"region": "eu",
 			"env":    "canary-1",
 		})
-		if err != nil || !strings.Contains(string(muxBytes), "Env: canary_1") {
+		if err != nil || !strings.Contains(string(muxBytes), "Env: canary_1") || !strings.Contains(string(muxBytes), "from_template: "+tplURL) {
 			t.Fatalf("FetchAuthorizedContentWithVars: err=%v body=%q", err, muxBytes)
 		}
 

@@ -51,7 +51,8 @@ SOURCES = ["schedule", "push", "merge", "pull_request", "manual", "scenario"]
 SEVERITY = {"GF005": "warning", "GF022": "warning"}
 CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
          "GF030", "GF032", "GF033", "GF034", "GF035", "GF036"]
-STEM = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+STEM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 USER_IDENTITY = re.compile(r"^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$")
 ANCHOR_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$")
@@ -472,12 +473,25 @@ def classify(rel):
         suf = ".%s.grain.md" % k
         if leaf.endswith(suf):
             return ("grain", k, leaf[:-len(suf)], False)
-    if re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.grain\.md(?:\.jinja2)?$", leaf):
-        return ("asset", "GF005")
-    m = re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.md(?:\.jinja2)?$", leaf)
-    if m and not leaf.lower().startswith("readme"):
+    if re.match(r"^(.+)\.([A-Za-z][A-Za-z0-9-]*)\.grain\.md(?:\.jinja2)?$", leaf):
         return ("asset", "GF005")
     return ("asset",)
+
+
+def valid_repo_slug_or_url(val):
+    if not isinstance(val, str) or not val or re.search(r"[\s\\]", val):
+        return False
+    if "://" in val or val.startswith(("http:", "https:", "ssh:", "git@", "file:")):
+        try:
+            r = parse_ref(val)
+        except Finding:
+            return False
+        return r.form == "remote" and not r.path and r.gitref is None and r.mode is None and r.anchor is None
+    cleaned = val[:-4] if val.endswith(".git") else val
+    if not REPO_SLUG_RE.match(cleaned):
+        return False
+    owner, repo = cleaned.split("/", 1)
+    return owner not in (".", "..") and repo not in ("", ".", "..")
 
 
 class Schemas:
@@ -520,6 +534,8 @@ class Schemas:
         for e in sorted(v.iter_errors(data), key=lambda e: list(e.path)):
             p = list(e.path)
             if p and p[0] in ("references", "depends_on") and isinstance(e.instance, str) and e.instance and not re.search(r"[\s\\]", e.instance):
+                continue
+            if p == ["from_template"] and isinstance(e.instance, str):
                 continue
             if p in (["recipient"], ["requestor"]) and isinstance(e.instance, str) and e.instance and not any(ch in e.instance for ch in "<>@\\ "):
                 continue
@@ -664,7 +680,7 @@ class Linter:
             self.add("GF032", where, "%s: %r is a file reference (/blob/), expected a repository or folder" % (field, s))
             return
         for k in KINDS:
-            for suf in (".%s.grain.md" % k, ".%s.grain.md.jinja2" % k, ".%s.md" % k):
+            for suf in (".%s.grain.md" % k, ".%s.grain.md.jinja2" % k):
                 if r.path.endswith(suf) or (r.repo and r.repo.endswith(suf)):
                     self.add("GF032", where, "%s: %r is a %s grainfile, expected a repository or folder" % (field, s, k))
                     return
@@ -676,6 +692,69 @@ class Linter:
         if t is not None and t != "folder":
             kind = t.kind if isinstance(t, Item) else t
             self.add("GF032", where, "%s: %r resolves to a %s, expected a repository or folder" % (field, s, kind))
+
+    def check_from_template(self, it, s, where):
+        if not isinstance(s, str):
+            return
+        if not s or not s.strip() or re.search(r"[\s\\]", s):
+            self.add("GF035", where, "from_template: must be a non-empty URL or path without whitespace")
+            return
+        try:
+            r = parse_ref(s)
+        except Finding as e:
+            self.add("GF035", where, "from_template: %s" % e.msg)
+            return
+        if r.anchor:
+            self.add("GF035", where, "from_template: %r may not carry an anchor" % s)
+            return
+        if r.mode == "tree" or s.endswith("/"):
+            self.add("GF035", where, "from_template: %r must reference a .%s.grain.md.jinja2 file, not a directory" % (s, it.kind))
+            return
+        want_suf = ".%s.grain.md.jinja2" % it.kind
+        if not r.path or not r.path.endswith(want_suf):
+            self.add("GF035", where, "from_template: %r on a %s grainfile must end with %s" % (s, it.kind, want_suf))
+            return
+        try:
+            t = self.resolve(it, s, "from_template")
+        except Finding as e:
+            self.add(e.code, where, e.msg)
+            return
+        it.targets.setdefault("from_template", []).append((s, t))
+
+    def check_when_filter(self, ev_key, flt, where):
+        if not isinstance(flt, dict):
+            return
+        raw_repo = flt.get("repo")
+        if isinstance(raw_repo, str) and not valid_repo_slug_or_url(raw_repo):
+            self.add("GF020", where, "when.%s.repo: invalid repository %r" % (ev_key, raw_repo))
+        raw_repos = flt.get("repos")
+        if isinstance(raw_repos, list):
+            for rp in raw_repos:
+                if isinstance(rp, str) and not valid_repo_slug_or_url(rp):
+                    self.add("GF020", where, "when.%s.repos: invalid repository %r" % (ev_key, rp))
+        raw_paths = flt.get("paths")
+        if isinstance(raw_paths, list):
+            for p in raw_paths:
+                if not isinstance(p, str):
+                    continue
+                if "\\" in p:
+                    self.add("GF020", where, "when.%s.paths: backslashes are not allowed in %r" % (ev_key, p))
+                elif "://" in p or p.startswith(("http:", "https:", "ssh:", "git@", "file:")):
+                    try:
+                        r = parse_ref(p)
+                        if r.form != "remote" or r.anchor:
+                            self.add("GF020", where, "when.%s.paths: invalid forge URL %r" % (ev_key, p))
+                    except Finding:
+                        self.add("GF020", where, "when.%s.paths: invalid forge URL %r" % (ev_key, p))
+                elif ".." in p.strip("/").split("/"):
+                    self.add("GF020", where, "when.%s.paths: '..' segment not allowed in %r" % (ev_key, p))
+        raw_ignore = flt.get("ignore")
+        if isinstance(raw_ignore, list):
+            for p in raw_ignore:
+                if not isinstance(p, str):
+                    continue
+                if "\\" in p or ".." in p.strip("/").split("/"):
+                    self.add("GF020", where, "when.%s.ignore: invalid path %r" % (ev_key, p))
 
     def refs_of(self, it):
         fm, out = it.fm, []
@@ -705,6 +784,8 @@ class Linter:
         nb = fm.get("not_before")
         if isinstance(nb, str) and (DATE_RE.match(nb) or TIME_RE.match(nb)) and not valid_time_or_date(nb, allow_date=True):
             self.add("GF020", where, "not_before: invalid calendar date or UTC time %r" % nb)
+        if "from_template" in fm and isinstance(fm["from_template"], str):
+            self.check_from_template(it, fm["from_template"], where)
         if it.kind == "task":
             req = fm.get("requestor")
             if isinstance(req, str) and not USER_IDENTITY.match(req):
@@ -720,6 +801,13 @@ class Linter:
                 sch = when.get("schedule")
                 if isinstance(sch, dict) and isinstance(sch.get("cron"), str) and len(sch["cron"].split()) != 5:
                     self.add("GF020", where, "schedule.cron must be a five-field cron expression")
+                for ev_key in ("push", "pull_request", "merge"):
+                    raw_ev = when.get(ev_key)
+                    if isinstance(raw_ev, dict):
+                        self.check_when_filter(ev_key, raw_ev, where)
+                    elif isinstance(raw_ev, list):
+                        for flt in raw_ev:
+                            self.check_when_filter(ev_key, flt, where)
         it.targets = {}
         for field, s in self.refs_of(it):
             try:
