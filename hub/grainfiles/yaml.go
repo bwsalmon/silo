@@ -565,7 +565,7 @@ func splitKeyValue(s, path string, lineNum int) (string, string, bool, *Finding)
 				keyPart := strings.TrimSpace(s[:i])
 				valPart := strings.TrimSpace(s[i+1:])
 				if keyPart == "" {
-					f := newFinding(CodeInvalidYAML, path, "non-string key")
+					f := newFinding(CodeMalformedFile, path, "YAML: empty mapping key")
 					return "", "", false, &f
 				}
 				return keyPart, valPart, true, nil
@@ -576,6 +576,10 @@ func splitKeyValue(s, path string, lineNum int) (string, string, bool, *Finding)
 }
 
 func parseMappingKey(rawKey, path string, lineNum int) (string, *Finding) {
+	if strings.TrimSpace(rawKey) == "" {
+		f := newFinding(CodeMalformedFile, path, fmt.Sprintf("YAML: line %d: empty mapping key", lineNum))
+		return "", &f
+	}
 	if rawKey == "<<" {
 		f := newFinding(CodeInvalidYAML, path, "anchors, aliases, merge keys and tags are not allowed")
 		return "", &f

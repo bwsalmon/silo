@@ -275,8 +275,8 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("empty path segments (//) are not allowed in reference URLs: %q", s))
 	}
 	hostname := strings.ToLower(u.Hostname())
-	if hostname == "" {
-		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("missing host in reference URL: %q", s))
+	if hostname == "" || !strings.Contains(hostname, ".") {
+		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("missing or invalid host in reference URL: %q", s))
 	}
 	var segs []string
 	for _, seg := range strings.Split(u.Path, "/") {
@@ -284,8 +284,8 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 			segs = append(segs, seg)
 		}
 	}
-	if len(segs) == 0 {
-		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("no repository path: %q", s))
+	if len(segs) < 2 {
+		return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("repository URL must have at least <owner>/<repo>: %q", s))
 	}
 	trailing := strings.HasSuffix(u.Path, "/")
 
@@ -297,7 +297,7 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 		forge    string
 	)
 	if dashIdx := slices.Index(segs, "-"); dashIdx >= 0 {
-		if dashIdx == 0 || dashIdx+2 >= len(segs) || (segs[dashIdx+1] != "blob" && segs[dashIdx+1] != "tree") {
+		if dashIdx < 2 || dashIdx+2 >= len(segs) || (segs[dashIdx+1] != "blob" && segs[dashIdx+1] != "tree") {
 			return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("malformed GitLab reference URL: %q", s))
 		}
 		repoSegs = segs[:dashIdx]
@@ -983,6 +983,12 @@ func HasHeadingAnchor(markdownBody, anchor string) bool {
 // repositories with an optional `stubs.yaml` mapping repository URLs to child
 // directories) according to docs/grainfiles-spec.md §4–§10.
 func LintTree(top string) ([]Finding, error) {
+	return LintTreeWithVars(top, nil)
+}
+
+// LintTreeWithVars is like LintTree and supplies vars when rendering
+// .grain.md.jinja2 templates during validation.
+func LintTreeWithVars(top string, vars map[string]string) ([]Finding, error) {
 	topClean := filepath.Clean(top)
 	info, err := os.Stat(topClean)
 	if err != nil {
@@ -1154,7 +1160,7 @@ func LintTree(top string) ([]Finding, error) {
 			var templateVars []string
 			parseRaw := raw
 			if isTmpl {
-				rendered, tvars, rErr := renderTemplateAtPath(where, string(raw), nil)
+				rendered, tvars, rErr := renderTemplateAtPath(where, string(raw), vars)
 				if rErr != nil {
 					if rErrs, ok := rErr.(Errors); ok {
 						findings = append(findings, rErrs...)
@@ -1372,7 +1378,7 @@ func LintTree(top string) ([]Finding, error) {
 			if fr.want {
 				if fr.field == "depends_on" && it.kind == KindTask {
 					if tItem != nil {
-						if tItem.gf != nil && tItem.gf.IsTemplate {
+						if IsTemplatePath(tItem.rel) || (tItem.gf != nil && tItem.gf.IsTemplate) {
 							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is an unrendered .jinja2 template, expected a concrete .task.grain.md file", fr.field, fr.ref)))
 						} else if tItem.kind != KindTask {
 							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: task %q cannot depend on %s %q (only .task.grain.md allowed)", fr.field, it.rel, tItem.kind, fr.ref)))
