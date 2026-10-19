@@ -683,6 +683,23 @@ func (s *Store) CreateDeployment(ctx context.Context, id, name, creatorEmail str
 	}
 	now := s.now().UnixMilli()
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		if creatorPrincipal != "" {
+			// A self-service deployment's ID is also its node ID. Refuse an ID
+			// that another owner already holds an unreleased node token for:
+			// otherwise whoever minted a token for the name first would be
+			// connected as the new deployment's node, and be delivered the
+			// tasks and Grainfiles addressed to it, until its creator happened
+			// to mint a replacement token.
+			var other string
+			err := tx.QueryRowContext(ctx, s.q(`SELECT owner FROM node_tokens WHERE node = ? AND owner <> ? AND released_at IS NULL LIMIT 1`),
+				id, strings.TrimPrefix(creatorPrincipal, UserPrefix)).Scan(&other)
+			if err == nil {
+				return fmt.Errorf("%w: deployment %s: node ID is held by another owner's node token", ErrExists, id)
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		_, err := tx.ExecContext(ctx, s.q(`INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)`), id, name, now)
 		if isUnique(err) {
 			return fmt.Errorf("%w: deployment %s", ErrExists, id)

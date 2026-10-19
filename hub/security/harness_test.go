@@ -180,11 +180,14 @@ func startHub(t *testing.T, o options) *hub {
 		whSecret = ""
 	}
 	h, err := server.New(context.Background(), server.Config{
-		Database:         o.database,
-		IAPAudience:      audience,
-		IAPKeys:          &identity.KeySet{URL: ks.URL},
-		HubAdmins:        []string{"user:" + root},
-		AcceptedUsers:    []string{alice, dave, zed, carol, bob, nina, pat, "mallory@example.com"},
+		Database:    o.database,
+		IAPAudience: audience,
+		IAPKeys:     &identity.KeySet{URL: ks.URL},
+		HubAdmins:   []string{"user:" + root},
+		// yan is accepted so a deployment admin may add them as a member
+		// (TestRouteMatrix); a deployment admin may not admit an unaccepted
+		// user (TestDeploymentAdminCannotBypassAcceptedUsers).
+		AcceptedUsers:    []string{alice, dave, zed, carol, bob, nina, pat, "mallory@example.com", "yan@example.com"},
 		NodeUIDomain:     nodeDomain,
 		InternalKey:      bytes.Repeat([]byte("k"), rendezvous.MinInternalKey),
 		ClaimsIssuer:     "https://hub.test",

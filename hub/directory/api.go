@@ -121,6 +121,15 @@ func (a *API) Access(r *http.Request) (*Access, error) {
 	return acc, nil
 }
 
+func (a *API) disconnectAll(nodes []string) {
+	if a.Disconnect == nil {
+		return
+	}
+	for _, n := range nodes {
+		a.Disconnect(n)
+	}
+}
+
 func adminModeOff(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "off", "false", "0":
@@ -398,6 +407,13 @@ func (a *API) deleteUser(w http.ResponseWriter, r *http.Request, acc *Access) er
 	}
 	norm, _ := normEmail(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(rawEmail)), UserPrefix))
 	a.audit(acc, "removed accepted user %s", norm)
+	// A user removed from the accepted users list may no longer reach the
+	// Hub at all, including through the node tokens they minted.
+	nodes, err := a.Store.RevokeOwnerTokens(r.Context(), norm, "")
+	if err != nil {
+		return err
+	}
+	a.disconnectAll(nodes)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -591,6 +607,16 @@ func (a *API) deleteTeam(w http.ResponseWriter, r *http.Request, acc *Access) er
 	if err := a.Store.DeleteTeam(r.Context(), id); err != nil {
 		return err
 	}
+	// The deleted deployment's node tokens go with it: no former admin's
+	// host stays connected as it, and the name may be created again.
+	if n, err := a.Store.ReleaseNodeTokens(r.Context(), id); err != nil {
+		return err
+	} else if n > 0 {
+		a.disconnectAll([]string{id})
+		if a.Unbind != nil {
+			_ = a.Unbind(id)
+		}
+	}
 	a.audit(acc, "deleted team %s, leaving its repositories unowned", id)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
@@ -634,11 +660,51 @@ func (a *API) setMember(w http.ResponseWriter, r *http.Request, acc *Access) err
 	if err := readJSON(r, &req); err != nil {
 		return err
 	}
+	if err := a.requireAcceptedPrincipal(r.Context(), acc, r.PathValue("principal")); err != nil {
+		return err
+	}
 	if err := a.Store.SetMember(r.Context(), team, r.PathValue("principal"), req.Role); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+// errNotAcceptedMember refuses a deployment admin adding a user who is not
+// on the Hub's accepted users list. Store.SetMember admits a new user:
+// member into accepted_users so that a sys admin can build a deployment in
+// one step; without this check any accepted user could create a
+// self-service deployment and admit arbitrary outsiders to the Hub through
+// it, bypassing the sys-admin-only /v1/users allowlist.
+var errNotAcceptedMember = &httpError{http.StatusForbidden, "forbidden: principal is not on the hub accepted users list; a hub sys admin must add them first"}
+
+// requireAcceptedPrincipal is nil when acc may make principal a member of
+// a deployment: acc is an active hub admin, principal is a group, the Hub
+// does not enforce its accepted users list, or principal is already on it
+// (or is a configured hub admin).
+func (a *API) requireAcceptedPrincipal(ctx context.Context, acc *Access, principal string) error {
+	if acc.HubAdmin || a.Store == nil {
+		return nil
+	}
+	p, err := normPrincipal(principal)
+	if err != nil {
+		return err
+	}
+	email, isUser := strings.CutPrefix(p, UserPrefix)
+	if !isUser {
+		return nil
+	}
+	if a.isHubAdmin(identity.Principal{Email: email}) {
+		return nil
+	}
+	accepted, _, hasAnyUsers, err := a.Store.CheckAcceptedUser(ctx, email)
+	if err != nil {
+		return err
+	}
+	if accepted || !(hasAnyUsers || a.Store.EnforceAcceptedUsers() || a.EnforceAcceptedUsers) {
+		return nil
+	}
+	return errNotAcceptedMember
 }
 
 func (a *API) removeMember(w http.ResponseWriter, r *http.Request, acc *Access) error {
@@ -648,6 +714,22 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request, acc *Access) 
 	}
 	if err := a.Store.RemoveMember(r.Context(), team, r.PathValue("principal")); err != nil {
 		return err
+	}
+	// A user removed from a deployment loses the standing any node token
+	// they minted for its node was issued on: revoke it and end the
+	// connection, so a former admin's host does not stay connected as the
+	// deployment and keep receiving its tasks and Grainfiles.
+	if p, err := normPrincipal(r.PathValue("principal")); err == nil {
+		if email, ok := strings.CutPrefix(p, UserPrefix); ok {
+			nodes, err := a.Store.RevokeOwnerTokens(r.Context(), email, team)
+			if err != nil {
+				return err
+			}
+			a.disconnectAll(nodes)
+			if len(nodes) > 0 {
+				a.audit(acc, "removed %s from deployment %s and revoked their node tokens for it", p, team)
+			}
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
