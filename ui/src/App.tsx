@@ -46,6 +46,7 @@ import { Teams } from './pages/Teams';
 import { TeamPage } from './pages/TeamPage';
 import { Deployments, DeploymentPage } from './pages/Deployments';
 import { Proposals } from './pages/Proposals';
+import { Chats } from './pages/Chats';
 
 export const ADMIN_MODE_STORAGE_KEY = 'silo.adminMode';
 export const THEME_MODE_STORAGE_KEY = 'silo.themeMode';
@@ -258,6 +259,9 @@ export function App() {
                 />
               )}
             </Button>
+            <Button color="inherit" aria-label="Chats" onClick={() => navigate('/chats')}>
+              Chats
+            </Button>
             <Button color="inherit" onClick={() => navigate('/grainfiles')}>
               Grainfiles
             </Button>
@@ -343,6 +347,9 @@ export function App() {
               {me.error && <Alert severity="error">{me.error.message}</Alert>}
               {route.page === 'inbox' && (
                 <Inbox me={effectiveMe} nodes={nodes.data} onInboxChanged={handleInboxChanged} />
+              )}
+              {(route.page === 'chats' || route.page === 'chat') && (
+                <Chats id={route.page === 'chat' ? route.id : undefined} me={effectiveMe} onInboxChanged={handleInboxChanged} />
               )}
               {route.page === 'backlog' && <Backlog me={effectiveMe} team={route.team} />}
               {route.page === 'task' && <TaskPage id={route.id} me={effectiveMe} nodes={nodes.data} />}

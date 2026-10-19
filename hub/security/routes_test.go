@@ -69,6 +69,7 @@ type world struct {
 	as    map[string]as
 	runA  tasks.Task // team A's interactive task, running on ws-a
 	runB  tasks.Task // team B's task, running on ws-b
+	chatA tasks.ChatSession
 	nodeA *fakeNode
 	nodeB *fakeNode
 
@@ -124,6 +125,7 @@ func newWorld(t *testing.T) *world {
 
 	w.runA = w.run(alice, repoA, w.nodeA, true)
 	w.runB = w.run(bob, repoB, w.nodeB, false)
+	hb.must(hb.user(alice), "POST", "/v1/chats", map[string]string{"deployment": teamA, "title": "Team A Ops"}, http.StatusCreated, &w.chatA)
 	// Team A's task asks one approval for each caller, and lists an
 	// artifact.
 	lines := []string{event(w.runA.ID, 1, events.TypeStatus, `{"phase":"running","state":"started","message":"go"}`)}
@@ -276,6 +278,12 @@ func matrix() []row {
 		{route: pub("POST /v1/tasks/{id}/approvals/{request}"), method: "POST", path: "/v1/tasks/{task}/approvals/req-{caller}", body: body(map[string]string{"decision": "allow"}), want: human(404, 200, 200, 404)},
 		{route: pub("GET /v1/tasks/{id}/messages"), method: "GET", path: "/v1/tasks/{task}/messages", want: human(404, 200, 200, 404)},
 		{route: pub("POST /v1/tasks/{id}/messages"), method: "POST", path: "/v1/tasks/{task}/messages", body: body(map[string]string{"text": "hello"}), want: human(404, 201, 201, 404)},
+		{route: pub("GET " + tasks.ChatsPath), method: "GET", path: tasks.ChatsPath, want: human(200, 200, 200, 200)},
+		{route: pub("POST " + tasks.ChatsPath), method: "POST", path: tasks.ChatsPath, body: body(map[string]string{"deployment": teamA, "title": "ops"}), want: human(403, 201, 201, 403)},
+		{route: pub("GET /v1/chats/{id}"), method: "GET", path: "/v1/chats/{chat}", want: human(404, 200, 200, 404)},
+		{route: pub("PATCH /v1/chats/{id}"), method: "PATCH", path: "/v1/chats/{chat}", body: body(map[string]string{"title": "ops-2"}), want: human(404, 200, 200, 404)},
+		{route: pub("POST /v1/chats/{id}/messages"), method: "POST", path: "/v1/chats/{chat}/messages", body: body(map[string]string{"text": "hi"}), want: human(404, 201, 201, 404)},
+		{route: pub("GET /v1/chats/{id}/events"), method: "GET", path: "/v1/chats/{chat}/events", want: human(404, 200, 200, 404), check: noStore},
 		{route: pub("GET " + live.EventsPath), method: "GET", path: "/v1/tasks/{task}/events", want: human(404, 200, 200, 404), check: noStore},
 		{route: pub("GET " + live.ArtifactsPath), method: "GET", path: "/v1/tasks/{task}/artifacts?ref=diff-1", want: human(404, 200, 200, 404), check: func(t *testing.T, c string, h http.Header) {
 			noStore(t, c, h)
@@ -345,7 +353,7 @@ func TestRouteMatrix(t *testing.T) {
 				if r.task != nil {
 					task = r.task(w)
 				}
-				path := strings.NewReplacer("{task}", task, "{caller}", c, "{spare}", w.spareToken).Replace(r.path)
+				path := strings.NewReplacer("{task}", task, "{chat}", w.chatA.ID, "{caller}", c, "{spare}", w.spareToken).Replace(r.path)
 				base := w.hb.url
 				switch r.route.Listener {
 				case server.ListenerInternal:

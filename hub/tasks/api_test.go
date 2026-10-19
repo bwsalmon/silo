@@ -65,6 +65,8 @@ func newAPIHub(t *testing.T) *apiHub {
 	m.Handle(InboxPath, api.Handler())
 	m.Handle(TasksPath, api.Handler())
 	m.Handle(TasksPath+"/", api.Handler())
+	m.Handle(ChatsPath, api.Handler())
+	m.Handle(ChatsPath+"/", api.Handler())
 	m.Handle("/", dirAPI.Handler())
 	ts := httptest.NewServer(m)
 	t.Cleanup(ts.Close)

@@ -11,5 +11,14 @@ export {
   UnavailableError,
   errorFor,
 } from './errors.js';
-export { addEvent, SSEParser, type EventStream, type FollowOptions, type SSEMessage, type StreamState, type Transport } from './events.js';
+export {
+  addEvent,
+  SSEParser,
+  type EventStream,
+  type FollowOptions,
+  type SSEMessage,
+  type StreamState,
+  type SubscribeChatEventsOptions,
+  type Transport,
+} from './events.js';
 export * from './models.js';

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/silo/events"
@@ -85,6 +86,13 @@ type API struct {
 	Registry *registry.Registry
 	// NodeUIDomain, when set, populates node_ui_url on inbox items.
 	NodeUIDomain string
+	// TaskEvents, when set, returns a task's stored and in-memory live events
+	// for shared chat transcripts.
+	TaskEvents func(ctx context.Context, taskID string) ([]events.Event, error)
+
+	chatMu   sync.Mutex
+	chatSubs map[string]map[chan ChatEvent]struct{}
+	chatSeq  map[string]int64
 }
 
 // ApprovalRequests finds the approval_request event a task's node sent
@@ -105,6 +113,7 @@ type InboxItem struct {
 	ID         string    `json:"id"`
 	Kind       string    `json:"kind"`
 	TaskID     string    `json:"task_id"`
+	ChatID     string    `json:"chat_id,omitempty"`
 	NodeID     string    `json:"node_id,omitempty"`
 	NodeUIURL  string    `json:"node_ui_url,omitempty"`
 	Team       string    `json:"team"`
@@ -142,6 +151,12 @@ func (a *API) Handler() http.Handler {
 		})
 	}
 	h("GET "+InboxPath, a.inbox)
+	h("GET "+ChatsPath, a.listChats)
+	h("POST "+ChatsPath, a.createChat)
+	h("GET "+ChatsPath+"/{id}", a.getChat)
+	h("PATCH "+ChatsPath+"/{id}", a.updateChat)
+	h("POST "+ChatsPath+"/{id}/messages", a.postChatMessage)
+	h("GET "+ChatsPath+"/{id}/events", a.chatEvents)
 	h("POST "+TasksPath, a.submit)
 	h("GET "+TasksPath, a.list)
 	h("GET "+TasksPath+"/{id}", a.get)
@@ -171,7 +186,7 @@ func writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &he):
 		code = he.code
-	case errors.Is(err, ErrNotFound), errors.Is(err, directory.ErrNotFound):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrNoChat), errors.Is(err, directory.ErrNotFound):
 		code = http.StatusNotFound
 	case errors.Is(err, ErrState):
 		code = http.StatusConflict
@@ -345,8 +360,13 @@ func (a *API) list(w http.ResponseWriter, r *http.Request, acc *directory.Access
 // task loads the request's task, if the caller may see it.
 func (a *API) task(r *http.Request, acc *directory.Access) (Task, error) {
 	t, err := a.Store.Get(r.Context(), r.PathValue("id"))
-	if errors.Is(err, ErrNotFound) || (err == nil && !sees(acc, t)) {
+	if errors.Is(err, ErrNotFound) {
 		return Task{}, errNoTask
+	}
+	if err == nil && !sees(acc, t) {
+		if chat, ok, _ := a.Store.GetChatByTask(r.Context(), t.ID); !ok || !a.chatSees(acc, chat) {
+			return Task{}, errNoTask
+		}
 	}
 	return t, err
 }
@@ -481,7 +501,13 @@ func (a *API) answer(w http.ResponseWriter, r *http.Request, acc *directory.Acce
 	if err != nil {
 		return err
 	}
-	if !member(acc, t) {
+	canAnswer := member(acc, t)
+	if !canAnswer {
+		if chat, ok, _ := a.Store.GetChatByTask(r.Context(), t.ID); ok && a.chatCanPost(acc, chat) {
+			canAnswer = true
+		}
+	}
+	if !canAnswer {
 		return &httpError{http.StatusForbidden, "forbidden: only a member of team " + t.Team + " may answer the task's approval requests"}
 	}
 	var req struct {
@@ -590,7 +616,7 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 				continue
 			}
 			switch k {
-			case InboxAwaitingReply, InboxApprovalRequest, InboxProposal, InboxFailed:
+			case InboxAwaitingReply, InboxApprovalRequest, InboxProposal, InboxFailed, InboxChatMention:
 				kindFilter[k] = true
 			default:
 				return &httpError{http.StatusBadRequest, "bad inbox kind: " + k}
@@ -739,9 +765,31 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 		return ""
 	}
 
+	allChats, _ := a.Store.ListChats(ctx)
+	chatByTask := map[string]ChatSession{}
+	var visibleChats []ChatSession
+	seenTask := map[string]bool{}
+	for _, t := range ts {
+		seenTask[t.ID] = true
+	}
+	for _, c := range allChats {
+		if !a.chatSees(acc, c) {
+			continue
+		}
+		chatByTask[c.TaskID] = c
+		visibleChats = append(visibleChats, c)
+		if !seenTask[c.TaskID] {
+			if bt, berr := a.Store.Get(ctx, c.TaskID); berr == nil {
+				ts = append(ts, bt)
+				seenTask[c.TaskID] = true
+			}
+		}
+	}
+
 	items := []InboxItem{}
 	for _, t := range ts {
-		if !sees(acc, t) {
+		chat, isChat := chatByTask[t.ID]
+		if !sees(acc, t) && !isChat {
 			continue
 		}
 		nodeID := t.Node
@@ -749,7 +797,7 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 			nodeID = t.Constraints.Node
 		}
 		if nodeID != "" {
-			if len(selectedSet) > 0 || hasExplicitFilter {
+			if !isChat && (len(selectedSet) > 0 || hasExplicitFilter) {
 				if !selectedSet[nodeID] {
 					continue
 				}
@@ -761,7 +809,7 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 					break
 				}
 			}
-			if nodeID == "" && (hasExplicitFilter || len(entries) > 0) {
+			if !isChat && nodeID == "" && (hasExplicitFilter || len(entries) > 0) {
 				continue
 			}
 		}
@@ -769,10 +817,22 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 		viewerRole := ""
 		if res, ok := resolvedByID[nodeID]; ok && res.ViewerRole != "" {
 			viewerRole = res.ViewerRole
+		} else if isChat {
+			viewerRole = a.chatRole(acc, chat)
 		} else if t.Team != "" {
 			viewerRole = string(acc.Teams[t.Team])
 		}
 		uiURL := nodeUIURLFor(nodeID)
+		var chatID string
+		title := t.Title
+		canPost := posts(acc, t)
+		canApprove := member(acc, t)
+		if isChat {
+			chatID = chat.ID
+			title = chat.Title
+			canPost = a.chatCanPost(acc, chat)
+			canApprove = a.chatCanPost(acc, chat)
+		}
 
 		switch t.State {
 		case Running:
@@ -807,18 +867,19 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 						ID:         t.ID + ":awaiting_reply",
 						Kind:       InboxAwaitingReply,
 						TaskID:     t.ID,
+						ChatID:     chatID,
 						NodeID:     nodeID,
 						NodeUIURL:  uiURL,
 						Team:       t.Team,
 						Repo:       t.Repo,
 						TaskKind:   t.Kind,
-						Title:      t.Title,
+						Title:      title,
 						State:      t.State,
 						Summary:    summary,
 						Question:   question,
 						Submitter:  t.Submitter,
 						ViewerRole: viewerRole,
-						CanAct:     posts(acc, t),
+						CanAct:     canPost,
 						UpdatedAt:  stamp,
 					})
 				}
@@ -852,29 +913,37 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 						ID:         t.ID + ":approval:" + ar.ID,
 						Kind:       InboxApprovalRequest,
 						TaskID:     t.ID,
+						ChatID:     chatID,
 						NodeID:     nodeID,
 						NodeUIURL:  uiURL,
 						Team:       t.Team,
 						Repo:       t.Repo,
 						TaskKind:   t.Kind,
-						Title:      t.Title,
+						Title:      title,
 						State:      t.State,
 						Summary:    summary,
 						Submitter:  t.Submitter,
 						ApprovalID: ar.ID,
 						Tool:       ar.Tool,
 						ViewerRole: viewerRole,
-						CanAct:     member(acc, t),
+						CanAct:     canApprove,
 						UpdatedAt:  stamp,
 					})
 				}
 			}
 		case Proposed:
 			if kindAllowed(InboxProposal) {
+				var propChatID string
+				if t.OriginTask != "" {
+					if origChat, ok := chatByTask[t.OriginTask]; ok {
+						propChatID = origChat.ID
+					}
+				}
 				items = append(items, InboxItem{
 					ID:         t.ID + ":proposal",
 					Kind:       InboxProposal,
 					TaskID:     t.ID,
+					ChatID:     propChatID,
 					NodeID:     nodeID,
 					NodeUIURL:  uiURL,
 					Team:       t.Team,
@@ -904,12 +973,13 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 					ID:         t.ID + ":failed",
 					Kind:       InboxFailed,
 					TaskID:     t.ID,
+					ChatID:     chatID,
 					NodeID:     nodeID,
 					NodeUIURL:  uiURL,
 					Team:       t.Team,
 					Repo:       t.Repo,
 					TaskKind:   t.Kind,
-					Title:      t.Title,
+					Title:      title,
 					State:      t.State,
 					Summary:    summary,
 					Reason:     t.Reason,
@@ -917,6 +987,50 @@ func (a *API) inbox(w http.ResponseWriter, r *http.Request, acc *directory.Acces
 					ViewerRole: viewerRole,
 					CanAct:     manages(acc, t),
 					UpdatedAt:  t.Updated,
+				})
+			}
+		}
+	}
+
+	if kindAllowed(InboxChatMention) {
+		for _, c := range visibleChats {
+			msgs, err := a.Store.ChatMessages(ctx, c.ID, 0)
+			if err != nil || len(msgs) == 0 {
+				continue
+			}
+			var lastMention *ChatMessage
+			for i := range msgs {
+				m := &msgs[i]
+				if strings.EqualFold(m.Sender, acc.Email) {
+					lastMention = nil
+					continue
+				}
+				if MentionsUser(m.Text, acc.Email) {
+					lastMention = m
+				}
+			}
+			if lastMention != nil {
+				var primaryRepo string
+				if len(c.Repos) > 0 {
+					primaryRepo = c.Repos[0]
+				}
+				items = append(items, InboxItem{
+					ID:         c.ID + ":mention:" + lastMention.ID,
+					Kind:       InboxChatMention,
+					TaskID:     c.TaskID,
+					ChatID:     c.ID,
+					NodeID:     c.Node,
+					NodeUIURL:  nodeUIURLFor(c.Node),
+					Team:       c.Deployment,
+					Repo:       primaryRepo,
+					TaskKind:   KindInteractive,
+					Title:      c.Title,
+					State:      c.State,
+					Summary:    fmt.Sprintf("[%s]: %s", lastMention.Sender, lastMention.Text),
+					Submitter:  lastMention.Sender,
+					ViewerRole: a.chatRole(acc, c),
+					CanAct:     a.chatCanPost(acc, c),
+					UpdatedAt:  lastMention.CreatedAt,
 				})
 			}
 		}

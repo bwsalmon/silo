@@ -46,6 +46,7 @@ const kindLabels: Record<InboxKind, string> = {
   approval_request: 'approval_request',
   proposal: 'proposal',
   failed: 'failed',
+  chat_mention: 'chat_mention',
 };
 
 function defaultSelectedNodes(me?: Me, nodes?: NodeEntry[]): string[] {
@@ -124,8 +125,19 @@ function InboxCard({
             <Chip size="small" label={kindLabels[item.kind]} color="primary" variant="outlined" />
             <StateChip state={t.state} />
             <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-              <Link to={routePath({ page: 'task', id: t.id })}>{t.title || t.id}</Link>
+              <Link to={item.chat_id ? routePath({ page: 'chat', id: item.chat_id }) : routePath({ page: 'task', id: t.id })}>
+                {t.title || t.id}
+              </Link>
             </Typography>
+            {item.chat_id && (
+              <Chip
+                size="small"
+                label="Shared Chat"
+                variant="outlined"
+                onClick={() => {}}
+                component="span"
+              />
+            )}
           </Stack>
           {nodeId && uiHref && (
             <MuiLink
@@ -182,6 +194,12 @@ function InboxCard({
           <Typography variant="body2" color="text.secondary">
             {item.summary}
           </Typography>
+        )}
+
+        {item.kind === 'chat_mention' && item.summary && (
+          <Box sx={{ pl: 1, borderLeft: 2, borderColor: 'info.main' }}>
+            <Markdown>{item.summary}</Markdown>
+          </Box>
         )}
 
         {item.kind === 'failed' && (item.reason || item.summary) && (
