@@ -11,7 +11,7 @@ import { test as base, expect, type Browser, type Page } from '@playwright/test'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, createWriteStream } from 'node:fs';
-import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest, type Server as HttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -189,6 +189,56 @@ export class Hub {
       throw new Error(`pull_request webhook failed: ${res.status} ${await res.text()}`);
     }
   }
+
+  // workflowRunGitHub posts an HMAC-SHA256 signed workflow_run webhook to the hub.
+  async workflowRunGitHub(
+    slug: string,
+    opts: {
+      action?: 'requested' | 'in_progress' | 'completed';
+      name: string;
+      path?: string;
+      headBranch?: string;
+      sha: string;
+      conclusion?: string;
+      htmlUrl?: string;
+    },
+  ): Promise<void> {
+    const payload = JSON.stringify({
+      action: opts.action ?? 'completed',
+      repository: {
+        full_name: slug,
+        html_url: `https://github.com/${slug}`,
+        default_branch: 'main',
+      },
+      workflow: {
+        name: opts.name,
+        path: opts.path ?? `.github/workflows/${opts.name.toLowerCase()}.yml`,
+      },
+      workflow_run: {
+        id: 1001,
+        name: opts.name,
+        path: opts.path ?? `.github/workflows/${opts.name.toLowerCase()}.yml`,
+        head_branch: opts.headBranch ?? 'main',
+        head_sha: opts.sha,
+        status: opts.action ?? 'completed',
+        conclusion: opts.conclusion ?? 'success',
+        html_url: opts.htmlUrl ?? `https://github.com/${slug}/actions/runs/1001`,
+      },
+    });
+    const sig = 'sha256=' + createHmac('sha256', webhookSecret).update(payload).digest('hex');
+    const res = await fetch(`${this.url}/v1/webhooks/github`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': 'workflow_run',
+        'X-Hub-Signature-256': sig,
+      },
+      body: payload,
+    });
+    if (!res.ok) {
+      throw new Error(`workflow_run webhook failed: ${res.status} ${await res.text()}`);
+    }
+  }
 }
 
 async function freePort(): Promise<number> {
@@ -288,6 +338,8 @@ async function startHub(dir: string): Promise<Hub> {
       githubSimUrl,
       '-node-ui-domain',
       nodeUIDomain,
+      '-hub-url',
+      url,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
@@ -462,6 +514,48 @@ export const test = base.extend<
     const contexts: Awaited<ReturnType<Browser['newContext']>>[] = [];
     await use(async (user: string) => {
       const ctx = await browser.newContext({ baseURL: hub.url, extraHTTPHeaders: { [userHeader]: user } });
+      await ctx.route(/^https?:\/\/([^/]+\.nodes\.hub\.e2e\.test)(?::\d+)?(\/.*)?$/, async (route) => {
+        const req = route.request();
+        const parsed = new URL(req.url());
+        const hubUrl = new URL(hub.url);
+        const reqHeaders: Record<string, string> = {
+          ...req.headers(),
+          host: parsed.hostname,
+          [userHeader]: user,
+        };
+        const bodyBuf = req.postDataBuffer();
+        const res = await new Promise<{ status: number; headers: Record<string, string>; body: Buffer }>((resolve, reject) => {
+          const proxyReq = httpRequest(
+            {
+              hostname: hubUrl.hostname,
+              port: Number(hubUrl.port),
+              path: parsed.pathname + parsed.search,
+              method: req.method(),
+              headers: reqHeaders,
+            },
+            (proxyRes) => {
+              const chunks: Buffer[] = [];
+              proxyRes.on('data', (c) => chunks.push(Buffer.from(c)));
+              proxyRes.on('end', () => {
+                const headers: Record<string, string> = {};
+                for (const [k, v] of Object.entries(proxyRes.headers)) {
+                  if (typeof v === 'string') headers[k] = v;
+                  else if (Array.isArray(v)) headers[k] = v.join(', ');
+                }
+                resolve({ status: proxyRes.statusCode || 500, headers, body: Buffer.concat(chunks) });
+              });
+            },
+          );
+          proxyReq.on('error', reject);
+          if (bodyBuf) proxyReq.write(bodyBuf);
+          proxyReq.end();
+        });
+        await route.fulfill({
+          status: res.status,
+          headers: res.headers,
+          body: res.body,
+        });
+      });
       contexts.push(ctx);
       return ctx.newPage();
     });

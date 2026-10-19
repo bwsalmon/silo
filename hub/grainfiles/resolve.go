@@ -134,6 +134,14 @@ func hasDotSegment(p string) (hasDot, hasDotDot bool) {
 	return hasDot, hasDotDot
 }
 
+func isLoopbackDeploymentHTTPURL(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if !strings.HasPrefix(s, "http://127.0.0.1") && !strings.HasPrefix(s, "http://localhost") {
+		return false
+	}
+	return DeploymentIDFromRecipient(s) != ""
+}
+
 // CanonicalRepoURL returns the canonical base URL of a git repository
 // (`https://<lower-host>/<repo-path>`, with default port `:443`, trailing `/`,
 // and trailing `.git` stripped; docs/grainfiles-spec.md §8.5).
@@ -156,7 +164,8 @@ func CanonicalRepoURL(rawURL string) (string, error) {
 		}
 		return "file://" + repoName, nil
 	}
-	if !strings.HasPrefix(rawURL, "https://") {
+	isLoopbackHTTP := isLoopbackDeploymentHTTPURL(rawURL)
+	if !strings.HasPrefix(rawURL, "https://") && !isLoopbackHTTP {
 		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("only https:// (and file:// in tests) URLs are allowed: %q", rawURL))
 	}
 	u, err := url.Parse(rawURL)
@@ -204,7 +213,11 @@ func CanonicalRepoURL(rawURL string) (string, error) {
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", newFinding(CodeMalformedRef, "", fmt.Sprintf("invalid repository path: %q", rawURL))
 	}
-	return "https://" + host + "/" + cleaned, nil
+	scheme := "https://"
+	if isLoopbackHTTP {
+		scheme = "http://"
+	}
+	return scheme + host + "/" + cleaned, nil
 }
 
 // ParseRef parses a reference string according to docs/grainfiles-spec.md §8.1.
@@ -234,10 +247,11 @@ func ParseRef(s string) (Ref, error) {
 	}
 
 	if strings.Contains(s, "://") || urlSchemeRe.MatchString(s) {
-		if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "file://") {
+		isLoopbackHTTP := isLoopbackDeploymentHTTPURL(s)
+		if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "file://") && !isLoopbackHTTP {
 			return Ref{}, newFinding(CodeMalformedRef, "", fmt.Sprintf("only https:// (and file:// in tests) URLs are allowed: %q", s))
 		}
-		if strings.HasPrefix(s, "https://") {
+		if strings.HasPrefix(s, "https://") || isLoopbackHTTP {
 			return parseHTTPSRef(s, anchor)
 		}
 		return parseFileRef(s, anchor)
@@ -350,7 +364,11 @@ func parseHTTPSRef(s, anchor string) (Ref, error) {
 			host = fmt.Sprintf("%s:%d", hostname, portNum)
 		}
 	}
-	repoURL, err := CanonicalRepoURL(fmt.Sprintf("https://%s/%s", host, strings.Join(repoSegs, "/")))
+	scheme := "https"
+	if strings.EqualFold(u.Scheme, "http") && isLoopbackDeploymentHTTPURL(s) {
+		scheme = "http"
+	}
+	repoURL, err := CanonicalRepoURL(fmt.Sprintf("%s://%s/%s", scheme, host, strings.Join(repoSegs, "/")))
 	if err != nil {
 		return Ref{}, err
 	}

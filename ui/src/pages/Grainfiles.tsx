@@ -9,6 +9,10 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   LinearProgress,
   Link as MuiLink,
@@ -25,6 +29,8 @@ import {
 } from '@mui/material';
 import {
   getGrainfilesOverview,
+  putPersonalGrainfile,
+  putTeamGrainfile,
   type EventFilter,
   type Grainfile,
   type GrainfileEvent,
@@ -210,6 +216,48 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
   const [repoFilter, setRepoFilter] = useState('');
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
 
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorScope, setEditorScope] = useState<'personal' | 'team'>('personal');
+  const [editorTeam, setEditorTeam] = useState('');
+  const [editorPath, setEditorPath] = useState('tasks/example.task.grain.md');
+  const [editorContent, setEditorContent] = useState(
+    '---\nversion: v1\ntitle: "Example task"\nrecipient: "https://hub.local/deployments/example"\n---\n',
+  );
+  const [editorRefPath, setEditorRefPath] = useState('');
+  const [editorRefContent, setEditorRefContent] = useState('');
+  const [editorBusy, setEditorBusy] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
+
+  const saveHostedGrainfile = async () => {
+    setEditorBusy(true);
+    setEditorError(null);
+    try {
+      const files =
+        editorRefPath.trim().length > 0
+          ? { [editorRefPath.trim()]: editorRefContent }
+          : undefined;
+      const res =
+        editorScope === 'team'
+          ? await putTeamGrainfile(editorTeam.trim(), editorPath.trim(), {
+              content: editorContent,
+              files,
+            })
+          : await putPersonalGrainfile(editorPath.trim(), {
+              content: editorContent,
+              files,
+            });
+      setEditorOpen(false);
+      overview.reload();
+      if (res.indexed?.url) {
+        setSelectedUrl(res.indexed.url);
+      }
+    } catch (e) {
+      setEditorError((e as Error).message);
+    } finally {
+      setEditorBusy(false);
+    }
+  };
+
   const query = useMemo<GrainfileQuery>(() => {
     const q: GrainfileQuery = { include_drafts: true };
     if (kindFilter !== 'all') q.kind = kindFilter;
@@ -263,9 +311,22 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
             Indexed <code>.task.grain.md</code> tasks and <code>.process.grain.md</code> standing processes across watched repositories.
           </Typography>
         </Box>
-        <Button size="small" variant="outlined" onClick={overview.reload}>
-          Refresh
-        </Button>
+        <Stack direction="row" spacing={1}>
+          <Button
+            size="small"
+            variant="contained"
+            data-testid="open-grainfile-editor-btn"
+            onClick={() => {
+              setEditorError(null);
+              setEditorOpen(true);
+            }}
+          >
+            Author Grainfile
+          </Button>
+          <Button size="small" variant="outlined" onClick={overview.reload}>
+            Refresh
+          </Button>
+        </Stack>
       </Stack>
 
       <Paper sx={{ p: 2 }}>
@@ -720,6 +781,101 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
           </Stack>
         </Paper>
       )}
+
+      <Dialog
+        open={editorOpen}
+        onClose={() => !editorBusy && setEditorOpen(false)}
+        maxWidth="md"
+        fullWidth
+        data-testid="grainfile-editor-modal"
+      >
+        <DialogTitle>Author Hub-Hosted Grainfile</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {editorError && (
+              <Alert severity="error" data-testid="grainfile-editor-error">
+                {editorError}
+              </Alert>
+            )}
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+              <TextField
+                select
+                size="small"
+                label="Grainfile scope"
+                value={editorScope}
+                onChange={(e) => setEditorScope(e.target.value as 'personal' | 'team')}
+                inputProps={{ 'data-testid': 'grainfile-editor-scope' }}
+                sx={{ minWidth: 160 }}
+              >
+                <MenuItem value="personal">Personal</MenuItem>
+                <MenuItem value="team">Deployment</MenuItem>
+              </TextField>
+              {editorScope === 'team' && (
+                <TextField
+                  size="small"
+                  label="Target deployment"
+                  placeholder="payments-prod"
+                  value={editorTeam}
+                  onChange={(e) => setEditorTeam(e.target.value)}
+                  inputProps={{ 'data-testid': 'grainfile-editor-team' }}
+                  sx={{ minWidth: 200 }}
+                />
+              )}
+              <TextField
+                size="small"
+                label="Grainfile path"
+                placeholder="tasks/rotate-keys.task.grain.md"
+                value={editorPath}
+                onChange={(e) => setEditorPath(e.target.value)}
+                inputProps={{ 'data-testid': 'grainfile-editor-path' }}
+                sx={{ flex: 1 }}
+              />
+            </Stack>
+            <TextField
+              multiline
+              minRows={7}
+              label="Grainfile content"
+              value={editorContent}
+              onChange={(e) => setEditorContent(e.target.value)}
+              inputProps={{ 'data-testid': 'grainfile-editor-content' }}
+              sx={{ fontFamily: mono }}
+            />
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+              <TextField
+                size="small"
+                label="Companion file path (optional)"
+                placeholder="specs/rollout.md"
+                value={editorRefPath}
+                onChange={(e) => setEditorRefPath(e.target.value)}
+                inputProps={{ 'data-testid': 'grainfile-editor-ref-path' }}
+                sx={{ minWidth: 220 }}
+              />
+              <TextField
+                size="small"
+                label="Companion file content (optional)"
+                placeholder="# Spec details"
+                value={editorRefContent}
+                onChange={(e) => setEditorRefContent(e.target.value)}
+                inputProps={{ 'data-testid': 'grainfile-editor-ref-content' }}
+                sx={{ flex: 1 }}
+              />
+            </Stack>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditorOpen(false)} disabled={editorBusy}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={editorBusy || !editorPath.trim() || (editorScope === 'team' && !editorTeam.trim())}
+            data-testid="save-grainfile-btn"
+            onClick={saveHostedGrainfile}
+          >
+            Save Grainfile
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }

@@ -43,6 +43,7 @@ import type {
   GrainfileQuery,
   GrainfilesOverview,
   GrainfileSubscriptions,
+  HostedGrainfileResponse,
   HubEvent,
   InboxItem,
   InboxPreferences,
@@ -53,6 +54,7 @@ import type {
   NodeEntry,
   NodeToken,
   PostChatMessageInput,
+  PutHostedGrainfileInput,
   ResolvedTheme,
   Role,
   Task,
@@ -678,6 +680,30 @@ export class HubClient {
   async listGrainfileEvents(q: GrainfileQuery = {}, signal?: AbortSignal): Promise<GrainfileEvent[]> {
     const r = await this.getGrainfilesOverview(q, signal);
     return r.events;
+  }
+
+  putPersonalGrainfile(path: string, input: PutHostedGrainfileInput): Promise<HostedGrainfileResponse> {
+    const cleanPath = path
+      .replace(/^\/+/, '')
+      .split('/')
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join('/');
+    return this.write<HostedGrainfileResponse>('PUT', `/v1/grainfiles/personal/${cleanPath}`, input);
+  }
+
+  putTeamGrainfile(team: string, path: string, input: PutHostedGrainfileInput): Promise<HostedGrainfileResponse> {
+    const cleanPath = path
+      .replace(/^\/+/, '')
+      .split('/')
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join('/');
+    return this.write<HostedGrainfileResponse>(
+      'PUT',
+      `/v1/grainfiles/team/${encodeURIComponent(team)}/${cleanPath}`,
+      input,
+    );
   }
 
   // Shared chat sessions (docs/hub.md §6.6, docs/shared-chats.md).
