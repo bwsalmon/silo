@@ -223,19 +223,15 @@ file_task() {
 # say who the token is and that it may push to REPO without reaching
 # GitHub. Nothing here dispatches, so nothing ever clones with it.
 grain_team() {
-	local id="$1" repo="$2" out
-	out="$(grainapi POST /api/teams "$(jq -nc --arg id "$id" --arg u "$USER_EMAIL" --arg r "$repo" \
-		'{id: $id, name: $id, users: [$u], maxWorkers: 1, targetRepos: [$r]}')")"
-	if echo "$out" | jq -e '(.error // "") | test("single-tenant")' >/dev/null 2>&1; then
-		id="default"
-		local cur body
-		cur="$(grainapi GET /api/teams/default)"
-		body="$(echo "$cur" | jq -c --arg u "$USER_EMAIL" --arg r "$repo" \
-			'.id = "default" | .name = (.name // "default") | .users = (((.users // []) + [$u]) | unique) | .targetRepos = (((.targetRepos // []) + [$r]) | unique) | .maxWorkers = 1')"
-		out="$(grainapi PUT /api/teams/default "$body")"
-		if ! grainapi GET /api/teams/default | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null 2>&1; then
-			out="$(grainapi POST /api/teams "$body")"
-		fi
+	local id="$1" repo="$2" out cur users target_repos
+	cur="$(grainapi GET "/api/teams/$id" 2>/dev/null || true)"
+	users="$(echo "$cur" | jq -c --arg u "$USER_EMAIL" '((.users // []) + [$u]) | unique' 2>/dev/null)" || users="$(jq -nc --arg u "$USER_EMAIL" '[$u]')"
+	target_repos="$(echo "$cur" | jq -c --arg r "$repo" '((.targetRepos // []) + [$r]) | unique' 2>/dev/null)" || target_repos="$(jq -nc --arg r "$repo" '[$r]')"
+	out="$(grainapi POST /api/teams "$(jq -nc --arg id "$id" --argjson u "$users" --argjson r "$target_repos" \
+		'{id: $id, name: $id, users: $u, maxWorkers: 1, targetRepos: $r}')")"
+	if ! grainapi GET "/api/teams/$id" | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null 2>&1; then
+		out="$(grainapi PUT "/api/teams/$id" "$(jq -nc --arg id "$id" --argjson u "$users" --argjson r "$target_repos" \
+			'{id: $id, name: $id, users: $u, maxWorkers: 1, targetRepos: $r}')")"
 	fi
 	grainapi GET "/api/teams/$id" | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null ||
 		{ fail setup "could not give grain a team for $repo: $out"; return 1; }
@@ -320,7 +316,7 @@ round_trip() {
 	fi
 
 	local db="sqlite:$d/hub.db"
-	"$silo" hub team -database "$db" -id widgets -name Widgets -admin "user:$USER_EMAIL" -repo acme/widgets -repo acme/outside >/dev/null 2>"$d/setup.err" ||
+	"$silo" hub team -database "$db" -id default -name Default -admin "user:$USER_EMAIL" -repo acme/widgets -repo acme/outside >/dev/null 2>"$d/setup.err" ||
 		{ fail setup "silo hub team: $(cat "$d/setup.err")"; return 1; }
 	SILO_HUB_OIDC_SESSION_KEY=grain-interop-session-key-of-32-bytes-or-more \
 		"$silo" hub serve -dev -addr "127.0.0.1:$HUB_PORT" -database "$db" -admins user:admin@interop.test \
@@ -386,7 +382,7 @@ round_trip() {
 	GRAIN_CODE="$d/grain/local-api-token"
 	until_true 60 grain_up || { fail grain "grain's API did not come up"; return 1; }
 
-	grain_team widgets acme/widgets || return 1
+	grain_team default acme/widgets || return 1
 
 	stage "$label: register"
 	until_true "$WAIT" node_online || { fail register "grain did not show online in GET /v1/nodes: $(hub GET /v1/nodes)"; return 1; }
@@ -444,7 +440,7 @@ round_trip() {
 	# only because no team of its own owns the repository.
 	local b why
 	if grain_has '(policy|Policy)\.[A-Z]|\.Policy\b|[pP]olicy\('; then
-		grain_team outside acme/outside || return 1
+		grain_team default acme/outside || return 1
 		why="its local policy does not allow"
 	else
 		say "NOTICE: grain $grain_sha does not check an offer against its local policy (-policy): it holds the task at dispatch instead, so this checks the refusal of a repository no team of grain's owns"

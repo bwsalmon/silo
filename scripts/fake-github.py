@@ -21,6 +21,22 @@ class Handler(BaseHTTPRequestHandler):
         repo = re.fullmatch(r"/repos/([^/]+)/([^/]+)", path)
         if path == "/user":
             body = {"login": "grain-interop", "id": 1, "name": "grain-interop", "type": "User"}
+        elif path == "/user/repos":
+            if "page=1" in self.path or "page=" not in self.path:
+                body = [
+                    {
+                        "id": 1, "name": "widgets", "full_name": "acme/widgets",
+                        "owner": {"login": "acme"}, "private": False, "default_branch": "main",
+                        "permissions": {"admin": True, "maintain": True, "push": True, "triage": True, "pull": True},
+                    },
+                    {
+                        "id": 2, "name": "outside", "full_name": "acme/outside",
+                        "owner": {"login": "acme"}, "private": False, "default_branch": "main",
+                        "permissions": {"admin": True, "maintain": True, "push": True, "triage": True, "pull": True},
+                    },
+                ]
+            else:
+                body = []
         elif repo:
             owner, name = repo.groups()
             body = {
