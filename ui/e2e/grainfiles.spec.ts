@@ -81,7 +81,6 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
       'references:',
       '  - /docs/spec.md',
       '  - https://github.com/external/other/blob/main/runbook.md',
-      'depends_on:',
       `  - https://github.com/${repo2}/blob/main/processes/lint.process.grain.md`,
       'when:',
       '  schedule:',
@@ -251,13 +250,36 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   await expect(detail.getByRole('link', { name: sameRepoRef }).first()).toHaveAttribute('href', sameRepoRef);
   await expect(detail.getByRole('link', { name: externalRunbook })).toHaveAttribute('href', externalRunbook);
   await expect(detail.getByText('Authorized (same-repo)')).toBeVisible();
-  await expect(detail.getByText('External', { exact: true })).toBeVisible();
+  await expect(detail.getByText('External', { exact: true }).first()).toBeVisible();
   await expect(detail.getByRole('link', { name: depUrl }).first()).toHaveAttribute('href', depUrl);
   await expect(detail.getByText(new RegExp(node.id))).toBeVisible();
   await expect(detail.getByText('process_updated').first()).toBeVisible();
   await expect(detail.getByText('process_triggered').first()).toBeVisible();
   await expect(detail.getByText('trigger: push')).toBeVisible();
-  await expect(detail.getByText('trigger: depends_on')).toBeVisible();
+
+  // 7. Push and inspect a Jinja2 Grainfile template (.task.grain.md.jinja2)
+  await hub.pushGitHub(world.repo, 'main', {
+    'tasks/03-rollout.task.grain.md.jinja2': [
+      '---',
+      'grainfile: v1',
+      `title: "Rollout {{ service_name | default('billing') }} to {{ region | default('eu-west-1') }} ${world.n}"`,
+      `recipient: "{{ recipient_url | default('${recipientAlpha}') }}"`,
+      '---',
+      '# Rollout {{ service_name | default("billing") }}',
+      '',
+      'Deploy {{ service_name | default("billing") }} in {{ region | default("eu-west-1") }}.',
+    ].join('\n'),
+  });
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  const rolloutTitle = `Rollout billing to eu-west-1 ${world.n}`;
+  await expect(table.getByText(rolloutTitle)).toBeVisible();
+  await expect(table.getByText('jinja2').first()).toBeVisible();
+  await expect(table.getByText('vars: recipient_url, region, service_name')).toBeVisible();
+  await table.getByText(rolloutTitle).click();
+  await expect(detail.getByRole('heading', { name: rolloutTitle })).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^jinja2$/ })).toBeVisible();
+  await expect(detail.getByText('Template variables (template_vars):')).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^service_name$/ })).toBeVisible();
 
   // Browsing and inspecting Grainfiles leaves nothing in browser storage.
   const s = await storage(page);

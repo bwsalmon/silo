@@ -58,16 +58,11 @@ Grainfiles use two reference lists (`references` and `depends_on`), both sharing
 - **Cross-repository references** use standard clickable forge URLs (`https://github.com/acme/widgets/blob/main/docs/widget-schema.md#schema-version-header`, `https://github.com/acme/widgets/tree/main/src`).
 - **Repository-local references** use `/`-rooted paths from the repository root (`/docs/widget-schema.md`, `/src/widget.go`) or relative paths (`./2026-10-16-widget-schema-v2.task.grain.md`).
 
-### `depends_on` target rules (spec §7, §8.3)
+### `depends_on` target rules (spec §7, §8.3) and `.grain.md.jinja2` templates (spec §5.7)
 
-- **`depends_on` on a `.task.grain.md`** MUST resolve only to `.task.grain.md` files (`GF032` if a task depends on a process).
-- **`depends_on` on a `.process.grain.md`** MUST resolve either to a `.process.grain.md` or to a `.task.grain.md` (`GF032` otherwise), subject to DAG cycle detection (`GF033`).
-
-For example, in `examples/grainfiles/grain-eu/processes/qualification/`:
-- `smoke.process.grain.md` declares `when: {schedule: {cron: "0 2 * * *", timezone: "Europe/Berlin"}}`.
-- `report.process.grain.md` declares `when: {schedule: {cron: "0 2 * * *", timezone: "Europe/Berlin"}}` and `depends_on: ["./smoke.process.grain.md"]`.
-
-When both processes fire on their schedule at 02:00 Berlin time, `report.process.grain.md` waits for `smoke.process.grain.md` to finish before starting (`depends_on`).
+- **`depends_on` is restricted exclusively to `.task.grain.md` (`GF020` on `.process.grain.md`):** A `.task.grain.md` is a concrete 1-off task with a single identity `(repo_url, file_path)`, a single `recipient` deployment, and a single terminal `done` state — so `depends_on` between concrete `.task.grain.md` files is a well-defined DAG (`GF034` on cycles). A `.process.grain.md` is a standing 1-to-many trigger (`when`, `gate`, `references`, `draft`, `not_before`) with no `recipient` and no single completion state; multi-step or cross-task coordination inside a process is expressed in natural language in the `.process.grain.md` prompt itself (where the executing agent can run steps or propose/chain sub-tasks locally) and via `references`.
+- **Every `depends_on` entry on a `.task.grain.md` MUST resolve to a concrete `.task.grain.md` file (`GF032`):** Never a `.process.grain.md` and never an unrendered `.jinja2` template.
+- **Plain `.grain.md` vs. self-contained `.grain.md.jinja2` templates:** Plain `<name>.task.grain.md` and `<name>.process.grain.md` files are 100% literal (zero template evaluation). Self-contained `<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2` templates apply sandboxed Jinja2 (`ImmutableSandboxedEnvironment(loader=None)`, rejecting `include`/`extends`/`import`/`from` with `GF034` and syntax errors with `GF033`) to the whole file to produce a standard `.task.grain.md` or `.process.grain.md` document.
 
 ## 5. Triggers (`when`) and merge gating (`gate`)
 

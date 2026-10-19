@@ -101,6 +101,9 @@ function normalizeGrainfile(g: Grainfile): Grainfile {
     spec_summary_path: g.spec_summary_path ?? 'docs/grainfile-v1.md',
     spec_path: g.spec_path ?? 'docs/grainfiles-spec.md',
   };
+  if (g.is_template || g.path?.endsWith('.jinja2')) {
+    out.is_template = true;
+  }
   const triggers = g.when ?? g.on ?? g.on_spec;
   if (triggers && Object.keys(triggers).length > 0) {
     out.when = triggers;
@@ -126,6 +129,9 @@ function normalizeGrainfileEvent(e: GrainfileEvent): GrainfileEvent {
     spec_summary_path: e.spec_summary_path ?? 'docs/grainfile-v1.md',
     spec_path: e.spec_path ?? 'docs/grainfiles-spec.md',
   };
+  if (e.is_template || e.path?.endsWith('.jinja2')) {
+    out.is_template = true;
+  }
   const triggers = e.when ?? e.on ?? e.on_spec;
   if (triggers && Object.keys(triggers).length > 0) {
     out.when = triggers;

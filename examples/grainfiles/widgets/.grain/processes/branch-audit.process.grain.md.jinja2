@@ -1,0 +1,16 @@
+---
+grainfile: v1
+title: Audit widget schema changes on {{ target_branch | default("main") | trim }}
+when:
+  push:
+    branches:
+      - {{ target_branch | default("main") | trim }}
+    paths:
+      - "src/**"
+gate: {{ enforce_gate | default("false") }}
+references:
+  - /docs/widget-schema.md
+  - /src/widget.go
+---
+{# Self-contained Jinja2 process template for branch audit #}
+Audit commits pushed to `{{ target_branch | default("main") | trim }}` touching `src/**` against `/docs/widget-schema.md`.

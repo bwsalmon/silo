@@ -295,6 +295,16 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                         {g.title}
                       </Typography>
                       <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                        {(g.is_template || g.path.endsWith('.jinja2')) && (
+                          <Chip size="small" label="jinja2" color="info" variant="outlined" />
+                        )}
+                        {g.template_vars && g.template_vars.length > 0 && (
+                          <Chip
+                            size="small"
+                            label={`vars: ${g.template_vars.join(', ')}`}
+                            variant="outlined"
+                          />
+                        )}
                         {g.draft && <Chip size="small" label="Draft" color="warning" />}
                         {g.not_before && (
                           <Chip
@@ -393,6 +403,9 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                 <GrainfileKindChip kind={selected.kind} />
                 <Typography variant="h6">{selected.title}</Typography>
+                {(selected.is_template || selected.path.endsWith('.jinja2')) && (
+                  <Chip size="small" label="jinja2" color="info" variant="outlined" />
+                )}
                 {selected.draft && <Chip size="small" label="Draft" color="warning" />}
                 {selected.gate && <Chip size="small" label="Gate" color="success" />}
                 {selected.not_before && (
@@ -424,6 +437,18 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                       </>
                     ) : null}
                   </Typography>
+                )}
+                {selected.template_vars && selected.template_vars.length > 0 && (
+                  <Box>
+                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                      <strong>Template variables (template_vars):</strong>
+                    </Typography>
+                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                      {selected.template_vars.map((v) => (
+                        <Chip key={v} size="small" label={v} sx={{ fontFamily: mono }} variant="outlined" />
+                      ))}
+                    </Stack>
+                  </Box>
                 )}
                 {selected.recipient && (
                   <Typography variant="body2">

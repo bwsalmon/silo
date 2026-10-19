@@ -584,13 +584,14 @@ func (s *Server) acceptNodeStreams(nodeID string, m *mux.Mux) {
 }
 
 type muxFetchRequest struct {
-	Type         string `json:"type"`
-	GrainfileURL string `json:"grainfile_url"`
-	Commit       string `json:"commit,omitempty"`
-	CommitSHA    string `json:"commit_sha,omitempty"`
-	Reference    string `json:"reference,omitempty"`
-	Path         string `json:"path,omitempty"`
-	Format       string `json:"format,omitempty"`
+	Type         string            `json:"type"`
+	GrainfileURL string            `json:"grainfile_url"`
+	Commit       string            `json:"commit,omitempty"`
+	CommitSHA    string            `json:"commit_sha,omitempty"`
+	Reference    string            `json:"reference,omitempty"`
+	Path         string            `json:"path,omitempty"`
+	Format       string            `json:"format,omitempty"`
+	Vars         map[string]string `json:"vars,omitempty"`
 }
 
 // MuxFetchHeader is the first JSON line written back by the Hub on a
@@ -684,7 +685,7 @@ func (s *Server) serveMuxFetch(nodeID string, st *mux.Stream, req muxFetchReques
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	kind, resolvedCommit, data, err := api.FetchAuthorizedContent(ctx, nodeID, req.GrainfileURL, commit, reference, req.Format)
+	kind, resolvedCommit, data, err := api.FetchAuthorizedContentWithVars(ctx, nodeID, req.GrainfileURL, commit, reference, req.Format, req.Vars)
 	if err != nil {
 		switch {
 		case errors.Is(err, grainfiles.ErrUnauthorized):

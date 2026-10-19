@@ -399,7 +399,7 @@ func TestStoreProcessFanoutAndDependsOn(t *testing.T) {
 		if _, err := s.SetSubscriptions(ctx, Subscriptions{
 			NodeID:     "node-us",
 			Recipients: []string{"https://github.com/acme/grain-us"},
-			Folders:    []string{"https://github.com/acme/grain-us/tree/main/processes"},
+			Folders:    []string{"https://github.com/acme/grain-us/tree/main/tasks"},
 			Grainfiles: []string{"https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.grain.md"},
 		}); err != nil {
 			t.Fatal(err)
@@ -429,51 +429,84 @@ Run smoke suite.
 			t.Fatal(err)
 		}
 
-		// 2. Dependent process report.process.grain.md in acme/grain-us with depends_on pointing to smoke.process.grain.md.
-		reportYAML := `---
-title: Publish qualification report
+		// Verify depends_on on .process.grain.md is rejected with GF020.
+		badProcYAML := `---
+title: Invalid process with depends_on
 depends_on:
-  - https://github.com/acme/widgets/blob/main/.grain/processes/smoke.process.grain.md
+  - https://github.com/acme/widgets/blob/main/.grain/tasks/prep.task.grain.md
 when:
   manual: {}
 ---
-Summarize smoke results.
+Must be rejected.
 `
-		reportGF, err := Parse("processes/report.process.grain.md", []byte(reportYAML))
+		if _, err := Parse("processes/report.process.grain.md", []byte(badProcYAML)); err == nil || !strings.Contains(err.Error(), CodeSchemaInvalid) {
+			t.Fatalf("expected %s for depends_on on .process.grain.md, got %v", CodeSchemaInvalid, err)
+		}
+
+		// 2. Concrete task prep.task.grain.md in acme/widgets and dependent task rollout.task.grain.md in acme/grain-us.
+		prepYAML := `---
+title: Prepare widget release artifacts
+recipient: https://github.com/acme/grain-eu
+---
+Prepare release artifacts.
+`
+		prepGF, err := Parse(".grain/tasks/prep.task.grain.md", []byte(prepYAML))
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = reportGF.ResolveSource(Source{
+		_ = prepGF.ResolveSource(Source{
+			RepoURL: "https://github.com/acme/widgets",
+			Ref:     "refs/heads/main",
+			Commit:  "sha-1",
+			Path:    ".grain/tasks/prep.task.grain.md",
+		})
+		if _, err := s.IndexGrainfile(ctx, prepGF); err != nil {
+			t.Fatal(err)
+		}
+
+		rolloutYAML := `---
+title: Roll out widget release to US
+recipient: https://github.com/acme/grain-us
+depends_on:
+  - https://github.com/acme/widgets/blob/main/.grain/tasks/prep.task.grain.md
+---
+Roll out after prep completes.
+`
+		rolloutGF, err := Parse("tasks/rollout.task.grain.md", []byte(rolloutYAML))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = rolloutGF.ResolveSource(Source{
 			RepoURL: "https://github.com/acme/grain-us",
 			Ref:     "refs/heads/main",
 			Commit:  "sha-us-1",
-			Path:    "processes/report.process.grain.md",
+			Path:    "tasks/rollout.task.grain.md",
 		})
-		reportRec, err := s.IndexGrainfile(ctx, reportGF)
+		rolloutRec, err := s.IndexGrainfile(ctx, rolloutGF)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		// Both node-eu (by repo) and node-us (by grainfile_url) receive process_updated for smoke.process.grain.md!
+		// Both node-eu (by repo/recipient) and node-us (by grainfile_url) receive process_updated for smoke.process.grain.md!
 		euInit, _, _ := s.CatchupNode(ctx, "node-eu", true)
 		usInit, _, _ := s.CatchupNode(ctx, "node-us", true)
-		if len(euInit) != 1 || euInit[0].Type != EventProcessUpdated || euInit[0].GrainfileURL != smokeGF.URL {
-			t.Fatalf("expected node-eu to receive process_updated for smoke, got %+v", euInit)
+		if len(euInit) != 2 || euInit[0].Type != EventProcessUpdated || euInit[0].GrainfileURL != smokeGF.URL {
+			t.Fatalf("expected node-eu to receive process_updated for smoke and task_ready for prep, got %+v", euInit)
 		}
 		if len(usInit) != 2 {
-			t.Fatalf("expected node-us to receive process_updated for both smoke and report, got %+v", usInit)
+			t.Fatalf("expected node-us to receive process_updated for smoke and task_ready for rollout, got %+v", usInit)
 		}
 
-		// Verify report.process.grain.md dependencies are not yet satisfied.
-		sat, err := s.DependenciesSatisfied(ctx, reportRec.URL)
+		// Verify rollout.task.grain.md dependencies are not yet satisfied.
+		sat, err := s.DependenciesSatisfied(ctx, rolloutRec.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if sat {
-			t.Fatal("expected report.process.grain.md dependencies to be unsatisfied before smoke completes")
+			t.Fatal("expected rollout.task.grain.md dependencies to be unsatisfied before prep completes")
 		}
 
-		// 3. Evaluate push trigger on acme/widgets -> triggers both smoke.process.grain.md AND report.process.grain.md (via depends_on)!
+		// 3. Evaluate push trigger on acme/widgets -> triggers smoke.process.grain.md!
 		trigEvs, err := s.EvaluateTriggers(ctx, "https://github.com/acme/widgets", "sha-2", ForgeEvent{
 			Source:       TriggerPush,
 			Branch:       "refs/heads/main",
@@ -482,48 +515,42 @@ Summarize smoke results.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(trigEvs) != 2 {
-			t.Fatalf("expected 2 triggered events (primary + depends_on co-trigger), got %+v", trigEvs)
-		}
-		if trigEvs[0].GrainfileURL != smokeGF.URL || trigEvs[0].TriggerSource != TriggerPush {
-			t.Errorf("unexpected primary trigger event: %+v", trigEvs[0])
-		}
-		if trigEvs[1].GrainfileURL != reportGF.URL || trigEvs[1].TriggerSource != TriggerDependsOn || trigEvs[1].TriggeredBy != smokeGF.URL {
-			t.Errorf("unexpected co-trigger event: %+v", trigEvs[1])
+		if len(trigEvs) != 1 || trigEvs[0].GrainfileURL != smokeGF.URL || trigEvs[0].TriggerSource != TriggerPush {
+			t.Fatalf("expected 1 triggered event for smoke.process.grain.md, got %+v", trigEvs)
 		}
 
-		// 4. Complete smoke.process.grain.md -> records dependency_completed for report.process.grain.md and satisfies its depends_on!
-		depEvs, err := s.RecordDependencyCompleted(ctx, smokeGF.URL, "sha-2", "done", "all checks passed")
+		// 4. Complete prep.task.grain.md -> records dependency_completed for rollout.task.grain.md and satisfies its depends_on!
+		depEvs, err := s.RecordDependencyCompleted(ctx, prepGF.URL, "sha-1", "done", "all checks passed")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(depEvs) != 1 || depEvs[0].Type != EventDependencyCompleted || depEvs[0].GrainfileURL != reportGF.URL {
+		if len(depEvs) != 1 || depEvs[0].Type != EventDependencyCompleted || depEvs[0].GrainfileURL != rolloutGF.URL {
 			t.Fatalf("unexpected dependency_completed events: %+v", depEvs)
 		}
 
-		sat, err = s.DependenciesSatisfied(ctx, reportRec.URL)
+		sat, err = s.DependenciesSatisfied(ctx, rolloutRec.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !sat {
-			t.Fatal("expected report.process.grain.md dependencies to be satisfied after smoke completed with done")
+			t.Fatal("expected rollout.task.grain.md dependencies to be satisfied after prep completed with done")
 		}
 
 		usEvents, _, err := s.CatchupNode(ctx, "node-us", true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var sawCoTrigger, sawDepDone bool
+		var sawSmokeTrigger, sawDepDone bool
 		for _, ev := range usEvents {
-			if ev.Type == EventProcessTriggered && ev.TriggerSource == TriggerDependsOn && ev.GrainfileURL == reportGF.URL {
-				sawCoTrigger = true
+			if ev.Type == EventProcessTriggered && ev.GrainfileURL == smokeGF.URL {
+				sawSmokeTrigger = true
 			}
-			if ev.Type == EventDependencyCompleted && ev.DependencyURL == smokeGF.URL && ev.DependencyState == "done" {
+			if ev.Type == EventDependencyCompleted && ev.DependencyURL == prepGF.URL && ev.DependencyState == "done" {
 				sawDepDone = true
 			}
 		}
-		if !sawCoTrigger || !sawDepDone {
-			t.Errorf("node-us catchup missing expected events (sawCoTrigger=%v, sawDepDone=%v): %+v", sawCoTrigger, sawDepDone, usEvents)
+		if !sawSmokeTrigger || !sawDepDone {
+			t.Errorf("node-us catchup missing expected events (sawSmokeTrigger=%v, sawDepDone=%v): %+v", sawSmokeTrigger, sawDepDone, usEvents)
 		}
 	})
 }
@@ -700,12 +727,12 @@ func TestTaskIdempotencyEditsDeletionAndBoundedTriggerWith(t *testing.T) {
 
 		// 5. Bounded depends_on chain depth (MaxDependsOnDepth = 8) & cycle safety.
 		for i := 0; i <= MaxDependsOnDepth+3; i++ {
-			path := fmt.Sprintf(".grain/processes/p%02d.process.grain.md", i)
+			path := fmt.Sprintf(".grain/processes/p%02d.process.md", i)
 			var yamlBody string
 			if i == 0 {
 				yamlBody = "---\ntitle: Root process\nwhen:\n  push:\n    branches: [\"main\"]\n---\nRoot.\n"
 			} else {
-				prevURL := fmt.Sprintf("https://github.com/acme/widgets/blob/main/.grain/processes/p%02d.process.grain.md", i-1)
+				prevURL := fmt.Sprintf("https://github.com/acme/widgets/blob/main/.grain/processes/p%02d.process.md", i-1)
 				yamlBody = fmt.Sprintf("---\ntitle: Step %d\ndepends_on:\n  - %s\nwhen:\n  manual: {}\n---\nStep.\n", i, prevURL)
 			}
 			pg, err := Parse(path, []byte(yamlBody))

@@ -230,9 +230,63 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if rep.Recipient != "" {
 		t.Errorf("rep.Recipient after Resolve = %q, want empty", rep.Recipient)
 	}
-	wantSmokeURL := []string{"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.grain.md"}
-	if !reflect.DeepEqual(rep.DependsOn, wantSmokeURL) {
-		t.Errorf("rep.DependsOn = %v, want %v", rep.DependsOn, wantSmokeURL)
+	if len(rep.DependsOn) != 0 {
+		t.Errorf("rep.DependsOn = %v, want empty (depends_on is .task.grain.md-only)", rep.DependsOn)
+	}
+	wantSmokeRefs := []string{
+		"https://github.com/acme/grain-eu/blob/main/processes/qualification/smoke.process.grain.md",
+		"https://github.com/acme/widgets/blob/main/docs/widget-schema.md",
+	}
+	if !reflect.DeepEqual(rep.References, wantSmokeRefs) {
+		t.Errorf("rep.References = %v, want %v", rep.References, wantSmokeRefs)
+	}
+
+	// Verify the worked .task.grain.md.jinja2 and .process.grain.md.jinja2 examples.
+	rolloutTplPath := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "rollout-region.task.grain.md.jinja2")
+	rolloutTpl, err := ParseFile(rolloutTplPath)
+	if err != nil {
+		t.Fatalf("ParseFile(rollout-region.task.grain.md.jinja2): %v", err)
+	}
+	if !rolloutTpl.IsTemplate {
+		t.Errorf("rolloutTpl.IsTemplate = false, want true")
+	}
+	wantTaskVars := []string{"dry_run", "environment", "recipient_url", "region", "requestor"}
+	if !reflect.DeepEqual(rolloutTpl.TemplateVars, wantTaskVars) {
+		t.Errorf("rolloutTpl.TemplateVars = %v, want %v", rolloutTpl.TemplateVars, wantTaskVars)
+	}
+	if rolloutTpl.Kind != KindTask || rolloutTpl.Recipient != "https://github.com/acme/grain-eu" {
+		t.Errorf("unexpected default-rendered rolloutTpl: kind=%q recipient=%q", rolloutTpl.Kind, rolloutTpl.Recipient)
+	}
+	rolloutBytes, err := os.ReadFile(rolloutTplPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderedRollout, err := ParseWithVars(".grain/tasks/rollout-region.task.grain.md.jinja2", rolloutBytes, map[string]string{
+		"region":        "us-east-1",
+		"environment":   "staging",
+		"recipient_url": "https://github.com/acme/grain-us-east-1",
+		"requestor":     "https://github.com/acme/sre",
+	})
+	if err != nil {
+		t.Fatalf("ParseWithVars(rollout-region): %v", err)
+	}
+	if renderedRollout.Title != "Roll out widget schema v2 to US-EAST-1 (staging)" ||
+		renderedRollout.Recipient != "https://github.com/acme/grain-us-east-1" ||
+		renderedRollout.Requestor != "https://github.com/acme/sre" {
+		t.Errorf("unexpected renderedRollout: %+v", renderedRollout)
+	}
+
+	auditTplPath := filepath.Join(examplesDir, "widgets", ".grain", "processes", "branch-audit.process.grain.md.jinja2")
+	auditTpl, err := ParseFile(auditTplPath)
+	if err != nil {
+		t.Fatalf("ParseFile(branch-audit.process.grain.md.jinja2): %v", err)
+	}
+	if !auditTpl.IsTemplate || auditTpl.Kind != KindProcess {
+		t.Errorf("unexpected auditTpl: IsTemplate=%v Kind=%q", auditTpl.IsTemplate, auditTpl.Kind)
+	}
+	wantProcVars := []string{"enforce_gate", "target_branch"}
+	if !reflect.DeepEqual(auditTpl.TemplateVars, wantProcVars) {
+		t.Errorf("auditTpl.TemplateVars = %v, want %v", auditTpl.TemplateVars, wantProcVars)
 	}
 }
 
@@ -670,18 +724,30 @@ when:
 ---
 Run co-triggered check.
 `)
-	gp, err := Parse(".grain/processes/follow.process.grain.md", procRaw)
-	if err != nil {
-		t.Fatalf("Parse(proc): %v", err)
+	if _, err := Parse(".grain/processes/follow.process.grain.md", procRaw); err == nil || !strings.Contains(err.Error(), CodeSchemaInvalid) {
+		t.Fatalf("Parse(proc with depends_on): got %v, want %s", err, CodeSchemaInvalid)
 	}
-	if err := gp.Resolve("https://GitHub.com:443/acme/widgets.git/", "refs/heads/main", ".grain/processes/follow.process.grain.md"); err != nil {
-		t.Fatalf("gp.Resolve: %v", err)
+
+	taskDepOnProcRaw := []byte(`---
+title: Task depending on process
+depends_on:
+  - ../processes/nightly.process.grain.md
+---
+Rejected because depends_on must target a concrete .task.grain.md.
+`)
+	if _, err := Parse(".grain/tasks/bad-dep.task.grain.md", taskDepOnProcRaw); err == nil || !strings.Contains(err.Error(), CodeWrongTargetKind) {
+		t.Fatalf("Parse(task with depends_on pointing to .process.grain.md): got %v, want %s", err, CodeWrongTargetKind)
 	}
-	wantProcDeps := []string{
-		"https://github.com/acme/widgets/blob/main/.grain/processes/nightly.process.grain.md",
-	}
-	if !reflect.DeepEqual(gp.DependsOn, wantProcDeps) {
-		t.Errorf("gp.DependsOn = %v, want %v", gp.DependsOn, wantProcDeps)
+
+	taskDepOnTplRaw := []byte(`---
+title: Task depending on unrendered jinja2 template
+depends_on:
+  - ./rollout-region.task.grain.md.jinja2
+---
+Rejected because depends_on cannot target an unrendered .jinja2 template.
+`)
+	if _, err := Parse(".grain/tasks/bad-dep-tpl.task.grain.md", taskDepOnTplRaw); err == nil || !strings.Contains(err.Error(), CodeWrongTargetKind) {
+		t.Fatalf("Parse(task with depends_on pointing to .jinja2): got %v, want %s", err, CodeWrongTargetKind)
 	}
 
 	sameRepo, crossRepo := g.AuthorizedReferences("https://github.com/acme/widgets")

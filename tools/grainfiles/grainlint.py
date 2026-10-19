@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """grainlint: the reference linter for the Grainfile Format (docs/grainfiles-spec.md).
 
-  grainlint.py TREE...       lint each tree (a directory of repositories, or one repository)
+  grainlint.py [--var KEY=VALUE ...] TREE...
+                             lint each tree (a directory of repositories, or one repository)
   grainlint.py --self-test   lint the examples (no errors or warnings), every fixture under
                              testdata/bad (exactly the codes in its expect.txt), and
                              check the spec, schemas and linter agree
@@ -11,9 +12,10 @@ repository). Remote references (https://…) are resolved through stubs.yaml
 at the tree's top, mapping a repository URL to a child directory; an unmapped
 repository is external and is not resolved.
 
-Needs python3-yaml and python3-jsonschema.
+Needs python3-yaml, python3-jsonschema, and python3-jinja2.
 """
 import datetime, json, pathlib, posixpath, re, sys, urllib.parse
+import jinja2, jinja2.meta, jinja2.nodes, jinja2.sandbox
 import jsonschema, yaml
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -48,7 +50,7 @@ KINDS = ["task", "process"]
 SOURCES = ["schedule", "push", "merge", "pull_request", "manual", "scenario"]
 SEVERITY = {"GF005": "warning", "GF022": "warning"}
 CODES = ["GF001", "GF003", "GF004", "GF005", "GF006", "GF020", "GF022",
-         "GF030", "GF032", "GF034", "GF035", "GF036"]
+         "GF030", "GF032", "GF033", "GF034", "GF035", "GF036"]
 STEM = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 USER_IDENTITY = re.compile(r"^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$")
 ANCHOR_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -75,10 +77,16 @@ def valid_time_or_date(s, allow_date=False):
 
 EXPECTS = {
     ("task", "depends_on"): ("task",),
-    ("process", "depends_on"): ("task", "process"),
 }
 MAX_FILE_BYTES = 1024 * 1024
 MAX_FM_BYTES = 64 * 1024
+
+FORBIDDEN_JINJA2_NODES = (
+    jinja2.nodes.Include,
+    jinja2.nodes.Extends,
+    jinja2.nodes.Import,
+    jinja2.nodes.FromImport,
+)
 
 
 class Finding(Exception):
@@ -119,19 +127,29 @@ Loader.yaml_implicit_resolvers["O"] = [r for r in Loader.yaml_implicit_resolvers
                                        if r[0] != "tag:yaml.org,2002:bool"]
 
 
-def parse(path):
-    """-> (front matter, body) or raises Finding."""
-    raw = pathlib.Path(path).read_bytes()
-    if len(raw) > MAX_FILE_BYTES:
-        raise Finding("GF006", path, "grainfile exceeds 1 MiB")
-    if raw.startswith(b"version https://git-lfs"):
-        raise Finding("GF003", path, "a grainfile may not be an LFS pointer")
-    if b"\0" in raw or raw.startswith(b"\xef\xbb\xbf"):
-        raise Finding("GF003", path, "NUL or byte-order mark")
+def render_template(raw_text, path="<template>", cli_vars=None):
+    """Render a sandboxed .grain.md.jinja2 template -> (rendered_text, template_vars) or raises Finding."""
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(loader=None)
     try:
-        text = raw.decode("utf-8").replace("\r\n", "\n")
-    except UnicodeDecodeError:
-        raise Finding("GF003", path, "not UTF-8")
+        ast = env.parse(raw_text)
+    except jinja2.TemplateSyntaxError as e:
+        raise Finding("GF033", path, "Jinja2 syntax error: %s" % e)
+    for node in ast.find_all(FORBIDDEN_JINJA2_NODES):
+        raise Finding("GF034", path, "forbidden Jinja2 tag %s in sandboxed grainfile template" % type(node).__name__.lower())
+    template_vars = sorted(jinja2.meta.find_undeclared_variables(ast))
+    try:
+        rendered = env.from_string(raw_text).render(**(cli_vars or {}))
+    except jinja2.TemplateError as e:
+        raise Finding("GF033", path, "Jinja2 render error: %s" % e)
+    except Exception as e:
+        raise Finding("GF033", path, "Jinja2 evaluation error: %s" % e)
+    if len(rendered.encode("utf-8")) > MAX_FILE_BYTES:
+        raise Finding("GF006", path, "rendered grainfile template exceeds 1 MiB")
+    return rendered, template_vars
+
+
+def parse_text(text, path):
+    """Parse decoded Grainfile text -> (front matter, body) or raises Finding."""
     lines = text.split("\n")
     if lines[0].rstrip() != "---":
         raise Finding("GF003", path, "no front matter")
@@ -154,6 +172,32 @@ def parse(path):
     if not isinstance(fm, dict):
         raise Finding("GF004", path, "front matter is not a mapping")
     return fm, "\n".join(lines[end + 1:])
+
+
+def parse_grainfile(path, is_template=False, cli_vars=None):
+    """-> (front matter, body, template_vars) or raises Finding."""
+    raw = pathlib.Path(path).read_bytes()
+    if len(raw) > MAX_FILE_BYTES:
+        raise Finding("GF006", path, "grainfile exceeds 1 MiB")
+    if raw.startswith(b"version https://git-lfs"):
+        raise Finding("GF003", path, "a grainfile may not be an LFS pointer")
+    if b"\0" in raw or raw.startswith(b"\xef\xbb\xbf"):
+        raise Finding("GF003", path, "NUL or byte-order mark")
+    try:
+        text = raw.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        raise Finding("GF003", path, "not UTF-8")
+    template_vars = []
+    if is_template:
+        text, template_vars = render_template(text, path, cli_vars=cli_vars)
+    fm, body = parse_text(text, path)
+    return fm, body, template_vars
+
+
+def parse(path, is_template=False, cli_vars=None):
+    """-> (front matter, body) or raises Finding."""
+    fm, body, _ = parse_grainfile(path, is_template=is_template, cli_vars=cli_vars)
+    return fm, body
 
 
 def heading_slug(text):
@@ -210,23 +254,23 @@ def parse_ref(s):
     if s.startswith("git@"):
         raise Finding("GF035", "", "SSH references are not allowed; use https:// (%r)" % s)
     if "://" in s or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", s):
-        if not s.startswith(("https://", "file://")):
-            raise Finding("GF035", "", "only https:// (and file:// in tests) URLs are allowed: %r" % s)
+        if not (s.startswith("https://") or s.startswith("file://")):
+            raise Finding("GF035", "", "unsupported reference scheme in %r (only https:// is allowed)" % s)
         u = urllib.parse.urlsplit(s)
-        if u.username or u.password or "@" in (u.netloc or ""):
-            raise Finding("GF035", "", "credentials are not allowed in reference URLs: %r" % s)
+        if u.username or u.password:
+            raise Finding("GF035", "", "credentials are not allowed in reference URLs (%r)" % s)
         if "//" in u.path:
-            raise Finding("GF035", "", "empty path segments (//) are not allowed in reference URLs: %r" % s)
+            raise Finding("GF035", "", "'//' path separators are not allowed; use standard forge /blob/<ref>/ or /tree/<ref>/ URLs (%r)" % s)
         if u.scheme == "https":
-            if not u.hostname:
-                raise Finding("GF035", "", "missing host in reference URL: %r" % s)
-            segs = [seg for seg in u.path.split("/") if seg]
-            if not segs:
-                raise Finding("GF035", "", "no repository path: %r" % s)
+            if not u.hostname or "." not in u.hostname:
+                raise Finding("GF035", "", "invalid host in %r" % s)
             trailing = "/" if u.path.endswith("/") else ""
+            segs = [seg for seg in u.path.split("/") if seg]
+            if len(segs) < 2:
+                raise Finding("GF035", "", "repository URL must have at least <owner>/<repo>: %r" % s)
             if "-" in segs:
                 idx = segs.index("-")
-                if idx == 0 or idx + 2 >= len(segs) or segs[idx + 1] not in ("blob", "tree"):
+                if idx < 2 or idx + 2 >= len(segs) or segs[idx + 1] not in ("blob", "tree"):
                     raise Finding("GF035", "", "malformed GitLab reference URL: %r" % s)
                 repo_segs, mode, gitref, sub_segs = segs[:idx], segs[idx + 1], segs[idx + 2], segs[idx + 3:]
             elif "+" in segs:
@@ -283,9 +327,11 @@ class Repo:
 
 
 class Item:
-    """One grainfile (<name>.task.grain.md or <name>.process.grain.md)."""
-    def __init__(self, repo, rel, kind, name):
+    """One grainfile (<name>.task.grain.md[.jinja2] or <name>.process.grain.md[.jinja2])."""
+    def __init__(self, repo, rel, kind, name, is_template=False):
         self.repo, self.rel, self.kind, self.name = repo, rel, kind, name
+        self.is_template = bool(is_template)
+        self.template_vars = []
         self.fm, self.body, self.ok = {}, "", False
         self.grainfile = DEFAULT_VERSION
         self.spec_summary_path = VERSIONS[DEFAULT_VERSION]["spec_summary_path"]
@@ -302,15 +348,18 @@ class Item:
 
 
 def classify(rel):
-    """Repo-relative path -> ('grain', kind, stem) | ('asset',) | ('asset', 'GF005')."""
+    """Repo-relative path -> ('grain', kind, stem, is_template) | ('asset',) | ('asset', 'GF005')."""
     leaf = rel.rsplit("/", 1)[-1]
     for k in KINDS:
+        suf_j2 = ".%s.grain.md.jinja2" % k
+        if leaf.endswith(suf_j2):
+            return ("grain", k, leaf[:-len(suf_j2)], True)
         suf = ".%s.grain.md" % k
         if leaf.endswith(suf):
-            return ("grain", k, leaf[:-len(suf)])
-    if re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.grain\.md$", leaf):
+            return ("grain", k, leaf[:-len(suf)], False)
+    if re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.grain\.md(?:\.jinja2)?$", leaf):
         return ("asset", "GF005")
-    m = re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.md$", leaf)
+    m = re.match(r"^(.+)\.([a-z][a-z0-9-]*)\.md(?:\.jinja2)?$", leaf)
     if m and not leaf.lower().startswith("readme"):
         return ("asset", "GF005")
     return ("asset",)
@@ -332,8 +381,8 @@ class Schemas:
         for k in list(fm):
             if k not in props and not k.startswith("x_"):
                 if k == "trigger_with":
-                    out.append(Finding("GF020", path, "trigger_with is not allowed; use depends_on and when"))
-                elif kind == "process" and k in ("recipient", "requestor"):
+                    out.append(Finding("GF020", path, "trigger_with is not allowed; use depends_on on .task.grain.md"))
+                elif kind == "process" and k in ("recipient", "requestor", "depends_on"):
                     out.append(Finding("GF020", path, "%s is only valid on .task.grain.md files" % k))
                 elif kind == "task" and k in ("when", "on", "gate"):
                     out.append(Finding("GF020", path, "%s is only valid on .process.grain.md files" % k))
@@ -367,8 +416,9 @@ class Schemas:
 # ---------------------------------------------------------------- the linter
 
 class Linter:
-    def __init__(self, top):
+    def __init__(self, top, cli_vars=None):
         self.top = pathlib.Path(top)
+        self.cli_vars = dict(cli_vars or {})
         self.findings = []
         self.schemas = Schemas()
         stubs = self.top / "stubs.yaml"
@@ -410,12 +460,15 @@ class Linter:
             if c[0] == "asset" and len(c) > 1:
                 self.add(c[1], self.show(repo, x), "unregistered kind suffix")
             elif c[0] == "grain":
-                it = Item(repo, x, c[1], c[2])
+                is_tmpl = c[3] if len(c) > 3 else False
+                it = Item(repo, x, c[1], c[2], is_template=is_tmpl)
                 self.items[(repo.dir, x)] = it
                 if not STEM.match(c[2]):
                     self.add("GF001", self.show(repo, x), "bad grainfile name %r" % c[2])
                 try:
-                    it.fm, it.body = parse(it.path)
+                    it.fm, it.body, it.template_vars = parse_grainfile(
+                        it.path, is_template=is_tmpl, cli_vars=self.cli_vars
+                    )
                     it.ok = True
                 except Finding as e:
                     e.path = self.show(repo, x)
@@ -496,7 +549,7 @@ class Linter:
             self.add("GF032", where, "%s: %r is a file reference (/blob/), expected a repository or folder" % (field, s))
             return
         for k in KINDS:
-            for suf in (".%s.grain.md" % k, ".%s.md" % k):
+            for suf in (".%s.grain.md" % k, ".%s.grain.md.jinja2" % k, ".%s.md" % k):
                 if r.path.endswith(suf) or (r.repo and r.repo.endswith(suf)):
                     self.add("GF032", where, "%s: %r is a %s grainfile, expected a repository or folder" % (field, s, k))
                     return
@@ -514,7 +567,8 @@ class Linter:
         def add(field, v):
             if isinstance(v, str):
                 out.append((field, v))
-        for f in ("depends_on", "references"):
+        fields = ("depends_on", "references") if it.kind == "task" else ("references",)
+        for f in fields:
             val = fm.get(f)
             if isinstance(val, list):
                 for v in val:
@@ -559,20 +613,22 @@ class Linter:
                 self.add(e.code, where, e.msg)
                 continue
             want = EXPECTS.get((it.kind, field))
-            if want and isinstance(t, Item) and t.kind not in want:
+            if want and isinstance(t, Item) and t.is_template:
+                self.add("GF032", where, "%s: %r is an unrendered .jinja2 template, expected a concrete .task.grain.md file" % (field, s))
+            elif want and isinstance(t, Item) and t.kind not in want:
                 self.add("GF032", where, "%s: %r is a %s, expected %s" % (field, s, t.kind, " or ".join(want)))
             elif want and t in ("asset", "folder"):
                 self.add("GF032", where, "%s: %r is a %s, expected %s" % (field, s, t, " or ".join(want)))
             elif want and t is None:
                 r = parse_ref(s)
                 if r.mode == "tree" or not any(r.path.endswith(".%s.grain.md" % k) for k in want):
-                    self.add("GF032", where, "%s: %r is not a %s grainfile" % (field, s, " or ".join(want)))
+                    self.add("GF032", where, "%s: %r is not a concrete %s grainfile" % (field, s, " or ".join(want)))
             it.targets.setdefault(field, []).append((s, t))
 
     def check_graphs(self):
         graph = {}
         for it in self.items.values():
-            if it.ok:
+            if it.ok and it.kind == "task":
                 graph[it] = [t for _, t in it.targets.get("depends_on", []) if isinstance(t, Item)]
         for cyc in cycles(graph):
             self.add("GF034", self.show(cyc[0].repo, cyc[0].rel),
@@ -599,8 +655,8 @@ def cycles(graph):
 
 # ---------------------------------------------------------------- entry points
 
-def lint(top):
-    return Linter(top).run()
+def lint(top, cli_vars=None):
+    return Linter(top, cli_vars=cli_vars).run()
 
 
 def self_test():
@@ -615,8 +671,26 @@ def self_test():
     if not SPEC_SUMMARY.exists():
         fail("missing %s" % SPEC_SUMMARY)
     ex = ROOT / "examples" / "grainfiles"
-    for f in lint(ex):
+    ex_linter = Linter(ex)
+    for f in ex_linter.run():
         fail("examples: %s" % f)
+    # Verify template discovery on examples/grainfiles
+    tmpl_items = {it.rel: it for it in ex_linter.items.values() if it.is_template}
+    if ".grain/tasks/rollout-region.task.grain.md.jinja2" not in tmpl_items:
+        fail("missing rollout-region.task.grain.md.jinja2 in examples")
+    else:
+        t_it = tmpl_items[".grain/tasks/rollout-region.task.grain.md.jinja2"]
+        if t_it.template_vars != ["dry_run", "environment", "recipient_url", "region", "requestor"]:
+            fail("unexpected template_vars on rollout-region: %r" % (t_it.template_vars,))
+    if ".grain/processes/branch-audit.process.grain.md.jinja2" not in tmpl_items:
+        fail("missing branch-audit.process.grain.md.jinja2 in examples")
+    else:
+        p_it = tmpl_items[".grain/processes/branch-audit.process.grain.md.jinja2"]
+        if p_it.template_vars != ["enforce_gate", "target_branch"]:
+            fail("unexpected template_vars on branch-audit: %r" % (p_it.template_vars,))
+    # Verify --var override rendering on examples/grainfiles
+    for f in lint(ex, cli_vars={"region": "us-east-1", "environment": "production", "dry_run": "true", "target_branch": "release/v2"}):
+        fail("examples with --var overrides: %s" % f)
     seen = set()
     bad = HERE / "testdata" / "bad"
     for case in sorted(p for p in bad.iterdir() if p.is_dir()):
@@ -684,7 +758,30 @@ def self_test():
 def main(argv):
     if argv[:1] == ["--self-test"]:
         return self_test()
-    fs = [f for t in argv for f in lint(t)]
+    cli_vars = {}
+    trees = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--var":
+            if i + 1 >= len(argv) or "=" not in argv[i + 1]:
+                print("grainlint: --var requires KEY=VALUE", file=sys.stderr)
+                return 2
+            k, _, v = argv[i + 1].partition("=")
+            cli_vars[k] = v
+            i += 2
+        elif arg.startswith("--var="):
+            kv = arg[len("--var="):]
+            if "=" not in kv:
+                print("grainlint: --var requires KEY=VALUE", file=sys.stderr)
+                return 2
+            k, _, v = kv.partition("=")
+            cli_vars[k] = v
+            i += 1
+        else:
+            trees.append(arg)
+            i += 1
+    fs = [f for t in trees for f in lint(t, cli_vars=cli_vars)]
     for f in fs:
         print(f)
     errors = [f for f in fs if f.severity == "error"]

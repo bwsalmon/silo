@@ -38,14 +38,16 @@ const sampleOverview = {
       spec_summary_path: 'docs/grainfile-v1.md',
       spec_path: 'docs/grainfiles-spec.md',
       repo: 'https://github.com/acme/infra',
-      path: '.grain/processes/ci.process.grain.md',
+      path: '.grain/processes/ci.process.grain.md.jinja2',
       commit_sha: '2222222222222222222222222222222222222222',
       ref: 'main',
-      url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md',
+      url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md.jinja2',
       kind: 'process',
       title: 'Continuous verification gate',
+      is_template: true,
+      template_vars: ['branch', 'region'],
       draft: true,
-      depends_on: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
+      references: ['https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md'],
       when: {
         push: { branches: ['main'] },
         schedule: { cron: '0 * * * *' },
@@ -83,10 +85,12 @@ const sampleOverview = {
       seq: 2,
       type: 'process_triggered',
       repo: 'https://github.com/acme/infra',
-      path: '.grain/processes/ci.process.grain.md',
-      grainfile_url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md',
+      path: '.grain/processes/ci.process.grain.md.jinja2',
+      grainfile_url: 'https://github.com/acme/infra/blob/main/.grain/processes/ci.process.grain.md.jinja2',
       kind: 'process',
       title: 'Continuous verification gate',
+      is_template: true,
+      template_vars: ['branch', 'region'],
       recipient: 'https://github.com/acme/grain-us',
       trigger_source: 'push',
       gate: true,
@@ -124,13 +128,12 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getAllByText('Not before 2026-10-19T00:00:00Z').length).toBeGreaterThan(0);
     expect(screen.getByText('Draft')).toBeTruthy();
     expect(screen.getByText('Gate')).toBeTruthy();
+    expect(screen.getAllByText('jinja2').length).toBeGreaterThan(0);
+    expect(screen.getByText('vars: branch, region')).toBeTruthy();
     expect(screen.getByText('push (branches: main)')).toBeTruthy();
     expect(screen.getByText('schedule: 0 * * * *')).toBeTruthy();
     expect(screen.getByText('acme/app:tasks/00-prep.task.grain.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md',
-    );
-    expect(screen.getByText('acme/infra:.grain/processes/smoke.process.grain.md').getAttribute('href')).toBe(
-      'https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md',
     );
 
     // Inspection panel for first Grainfile (Deploy service to staging)
@@ -141,9 +144,15 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getByText('task_ready')).toBeTruthy();
     expect(screen.getByText(/ws-eu-1/)).toBeTruthy();
 
-    // Click the second row to inspect the process Grainfile and its trigger event
+    // Click the second row to inspect the process Grainfile template and its trigger event
     fireEvent.click(screen.getByText('Continuous verification gate'));
     expect(await screen.findByText('process_triggered')).toBeTruthy();
+    expect(screen.getByText('Template variables (template_vars):')).toBeTruthy();
+    expect(screen.getByText('branch')).toBeTruthy();
+    expect(screen.getByText('region')).toBeTruthy();
+    expect(screen.getByText('https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md').getAttribute('href')).toBe(
+      'https://github.com/acme/infra/blob/main/.grain/processes/smoke.process.grain.md',
+    );
     expect(screen.getByText('trigger: push')).toBeTruthy();
     expect(screen.getByText('commit 2222222 on main')).toBeTruthy();
 

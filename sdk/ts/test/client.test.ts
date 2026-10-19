@@ -239,16 +239,18 @@ describe('Grainfiles and node subscriptions', () => {
       },
       {
         repo: 'https://github.com/acme/app',
-        path: '.grain/processes/ci.process.md',
+        path: '.grain/processes/ci.process.md.jinja2',
         commit_sha: '1111111',
         ref: 'main',
-        url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md',
+        url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md.jinja2',
         kind: 'process',
         title: 'Continuous verification gate',
+        is_template: true,
+        template_vars: ['branch', 'env'],
         draft: true,
         not_before: '0001-01-01T00:00:00Z',
         created_at: '0001-01-01T00:00:00Z',
-        depends_on: ['https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md'],
+        references: ['https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md'],
         on_spec: { push: { branches: ['main'] }, schedule: { cron: '0 * * * *' } },
         gate: true,
         updated_at: '2026-10-18T10:06:00Z',
@@ -283,10 +285,12 @@ describe('Grainfiles and node subscriptions', () => {
         seq: 2,
         type: 'process_triggered',
         repo: 'https://github.com/acme/app',
-        path: '.grain/processes/ci.process.md',
-        grainfile_url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md',
+        path: '.grain/processes/ci.process.md.jinja2',
+        grainfile_url: 'https://github.com/acme/app/blob/main/.grain/processes/ci.process.md.jinja2',
         kind: 'process',
         title: 'Continuous verification gate',
+        is_template: true,
+        template_vars: ['branch', 'env'],
         recipient: 'https://github.com/acme/grain-eu',
         trigger_source: 'push',
         gate: true,
@@ -317,21 +321,25 @@ describe('Grainfiles and node subscriptions', () => {
   it('inspects a grainfile’s metadata, normalized on triggers, and recent events', async () => {
     const f = stub(200, JSON.stringify(sampleOverview));
     const h = new HubClient({ fetch: f });
-    const insp = await h.inspectGrainfile('https://github.com/acme/app/blob/main/.grain/processes/ci.process.md');
+    const insp = await h.inspectGrainfile('https://github.com/acme/app/blob/main/.grain/processes/ci.process.md.jinja2');
     expect(insp.grainfile?.title).toBe('Continuous verification gate');
     expect(insp.grainfile?.grainfile).toBe('v1');
     expect(insp.grainfile?.spec_summary_path).toBe('docs/grainfile-v1.md');
     expect(insp.grainfile?.spec_path).toBe('docs/grainfiles-spec.md');
+    expect(insp.grainfile?.is_template).toBe(true);
+    expect(insp.grainfile?.template_vars).toEqual(['branch', 'env']);
     expect(insp.grainfile?.gate).toBe(true);
     expect(insp.grainfile?.when?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.on?.push?.branches).toEqual(['main']);
     expect(insp.grainfile?.not_before).toBeUndefined();
-    expect(insp.grainfile?.depends_on).toEqual([
+    expect(insp.grainfile?.references).toEqual([
       'https://github.com/acme/app/blob/main/.grain/processes/smoke.process.md',
     ]);
     expect(insp.events).toHaveLength(1);
     expect(insp.events[0].type).toBe('process_triggered');
     expect(insp.events[0].trigger_source).toBe('push');
+    expect(insp.events[0].is_template).toBe(true);
+    expect(insp.events[0].template_vars).toEqual(['branch', 'env']);
     expect(insp.subscriptions).toHaveLength(1);
     expect(insp.subscriptions[0].node_id).toBe('ws-eu-1');
   });

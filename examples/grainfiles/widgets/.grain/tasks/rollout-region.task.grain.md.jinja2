@@ -1,0 +1,18 @@
+---
+grainfile: v1
+title: Roll out widget schema v2 to {{ region | default("eu-west-1") | upper }} ({{ environment | default("staging") | lower }})
+recipient: {{ recipient_url | default("https://github.com/acme/grain-eu") }}
+requestor: {{ requestor | default("Bruce Salmon <bsalmon@google.com>") }}
+depends_on:
+  - ./2026-10-16-widget-schema-v2-migration.task.grain.md
+references:
+  - /docs/widget-schema.md#schema-version-header
+  - /src/widget.go
+---
+{# Self-contained Jinja2 task template for regional rollout #}
+Roll out the `widgets` v2 binary schema to region `{{ region | default("eu-west-1") }}` in the `{{ environment | default("staging") | lower }}` environment.
+{% if dry_run | default("false") == "true" %}
+Run in **dry-run** verification mode only; do not shift production traffic.
+{% else %}
+Shift traffic incrementally across availability zones and verify health checks at each step.
+{% endif %}

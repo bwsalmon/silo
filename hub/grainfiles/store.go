@@ -160,6 +160,8 @@ CREATE TABLE IF NOT EXISTS grainfile_index (
 	trigger_with TEXT NOT NULL DEFAULT '[]',
 	on_spec TEXT NOT NULL DEFAULT '{}',
 	gate INTEGER NOT NULL DEFAULT 0,
+	is_template INTEGER NOT NULL DEFAULT 0,
+	template_vars TEXT NOT NULL DEFAULT '[]',
 	ready_emitted INTEGER NOT NULL DEFAULT 0,
 	removed INTEGER NOT NULL DEFAULT 0,
 	updated_at BIGINT NOT NULL,
@@ -209,6 +211,8 @@ var added = []dbaccess.Column{
 	{Table: "grainfile_index", Name: "trigger_with", Add: `ALTER TABLE grainfile_index ADD COLUMN trigger_with TEXT NOT NULL DEFAULT '[]'`},
 	{Table: "grainfile_index", Name: "on_spec", Add: `ALTER TABLE grainfile_index ADD COLUMN on_spec TEXT NOT NULL DEFAULT '{}'`},
 	{Table: "grainfile_index", Name: "gate", Add: `ALTER TABLE grainfile_index ADD COLUMN gate INTEGER NOT NULL DEFAULT 0`},
+	{Table: "grainfile_index", Name: "is_template", Add: `ALTER TABLE grainfile_index ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0`},
+	{Table: "grainfile_index", Name: "template_vars", Add: `ALTER TABLE grainfile_index ADD COLUMN template_vars TEXT NOT NULL DEFAULT '[]'`},
 	{Table: "grainfile_index", Name: "ready_emitted", Add: `ALTER TABLE grainfile_index ADD COLUMN ready_emitted INTEGER NOT NULL DEFAULT 0`},
 	{Table: "grainfile_index", Name: "removed", Add: `ALTER TABLE grainfile_index ADD COLUMN removed INTEGER NOT NULL DEFAULT 0`},
 	{Table: "grainfile_events", Name: "trigger_source", Add: `ALTER TABLE grainfile_events ADD COLUMN trigger_source TEXT NOT NULL DEFAULT ''`},
@@ -316,6 +320,8 @@ type IndexRecord struct {
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
+	IsTemplate           bool      `json:"is_template"`
+	TemplateVars         []string  `json:"template_vars,omitempty"`
 	SubscribedNodes      []string  `json:"subscribed_nodes,omitempty"`
 	RecentEvents         []Event   `json:"recent_events,omitempty"`
 	UpdatedAt            time.Time `json:"updated_at"`
@@ -323,6 +329,9 @@ type IndexRecord struct {
 	readyEmitted bool
 	removed      bool
 }
+
+// IndexedGrainfile is an alias for IndexRecord.
+type IndexedGrainfile = IndexRecord
 
 // ToGrainfile reconstructs a metadata-only *Grainfile (with an empty Body) from
 // an IndexRecord so trigger and reference-authorization methods can be invoked.
@@ -366,6 +375,8 @@ func (r IndexRecord) ToGrainfile() *Grainfile {
 		When:            triggers,
 		On:              triggers,
 		Gate:            r.Gate,
+		IsTemplate:      r.IsTemplate,
+		TemplateVars:    slices.Clone(r.TemplateVars),
 	}
 }
 
@@ -411,6 +422,8 @@ type Event struct {
 	On                   Triggers  `json:"on,omitempty,omitzero"`
 	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
 	Gate                 bool      `json:"gate,omitempty"`
+	IsTemplate           bool      `json:"is_template,omitempty"`
+	TemplateVars         []string  `json:"template_vars,omitempty"`
 	TriggerSource        string    `json:"trigger_source,omitempty"`
 	TriggeredBy          string    `json:"triggered_by,omitempty"`
 	ChangedPaths         []string  `json:"changed_paths,omitempty"`
@@ -429,6 +442,8 @@ type eventPayload struct {
 	AuthorizedReferences []string `json:"authorized_references,omitempty"`
 	DependsOn            []string `json:"depends_on,omitempty"`
 	OnSpec               Triggers `json:"on_spec,omitempty"`
+	IsTemplate           bool     `json:"is_template,omitempty"`
+	TemplateVars         []string `json:"template_vars,omitempty"`
 	ChangedPaths         []string `json:"changed_paths,omitempty"`
 	Reason               string   `json:"reason,omitempty"`
 }
@@ -493,6 +508,13 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	if deps == nil {
 		deps = []string{}
 	}
+	if IsTemplatePath(cp.Path) {
+		cp.IsTemplate = true
+	}
+	tvars := slices.Clone(cp.TemplateVars)
+	if tvars == nil {
+		tvars = []string{}
+	}
 
 	if at.IsZero() {
 		at = s.now()
@@ -545,6 +567,8 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		On:                   triggers,
 		OnSpec:               triggers,
 		Gate:                 cp.Gate,
+		IsTemplate:           cp.IsTemplate,
+		TemplateVars:         tvars,
 		UpdatedAt:            now,
 		readyEmitted:         activeNow,
 		removed:              false,
@@ -563,6 +587,10 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		return IndexRecord{}, err
 	}
 	onJSON, err := json.Marshal(rec.OnSpec)
+	if err != nil {
+		return IndexRecord{}, err
+	}
+	tvarsJSON, err := json.Marshal(rec.TemplateVars)
 	if err != nil {
 		return IndexRecord{}, err
 	}
@@ -630,8 +658,9 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO grainfile_index (
 			repo, path, commit_sha, ref, url, kind, title, recipient, requestor,
 			draft, not_before, created_at, "references", authorized_references,
-			depends_on, trigger_with, on_spec, gate, ready_emitted, removed, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 0, ?)
+			depends_on, trigger_with, on_spec, gate, is_template, template_vars,
+			ready_emitted, removed, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, 0, ?)
 		ON CONFLICT (repo, path, commit_sha) DO UPDATE SET
 			ref = EXCLUDED.ref,
 			url = EXCLUDED.url,
@@ -648,6 +677,8 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			trigger_with = EXCLUDED.trigger_with,
 			on_spec = EXCLUDED.on_spec,
 			gate = EXCLUDED.gate,
+			is_template = EXCLUDED.is_template,
+			template_vars = EXCLUDED.template_vars,
 			ready_emitted = EXCLUDED.ready_emitted,
 			removed = 0,
 			updated_at = EXCLUDED.updated_at`),
@@ -655,6 +686,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			rec.Title, rec.Recipient, rec.Requestor, boolToInt(rec.Draft),
 			notBeforeMS, createdAtMS, string(refsJSON), string(authRefsJSON),
 			string(depsJSON), string(onJSON), boolToInt(rec.Gate),
+			boolToInt(rec.IsTemplate), string(tvarsJSON),
 			readyFlag, rec.UpdatedAt.UnixMilli())
 		if err != nil {
 			return err
@@ -682,6 +714,8 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 					When:                 rec.When,
 					OnSpec:               rec.OnSpec,
 					Gate:                 rec.Gate,
+					IsTemplate:           rec.IsTemplate,
+					TemplateVars:         rec.TemplateVars,
 					Reason:               "process grainfile marked draft",
 					CreatedAt:            now,
 				})
@@ -711,6 +745,8 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 					References:           rec.References,
 					AuthorizedReferences: rec.AuthorizedReferences,
 					DependsOn:            rec.DependsOn,
+					IsTemplate:           rec.IsTemplate,
+					TemplateVars:         rec.TemplateVars,
 					DependencyURL:        rec.URL,
 					DependencyState:      "cancelled",
 					Reason:               "task grainfile marked draft",
@@ -747,6 +783,8 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
+				IsTemplate:           rec.IsTemplate,
+				TemplateVars:         rec.TemplateVars,
 				CreatedAt:            now,
 			})
 			return err
@@ -863,6 +901,8 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 				When:                 latest.When,
 				OnSpec:               latest.OnSpec,
 				Gate:                 latest.Gate,
+				IsTemplate:           latest.IsTemplate,
+				TemplateVars:         latest.TemplateVars,
 				Reason:               "process grainfile deleted",
 				CreatedAt:            now,
 			})
@@ -902,6 +942,8 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 			References:           latest.References,
 			AuthorizedReferences: latest.AuthorizedReferences,
 			DependsOn:            latest.DependsOn,
+			IsTemplate:           latest.IsTemplate,
+			TemplateVars:         latest.TemplateVars,
 			DependencyURL:        latest.URL,
 			DependencyState:      "cancelled",
 			Reason:               "task grainfile deleted",
@@ -1003,6 +1045,8 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				When:                 rec.When,
 				OnSpec:               rec.OnSpec,
 				Gate:                 rec.Gate,
+				IsTemplate:           rec.IsTemplate,
+				TemplateVars:         rec.TemplateVars,
 				CreatedAt:            at.Truncate(time.Millisecond),
 			})
 			if err != nil {
@@ -1021,23 +1065,25 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 
 const selectIndexCols = `repo, path, commit_sha, ref, url, kind, title, recipient, requestor,
 	draft, not_before, created_at, "references", authorized_references,
-	depends_on, trigger_with, on_spec, gate, ready_emitted, removed, updated_at`
+	depends_on, trigger_with, on_spec, gate, is_template, template_vars, ready_emitted, removed, updated_at`
 
 func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	var (
 		rec                             IndexRecord
 		kindStr                         string
 		draftInt, gateInt               int
+		isTemplateInt                   int
 		readyInt, removedInt            int
 		notBeforeMS, createdMS, updatMS int64
 		refsStr, authRefsStr            string
-		depsStr, twStr, onStr           string
+		depsStr, twStr, onStr, tvarsStr string
 	)
 	if err := r.Scan(
 		&rec.Repo, &rec.Path, &rec.CommitSHA, &rec.Ref, &rec.URL, &kindStr,
 		&rec.Title, &rec.Recipient, &rec.Requestor,
 		&draftInt, &notBeforeMS, &createdMS, &refsStr, &authRefsStr,
-		&depsStr, &twStr, &onStr, &gateInt, &readyInt, &removedInt, &updatMS,
+		&depsStr, &twStr, &onStr, &gateInt, &isTemplateInt, &tvarsStr,
+		&readyInt, &removedInt, &updatMS,
 	); err != nil {
 		return IndexRecord{}, err
 	}
@@ -1047,6 +1093,7 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	rec.Kind = Kind(kindStr)
 	rec.Draft = draftInt != 0
 	rec.Gate = gateInt != 0
+	rec.IsTemplate = isTemplateInt != 0 || IsTemplatePath(rec.Path)
 	rec.readyEmitted = readyInt != 0
 	rec.removed = removedInt != 0
 	if notBeforeMS > 0 {
@@ -1060,6 +1107,7 @@ func scanIndexRecord(r interface{ Scan(...any) error }) (IndexRecord, error) {
 	_ = json.Unmarshal([]byte(authRefsStr), &rec.AuthorizedReferences)
 	_ = json.Unmarshal([]byte(depsStr), &rec.DependsOn)
 	_ = json.Unmarshal([]byte(onStr), &rec.OnSpec)
+	_ = json.Unmarshal([]byte(tvarsStr), &rec.TemplateVars)
 	rec.When = rec.OnSpec
 	rec.On = rec.OnSpec
 	return rec, nil
@@ -1458,6 +1506,8 @@ func (s *Store) EvaluateTriggers(ctx context.Context, repoURL, commitSHA string,
 				When:                 curr.rec.When,
 				OnSpec:               curr.rec.OnSpec,
 				Gate:                 curr.rec.Gate,
+				IsTemplate:           curr.rec.IsTemplate,
+				TemplateVars:         curr.rec.TemplateVars,
 				TriggerSource:        curr.source,
 				TriggeredBy:          curr.triggeredBy,
 				ChangedPaths:         slices.Clone(ev.ChangedPaths),
@@ -1568,6 +1618,8 @@ func (s *Store) RecordDependencyCompleted(ctx context.Context, completedURL, com
 				When:                 dep.When,
 				OnSpec:               dep.OnSpec,
 				Gate:                 dep.Gate,
+				IsTemplate:           dep.IsTemplate,
+				TemplateVars:         dep.TemplateVars,
 				DependencyURL:        canonCompleted,
 				DependencyState:      state,
 				Reason:               reason,
@@ -1742,6 +1794,8 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 		AuthorizedReferences: ev.AuthorizedReferences,
 		DependsOn:            ev.DependsOn,
 		OnSpec:               ev.OnSpec,
+		IsTemplate:           ev.IsTemplate,
+		TemplateVars:         ev.TemplateVars,
 		ChangedPaths:         ev.ChangedPaths,
 		Reason:               ev.Reason,
 	}
@@ -1803,6 +1857,8 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.OnSpec = pl.OnSpec
 		ev.When = pl.OnSpec
 		ev.On = pl.OnSpec
+		ev.IsTemplate = pl.IsTemplate || IsTemplatePath(ev.Path)
+		ev.TemplateVars = pl.TemplateVars
 		ev.ChangedPaths = pl.ChangedPaths
 		ev.Reason = pl.Reason
 	}

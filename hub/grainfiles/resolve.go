@@ -1150,17 +1150,35 @@ func LintTree(top string) ([]Finding, error) {
 				findings = append(findings, newFinding(CodeMalformedFile, where, err.Error()))
 				continue
 			}
-			fm, body, fErr := splitAndParseFrontMatter(where, raw)
+			isTmpl := IsTemplatePath(rel)
+			var templateVars []string
+			parseRaw := raw
+			if isTmpl {
+				rendered, tvars, rErr := renderTemplateAtPath(where, string(raw), nil)
+				if rErr != nil {
+					if rErrs, ok := rErr.(Errors); ok {
+						findings = append(findings, rErrs...)
+					} else {
+						findings = append(findings, newFinding(CodeTemplateSyntax, where, rErr.Error()))
+					}
+					continue
+				}
+				templateVars = tvars
+				parseRaw = []byte(rendered)
+			}
+			fm, body, fErr := splitAndParseFrontMatter(where, parseRaw)
 			if fErr != nil {
 				findings = append(findings, *fErr)
 				continue
 			}
 			it.ok = true
 			gf := &Grainfile{
-				Kind: kind,
-				Name: stem,
-				Path: rel,
-				Body: body,
+				Kind:         kind,
+				Name:         stem,
+				Path:         rel,
+				IsTemplate:   isTmpl,
+				TemplateVars: templateVars,
+				Body:         body,
 			}
 			it.gf = gf
 			vErrs := validateFrontMatterForLinter(gf, fm, where)
@@ -1354,7 +1372,9 @@ func LintTree(top string) ([]Finding, error) {
 			if fr.want {
 				if fr.field == "depends_on" && it.kind == KindTask {
 					if tItem != nil {
-						if tItem.kind != KindTask {
+						if tItem.gf != nil && tItem.gf.IsTemplate {
+							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is an unrendered .jinja2 template, expected a concrete .task.grain.md file", fr.field, fr.ref)))
+						} else if tItem.kind != KindTask {
 							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: task %q cannot depend on %s %q (only .task.grain.md allowed)", fr.field, it.rel, tItem.kind, fr.ref)))
 						}
 					} else if tKind == "asset" || tKind == "folder" {
@@ -1363,19 +1383,6 @@ func LintTree(top string) ([]Finding, error) {
 						r, _ := ParseRef(fr.ref)
 						if r.Mode == "tree" || !strings.HasSuffix(r.Path, ".task.grain.md") {
 							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is not a .task.grain.md file", fr.field, fr.ref)))
-						}
-					}
-				} else {
-					if tItem != nil {
-						if !tItem.kind.Valid() {
-							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is not a task or process", fr.field, fr.ref)))
-						}
-					} else if tKind == "asset" || tKind == "folder" {
-						findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s, expected task or process", fr.field, fr.ref, tKind)))
-					} else if tKind == "external" {
-						r, _ := ParseRef(fr.ref)
-						if r.Mode == "tree" || (!strings.HasSuffix(r.Path, ".task.grain.md") && !strings.HasSuffix(r.Path, ".process.grain.md")) {
-							findings = append(findings, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is not a task or process grainfile", fr.field, fr.ref)))
 						}
 					}
 				}
@@ -1453,7 +1460,7 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .process.grain.md files", k)))
 			continue
 		}
-		if g.Kind == KindProcess && (k == "recipient" || k == "requestor") {
+		if g.Kind == KindProcess && (k == "recipient" || k == "requestor" || k == "depends_on") {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .task.grain.md files", k)))
 			continue
 		}
@@ -1549,7 +1556,7 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 	if rawRefs, ok := fm["references"]; ok {
 		g.References = extractRefStrings(rawRefs, "references")
 	}
-	if rawDeps, ok := fm["depends_on"]; ok {
+	if rawDeps, ok := fm["depends_on"]; ok && g.Kind == KindTask {
 		g.DependsOn = extractRefStrings(rawDeps, "depends_on")
 	}
 

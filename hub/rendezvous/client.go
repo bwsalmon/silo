@@ -279,10 +279,18 @@ func (c *Conn) Open(ctx context.Context) (net.Conn, error) { return c.m.OpenStre
 // an authorized .task.grain.md or .process.grain.md on demand without storing
 // content at rest.
 func (c *Conn) FetchGrainfile(ctx context.Context, grainfileURL, commitSHA string) (MuxFetchHeader, []byte, error) {
+	return c.FetchGrainfileWithVars(ctx, grainfileURL, commitSHA, nil)
+}
+
+// FetchGrainfileWithVars opens a mux stream to the hub and fetches an
+// authorized Grainfile, rendering .task.grain.md.jinja2 / .process.grain.md.jinja2
+// templates when vars is non-empty.
+func (c *Conn) FetchGrainfileWithVars(ctx context.Context, grainfileURL, commitSHA string, vars map[string]string) (MuxFetchHeader, []byte, error) {
 	return c.fetchMuxContent(ctx, muxFetchRequest{
 		Type:         "fetch_grainfile",
 		GrainfileURL: grainfileURL,
 		Commit:       commitSHA,
+		Vars:         vars,
 	})
 }
 

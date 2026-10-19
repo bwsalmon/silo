@@ -107,6 +107,7 @@ const (
 	CodeUnknownField    = "GF022"
 	CodeUnresolvedRef   = "GF030"
 	CodeWrongTargetKind = "GF032"
+	CodeTemplateSyntax  = "GF033"
 	CodeCycle           = "GF034"
 	CodeMalformedRef    = "GF035"
 	CodeEscapesRepo     = "GF036"
@@ -165,11 +166,13 @@ func (e Errors) Error() string {
 	return strings.Join(parts, "\n")
 }
 
-// Grainfile is a parsed and validated .task.grain.md or .process.grain.md file.
+// Grainfile is a parsed and validated .task.grain.md[.jinja2] or .process.grain.md[.jinja2] file.
 type Grainfile struct {
-	Kind Kind   `json:"kind"`
-	Name string `json:"name,omitempty"`
-	Path string `json:"path,omitempty"`
+	Kind         Kind     `json:"kind"`
+	Name         string   `json:"name,omitempty"`
+	Path         string   `json:"path,omitempty"`
+	IsTemplate   bool     `json:"is_template,omitempty"`
+	TemplateVars []string `json:"template_vars,omitempty"`
 
 	// Format version and specification paths (docs/grainfiles-spec.md §6.1).
 	Grainfile       string `json:"grainfile"`
@@ -250,21 +253,21 @@ type ScenarioTrigger struct {
 
 var (
 	stemRe             = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
-	unknownGrainKindRe = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.grain\.md$`)
-	unknownKindRe      = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.md$`)
+	unknownGrainKindRe = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.grain\.md(?:\.jinja2)?$`)
+	unknownKindRe      = regexp.MustCompile(`^(.+)\.([a-z][a-z0-9-]*)\.md(?:\.jinja2)?$`)
 	userIdentityRe     = regexp.MustCompile(`^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$`)
 	timeRe             = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$`)
 	dateRe             = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 )
 
 // ClassifyStrictPath classifies a repository-relative path strictly against
-// the canonical .task.grain.md and .process.grain.md suffixes
+// the canonical .task.grain.md[.jinja2] and .process.grain.md[.jinja2] suffixes
 // (docs/grainfiles-spec.md §4.1 and §4.2).
 //
-// If relPath ends with .task.grain.md or .process.grain.md, isGrainfile is true
-// and kind and stem are returned. If relPath is an asset Markdown file with an
-// unregistered .<kind>.grain.md or .<kind>.md suffix (excluding README*),
-// warnCode is "GF005".
+// If relPath ends with .task.grain.md[.jinja2] or .process.grain.md[.jinja2],
+// isGrainfile is true and kind and stem are returned. If relPath is an asset
+// Markdown file with an unregistered .<kind>.grain.md[.jinja2] or .<kind>.md
+// suffix (excluding README*), warnCode is "GF005".
 func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile bool, warnCode string) {
 	norm := filepath.ToSlash(relPath)
 	leaf := norm
@@ -272,6 +275,10 @@ func ClassifyStrictPath(relPath string) (kind Kind, stem string, isGrainfile boo
 		leaf = norm[idx+1:]
 	}
 	for _, k := range []Kind{KindTask, KindProcess} {
+		sufJ2 := "." + string(k) + ".grain.md.jinja2"
+		if strings.HasSuffix(leaf, sufJ2) {
+			return k, leaf[:len(leaf)-len(sufJ2)], true, ""
+		}
 		suf := "." + string(k) + ".grain.md"
 		if strings.HasSuffix(leaf, suf) {
 			return k, leaf[:len(leaf)-len(suf)], true, ""
@@ -391,9 +398,15 @@ func ParseFile(fsPath string) (*Grainfile, error) {
 	return Parse(fsPath, data)
 }
 
-// Parse parses and validates a .task.md or .process.md Grainfile from its
-// path/filename and raw UTF-8 bytes (docs/grainfiles-spec.md §4–§8).
+// Parse parses and validates a .task.grain.md[.jinja2] or .process.grain.md[.jinja2]
+// Grainfile from its path/filename and raw UTF-8 bytes (docs/grainfiles-spec.md §4–§8).
 func Parse(path string, data []byte) (*Grainfile, error) {
+	return ParseWithVars(path, data, nil)
+}
+
+// ParseWithVars parses and validates a Grainfile or .grain.md.jinja2 template
+// from its path/filename, raw UTF-8 bytes, and optional template variable bindings.
+func ParseWithVars(path string, data []byte, vars map[string]string) (*Grainfile, error) {
 	var errs Errors
 	normPath := filepath.ToSlash(path)
 	if len(normPath) > MaxPathBytes {
@@ -412,13 +425,13 @@ func Parse(path string, data []byte) (*Grainfile, error) {
 		if warnCode != "" {
 			return nil, Errors{newFinding(warnCode, path, "unregistered kind suffix")}
 		}
-		return nil, Errors{newFinding(CodeBadName, path, "filename must end with .task.md or .process.md")}
+		return nil, Errors{newFinding(CodeBadName, path, "filename must end with .task.grain.md[.jinja2] or .process.grain.md[.jinja2]")}
 	}
 	if !ValidateStem(stem) {
 		errs = append(errs, newFinding(CodeBadName, path, fmt.Sprintf("bad grainfile name %q", stem)))
 	}
 
-	g, parseErrs := parseWithKind(kind, stem, path, data)
+	g, parseErrs := parseWithKindAndVars(kind, stem, path, data, vars)
 	errs = append(errs, parseErrs...)
 	if len(errs) > 0 {
 		return g, errs
@@ -432,23 +445,39 @@ func ParseKind(kind Kind, data []byte) (*Grainfile, error) {
 	if !kind.Valid() {
 		return nil, Errors{newFinding(CodeBadName, "", fmt.Sprintf("unknown grainfile kind %q", kind))}
 	}
-	g, errs := parseWithKind(kind, "", "", data)
+	g, errs := parseWithKindAndVars(kind, "", "", data, nil)
 	if len(errs) > 0 {
 		return g, errs
 	}
 	return g, nil
 }
 
-func parseWithKind(kind Kind, stem, path string, raw []byte) (*Grainfile, Errors) {
-	fm, body, fErr := splitAndParseFrontMatter(path, raw)
+func parseWithKindAndVars(kind Kind, stem, path string, raw []byte, vars map[string]string) (*Grainfile, Errors) {
+	isTmpl := IsTemplatePath(path)
+	var templateVars []string
+	parseRaw := raw
+	if isTmpl {
+		rendered, tvars, err := renderTemplateAtPath(path, string(raw), vars)
+		if err != nil {
+			if errs, ok := err.(Errors); ok {
+				return nil, errs
+			}
+			return nil, Errors{newFinding(CodeTemplateSyntax, path, err.Error())}
+		}
+		templateVars = tvars
+		parseRaw = []byte(rendered)
+	}
+	fm, body, fErr := splitAndParseFrontMatter(path, parseRaw)
 	if fErr != nil {
 		return nil, Errors{*fErr}
 	}
 	g := &Grainfile{
-		Kind: kind,
-		Name: stem,
-		Path: filepath.ToSlash(path),
-		Body: body,
+		Kind:         kind,
+		Name:         stem,
+		Path:         filepath.ToSlash(path),
+		IsTemplate:   isTmpl,
+		TemplateVars: templateVars,
+		Body:         body,
 	}
 	errs := validateFrontMatter(g, fm, path)
 	return g, errs
@@ -528,7 +557,6 @@ var (
 		"title":      true,
 		"draft":      true,
 		"not_before": true,
-		"depends_on": true,
 		"references": true,
 		"when":       true,
 		"gate":       true,
@@ -548,7 +576,7 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 	isLegacyProcess := g.Kind == KindProcess &&
 		strings.HasSuffix(g.Path, ".process.md") &&
 		!strings.HasSuffix(g.Path, ".process.grain.md") &&
-		fm["when"] == nil
+		!IsTemplatePath(where)
 
 	known := knownTaskFields
 	if g.Kind == KindProcess {
@@ -581,7 +609,7 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .process.grain.md files", k)))
 			continue
 		}
-		if g.Kind == KindProcess && !isLegacyProcess && (k == "recipient" || k == "requestor") {
+		if g.Kind == KindProcess && !isLegacyProcess && (k == "recipient" || k == "requestor" || k == "depends_on") {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s is only valid on .task.grain.md files", k)))
 			continue
 		}
@@ -683,8 +711,8 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		g.References = refs
 	}
 
-	// depends_on (optional list of refs: on a task must target tasks only; on a process targets tasks or processes; §8.3)
-	if rawDeps, ok := fm["depends_on"]; ok {
+	// depends_on (optional list of refs on .task.grain.md: must target concrete .task.grain.md files only; §8.3)
+	if rawDeps, ok := fm["depends_on"]; ok && (g.Kind == KindTask || isLegacyProcess) {
 		deps, depErrs := validateDependsOnSlice(rawDeps, g.Kind, where, g.Path)
 		errs = append(errs, depErrs...)
 		g.DependsOn = deps
@@ -776,7 +804,7 @@ func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
 		return &f
 	}
 	for _, k := range []Kind{KindTask, KindProcess} {
-		for _, suf := range []string{"." + string(k) + ".grain.md", "." + string(k) + ".md"} {
+		for _, suf := range []string{"." + string(k) + ".grain.md", "." + string(k) + ".grain.md.jinja2", "." + string(k) + ".md"} {
 			if strings.HasSuffix(r.Path, suf) || strings.HasSuffix(r.Repo, suf) {
 				f := newFinding(CodeWrongTargetKind, where, fmt.Sprintf("%s: %q is a %s grainfile, expected a repository or folder", field, s, k))
 				return &f
@@ -809,8 +837,12 @@ func validateDependsOnSlice(raw any, sourceKind Kind, where, sourcePath string) 
 		}
 		if sourceKind == KindTask {
 			if r, err := ParseRef(s); err == nil {
-				if !isGrainfileTargetPath(r.Path) || strings.HasSuffix(r.Path, ".process.grain.md") || (strings.HasSuffix(sourcePath, ".task.grain.md") && !isTaskTargetPath(r.Path)) {
-					errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("depends_on: %q is not a task grainfile (a .task.grain.md may only depend on .task.grain.md files)", s)))
+				strictTaskSource := strings.HasSuffix(sourcePath, ".task.grain.md") || strings.HasSuffix(sourcePath, ".task.grain.md.jinja2")
+				if !isGrainfileTargetPath(r.Path) ||
+					strings.HasSuffix(r.Path, ".jinja2") ||
+					strings.HasSuffix(r.Path, ".process.grain.md") ||
+					(strictTaskSource && !strings.HasSuffix(r.Path, ".task.grain.md")) {
+					errs = append(errs, newFinding(CodeWrongTargetKind, where, fmt.Sprintf("depends_on: %q is not a concrete .task.grain.md file", s)))
 				}
 			}
 		}

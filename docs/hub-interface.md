@@ -240,8 +240,8 @@ permanent git credentials for Repo A ([hub.md](hub.md) §6.4.1,
   demand:
 
 ```
-node → hub  {"type":"fetch_grainfile","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md","commit":"<git commit SHA>"}
-hub → node  {"type":"ok","kind":"file","commit":"<resolved commit SHA>","size":N}, then the raw UTF-8 .task.grain.md / .process.grain.md bytes until the hub closes the stream
+node → hub  {"type":"fetch_grainfile","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md","commit":"<git commit SHA>","vars":{"region":"eu-west-1"}}
+hub → node  {"type":"ok","kind":"file","commit":"<resolved commit SHA>","size":N}, then the raw (or rendered, when vars are supplied on a .grain.md.jinja2 template) UTF-8 .task.grain.md / .process.grain.md bytes until the hub closes the stream
             or {"type":"error","error":"..."}
 
 node → hub  {"type":"fetch_reference","grainfile_url":"https://github.com/acme/widgets/blob/main/.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md","commit":"<git commit SHA>","reference":"/docs/widget-schema.md#schema-version-header"}
@@ -251,8 +251,9 @@ hub → node  {"type":"ok","kind":"file"|"tree","commit":"<resolved commit SHA>"
 
 | Field | Meaning |
 | --- | --- |
-| `grainfile_url` | Canonical `https://` URL of the indexed non-draft `.task.md` or `.process.md` in **Repo A** whose `recipient` (or repository subscription) authorizes the fetch. |
+| `grainfile_url` | Canonical `https://` URL of the indexed non-draft `.task.grain.md`, `.process.grain.md`, or `.grain.md.jinja2` template in **Repo A** whose `recipient` (or repository subscription) authorizes the fetch. |
 | `commit` | Git commit SHA (or ref) at which the Grainfile was indexed in `grainfile_event`, `trigger_event`, or `catchup_result`. |
+| `vars` | (`fetch_grainfile` optional; or `?var.<name>=<value>` query parameters on `GET /v1/grainfiles/content`) Optional variable bindings used to render a `.task.grain.md.jinja2` or `.process.grain.md.jinja2` template into a concrete `.grain.md` document. When omitted on a `.jinja2` file, the raw template bytes are returned. |
 | `reference` | (`fetch_reference` only) A reference entry declared in that Grainfile's `references` (repo-local `/`-rooted or relative path, or an `https://` URL pointing to **Repo A**). Any `#<anchor>` suffix is stripped when resolving the file path; the deployment extracts the anchored Markdown section locally. |
 
 **How the hub authorizes and serves `fetch_grainfile` and `fetch_reference`:**
@@ -310,15 +311,15 @@ hub → node  {"type":"trigger_event","cursor":"...","id":"trig-...","process_ur
 
 ### Cross-deployment `depends_on` notices (`dependency_done`)
 
-A `.task.grain.md` or `.process.grain.md` on one Grain deployment may declare
-`depends_on` referencing a `.task.grain.md` or
-`.process.grain.md` executed by a different Grain deployment
+A `.task.grain.md` on one Grain deployment may declare
+`depends_on` referencing a concrete `.task.grain.md`
+executed by a different Grain deployment
 ([`docs/grainfiles-spec.md`](grainfiles-spec.md) §8.3). The
-waiting deployment includes those target Grainfile URLs in its
+waiting deployment includes those target `.task.grain.md` URLs in its
 `subscriptions.grainfiles`.
 
 When the executing deployment streams lifecycle events (below) or `grainfile_complete` reporting
-that a run of a Grainfile has finished (`result` with state
+that a run of a `.task.grain.md` has finished (`result` with state
 `done`, `failed`, or `cancelled`), Grain Hub routes notices to every
 subscribed deployment watching that Grainfile URL ([hub.md](hub.md)
 §6.5):
@@ -331,7 +332,7 @@ hub → node  {"type":"dependency_done","cursor":"...",
               "reason":"..."}
 ```
 
-- `done` unblocks the waiting deployment's `.task.grain.md` or `.process.grain.md`
+- `done` unblocks the waiting deployment's `.task.grain.md`
   run.
 - `failed` or `cancelled` means the upstream run did not succeed; the
   waiting deployment must not execute its dependent run as if the
