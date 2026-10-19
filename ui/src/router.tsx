@@ -33,7 +33,7 @@ export function parseRoute(path: string): Route {
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'members') return { page: 'team', team: parts[1] };
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'file') return { page: 'file', team: parts[1] };
   if (parts[0] === 'teams' && parts.length === 3 && parts[2] === 'proposals') return { page: 'proposals', team: parts[1] };
-  if (parts[0] === 'deployments' && parts.length === 1) return { page: 'deployments' };
+  if ((parts[0] === 'deployments' || parts[0] === 'users') && parts.length === 1) return { page: 'deployments' };
   if (parts[0] === 'deployments' && parts.length === 2) return { page: 'deployment', id: parts[1] };
   if (parts[0] === 'file' && parts.length === 1) return { page: 'file' };
   if (parts[0] === 'tasks' && parts.length === 2) return { page: 'task', id: parts[1] };

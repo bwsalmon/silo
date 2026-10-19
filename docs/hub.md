@@ -1231,6 +1231,8 @@ HTTP API routes (`tasks.API`, verified by `sdk/ts/test/routes.test.ts`):
 ```
 GET   /v1/inbox?nodes=node-1,node-2&kind=awaiting_reply|approval_request|proposal|failed|chat_mention   actionable items across the caller's selected deployments and shared chats
 GET   /v1/grainfiles?kind=task|process&recipient=...&repo=...&draft=true|false&node=...&url=...   indexed Grainfile metadata, subscriptions, and events
+PUT   /v1/grainfiles/personal/{path}                          author or update a personal Hub-hosted Grainfile
+PUT   /v1/grainfiles/team/{team}/{path}                       author or update a deployment/team Hub-hosted Grainfile
 POST  /v1/tasks {"repo" | "team", "kind", "title", "prompt", "constraints", "depends_on"}
 GET   /v1/tasks?state=queued,running&team=infra&limit=100     the caller's teams' tasks, newest first
 GET   /v1/tasks/{id}

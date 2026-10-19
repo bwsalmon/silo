@@ -748,7 +748,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			}
 		}
 
-		if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && strings.HasPrefix(rec.Recipient, "https://") {
+		if depID := DeploymentIDFromRecipient(rec.Recipient); depID != "" && (strings.HasPrefix(rec.Recipient, "https://") || isLoopbackDeploymentHTTPURL(rec.Recipient)) {
 			var subRecJSON string
 			if err := tx.QueryRowContext(ctx, s.q(`SELECT recipients FROM grainfile_subscriptions WHERE LOWER(node_id) = LOWER(?)`), depID).Scan(&subRecJSON); err == nil {
 				var subRecs []string
@@ -2168,7 +2168,7 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 
 	rawRecipients := slices.Clone(sub.Recipients)
 	if s.HubURL != "" {
-		if canonDeploy := CanonicalDeploymentURL(s.HubURL, nodeID); canonDeploy != "" && strings.HasPrefix(canonDeploy, "https://") {
+		if canonDeploy := CanonicalDeploymentURL(s.HubURL, nodeID); canonDeploy != "" && (strings.HasPrefix(canonDeploy, "https://") || isLoopbackDeploymentHTTPURL(canonDeploy)) {
 			rawRecipients = append(rawRecipients, canonDeploy)
 		}
 	}
@@ -2539,7 +2539,7 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 		if errors.Is(err, sql.ErrNoRows) {
 			var recs []string
 			if s.HubURL != "" {
-				if u := CanonicalDeploymentURL(s.HubURL, nodeID); u != "" && strings.HasPrefix(u, "https://") {
+				if u := CanonicalDeploymentURL(s.HubURL, nodeID); u != "" && (strings.HasPrefix(u, "https://") || isLoopbackDeploymentHTTPURL(u)) {
 					recs = append(recs, u)
 				}
 			}
@@ -2563,7 +2563,7 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 		} else {
 			sub = loaded
 			if s.HubURL != "" {
-				if u := CanonicalDeploymentURL(s.HubURL, nodeID); u != "" && strings.HasPrefix(u, "https://") && !slices.Contains(sub.Recipients, u) {
+				if u := CanonicalDeploymentURL(s.HubURL, nodeID); u != "" && (strings.HasPrefix(u, "https://") || isLoopbackDeploymentHTTPURL(u)) && !slices.Contains(sub.Recipients, u) {
 					sub.Recipients = append(sub.Recipients, u)
 				}
 			}

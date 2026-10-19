@@ -181,7 +181,7 @@ function AcceptedUsersSection() {
         </TableHead>
         <TableBody>
           {users.data?.map((u) => (
-            <TableRow key={u.email}>
+            <TableRow key={u.email} data-testid={`user-row-${u.email}`}>
               <TableCell sx={{ fontFamily: mono }}>{u.email}</TableCell>
               <TableCell>
                 <Checkbox
@@ -498,6 +498,7 @@ function DeploymentMembers({
                     size="small"
                     value={r}
                     inputProps={{ 'aria-label': `Role of ${p}` }}
+                    SelectDisplayProps={{ 'aria-label': `Role of ${p}` } as React.HTMLAttributes<HTMLDivElement>}
                     disabled={set.busy}
                     onChange={(e) => void set.run(p, e.target.value)}
                   >
@@ -555,6 +556,7 @@ function DeploymentMembers({
               size="small"
               value={role}
               inputProps={{ 'aria-label': 'New member role' }}
+              SelectDisplayProps={{ 'aria-label': 'New member role' } as React.HTMLAttributes<HTMLDivElement>}
               onChange={(e) => setRole(e.target.value)}
             >
               {roles.map((x) => (
@@ -782,6 +784,9 @@ export function DeploymentPage({
   const node = findNodeForDeployment(nodes, id);
   const uiHref = node ? nodeUIHref(node) : undefined;
   const hasNodeUI = node ? offersNodeUI(node) : false;
+  const myPrincipal = me?.email ? `user:${me.email.toLowerCase()}` : '';
+  const memberRole = myPrincipal ? d.data.members?.[myPrincipal] : undefined;
+  const viewerRole = memberRole ?? me?.teams?.[id] ?? node?.viewer_role ?? (admin ? 'admin' : undefined);
 
   const handleUpdated = () => {
     d.reload();
@@ -795,6 +800,14 @@ export function DeploymentPage({
           {d.data.name && d.data.name !== d.data.id ? `${d.data.name} (${d.data.id})` : d.data.id}
         </Typography>
         <NodeStatusChip status={node?.status ?? 'offline'} />
+        {viewerRole && (
+          <Chip
+            size="small"
+            variant="outlined"
+            data-testid="deployment-viewer-role"
+            label={viewerRole === 'admin' ? 'owner / admin' : viewerRole}
+          />
+        )}
         <Link to={routePath({ page: 'deployments' })}>All deployments</Link>
         <Link to={routePath({ page: 'backlog', team: id })}>Backlog</Link>
         <Link to={routePath({ page: 'proposals', team: id })}>Proposals</Link>

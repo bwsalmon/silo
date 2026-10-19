@@ -290,3 +290,156 @@ test('navigate to /grainfiles from the Grain Hub header, filter indexed Grainfil
   expect(Object.keys(s.sessionStorage)).toEqual([]);
   expect(Object.keys(s.localStorage)).toEqual([]);
 });
+
+test('Grainfile v1 .process.grain.md.jinja2 templates, RFC 3339 offset not_before, America/Los_Angeles schedule, when.workflow triggers, and Hub-hosted Grainfile editor modal (CUJ-3, CUJ-4, CUJ-6, CUJ-7)', async ({
+  world,
+  hub,
+  pageAs,
+  grain,
+}) => {
+  const deployId = `gf-deploy-${world.n}`;
+  await hub.must(world.admin, 'POST', '/v1/deployments', { id: deployId, name: `GF Deploy ${world.n}` });
+  const canonicalDeployUrl = `${hub.url}/deployments/${deployId}`;
+
+  await grain({
+    owner: world.admin,
+    repos: [world.repo],
+    id: deployId,
+    recipients: [canonicalDeployUrl],
+  });
+
+  const taskTemplateTitle = `Canary check {{ env | default('prod') }} ${world.n}`;
+  const resolvedTaskTemplateTitle = `Canary check prod ${world.n}`;
+  const procTemplateTitle = `Audit {{ target_service | default('ledger') }} ${world.n}`;
+  const resolvedProcTemplateTitle = `Audit ledger ${world.n}`;
+  const offsetTaskTitle = `Cutover with Pacific offset ${world.n}`;
+  const workflowProcTitle = `CI Workflow Watcher ${world.n}`;
+
+  const headSha = await hub.pushGitHub(world.repo, 'main', {
+    'templates/canary.task.grain.md.jinja2': [
+      '---',
+      'grainfile: v1',
+      `title: "${taskTemplateTitle}"`,
+      `recipient: "${canonicalDeployUrl}"`,
+      '---',
+      'Run canary checks for {{ env | default("prod") }} in {{ cluster | default("us-west") }}.',
+    ].join('\n'),
+    'templates/audit.process.grain.md.jinja2': [
+      '---',
+      'grainfile: v1',
+      `title: "${procTemplateTitle}"`,
+      'when:',
+      '  schedule:',
+      '    cron: "0 9 * * 1"',
+      '    timezone: "America/Los_Angeles"',
+      '---',
+      'Audit {{ target_service | default("ledger") }} with threshold {{ max_findings | default("0") }}.',
+    ].join('\n'),
+    'tasks/offset.task.grain.md': [
+      '---',
+      'grainfile: v1',
+      `title: "${offsetTaskTitle}"`,
+      `recipient: "${canonicalDeployUrl}"`,
+      'not_before: "2026-10-25T09:00:00-07:00"',
+      '---',
+      'Execute cutover at 9am Pacific.',
+    ].join('\n'),
+    'processes/ci-watch.process.grain.md': [
+      '---',
+      'grainfile: v1',
+      `title: "${workflowProcTitle}"`,
+      'when:',
+      '  schedule:',
+      '    cron: "30 8 * * 1-5"',
+      '    timezone: "America/Los_Angeles"',
+      '  workflow:',
+      '    workflow: "CI"',
+      '    branches: ["main"]',
+      '    events: ["triggered", "succeeded", "failed"]',
+      '---',
+      'Triage CI workflow runs.',
+    ].join('\n'),
+  });
+
+  // Fire a simulated GitHub workflow_run webhook matching when.workflow.
+  await hub.workflowRunGitHub(world.repo, {
+    action: 'completed',
+    name: 'CI',
+    path: '.github/workflows/ci.yml',
+    headBranch: 'main',
+    sha: headSha,
+    conclusion: 'failure',
+    htmlUrl: `https://github.com/${world.repo}/actions/runs/9001`,
+  });
+
+  const page = await pageAs(world.admin);
+  await page.goto('/grainfiles');
+
+  const table = page.getByRole('table').first();
+  const detail = page.getByTestId('grainfile-detail');
+
+  // 1. Inspect .task.grain.md.jinja2 and .process.grain.md.jinja2 templates (CUJ-7).
+  await expect(table.getByText(resolvedTaskTemplateTitle)).toBeVisible();
+  await table.getByText(resolvedTaskTemplateTitle).click();
+  await expect(detail.getByRole('heading', { name: resolvedTaskTemplateTitle })).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^jinja2$/ })).toBeVisible();
+  await expect(detail.getByText('Template variables (template_vars):')).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^cluster$/ })).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^env$/ })).toBeVisible();
+
+  await expect(table.getByText(resolvedProcTemplateTitle)).toBeVisible();
+  await table.getByText(resolvedProcTemplateTitle).click();
+  await expect(detail.getByRole('heading', { name: resolvedProcTemplateTitle })).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^jinja2$/ })).toBeVisible();
+  await expect(detail.getByText('Template variables (template_vars):')).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^max_findings$/ })).toBeVisible();
+  await expect(detail.locator('.MuiChip-label', { hasText: /^target_service$/ })).toBeVisible();
+
+  // 2. Inspect RFC 3339 offset not_before task and when.schedule.timezone + when.workflow process (CUJ-6).
+  await table.getByText(offsetTaskTitle).click();
+  await expect(detail.getByRole('heading', { name: offsetTaskTitle })).toBeVisible();
+  await expect(detail.getByText('Not before 2026-10-25T16:00:00Z').first()).toBeVisible();
+
+  await table.getByText(workflowProcTitle).click();
+  await expect(detail.getByRole('heading', { name: workflowProcTitle })).toBeVisible();
+  await expect(detail.getByText('schedule: 30 8 * * 1-5 (America/Los_Angeles)')).toBeVisible();
+  await expect(
+    detail.getByText('workflow (CI; events: triggered, succeeded, failed; branches: main)'),
+  ).toBeVisible();
+  await expect(detail.getByText('process_triggered').first()).toBeVisible();
+  await expect(detail.getByText('trigger: workflow (main)')).toBeVisible();
+
+  // 3. Author a deployment-scoped empty-body .task.grain.md in the Hub-hosted Grainfile editor modal targeting canonicalDeployUrl (CUJ-3 & CUJ-4).
+  const hostedTitle = `Empty-body spec task ${world.n}`;
+  await page.getByTestId('open-grainfile-editor-btn').click();
+  const modal = page.getByTestId('grainfile-editor-modal');
+  await expect(modal).toBeVisible();
+
+  await modal.getByLabel('Grainfile scope').click();
+  await page.getByRole('option', { name: 'Deployment', exact: true }).click();
+  await modal.getByTestId('grainfile-editor-team').fill(deployId);
+  await modal.getByTestId('grainfile-editor-path').fill('tasks/spec-only.task.grain.md');
+  await modal.getByTestId('grainfile-editor-content').fill(
+    [
+      '---',
+      'grainfile: v1',
+      `title: "${hostedTitle}"`,
+      `recipient: "${canonicalDeployUrl}"`,
+      'references:',
+      '  - "specs/rollout.md"',
+      '---',
+    ].join('\n'),
+  );
+  await modal.getByTestId('grainfile-editor-ref-path').fill('specs/rollout.md');
+  await modal.getByTestId('grainfile-editor-ref-content').fill('# Rollout Spec\n\nVerify canary metrics before full rollout.\n');
+  await modal.getByTestId('save-grainfile-btn').click();
+
+  await expect(modal).toHaveCount(0);
+  await expect(table.getByText(hostedTitle)).toBeVisible();
+  await table.getByText(hostedTitle).click();
+  await expect(detail.getByRole('heading', { name: hostedTitle })).toBeVisible();
+  await expect(detail.getByRole('link', { name: canonicalDeployUrl })).toHaveAttribute('href', canonicalDeployUrl);
+  await expect(detail.getByText('Authorized (same-repo)')).toBeVisible();
+  await expect(detail.getByText('task_ready').first()).toBeVisible();
+});
+

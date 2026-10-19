@@ -55,6 +55,7 @@ type task struct {
 	Repo       string          `json:"repo,omitempty"`
 	Kind       string          `json:"kind,omitempty"`
 	Title      string          `json:"title,omitempty"`
+	Prompt     string          `json:"prompt,omitempty"`
 	State      tasks.State     `json:"state,omitempty"`
 	Proposer   string          `json:"proposer,omitempty"`
 	ApprovedBy string          `json:"approved_by,omitempty"`
@@ -339,6 +340,7 @@ func (g *grain) handle(c net.Conn) {
 				Repo:      m.Task.Repo,
 				Kind:      m.Task.Kind,
 				Title:     m.Task.Title,
+				Prompt:    m.Task.Prompt,
 				State:     tasks.Running,
 				Received:  []tasks.Message{},
 				approveCh: make(chan tasks.Message, 8),
@@ -377,7 +379,25 @@ func (g *grain) handle(c net.Conn) {
 		if m.Type == tasks.TypeCancel {
 			t.State = tasks.Cancelled
 		}
+		var chatReplyTaskID, chatReplyText string
+		if m.Type == tasks.TypeMessage && m.Message != nil && (strings.HasPrefix(t.Title, "Shared chat:") || strings.HasPrefix(t.Prompt, "[Shared Chat Session:")) {
+			chatReplyTaskID = t.ID
+			chatReplyText = m.Message.Text
+		}
 		g.mu.Unlock()
+		if chatReplyTaskID != "" {
+			go func(taskID, text string) {
+				_ = g.emit(taskID, []map[string]any{
+					{
+						"type": "transcript",
+						"transcript": map[string]any{
+							"kind": "text",
+							"text": "Agent reply: " + text,
+						},
+					},
+				})
+			}(chatReplyTaskID, chatReplyText)
+		}
 	}
 }
 
@@ -836,6 +856,9 @@ func (g *grain) uiHandler(m nodeui.Message) http.Handler {
 				return
 			}
 		}
+		w.Header().Set(headerHubUITheme, theme)
+		w.Header().Set(headerHubUIRole, role)
+		w.Header().Set(headerHubUIAccess, access)
 		mux.ServeHTTP(w, r)
 	})
 }

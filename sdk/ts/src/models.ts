@@ -387,6 +387,24 @@ export interface GrainfileQuery {
   url?: string;
 }
 
+// PutHostedGrainfileInput is the body of PUT /v1/grainfiles/personal/{path} or PUT /v1/grainfiles/team/{team}/{path}.
+export interface PutHostedGrainfileInput {
+  content: string;
+  files?: Record<string, string>;
+  commit_sha?: string;
+  commit?: string;
+}
+
+// HostedGrainfileResponse is returned when authoring or updating a Hub-hosted Grainfile.
+export interface HostedGrainfileResponse {
+  ok: boolean;
+  repo: string;
+  path: string;
+  commit?: string;
+  indexed?: Grainfile;
+  events?: GrainfileEvent[];
+}
+
 // HubEvent is an event as the hub relays it (hub/live.Event): the
 // envelope of package events, the hub's task ID, and for a node-only
 // event only its artifact reference.

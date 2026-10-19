@@ -79,14 +79,25 @@ test('every page passes axe', async ({ world, newWorld, hub, pageAs, grain, file
   await node.emit(session.id, { type: 'awaiting_reply', awaiting_reply: { state: 'waiting', question: 'Which?' } });
   const other = await newWorld();
   await fileTask(other.member, { repo: world.repo, title: 'A proposal', prompt: 'please' });
+  const a11yChat = await hub.must(world.admin, 'POST', '/v1/chats', {
+    title: 'Ops Collaboration Room',
+    deployment: world.team,
+    repos: [world.repo],
+  });
+  await hub.must(world.admin, 'POST', `/v1/chats/${a11yChat.id}/messages`, {
+    id: 'm-a11y-1',
+    text: 'Accessible chat message.',
+  });
 
   const page = await pageAs(world.admin);
   const pages: [string, string, () => Promise<unknown>][] = [
-    ['the inbox', '/', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
+    ['the inbox (/)', '/', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
+    ['the inbox (/inbox)', '/inbox', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
+    ['the shared chats', '/chats', () => page.getByText('Accessible chat message.').waitFor()],
     ['the backlog', '/backlog', () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
     ["a team's backlog", `/teams/${world.team}`, () => page.getByRole('link', { name: 'Accessible' }).waitFor()],
     ['the deployments', '/deployments', () => page.getByText(world.team).first().waitFor()],
-    ['a deployment', `/deployments/${world.team}`, () => page.getByTestId('canonical-deployment-url').waitFor()],
+    ['a deployment detail view', `/deployments/${world.team}`, () => page.getByTestId('canonical-deployment-url').waitFor()],
     ['the teams', '/teams', () => page.getByText(world.team).first().waitFor()],
     ["a team's members", `/teams/${world.team}/members`, () => page.getByText(world.member).first().waitFor()],
     ['the file form', `/teams/${world.team}/file`, () => expect(page.getByRole('combobox', { name: 'Repository' })).not.toHaveAttribute('aria-disabled', 'true')],
