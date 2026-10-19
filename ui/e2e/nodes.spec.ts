@@ -129,11 +129,13 @@ test('deployment switcher, theme switcher, and unified inbox across deployments'
   );
 
   // Inline quick action: approve the proposal directly from the Unified Inbox.
+  // Approval queues it, and the connected node may claim it at once, so
+  // either state shows the approval went through.
   const proposalCard = page.getByTestId(`inbox-item-${proposal.id}`);
   await proposalCard.getByRole('button', { name: 'Approve' }).click();
   await expect
     .poll(async () => (await hub.must(world.member, 'GET', `/v1/tasks/${proposal.id}`)).state)
-    .toBe('queued');
+    .toMatch(/^(queued|running)$/);
 
   // Deployment Switcher lists the deployment with its inferred team and role chip.
   await page.getByTestId('deployment-switcher').click();
