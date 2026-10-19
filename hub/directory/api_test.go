@@ -41,9 +41,10 @@ func (headerAuth) Principal(r *http.Request) (identity.Principal, error) {
 // testHub is a hub with the directory wired into the rendezvous, as
 // docs/hub.md §5 lays it out.
 type testHub struct {
-	store *Store
-	rv    *rendezvous.Server
-	url   string
+	store  *Store
+	rv     *rendezvous.Server
+	url    string
+	claims map[string]string
 }
 
 func newTestHub(t *testing.T) *testHub {
@@ -60,7 +61,26 @@ func newTestHub(t *testing.T) *testHub {
 		Heartbeat:    time.Second,
 		Logf:         testlog.Logf(t),
 	}
-	api := &API{Store: s, Auth: headerAuth{}, HubAdmins: []string{"group:hub-admins@example.com"}, Disconnect: rv.Disconnect, Registry: rv.Registry}
+	claims := map[string]string{
+		"bwsalmon/silo": "infra\n",
+		"bwsalmon/web":  "web\n",
+	}
+	api := &API{
+		Store:      s,
+		Auth:       headerAuth{},
+		HubAdmins:  []string{"group:hub-admins@example.com"},
+		Disconnect: rv.Disconnect,
+		Registry:   rv.Registry,
+		VerifyRepoClaim: NewRepoClaimVerifier(func(_ context.Context, repoURL, _, filePath string) ([]byte, error) {
+			slug := strings.TrimPrefix(strings.ToLower(repoURL), "https://github.com/")
+			if filePath == ClaimFilePath {
+				if c, ok := claims[slug]; ok {
+					return []byte(c), nil
+				}
+			}
+			return nil, errors.New("file not found")
+		}, nil),
+	}
 	rv.Visible = api.Visible
 	rv.ResolveEntries = api.ResolveEntries
 	m := http.NewServeMux()
@@ -69,7 +89,7 @@ func newTestHub(t *testing.T) *testHub {
 	m.Handle("/", api.Handler())
 	ts := httptest.NewServer(m)
 	t.Cleanup(ts.Close)
-	return &testHub{store: s, rv: rv, url: ts.URL}
+	return &testHub{store: s, rv: rv, url: ts.URL, claims: claims}
 }
 
 // do calls the API as user (with groups after a comma-free list).
@@ -120,8 +140,10 @@ func TestAPI(t *testing.T) {
 	h.want(t, 400, root, "POST", TeamsPath, map[string]string{"id": "Bad Team"}, admins)
 	h.want(t, 400, root, "POST", TeamsPath, map[string]any{"id": "x", "extra": 1}, admins)
 
-	// A deployment admin may claim an unowned repository (without history);
+	// A deployment admin may claim an unowned repository (without history)
+	// only when .grain/hub-claim on its default branch names the deployment;
 	// history transfer requires a hub admin, and claiming another team's repo is 409.
+	h.want(t, 403, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/unclaimed", nil)
 	h.want(t, 204, alice, "PUT", TeamsPath+"/infra/repos/bwsalmon/silo", nil)
 	h.want(t, 204, root, "PUT", TeamsPath+"/web/repos/bwsalmon/web", map[string]bool{"history": true}, admins)
 	h.want(t, 409, bob, "PUT", TeamsPath+"/web/repos/bwsalmon/silo", nil)          // infra's
@@ -758,6 +780,7 @@ func TestDeploymentsCanonicalURLAndHostReplacement(t *testing.T) {
 		Heartbeat:    time.Second,
 		HubURL:       "https://hub.example.com",
 	}
+	claims := map[string]string{}
 	api := &API{
 		Store:      s,
 		Auth:       headerAuth{},
@@ -773,6 +796,15 @@ func TestDeploymentsCanonicalURLAndHostReplacement(t *testing.T) {
 			replayedNode = nodeID
 			return 3, nil
 		},
+		VerifyRepoClaim: NewRepoClaimVerifier(func(_ context.Context, repoURL, _, filePath string) ([]byte, error) {
+			slug := strings.TrimPrefix(strings.ToLower(repoURL), "https://github.com/")
+			if filePath == ClaimFilePath {
+				if c, ok := claims[slug]; ok {
+					return []byte(c), nil
+				}
+			}
+			return nil, errors.New("file not found")
+		}, func() string { return "https://hub.example.com" }),
 	}
 	rv.Visible = api.Visible
 	rv.ResolveEntries = api.ResolveEntries
@@ -782,7 +814,7 @@ func TestDeploymentsCanonicalURLAndHostReplacement(t *testing.T) {
 	m.Handle("/", api.Handler())
 	ts := httptest.NewServer(m)
 	t.Cleanup(ts.Close)
-	h := &testHub{store: s, rv: rv, url: ts.URL}
+	h := &testHub{store: s, rv: rv, url: ts.URL, claims: claims}
 
 	const alice, bob, carol = "alice@example.com", "bob@example.com", "carol@example.com"
 
@@ -796,7 +828,10 @@ func TestDeploymentsCanonicalURLAndHostReplacement(t *testing.T) {
 	// Name is taken (409 Conflict).
 	h.want(t, http.StatusConflict, bob, "POST", DeploymentsPath, map[string]string{"id": "payments-prod"})
 
-	// 2. Alice claims an open repo and adds Bob as a second deployment admin.
+	// 2. Alice cannot claim an unowned repo without .grain/hub-claim proof (403 Forbidden);
+	// once .grain/hub-claim names payments-prod, she claims it and adds Bob as a second deployment admin.
+	h.want(t, http.StatusForbidden, alice, "PUT", DeploymentsPath+"/payments-prod/repos/acme/payments", nil)
+	claims["acme/payments"] = "https://hub.example.com/deployments/payments-prod\n"
 	h.want(t, http.StatusNoContent, alice, "PUT", DeploymentsPath+"/payments-prod/repos/acme/payments", nil)
 	h.want(t, http.StatusNoContent, alice, "PUT", DeploymentsPath+"/payments-prod/members/user:"+bob, map[string]string{"role": "admin"})
 
@@ -1147,4 +1182,29 @@ func TestConcurrentSelfServiceDeploymentClaimAndGrainfilesReplayRace(t *testing.
 			t.Fatalf("unexpected replayed event paths/types: %+v", gotTypes)
 		}
 	})
+}
+
+func TestMatchRepoClaim(t *testing.T) {
+	const hubURL = "https://hub.example.com"
+	for _, tc := range []struct {
+		name string
+		raw  string
+		team string
+		hub  string
+		want bool
+	}{
+		{"bare deployment id", "acme-payments\n", "acme-payments", hubURL, true},
+		{"comments and blank lines", "# comment\n\n  acme-payments # inline\n", "acme-payments", hubURL, true},
+		{"canonical url", "https://hub.example.com/deployments/acme-payments/\n", "acme-payments", hubURL, true},
+		{"canonical path", "/deployments/acme-payments\n", "acme-payments", hubURL, true},
+		{"deployment key-value", "deployment: \"https://hub.example.com/deployments/acme-payments\"\n", "acme-payments", hubURL, true},
+		{"multiple deployments", "staging-pay\nacme-payments\n", "acme-payments", hubURL, true},
+		{"different deployment", "other-team\n", "acme-payments", hubURL, false},
+		{"different hub url", "https://other-hub.example.com/deployments/acme-payments\n", "acme-payments", hubURL, false},
+		{"empty file", "# only comments\n\n", "acme-payments", hubURL, false},
+	} {
+		if got := MatchRepoClaim([]byte(tc.raw), tc.team, tc.hub); got != tc.want {
+			t.Errorf("%s: MatchRepoClaim(%q, %q, %q) = %v, want %v", tc.name, tc.raw, tc.team, tc.hub, got, tc.want)
+		}
+	}
 }

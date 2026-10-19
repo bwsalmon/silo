@@ -55,12 +55,13 @@ A Grain Hub coordinates human operators, source-code repositories, and connected
   5. `alice@example.com` (an accepted non-admin user) creates a new deployment via `POST /v1/deployments` with `{"id": "payments-prod", "name": "Payments Prod"}` -> `201 Created`. The response includes `url: "https://<hub-host>/deployments/payments-prod"` and `recipient_url: "https://<hub-host>/deployments/payments-prod"`, and `alice@example.com` is recorded as `owner`.
   6. Attempting to create a duplicate deployment with `{"id": "payments-prod"}` returns `409 Conflict` (`deployment already exists`).
   7. `GET /deployments/payments-prod` serves the Hub SPA (`200 OK`), and `GET /v1/deployments/payments-prod` returns the deployment details with `url` and `recipient_url`.
-  8. `alice@example.com` mints a node token via `POST /v1/deployments/payments-prod/token` (`201 Created`, `Cache-Control: no-store`) and claims `acme/payments` via `PUT /v1/deployments/payments-prod/repos/acme/payments` (`204 No Content`).
+  8. Attempting to claim an unowned repository (`PUT /v1/deployments/payments-prod/repos/acme/payments` or `PUT /v1/deployments/rogue-team/repos/victim-org/private-repo`) before `.grain/hub-claim` on its default branch names the deployment is rejected with `403 Forbidden`. Once `.grain/hub-claim` on `acme/payments`'s default branch names `payments-prod` (or its canonical deployment URL `https://<hub-host>/deployments/payments-prod`), `alice@example.com` claims `acme/payments` via `PUT /v1/deployments/payments-prod/repos/acme/payments` (`204 No Content`) and mints a node token via `POST /v1/deployments/payments-prod/token` (`201 Created`, `Cache-Control: no-store`).
   9. A simulated Grain node connects to `GET /v1/nodes/connect` using the minted token and `NodeID: "payments-prod"`, and appears online in `GET /v1/nodes`.
 - **Security Invariants**:
   - Unaccepted users are blocked at `directory.API.Access` with `403 Forbidden`.
   - The Hub refuses to delete or demote the last remaining `sys_admin` (`ErrLastSysAdmin`, `409 Conflict`).
   - Deployment names are globally unique on the Hub (`ErrTeamExists`, `409 Conflict`).
+  - Self-service claims of unowned repositories require proof of repository write access via `.grain/hub-claim` on the repository's default branch naming the claiming deployment (`403 Forbidden` without proof); claiming a repository already owned by another deployment returns `409 Conflict`.
 
 ---
 

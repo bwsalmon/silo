@@ -31,6 +31,9 @@ func TestInteractiveSession(t *testing.T) {
 		DevUserHeader: userHeader,
 		HubAdmins:     []string{admin},
 		AcceptedUsers: []string{alice, dave, carol},
+		GrainfileFetcher: &mapContentFetcher{files: map[string][]byte{
+			".grain/hub-claim": []byte("infra\n"),
+		}},
 		Heartbeat:     time.Second,
 		DispatchRetry: time.Second,
 		Logf:          logf(t),

@@ -736,6 +736,10 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	tasksAPI.OnChatMessagePosted = h.GoogleChat.OnWebMessage
 	tasksAPI.OnChatTaskEvent = h.GoogleChat.OnChatTaskEvent
 	fetcher := cfg.GrainfileFetcher
+	hasRepoVerifier := cfg.GrainfileFetcher != nil ||
+		strings.TrimSpace(cfg.GitHubAPIURL) != "" ||
+		strings.TrimSpace(cfg.GitHubToken) != "" ||
+		(cfg.GitHubAppID != 0 && len(cfg.GitHubAppPrivateKey) > 0)
 	if fetcher == nil {
 		fetcher = &grainfiles.GitHubFetcher{
 			BaseURL:       cfg.GitHubAPIURL,
@@ -743,6 +747,9 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			AppID:         cfg.GitHubAppID,
 			AppPrivateKey: cfg.GitHubAppPrivateKey,
 		}
+	}
+	if hasRepoVerifier {
+		dirAPI.VerifyRepoClaim = directory.NewRepoClaimVerifier(fetcher.FetchFile, func() string { return dirAPI.HubURL })
 	}
 	authorizeOwnerRepo := func(ctx context.Context, owner, repoURL string) bool {
 		slug := urlRepoSlug(repoURL)
