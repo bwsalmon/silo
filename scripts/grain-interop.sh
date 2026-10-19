@@ -226,6 +226,17 @@ grain_team() {
 	local id="$1" repo="$2" out
 	out="$(grainapi POST /api/teams "$(jq -nc --arg id "$id" --arg u "$USER_EMAIL" --arg r "$repo" \
 		'{id: $id, name: $id, users: [$u], maxWorkers: 1, targetRepos: [$r]}')")"
+	if echo "$out" | jq -e '(.error // "") | test("single-tenant")' >/dev/null 2>&1; then
+		id="default"
+		local cur body
+		cur="$(grainapi GET /api/teams/default)"
+		body="$(echo "$cur" | jq -c --arg u "$USER_EMAIL" --arg r "$repo" \
+			'.id = "default" | .name = (.name // "default") | .users = (((.users // []) + [$u]) | unique) | .targetRepos = (((.targetRepos // []) + [$r]) | unique) | .maxWorkers = 1')"
+		out="$(grainapi PUT /api/teams/default "$body")"
+		if ! grainapi GET /api/teams/default | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null 2>&1; then
+			out="$(grainapi POST /api/teams "$body")"
+		fi
+	fi
 	grainapi GET "/api/teams/$id" | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null ||
 		{ fail setup "could not give grain a team for $repo: $out"; return 1; }
 	out="$(grainapi POST "/api/teams/$id/git-connections" "$(jq -nc --arg h "127.0.0.1:$GITHUB_PORT" \

@@ -797,7 +797,15 @@ func (s *Server) Open(ctx context.Context, nodeID string) (net.Conn, error) {
 	nc := s.conns[nodeID]
 	s.mu.Unlock()
 	if nc != nil {
-		return nc.m.OpenStream(ctx)
+		st, err := nc.m.OpenStream(ctx)
+		if err != nil {
+			select {
+			case <-nc.m.Done():
+				return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
+			default:
+			}
+		}
+		return st, err
 	}
 	if len(s.InternalKey) == 0 || s.Registry.Store == nil {
 		return nil, fmt.Errorf("%w: %s", ErrOffline, nodeID)
