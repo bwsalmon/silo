@@ -34,9 +34,11 @@ import (
 // HTTP paths served by the Grainfile webhook receiver, content proxy, and
 // human inspection endpoint.
 const (
-	GitHubWebhookPath = "/v1/webhooks/github"
-	ContentPath       = "/v1/grainfiles/content"
-	GrainfilesPath    = "/v1/grainfiles"
+	GitHubWebhookPath      = "/v1/webhooks/github"
+	ContentPath            = "/v1/grainfiles/content"
+	GrainfilesPath         = "/v1/grainfiles"
+	PersonalGrainfilesPath = "/v1/grainfiles/personal/{path...}"
+	TeamGrainfilesPath     = "/v1/grainfiles/team/{team}/{path...}"
 )
 
 const maxWebhookBodyBytes = 10 * 1024 * 1024 // 10 MiB
@@ -1039,6 +1041,7 @@ type Viewer struct {
 	Email    string
 	HubAdmin bool
 	SeesRepo func(repo string) bool
+	Teams    map[string]string
 }
 
 // API serves the forge webhook ingestion endpoint (POST /v1/webhooks/github),
@@ -1048,6 +1051,7 @@ type API struct {
 	Store         *Store
 	Fetcher       RepoFetcher
 	WebhookSecret string
+	HubURL        string
 	// AllowUnsignedWebhooks, when true in isolated unit tests, permits
 	// POST /v1/webhooks/github when WebhookSecret is empty. Production
 	// deployments leave this false so unsigned webhooks fail closed (401).
@@ -1072,6 +1076,7 @@ type API struct {
 
 	mu         sync.RWMutex
 	NodeTokens map[string]string
+	hosted     MemoryFetcher
 }
 
 // NewAPI constructs an API bound to store and fetcher.
@@ -1099,6 +1104,12 @@ func (a *API) Register(m *route.Mux) {
 	m.HandleFunc("POST "+GitHubWebhookPath, a.serveGitHubWebhook)
 	m.HandleFunc("GET "+ContentPath, a.serveContent)
 	m.HandleFunc("GET "+GrainfilesPath, a.serveGrainfiles)
+	m.HandleFunc("GET "+PersonalGrainfilesPath, a.servePersonalGrainfile)
+	m.HandleFunc("PUT "+PersonalGrainfilesPath, a.servePersonalGrainfile)
+	m.HandleFunc("DELETE "+PersonalGrainfilesPath, a.servePersonalGrainfile)
+	m.HandleFunc("GET "+TeamGrainfilesPath, a.serveTeamGrainfile)
+	m.HandleFunc("PUT "+TeamGrainfilesPath, a.serveTeamGrainfile)
+	m.HandleFunc("DELETE "+TeamGrainfilesPath, a.serveTeamGrainfile)
 }
 
 // Handler returns an http.Handler (and route.Lister) serving
@@ -1834,6 +1845,9 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 	}
 	// Otherwise the node matched via Repos, Folders, or Grainfiles subscription,
 	// which requires the node's owner to have repository access to rec.Repo.
+	if isTeamHostedRepoForNode(rec.Repo, sub.NodeID) {
+		return true
+	}
 	return authorize(ctx, sub.Owner, rec.Repo)
 }
 
@@ -2135,8 +2149,18 @@ func resolveRepoAndPath(rawRepo, rawTarget string) (canonRepo, targetPath, gitRe
 	return canonRepo, cleanP, "", nil
 }
 
+func (a *API) fetchFile(ctx context.Context, repoURL, ref, filePath string) ([]byte, error) {
+	if data, err := a.hosted.FetchFile(ctx, repoURL, ref, filePath); err == nil {
+		return data, nil
+	}
+	if a.Fetcher == nil {
+		return nil, os.ErrNotExist
+	}
+	return a.Fetcher.FetchFile(ctx, repoURL, ref, filePath)
+}
+
 func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, ref, filePath string) {
-	data, err := a.Fetcher.FetchFile(r.Context(), repoURL, ref, filePath)
+	data, err := a.fetchFile(r.Context(), repoURL, ref, filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "file not found in repository", http.StatusNotFound)
@@ -2202,7 +2226,7 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 func (a *API) streamRepoReference(w http.ResponseWriter, r *http.Request, repoURL, ref string, targetRef Ref, rawTarget string) {
 	isExplicitTree := targetRef.Mode == "tree" || targetRef.TrailingSlash || strings.HasSuffix(strings.TrimSpace(rawTarget), "/")
 	if !isExplicitTree {
-		data, err := a.Fetcher.FetchFile(r.Context(), repoURL, ref, targetRef.Path)
+		data, err := a.fetchFile(r.Context(), repoURL, ref, targetRef.Path)
 		if err == nil {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -2268,6 +2292,12 @@ func (a *API) streamRepoReference(w http.ResponseWriter, r *http.Request, repoUR
 }
 
 func (a *API) fetchRepoTree(ctx context.Context, repoURL, ref, dirPath string) ([]TreeEntry, string, error) {
+	if entries, sha, err := a.hosted.FetchTree(ctx, repoURL, ref, dirPath); err == nil {
+		return entries, sha, nil
+	}
+	if a.Fetcher == nil {
+		return nil, "", os.ErrNotExist
+	}
 	if tf, ok := a.Fetcher.(TreeFetcher); ok {
 		return tf.FetchTree(ctx, repoURL, ref, dirPath)
 	}
@@ -2284,7 +2314,7 @@ func (a *API) fetchRepoTree(ctx context.Context, repoURL, ref, dirPath string) (
 		if cleanDir != "" && p != cleanDir && !strings.HasPrefix(p, cleanDir+"/") {
 			continue
 		}
-		data, err := a.Fetcher.FetchFile(ctx, repoURL, firstNonEmpty(commitSHA, ref), p)
+		data, err := a.fetchFile(ctx, repoURL, firstNonEmpty(commitSHA, ref), p)
 		if err != nil {
 			return nil, "", err
 		}
@@ -2344,7 +2374,7 @@ func (a *API) FetchAuthorizedContent(ctx context.Context, nodeID, grainfileURL, 
 // is non-empty and the target is a .jinja2 Grainfile template, renders the
 // template with vars and validates the rendered Grainfile before returning it.
 func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainfileURL, commitSHA, reference, format string, vars map[string]string) (kind, resolvedCommit string, data []byte, err error) {
-	if a.Store == nil || a.Fetcher == nil {
+	if a.Store == nil {
 		return "", "", nil, errors.New("content proxy not configured")
 	}
 	nodeID = strings.TrimSpace(nodeID)
@@ -2384,7 +2414,7 @@ func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainf
 				return "", "", nil, fmt.Errorf("%w: target ref does not match indexed grainfile", ErrUnauthorized)
 			}
 		}
-		raw, err := a.Fetcher.FetchFile(ctx, rec.Repo, pinnedRef, rec.Path)
+		raw, err := a.fetchFile(ctx, rec.Repo, pinnedRef, rec.Path)
 		if err != nil {
 			return "", "", nil, err
 		}
@@ -2422,7 +2452,7 @@ func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainf
 
 	isExplicitTree := targetRef.Mode == "tree" || targetRef.TrailingSlash || strings.HasSuffix(strings.TrimSpace(reference), "/")
 	if !isExplicitTree {
-		raw, fErr := a.Fetcher.FetchFile(ctx, rec.Repo, pinnedRef, targetRef.Path)
+		raw, fErr := a.fetchFile(ctx, rec.Repo, pinnedRef, targetRef.Path)
 		if fErr == nil {
 			if IsTemplatePath(targetRef.Path) && len(vars) > 0 {
 				rendered, _, err := RenderTemplate(string(raw), vars)
@@ -2755,14 +2785,292 @@ func canSeeRepoURL(acc *Viewer, rawURL string) bool {
 	if acc == nil || acc.HubAdmin {
 		return true
 	}
-	if acc.SeesRepo == nil {
-		return false
+	if depID := DeploymentIDFromRecipient(rawURL); depID != "" {
+		if acc.Teams != nil && acc.Teams[strings.ToLower(depID)] != "" {
+			return true
+		}
 	}
 	owner, repo, err := parseGitHubOwnerRepo(rawURL)
 	if err != nil {
 		return false
 	}
+	if strings.EqualFold(owner, "personal") && acc.Email != "" && strings.EqualFold(repo, UserRepoSlug(acc.Email)) {
+		return true
+	}
+	if strings.EqualFold(owner, "team") && acc.Teams != nil && acc.Teams[strings.ToLower(repo)] != "" {
+		return true
+	}
+	if acc.SeesRepo == nil {
+		return false
+	}
 	return acc.SeesRepo(owner + "/" + repo)
+}
+
+// UserRepoSlug converts a user email or principal into a URL-safe single path
+// segment for Hub-hosted personal Grainfile repositories (/personal/<slug>).
+func UserRepoSlug(email string) string {
+	s := strings.ToLower(strings.TrimSpace(email))
+	s = strings.TrimPrefix(s, "user:")
+	s = strings.ReplaceAll(s, "@", "-at-")
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), ".-")
+	if out == "" {
+		return "user"
+	}
+	return out
+}
+
+// HostedGrainfileResponse is the JSON payload returned by PUT and DELETE on
+// Hub-hosted personal (/v1/grainfiles/personal/{path...}) and deployment/team
+// (/v1/grainfiles/team/{team}/{path...}) Grainfile repositories.
+type HostedGrainfileResponse struct {
+	OK      bool         `json:"ok"`
+	Repo    string       `json:"repo"`
+	Path    string       `json:"path"`
+	Commit  string       `json:"commit,omitempty"`
+	Indexed *IndexRecord `json:"indexed,omitempty"`
+	Events  []Event      `json:"events,omitempty"`
+}
+
+func (a *API) hubBaseURL(r *http.Request) string {
+	for _, candidate := range []string{a.HubURL, func() string {
+		if a.Store != nil {
+			return a.Store.HubURL
+		}
+		return ""
+	}()} {
+		if candidate = strings.TrimRight(strings.TrimSpace(candidate), "/"); strings.HasPrefix(candidate, "https://") {
+			if u, err := url.Parse(candidate); err == nil && strings.Contains(u.Hostname(), ".") {
+				return "https://" + u.Host
+			}
+		}
+	}
+	if r != nil && r.Host != "" {
+		if u, err := url.Parse("https://" + r.Host); err == nil && strings.Contains(u.Hostname(), ".") {
+			return "https://" + u.Host
+		}
+	}
+	return "https://hub.local"
+}
+
+func (a *API) servePersonalGrainfile(w http.ResponseWriter, r *http.Request) {
+	if a.Store == nil {
+		http.Error(w, "grainfiles store not configured", http.StatusInternalServerError)
+		return
+	}
+	email := "dev@example.com"
+	if a.Access != nil {
+		v, err := a.Access(r)
+		if err != nil {
+			if strings.Contains(err.Error(), "not on the hub accepted users list") {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		if v.Email != "" {
+			email = v.Email
+		}
+	}
+	repoURL := a.hubBaseURL(r) + "/personal/" + UserRepoSlug(email)
+	a.serveHostedGrainfile(w, r, repoURL, r.PathValue("path"))
+}
+
+func (a *API) serveTeamGrainfile(w http.ResponseWriter, r *http.Request) {
+	if a.Store == nil {
+		http.Error(w, "grainfiles store not configured", http.StatusInternalServerError)
+		return
+	}
+	team := strings.ToLower(strings.TrimSpace(r.PathValue("team")))
+	if team == "" || !validRepoSegment(team) {
+		http.Error(w, "no such deployment", http.StatusNotFound)
+		return
+	}
+	if a.Access != nil {
+		v, err := a.Access(r)
+		if err != nil {
+			if strings.Contains(err.Error(), "not on the hub accepted users list") {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		if !v.HubAdmin {
+			role := ""
+			if v.Teams != nil {
+				role = v.Teams[team]
+			}
+			if role == "" {
+				http.Error(w, "no such deployment", http.StatusNotFound)
+				return
+			}
+			if r.Method != http.MethodGet && role != "owner" && role != "admin" && role != "member" {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+	}
+	repoURL := a.hubBaseURL(r) + "/team/" + team
+	a.serveHostedGrainfile(w, r, repoURL, r.PathValue("path"))
+}
+
+func (a *API) serveHostedGrainfile(w http.ResponseWriter, r *http.Request, repoURL, rawPath string) {
+	if hasEncodedPathHazard(rawPath) {
+		http.Error(w, "invalid file path", http.StatusBadRequest)
+		return
+	}
+	if hasDot, hasDotDot := hasDotSegment(filepath.ToSlash(rawPath)); hasDot || hasDotDot {
+		http.Error(w, "invalid file path", http.StatusBadRequest)
+		return
+	}
+	cleanPath := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(rawPath)), "/"))
+	if cleanPath == "" || cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
+		http.Error(w, "invalid file path", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+		data, err := a.hosted.FetchFile(r.Context(), repoURL, ref, cleanPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+
+	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, MaxFileBytes)
+		rawBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "payload exceeds size limit", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "reading request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		content := rawBody
+		var extraFiles map[string]string
+		var explicitSHA string
+		if len(bytes.TrimSpace(rawBody)) > 0 && bytes.TrimSpace(rawBody)[0] == '{' {
+			var env struct {
+				Content   *string           `json:"content"`
+				Files     map[string]string `json:"files"`
+				CommitSHA string            `json:"commit_sha"`
+				Commit    string            `json:"commit"`
+			}
+			if err := json.Unmarshal(rawBody, &env); err == nil && env.Content != nil {
+				content = []byte(*env.Content)
+				extraFiles = env.Files
+				explicitSHA = firstNonEmpty(env.CommitSHA, env.Commit)
+			}
+		}
+		commitSHA := strings.TrimSpace(explicitSHA)
+		if commitSHA == "" {
+			sum := sha256.Sum256(append([]byte(repoURL+"\x00"+cleanPath+"\x00"), content...))
+			commitSHA = hex.EncodeToString(sum[:20])
+		}
+		for _, ref := range []string{commitSHA, "main", ""} {
+			a.hosted.SetFile(repoURL, ref, cleanPath, content)
+			for ep, ed := range extraFiles {
+				cleanEP := cleanPosixPath(strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(ep)), "/"))
+				if cleanEP != "" && cleanEP != "." && cleanEP != ".." && !strings.HasPrefix(cleanEP, "../") {
+					a.hosted.SetFile(repoURL, ref, cleanEP, []byte(ed))
+				}
+			}
+		}
+
+		var indexedRec *IndexRecord
+		var emittedEvents []Event
+		if _, _, isGF, _ := ClassifyPath(cleanPath); isGF {
+			gf, err := Parse(cleanPath, content)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			if err := gf.ResolveSource(Source{
+				RepoURL: repoURL,
+				Ref:     "main",
+				Commit:  commitSHA,
+				Path:    cleanPath,
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			prevSeq, _ := a.Store.MaxEventSeq(r.Context())
+			rec, err := a.Store.IndexGrainfile(r.Context(), gf)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			indexedRec = &rec
+			if evs, err := a.Store.EventsSince(r.Context(), prevSeq); err == nil && len(evs) > 0 {
+				emittedEvents = evs
+				if a.OnEvents != nil {
+					a.OnEvents(emittedEvents)
+				}
+			}
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(HostedGrainfileResponse{
+			OK:      true,
+			Repo:    repoURL,
+			Path:    cleanPath,
+			Commit:  commitSHA,
+			Indexed: indexedRec,
+			Events:  emittedEvents,
+		})
+
+	case http.MethodDelete:
+		for _, ref := range []string{"main", ""} {
+			a.hosted.DeleteFile(repoURL, ref, cleanPath)
+		}
+		if rec, err := a.Store.GetIndex(r.Context(), repoURL, cleanPath, ""); err == nil && rec.CommitSHA != "" {
+			a.hosted.DeleteFile(repoURL, rec.CommitSHA, cleanPath)
+		}
+		var emittedEvents []Event
+		if _, _, isGF, _ := ClassifyPath(cleanPath); isGF {
+			prevSeq, _ := a.Store.MaxEventSeq(r.Context())
+			_ = a.Store.RemoveGrainfile(r.Context(), repoURL, cleanPath)
+			if evs, err := a.Store.EventsSince(r.Context(), prevSeq); err == nil && len(evs) > 0 {
+				emittedEvents = evs
+				if a.OnEvents != nil {
+					a.OnEvents(emittedEvents)
+				}
+			}
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(HostedGrainfileResponse{
+			OK:     true,
+			Repo:   repoURL,
+			Path:   cleanPath,
+			Events: emittedEvents,
+		})
+	}
 }
 
 func canSeeRecord(acc *Viewer, rec IndexRecord) bool {

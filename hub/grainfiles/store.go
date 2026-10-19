@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1865,7 +1866,7 @@ func (s *Store) RecordDependencyCompletedByNode(ctx context.Context, nodeID, com
 				break
 			}
 		}
-		if !matchedByGF && s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
+		if !matchedByGF && !isTeamHostedRepoForNode(rec.Repo, sub.NodeID) && s.AuthorizeOwnerRepo != nil && sub.Owner != "" && !s.AuthorizeOwnerRepo(ctx, sub.Owner, rec.Repo) {
 			return nil, fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, sub.Owner, rec.Repo)
 		}
 		authorized = true
@@ -2266,6 +2267,9 @@ func (s *Store) SetSubscriptions(ctx context.Context, sub Subscriptions) (Subscr
 				}
 			}
 			for _, u := range out.Repos {
+				if isTeamHostedRepoForNode(u, nodeID) {
+					continue
+				}
 				if !s.AuthorizeOwnerRepo(ctx, out.Owner, u) {
 					return fmt.Errorf("%w: owner %q is not admitted for repository %q", ErrUnauthorized, out.Owner, u)
 				}
@@ -2642,7 +2646,8 @@ func (sub Subscriptions) EffectiveRecipients(hubURL string) []string {
 
 // MatchesRecord reports whether sub subscribes to rec by recipient URL
 // (including canonical Hub deployment URLs /deployments/<node_id>),
-// repository URL, folder prefix, or explicit Grainfile URL.
+// repository URL (including Hub-hosted /team/<node_id> repos), folder prefix,
+// or explicit Grainfile URL.
 func (sub Subscriptions) MatchesRecord(rec IndexRecord) bool {
 	if rec.Recipient != "" {
 		if slices.Contains(sub.Recipients, rec.Recipient) {
@@ -2657,8 +2662,11 @@ func (sub Subscriptions) MatchesRecord(rec IndexRecord) bool {
 			}
 		}
 	}
+	if sub.NodeID != "" && isTeamHostedRepoForNode(rec.Repo, sub.NodeID) {
+		return true
+	}
 	for _, r := range sub.Repos {
-		if IsSameRepo(r, rec.Repo) {
+		if IsSameRepo(r, rec.Repo) || isSameTeamHostedRepo(r, rec.Repo) {
 			return true
 		}
 	}
@@ -2759,12 +2767,58 @@ func normalizeSubscriptionList(items []string, normFn func(string) (string, erro
 	return out, nil
 }
 
+func isTeamHostedRepoForNode(repoURL, nodeID string) bool {
+	if repoURL == "" || nodeID == "" {
+		return false
+	}
+	team := teamFromHostedRepo(repoURL)
+	return team != "" && strings.EqualFold(team, strings.TrimSpace(nodeID))
+}
+
+func isSameTeamHostedRepo(a, b string) bool {
+	ta := teamFromHostedRepo(a)
+	tb := teamFromHostedRepo(b)
+	return ta != "" && strings.EqualFold(ta, tb)
+}
+
+func teamFromHostedRepo(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var p string
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		p = u.Path
+	} else {
+		p = raw
+	}
+	p = strings.Trim(p, "/")
+	if rest, ok := strings.CutPrefix(p, "v1/grainfiles/team/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return strings.ToLower(rest)
+	}
+	if rest, ok := strings.CutPrefix(p, "team/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return strings.ToLower(rest)
+	}
+	return ""
+}
+
 func normalizeSubRepoURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("empty repository URL")
 	}
-	if !strings.Contains(raw, "://") && strings.Count(raw, "/") == 1 {
+	if team := teamFromHostedRepo(raw); team != "" {
+		if !strings.Contains(raw, "://") {
+			raw = "https://hub.local/team/" + team
+		} else if u, err := url.Parse(raw); err == nil {
+			u.Path = "/team/" + team
+			raw = u.String()
+		}
+	} else if !strings.Contains(raw, "://") && strings.Count(raw, "/") == 1 {
 		raw = "https://github.com/" + raw
 	}
 	return CanonicalRepoURL(raw)
