@@ -481,6 +481,25 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			if slug == "" {
 				continue
 			}
+			if pSlug, ok := strings.CutPrefix(slug, "personal/"); ok {
+				if !strings.EqualFold(pSlug, grainfiles.UserRepoSlug(owner)) {
+					return fmt.Errorf("%w: %s may not claim or subscribe to %s", directory.ErrNotAdmitted, owner, slug)
+				}
+				continue
+			}
+			if tSlug, ok := strings.CutPrefix(slug, "team/"); ok {
+				if acc == nil {
+					var err error
+					acc, err = h.Directory.Access(ctx, identity.Principal{Email: owner}, false)
+					if err != nil {
+						return fmt.Errorf("%w: %w", rendezvous.ErrUnavailable, err)
+					}
+				}
+				if acc.Teams[tSlug] == "" {
+					return fmt.Errorf("%w: %s may not claim or subscribe to %s (owned by team %s)", directory.ErrNotAdmitted, owner, slug, tSlug)
+				}
+				continue
+			}
 			team, err := h.Directory.RepoOwner(ctx, slug)
 			if err != nil {
 				return fmt.Errorf("%w: %w", rendezvous.ErrUnavailable, err)
@@ -681,35 +700,49 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 			AppPrivateKey: cfg.GitHubAppPrivateKey,
 		}
 	}
-	h.GrainfilesAPI = &grainfiles.API{
-		Store:         h.Grainfiles,
-		Fetcher:       fetcher,
-		WebhookSecret: cfg.WebhookSecret,
-		Directory:     h.Directory,
-		AuthorizeOwnerRepo: func(ctx context.Context, owner, repoURL string) bool {
-			slug := urlRepoSlug(repoURL)
-			if slug == "" {
-				return false
-			}
-			team, err := h.Directory.RepoOwner(ctx, slug)
-			if err != nil || team == "" {
-				return false
-			}
+	authorizeOwnerRepo := func(ctx context.Context, owner, repoURL string) bool {
+		slug := urlRepoSlug(repoURL)
+		if slug == "" {
+			return false
+		}
+		if pSlug, ok := strings.CutPrefix(slug, "personal/"); ok {
+			return strings.EqualFold(pSlug, grainfiles.UserRepoSlug(owner))
+		}
+		if tSlug, ok := strings.CutPrefix(slug, "team/"); ok {
 			acc, err := h.Directory.Access(ctx, identity.Principal{Email: owner}, false)
-			if err != nil {
-				return false
-			}
-			return acc.Teams[team] != ""
-		},
+			return err == nil && acc.Teams[tSlug] != ""
+		}
+		team, err := h.Directory.RepoOwner(ctx, slug)
+		if err != nil || team == "" {
+			return false
+		}
+		acc, err := h.Directory.Access(ctx, identity.Principal{Email: owner}, false)
+		if err != nil {
+			return false
+		}
+		return acc.Teams[team] != ""
+	}
+	h.GrainfilesAPI = &grainfiles.API{
+		Store:              h.Grainfiles,
+		Fetcher:            fetcher,
+		WebhookSecret:      cfg.WebhookSecret,
+		HubURL:             hubURL,
+		Directory:          h.Directory,
+		AuthorizeOwnerRepo: authorizeOwnerRepo,
 		Access: func(r *http.Request) (grainfiles.Viewer, error) {
 			acc, err := dirAPI.Access(r)
 			if err != nil {
 				return grainfiles.Viewer{}, err
 			}
+			teams := make(map[string]string, len(acc.Teams))
+			for k, v := range acc.Teams {
+				teams[k] = string(v)
+			}
 			return grainfiles.Viewer{
 				Email:    acc.Email,
 				HubAdmin: acc.HubAdmin,
 				SeesRepo: acc.SeesRepo,
+				Teams:    teams,
 			}, nil
 		},
 		OnEvents: func(evs []grainfiles.Event) {
@@ -746,9 +779,11 @@ func New(ctx context.Context, cfg Config) (*Hub, error) {
 	m.Handle(tasks.TasksPath, tk)
 	m.Handle(tasks.TasksPath+"/", tk)
 	gf := h.GrainfilesAPI.Handler()
+	gfSameOrigin := route.Wrap(gf.(route.Lister), identity.SameOrigin(gf))
 	m.Handle("POST "+grainfiles.GitHubWebhookPath, h.metrics.wrapWebhooks(gf))
 	m.Handle("GET "+grainfiles.ContentPath, h.metrics.wrapContentRequests(gf))
 	m.Handle("GET "+grainfiles.GrainfilesPath, gf)
+	m.Handle(grainfiles.GrainfilesPath+"/", gfSameOrigin)
 	lv := h.Live.Handler()
 	m.Handle("GET "+live.EventsPath, h.metrics.subscriptions(lv))
 	m.Handle("GET "+live.ArtifactsPath, h.metrics.viewThrough(lv))

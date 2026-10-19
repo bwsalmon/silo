@@ -1244,7 +1244,7 @@ func NormalizeRepoSlugOrURL(raw string) (string, error) {
 }
 
 func validateAndNormalizeWhenPath(raw, fieldPath, where string, allowURL bool) (string, *Finding) {
-	if raw == "" || strings.ContainsRune(raw, '\\') {
+	if raw == "" || strings.ContainsAny(raw, "\\\x00") || hasEncodedPathHazard(raw) {
 		f := newFinding(CodeSchemaInvalid, where, fmt.Sprintf("%s: invalid path %q", fieldPath, raw))
 		return "", &f
 	}

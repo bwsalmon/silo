@@ -90,9 +90,12 @@ func InTx(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
 }
 
 func once(ctx context.Context, db *sql.DB, f func(*sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return err
+		tx, err = db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
 	}
 	if err := f(tx); err != nil {
 		tx.Rollback()

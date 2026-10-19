@@ -821,7 +821,9 @@ func (s *Store) Recover(ctx context.Context, reason string) error {
 
 // CompleteRun records a terminal run result (Done, Failed, or Cancelled)
 // reported by a node (e.g. via a NodeStream result event). If the task is
-// already in a terminal state, CompleteRun returns it unchanged.
+// already in a terminal state, CompleteRun returns it unchanged. If the task
+// was reclaimed back to Queued or Proposed (or has no node bound), CompleteRun
+// refuses with ErrState so a stale node stream cannot overwrite a reclaimed task.
 func (s *Store) CompleteRun(ctx context.Context, id string, state State, reason string) (Task, error) {
 	if state != Done && state != Failed && state != Cancelled {
 		return Task{}, fmt.Errorf("%w result %q: want done, failed, or cancelled", ErrInvalid, state)
@@ -834,6 +836,9 @@ func (s *Store) CompleteRun(ctx context.Context, id string, state State, reason 
 		}
 		if t.State.Terminal() {
 			return t, nil
+		}
+		if t.State == Queued || t.State == Proposed || t.Node == "" {
+			return t, fmt.Errorf("%w: task %s is %s", ErrState, id, t.State)
 		}
 		if updated, ok, err := s.write(ctx, id, t, func(t *Task) {
 			t.State = state
@@ -1012,6 +1017,10 @@ func (s *Store) RegisterRun(ctx context.Context, r RunRegistration) (Task, error
 				return Task{}, fmt.Errorf("%w: task %s is already bound to another owner", ErrInvalid, id)
 			}
 			updated, ok, err := s.write(ctx, id, existing, func(t *Task) {
+				if t.State == Queued || t.State == Offered || t.State == Lost {
+					t.State = Running
+					t.Reason = ""
+				}
 				if t.Node == "" {
 					t.Node = node
 				}

@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/silo/hub/grainfiles"
 	"github.com/bwsalmon/silo/hub/identity"
 	"github.com/bwsalmon/silo/hub/registry"
 	"github.com/bwsalmon/silo/hub/rendezvous"
@@ -828,4 +832,319 @@ func TestDeploymentsCanonicalURLAndHostReplacement(t *testing.T) {
 	if _, node, err := s.VerifyNodeToken(ctx, mint2.Token); err != nil || node != "payments-prod" {
 		t.Fatalf("replacement token verify: node=%q err=%v", node, err)
 	}
+}
+
+func TestConcurrentLastSysAdminMutualDemoteAndDeleteRace(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		const adminA, adminB, regular = "admin-a@example.com", "admin-b@example.com", "regular@example.com"
+
+		// Seed adminA via HubAdmins (just as server.New does) and regular as an accepted user.
+		if err := s.SeedUsers(ctx, []string{"user:" + adminA}, []string{regular}); err != nil {
+			t.Fatal(err)
+		}
+
+		api := &API{
+			Store:                s,
+			Auth:                 headerAuth{},
+			HubAdmins:            []string{"user:" + adminA},
+			EnforceAcceptedUsers: true,
+			HubURL:               "https://hub.example.com",
+		}
+		ts := httptest.NewServer(api.Handler())
+		t.Cleanup(ts.Close)
+		h := &testHub{store: s, url: ts.URL}
+
+		assertAtLeastOneSysAdmin := func(iter int, phase string) {
+			t.Helper()
+			users, err := s.Users(ctx)
+			if err != nil {
+				t.Fatalf("iter %d (%s): Users: %v", iter, phase, err)
+			}
+			sysCount := 0
+			for _, u := range users {
+				if u.SysAdmin {
+					sysCount++
+				}
+			}
+			if sysCount < 1 {
+				t.Fatalf("iter %d (%s): zero sys admins remaining in accepted_users: %+v", iter, phase, users)
+			}
+		}
+
+		for iter := 0; iter < 25; iter++ {
+			// Ensure both adminA and adminB are sys_admin = true before each race.
+			if err := s.SetUser(ctx, adminA, true, "bootstrap"); err != nil {
+				t.Fatalf("iter %d reset adminA: %v", iter, err)
+			}
+			if err := s.SetUser(ctx, adminB, true, adminA); err != nil {
+				t.Fatalf("iter %d reset adminB: %v", iter, err)
+			}
+
+			var (
+				wg         sync.WaitGroup
+				codeA      int
+				codeB      int
+				startGate  = make(chan struct{})
+				deleteMode = iter%3 == 1
+				mixedMode  = iter%3 == 2
+			)
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-startGate
+				if deleteMode {
+					codeA, _ = h.do(t, adminA, "DELETE", UsersPath+"/"+adminB, nil)
+				} else {
+					codeA, _ = h.do(t, adminA, "PUT", UsersPath+"/"+adminB, map[string]bool{"sys_admin": false})
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				<-startGate
+				if deleteMode || mixedMode {
+					codeB, _ = h.do(t, adminB, "DELETE", UsersPath+"/"+adminA, nil)
+				} else {
+					codeB, _ = h.do(t, adminB, "PUT", UsersPath+"/"+adminA, map[string]bool{"sys_admin": false})
+				}
+			}()
+			close(startGate)
+			wg.Wait()
+
+			// Exactly one must fail with 409 Conflict (ErrLastSysAdmin) or 403 Forbidden
+			// (if its own admin rights were revoked before its request ran), and at least
+			// one sys admin must remain.
+			if (codeA == http.StatusOK || codeA == http.StatusNoContent) &&
+				(codeB == http.StatusOK || codeB == http.StatusNoContent) {
+				t.Fatalf("iter %d: both concurrent sys-admin removals succeeded (codeA=%d, codeB=%d)", iter, codeA, codeB)
+			}
+			if codeA != http.StatusConflict && codeA != http.StatusForbidden &&
+				codeB != http.StatusConflict && codeB != http.StatusForbidden {
+				t.Fatalf("iter %d: expected at least one 409/403, got codeA=%d codeB=%d", iter, codeA, codeB)
+			}
+			assertAtLeastOneSysAdmin(iter, "http-race")
+
+			// If adminA (originally in HubAdmins) was deleted during the race, verify
+			// adminA is immediately blocked with 403 Forbidden despite being in api.HubAdmins.
+			users, _ := s.Users(ctx)
+			hasAdminA := false
+			for _, u := range users {
+				if u.Email == adminA {
+					hasAdminA = true
+				}
+			}
+			if !hasAdminA {
+				h.want(t, http.StatusForbidden, adminA, "GET", MePath, nil)
+			}
+		}
+
+		// Explicitly verify removing regular and seeded adminA blocks their subsequent API requests with 403 Forbidden.
+		if err := s.SetUser(ctx, adminA, true, "bootstrap"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetUser(ctx, adminB, true, adminA); err != nil {
+			t.Fatal(err)
+		}
+		h.want(t, http.StatusOK, regular, "GET", MePath, nil)
+		h.want(t, http.StatusNoContent, adminB, "DELETE", UsersPath+"/"+regular, nil)
+		h.want(t, http.StatusForbidden, regular, "GET", MePath, nil)
+
+		// Demote and then remove adminA (who was seeded from HubAdmins) via adminB.
+		h.want(t, http.StatusOK, adminB, "PUT", UsersPath+"/"+adminA, map[string]bool{"sys_admin": false})
+		h.want(t, http.StatusForbidden, adminA, "GET", UsersPath, nil)
+		h.want(t, http.StatusNoContent, adminB, "DELETE", UsersPath+"/"+adminA, nil)
+		h.want(t, http.StatusForbidden, adminA, "GET", MePath, nil)
+	})
+}
+
+func TestConcurrentSelfServiceDeploymentClaimAndGrainfilesReplayRace(t *testing.T) {
+	eachStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		const root = "root@example.com"
+		users := []string{"alice@example.com", "bob@example.com", "carol@example.com", "dave@example.com"}
+		if err := s.SeedUsers(ctx, []string{"user:" + root}, users); err != nil {
+			t.Fatal(err)
+		}
+
+		gfStore, err := grainfiles.Open(ctx, "sqlite::memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { gfStore.Close() })
+		gfStore.HubURL = "https://hub.example.com"
+
+		rv := &rendezvous.Server{
+			Registry:     registry.New(),
+			Authenticate: s.Authenticate,
+			Admit:        s.Admit,
+			ValidateUI:   s.ValidateNodeUI,
+			Grainfiles:   gfStore,
+			Heartbeat:    time.Second,
+			HubURL:       "https://hub.example.com",
+			Logf:         testlog.Logf(t),
+		}
+		var reclaimedCount atomic.Int64
+		api := &API{
+			Store:                s,
+			Auth:                 headerAuth{},
+			HubAdmins:            []string{"user:" + root},
+			EnforceAcceptedUsers: true,
+			HubURL:               "https://hub.example.com",
+			Disconnect:           rv.Disconnect,
+			Unbind:               rv.Registry.Unbind,
+			Registry:             rv.Registry,
+			ReclaimTasks: func(_ context.Context, nodeID, _ string) ([]string, error) {
+				reclaimedCount.Add(1)
+				return []string{"t-reclaimed-" + nodeID}, nil
+			},
+			ReplayGrainfiles: func(ctx context.Context, nodeID string) (int, error) {
+				evs, err := gfStore.ReplayForNode(ctx, nodeID)
+				if err == nil && len(evs) > 0 {
+					rv.NotifyGrainfiles(evs...)
+				}
+				return len(evs), err
+			},
+		}
+		rv.Visible = api.Visible
+		rv.ResolveEntries = api.ResolveEntries
+
+		m := http.NewServeMux()
+		m.Handle(rendezvous.ConnectPath, rv.Handler())
+		m.Handle(rendezvous.DirectoryPath, rv.Handler())
+		m.Handle("/", api.Handler())
+		ts := httptest.NewServer(m)
+		t.Cleanup(ts.Close)
+		h := &testHub{store: s, rv: rv, url: ts.URL}
+
+		// 1. Race accepted users concurrently claiming the same deployment name via POST /v1/deployments.
+		for iter := 0; iter < 20; iter++ {
+			sharedID := fmt.Sprintf("shared-name-%d", iter)
+			var (
+				wg        sync.WaitGroup
+				startGate = make(chan struct{})
+				codes     = make([]int, len(users))
+				bodies    = make([][]byte, len(users))
+			)
+			for i, u := range users {
+				wg.Add(1)
+				go func(idx int, userEmail string) {
+					defer wg.Done()
+					<-startGate
+					codes[idx], bodies[idx] = h.do(t, userEmail, "POST", DeploymentsPath, map[string]string{"id": sharedID})
+				}(i, u)
+			}
+			close(startGate)
+			wg.Wait()
+
+			createdCount := 0
+			conflictCount := 0
+			var winner string
+			for i, code := range codes {
+				switch code {
+				case http.StatusCreated:
+					createdCount++
+					winner = users[i]
+					var dep Team
+					if err := json.Unmarshal(bodies[i], &dep); err != nil {
+						t.Fatalf("iter %d unmarshal created deployment: %v", iter, err)
+					}
+					wantURL := "https://hub.example.com/deployments/" + sharedID
+					if dep.ID != sharedID || dep.URL != wantURL || dep.Members["user:"+winner] != Admin {
+						t.Fatalf("iter %d winner %s deployment = %+v", iter, winner, dep)
+					}
+				case http.StatusConflict:
+					conflictCount++
+				default:
+					t.Fatalf("iter %d user %s unexpected status %d: %s", iter, users[i], code, bodies[i])
+				}
+			}
+			if createdCount != 1 || conflictCount != len(users)-1 {
+				t.Fatalf("iter %d: got created=%d conflict=%d, want 1 and %d", iter, createdCount, conflictCount, len(users)-1)
+			}
+		}
+
+		// 2. Verify host replacement cleanly replays standing .process.grain.md and uncompleted
+		// .task.grain.md notifications for https://<hub-host>/deployments/{id}, while skipping
+		// already-completed .task.grain.md files.
+		const depID = "shared-name-0"
+		const depURL = "https://hub.example.com/deployments/" + depID
+		doneTask := &grainfiles.Grainfile{
+			Kind:      grainfiles.KindTask,
+			Repo:      "https://github.com/acme/caller",
+			Ref:       "refs/heads/main",
+			Commit:    "c100",
+			Path:      ".grain/tasks/2026-10-19-done.task.grain.md",
+			Title:     "Already completed task",
+			Recipient: depURL,
+		}
+		if _, err := gfStore.IndexGrainfile(ctx, doneTask); err != nil {
+			t.Fatalf("IndexGrainfile(doneTask): %v", err)
+		}
+		if _, err := gfStore.RecordDependencyCompleted(ctx, "https://github.com/acme/caller/blob/main/.grain/tasks/2026-10-19-done.task.grain.md", "c100", "done", ""); err != nil {
+			t.Fatalf("RecordDependencyCompleted: %v", err)
+		}
+		openTask := &grainfiles.Grainfile{
+			Kind:      grainfiles.KindTask,
+			Repo:      "https://github.com/acme/caller",
+			Ref:       "refs/heads/main",
+			Commit:    "c101",
+			Path:      ".grain/tasks/2026-10-19-open.task.grain.md",
+			Title:     "Uncompleted task",
+			Recipient: depURL,
+		}
+		if _, err := gfStore.IndexGrainfile(ctx, openTask); err != nil {
+			t.Fatalf("IndexGrainfile(openTask): %v", err)
+		}
+		standingProc, err := grainfiles.Parse(".grain/processes/gate.process.grain.md", []byte("---\ntitle: Standing gate\ngate: true\nwhen:\n  pull_request:\n    branches: [\"main\"]\n---\n"))
+		if err != nil {
+			t.Fatalf("Parse(standingProc): %v", err)
+		}
+		standingProc.Repo = "https://github.com/acme/caller"
+		standingProc.Ref = "refs/heads/main"
+		standingProc.Commit = "c102"
+		standingProc.Recipient = depURL
+		if _, err := gfStore.IndexGrainfile(ctx, standingProc); err != nil {
+			t.Fatalf("IndexGrainfile(standingProc): %v", err)
+		}
+
+		// Old host subscribes and catches up past all existing events.
+		if _, err := gfStore.SetSubscriptions(ctx, grainfiles.Subscriptions{
+			NodeID: depID,
+			Owner:  users[0],
+		}); err != nil {
+			t.Fatalf("SetSubscriptions: %v", err)
+		}
+		if _, _, err := gfStore.CatchupNode(ctx, depID, true); err != nil {
+			t.Fatalf("initial CatchupNode: %v", err)
+		}
+
+		// Trigger POST /v1/deployments/{id}/token {"replace_host": true} as root/admin.
+		var replaceResp struct {
+			Token          string   `json:"token"`
+			ReplacedHost   bool     `json:"replaced_host"`
+			ReclaimedTasks []string `json:"reclaimed_tasks"`
+			ReplayedEvents int      `json:"replayed_events"`
+		}
+		json.Unmarshal(h.want(t, http.StatusCreated, root, "POST", DeploymentsPath+"/"+depID+"/token", map[string]bool{"replace_host": true}), &replaceResp)
+		if !replaceResp.ReplacedHost || replaceResp.ReplayedEvents != 2 || len(replaceResp.ReclaimedTasks) != 1 {
+			t.Fatalf("replace-host response = %+v, want ReplayedEvents=2 ReclaimedTasks=1", replaceResp)
+		}
+
+		// Replacement host catches up and receives ONLY the standing process and uncompleted task.
+		replayedEvs, newCur, err := gfStore.CatchupNode(ctx, depID, true)
+		if err != nil {
+			t.Fatalf("replacement CatchupNode: %v", err)
+		}
+		if len(replayedEvs) != 2 || newCur == 0 {
+			t.Fatalf("replacement CatchupNode got %d events (cursor=%d), want 2: %+v", len(replayedEvs), newCur, replayedEvs)
+		}
+		gotTypes := map[string]string{}
+		for _, ev := range replayedEvs {
+			gotTypes[ev.Path] = ev.Type
+		}
+		if gotTypes[".grain/tasks/2026-10-19-open.task.grain.md"] != grainfiles.EventTaskReady ||
+			gotTypes[".grain/processes/gate.process.grain.md"] != grainfiles.EventProcessUpdated {
+			t.Fatalf("unexpected replayed event paths/types: %+v", gotTypes)
+		}
+	})
 }

@@ -100,6 +100,9 @@ func (a *API) Access(r *http.Request) (*Access, error) {
 		if err != nil {
 			return nil, err
 		}
+		if a.Store.EnforceAcceptedUsers() {
+			cfgAdmin = a.isHubAdminGroup(p)
+		}
 		enforce := hasAnyUsers || a.Store.EnforceAcceptedUsers() || a.EnforceAcceptedUsers
 		if enforce && !accepted && !cfgAdmin {
 			return nil, ErrNotAcceptedUser
@@ -174,6 +177,18 @@ func (a *API) IsAcceptedUser(ctx context.Context, email string) (bool, error) {
 		return false, err
 	}
 	return len(acc.Teams) > 0, nil
+}
+
+func (a *API) isHubAdminGroup(p identity.Principal) bool {
+	for _, adm := range a.HubAdmins {
+		adm, _ = HubAdminPrincipal(adm)
+		for _, g := range p.Groups {
+			if adm == GroupPrefix+strings.ToLower(strings.TrimSpace(g)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Visible is rendezvous.Server.Visible: the node directory, filtered to
