@@ -23,7 +23,7 @@ Each Grainfile optionally declares `grainfile: v1` (defaulting to `"v1"` when om
 - `spec_path`: [`docs/grainfiles-spec.md`](grainfiles-spec.md) (full normative specification)
 - `schemas/grainfiles/`: JSON Schemas for `common`, `task`, and `process`
 
-Everything needed to specify **what to run, which deployment runs a task, optional requestor attribution, when a process triggers, what it depends on, and what references it reads** lives in two canonical file suffixes with lower-case ASCII stems (`^[a-z0-9][a-z0-9._-]*$`):
+Everything needed to specify **what to run, which deployment runs a task, optional requestor/template attribution, when a process triggers across repositories and paths, what it depends on, and what references it reads** lives in two canonical file suffixes with ASCII stems (`^[A-Za-z0-9][A-Za-z0-9._-]*$`):
 
 - **`<name>.task.grain.md` (`task`):** A discrete 1-to-1 work item directed to a single `recipient` (defaulting to `/`) to execute once per canonical `(repo_url, file_path)` on the repository's default/protected branch.
 - **`<name>.process.grain.md` (`process`):** A standing, reusable 1-to-many process with structured triggers (`when`) and an optional `gate` flag that any number of Grain deployments can subscribe to (by repository, folder, or `.process.grain.md` URL).
@@ -36,7 +36,7 @@ Earlier drafts of the format had eleven kinds (`config`, `task`, `comment`, `tem
 
 Collapsing the format to **`.task.grain.md`** and **`.process.grain.md`** (`**/*.grain.md`) eliminates that indirection:
 
-- **Distinct `.grain.md` suffix.** Using `.task.grain.md` and `.process.grain.md` allows fast `**/*.grain.md` glob discovery without colliding with ordinary prose documentation (`*.md`), while simplifying the stem grammar to pure lower-case ASCII `[a-z0-9][a-z0-9._-]*`.
+- **Distinct `.grain.md` suffix.** Using `.task.grain.md` and `.process.grain.md` allows fast `**/*.grain.md` glob discovery without colliding with ordinary prose documentation (`*.md`), while supporting clean ASCII stems `[A-Za-z0-9][A-Za-z0-9._-]*` (including ISO/compact UTC timestamps like `2026-10-18T143000Z-fix-API.task.grain.md`).
 - **No separate `trigger`, `template`, or `gate` kinds.** A standing job or review check is one `<name>.process.grain.md` file: its front matter says when it fires (`when`) and whether it gates a commit or pull request (`gate: true`), and its Markdown body *is* the prompt given to the agent.
 - **No separate `config` or `GRAINOWNERS` files.** Any repository can hold `.task.grain.md` and `.process.grain.md` files (for example under `.grain/` in a code repository or in a dedicated tasks repository) without needing a marker file, and standard forge branch protection and `CODEOWNERS` govern who can merge changes.
 
@@ -62,18 +62,18 @@ Grainfiles use two reference lists (`references` and `depends_on`), both sharing
 
 - **`depends_on` is restricted exclusively to `.task.grain.md` (`GF020` on `.process.grain.md`):** A `.task.grain.md` is a concrete 1-off task with a single identity `(repo_url, file_path)`, a single `recipient` deployment, and a single terminal `done` state — so `depends_on` between concrete `.task.grain.md` files is a well-defined DAG (`GF034` on cycles). A `.process.grain.md` is a standing 1-to-many trigger (`when`, `gate`, `references`, `draft`, `not_before`) with no `recipient` and no single completion state; multi-step or cross-task coordination inside a process is expressed in natural language in the `.process.grain.md` prompt itself (where the executing agent can run steps or propose/chain sub-tasks locally) and via `references`.
 - **Every `depends_on` entry on a `.task.grain.md` MUST resolve to a concrete `.task.grain.md` file (`GF032`):** Never a `.process.grain.md` and never an unrendered `.jinja2` template.
-- **Plain `.grain.md` vs. self-contained `.grain.md.jinja2` templates:** Plain `<name>.task.grain.md` and `<name>.process.grain.md` files are 100% literal (zero template evaluation). Self-contained `<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2` templates apply sandboxed Jinja2 (`ImmutableSandboxedEnvironment(loader=None)`, rejecting `include`/`extends`/`import`/`from` with `GF034` and syntax errors with `GF033`) to the whole file to produce a standard `.task.grain.md` or `.process.grain.md` document.
+- **Plain `.grain.md` vs. self-contained `.grain.md.jinja2` templates and `from_template` provenance:** Plain `<name>.task.grain.md` and `<name>.process.grain.md` files are 100% literal (zero template evaluation). Self-contained `<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2` templates apply sandboxed Jinja2 (`ImmutableSandboxedEnvironment(loader=None)`, rejecting `include`/`extends`/`import`/`from` with `GF034` and syntax errors with `GF033`) to the whole file to produce a standard `.task.grain.md` or `.process.grain.md` document. Concrete Grainfiles may also specify **`from_template`** (normalized like `references` / `depends_on` and validated with `GF035` to end in `.task.grain.md.jinja2` or `.process.grain.md.jinja2`), which is included in `authorized_references` at `commit_sha` when same-repo or recorded as provenance metadata when cross-repo, and is auto-populated when Grain Hub renders a `.grain.md.jinja2` template.
 
 ## 5. Triggers (`when`) and merge gating (`gate`)
 
 A `.process.grain.md` specifies when it fires using **`when`** (required on every `.process.grain.md`; spec §7.2.1). Using `when` rather than `on` ensures that YAML 1.1 parsers never misparse an unquoted `on:` key as boolean `true`:
 
 - **`schedule: {cron, timezone}`:** Standard five-field POSIX cron expression with an optional IANA timezone name (default `UTC`).
-- **`push`, `merge`, `pull_request: {branches, paths, ignore}`:** Forge branch and path filters (at least one of `branches` or `paths` is required).
+- **`push`, `merge`, `pull_request`:** Either a single filter object or a non-empty list of filter objects, where each filter supports `repo` / `repos` (repository URL or `owner/repo` slug, defaulting to the process's repository), `branches`, `paths` (file paths, folder paths `dir/` or `/dir` matching `dir/**`, globs, or full forge `https://` file/folder URLs), and `ignore` (at least one of `repo`, `repos`, `branches`, or `paths` is required; `GF020`).
 - **`manual: {}`:** On-demand firing by a human or operator.
 - **`scenario: <string> | {description}`:** A natural-language scenario description specifying when the process applies.
 
-Setting **`gate: true`** on a `.process.grain.md` marks the process as a merge/commit gate: when triggered by a commit or pull request, the deployment holds that change until the process run passes.
+Setting **`gate: true`** on a `.process.grain.md` marks the process as a merge/commit gate: when triggered by a commit or pull request (including cross-repo within the same team in `hub/directory`), the deployment holds that change until the process run passes.
 
 ## 6. Direct execution, task lifecycle, and security invariants
 

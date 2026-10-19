@@ -38,8 +38,8 @@ def case(name, codes, files):
 
 A = task()
 
-case("gf001-bad-name", ["GF001"], {"r/tasks/Big-Name.task.grain.md": A})
-case("gf001-compact-utc-stem", ["GF001"], {"r/tasks/20260417T143000Z-fix.task.grain.md": A})
+case("gf001-bad-name", ["GF001"], {"r/tasks/-bad-start.task.grain.md": A})
+case("gf001-bad-stem-char", ["GF001"], {"r/tasks/2026+10+18-fix.task.grain.md": A})
 case("gf003-no-front-matter", ["GF003"], {"r/tasks/a.task.grain.md": "Just text.\n"})
 case("gf003-unclosed-front-matter", ["GF003"], {"r/tasks/a.task.grain.md": "---\ntitle: T\n"})
 case("gf004-duplicate-key", ["GF004"], {"r/tasks/a.task.grain.md": task("title: Again\n")})
@@ -133,6 +133,9 @@ case("gf035-malformed-ref", ["GF035"], {
 })
 case("gf035-query-parameter", ["GF035"], {
     "r/tasks/a.task.grain.md": task('references: ["https://github.com/acme/widgets/blob/main/docs/d.md?ref=main"]\n'),
+})
+case("gf035-bad-from-template", ["GF035"], {
+    "r/tasks/a.task.grain.md": task('from_template: "/processes/branch-audit.process.grain.md.jinja2"\n'),
 })
 case("gf036-escapes-repo", ["GF036"], {
     "r/tasks/a.task.grain.md": task("depends_on: [../../../outside.task.grain.md]\n"),

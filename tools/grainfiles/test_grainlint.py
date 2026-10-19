@@ -180,6 +180,101 @@ class TestGrainlint(unittest.TestCase):
             grainlint.parse_ref("https://github.com/acme/widgets/blob/main/docs/../../secret.md")
         self.assertEqual(ctx.exception.code, "GF036")
 
+    def test_mixed_case_stems_and_gf005_only_on_grain_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            # Uppercase letters and ISO/compact UTC timestamps are valid stems in v1.
+            (root / "2026-10-18T143000Z-fix-API.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Fix API\n---\nRun.\n",
+                encoding="utf-8",
+            )
+            (root / "Big-Name.process.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Process\nwhen:\n  manual: {}\n---\nRun.\n",
+                encoding="utf-8",
+            )
+            # Ordinary .task.md / .process.md files without .grain.md are regular Markdown assets (no GF005).
+            (root / "notes.task.md").write_text("# Regular markdown note\n", encoding="utf-8")
+            (root / "runbook.process.md").write_text("# Regular runbook\n", encoding="utf-8")
+            self.assertEqual(grainlint.lint(root), [])
+
+            # Unknown kind with .grain.md still warns with GF005.
+            (root / "foo.unknown.grain.md").write_text("---\ntitle: X\n---\nBody.\n", encoding="utf-8")
+            codes = [f.code for f in grainlint.lint(root)]
+            self.assertEqual(codes, ["GF005"])
+
+    def test_from_template_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "rollout.task.grain.md.jinja2").write_text(
+                "---\ngrainfile: v1\ntitle: Rollout {{ region | default('eu') }}\n---\nDeploy.\n",
+                encoding="utf-8",
+            )
+            (root / "audit.process.grain.md.jinja2").write_text(
+                "---\ngrainfile: v1\ntitle: Audit\nwhen:\n  manual: {}\n---\nAudit.\n",
+                encoding="utf-8",
+            )
+            # Valid same-repo and cross-repo from_template on task and process.
+            (root / "eu-rollout.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: EU Rollout\nfrom_template: /rollout.task.grain.md.jinja2\n---\nDeploy EU.\n",
+                encoding="utf-8",
+            )
+            (root / "us-rollout.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: US Rollout\nfrom_template: https://github.com/acme/templates/blob/main/rollout.task.grain.md.jinja2\n---\nDeploy US.\n",
+                encoding="utf-8",
+            )
+            (root / "main-audit.process.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Main Audit\nfrom_template: ./audit.process.grain.md.jinja2\nwhen:\n  manual: {}\n---\nAudit main.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(grainlint.lint(root), [])
+
+        # Wrong suffix on task -> GF035
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "bad.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Bad\nfrom_template: /audit.process.grain.md.jinja2\n---\nBody.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF035"])
+
+        # Missing local template -> GF030
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "missing.task.grain.md").write_text(
+                "---\ngrainfile: v1\ntitle: Missing\nfrom_template: /nonexistent.task.grain.md.jinja2\n---\nBody.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([f.code for f in grainlint.lint(root)], ["GF030"])
+
+    def test_when_multi_repo_and_folder_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "gate.process.grain.md").write_text(
+                "---\n"
+                "grainfile: v1\n"
+                "title: Multi-repo security gate\n"
+                "gate: true\n"
+                "when:\n"
+                "  pull_request:\n"
+                "    - repo: acme/payments\n"
+                "      branches: [main, 'release/*']\n"
+                "      paths:\n"
+                "        - src/auth/\n"
+                "        - /src/handler.go\n"
+                "        - https://github.com/acme/payments/tree/main/src/billing\n"
+                "      ignore:\n"
+                "        - docs/\n"
+                "    - repos:\n"
+                "        - https://github.com/acme/widgets\n"
+                "        - acme/checkout\n"
+                "  push:\n"
+                "    repo: https://github.com/acme/widgets\n"
+                "---\n"
+                "Review auth and billing edits.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(grainlint.lint(root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

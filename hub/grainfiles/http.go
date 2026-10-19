@@ -1405,9 +1405,21 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 	_, _ = a.Store.PromoteDeferred(r.Context(), a.Store.now())
 
+	if a.Store.TeamResolver == nil {
+		if tr, ok := a.Directory.(RepoTeamResolver); ok {
+			a.Store.TeamResolver = tr
+		}
+	}
+	prNum := 0
+	if pl.PullRequest != nil {
+		prNum = pl.PullRequest.Number
+	}
 	trigEvents, err := a.Store.EvaluateTriggers(r.Context(), canonRepo, commitSHA, ForgeEvent{
 		Source:       source,
+		Repo:         canonRepo,
 		Branch:       ref,
+		CommitSHA:    commitSHA,
+		PRNumber:     prNum,
 		ChangedPaths: allChangedPaths,
 		At:           a.Store.now(),
 	})
@@ -2131,6 +2143,9 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 	vars := extractQueryTemplateVars(q)
 	wantsRender := len(vars) > 0 || q.Get("render") == "true" || q.Get("render") == "1"
 	if IsTemplatePath(filePath) && wantsRender {
+		if vars == nil {
+			vars = map[string]string{}
+		}
 		rendered, _, err := RenderTemplate(string(data), vars)
 		if err != nil {
 			http.Error(w, "rendering template: "+err.Error(), http.StatusUnprocessableEntity)
@@ -2141,18 +2156,28 @@ func (a *API) streamRepoFile(w http.ResponseWriter, r *http.Request, repoURL, re
 			http.Error(w, "validating rendered template: "+err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		urlRef := ref
+		if a.Store != nil {
+			if idxRec, gErr := a.Store.GetIndex(r.Context(), repoURL, filePath, ref); gErr == nil && idxRec.Ref != "" {
+				urlRef = idxRec.Ref
+			}
+		}
 		strippedPath, _ := StripTemplateSuffix(filePath)
 		if err := gf.ResolveSource(Source{
 			RepoURL: repoURL,
-			Ref:     ref,
+			Ref:     urlRef,
 			Commit:  ref,
 			Path:    strippedPath,
 		}); err != nil {
 			http.Error(w, "resolving rendered template: "+err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		rendered = EnsureFromTemplate(rendered, gf.FromTemplate)
 		data = []byte(rendered)
 		w.Header().Set("X-Grainfile-Rendered", "true")
+		if gf.FromTemplate != "" {
+			w.Header().Set("X-Grainfile-From-Template", gf.FromTemplate)
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -2375,6 +2400,7 @@ func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainf
 			}); err != nil {
 				return "", "", nil, err
 			}
+			rendered = EnsureFromTemplate(rendered, gf.FromTemplate)
 			raw = []byte(rendered)
 		}
 		return "file", pinnedRef, raw, nil
@@ -2392,6 +2418,27 @@ func (a *API) FetchAuthorizedContentWithVars(ctx context.Context, nodeID, grainf
 	if !isExplicitTree {
 		raw, fErr := a.Fetcher.FetchFile(ctx, rec.Repo, pinnedRef, targetRef.Path)
 		if fErr == nil {
+			if IsTemplatePath(targetRef.Path) && len(vars) > 0 {
+				rendered, _, err := RenderTemplate(string(raw), vars)
+				if err != nil {
+					return "", "", nil, err
+				}
+				gf, err := ParseWithVars(targetRef.Path, raw, vars)
+				if err != nil {
+					return "", "", nil, err
+				}
+				strippedPath, _ := StripTemplateSuffix(targetRef.Path)
+				if err := gf.ResolveSource(Source{
+					RepoURL: rec.Repo,
+					Ref:     rec.Ref,
+					Commit:  pinnedRef,
+					Path:    strippedPath,
+				}); err != nil {
+					return "", "", nil, err
+				}
+				rendered = EnsureFromTemplate(rendered, gf.FromTemplate)
+				raw = []byte(rendered)
+			}
 			return "file", pinnedRef, raw, nil
 		}
 		if !errors.Is(fErr, os.ErrNotExist) {

@@ -521,6 +521,22 @@ Check the release branch.
 	})
 
 	t.Run("validation errors", func(t *testing.T) {
+		// Verify mixed-case stems (including UTC timestamps with T and Z) are valid.
+		for _, validPath := range []string{
+			"tasks/GoodName.task.grain.md",
+			"tasks/2026-10-18T143000Z-fix-API.task.grain.md",
+		} {
+			if _, err := Parse(validPath, []byte("---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\nBody.\n")); err != nil {
+				t.Fatalf("Parse(%q) failed unexpectedly: %v", validPath, err)
+			}
+		}
+		// Verify ordinary .task.md / .process.md files without .grain.md do not emit GF005 in ClassifyStrictPath.
+		for _, nonGrain := range []string{"notes/foo.task.md", "notes/foo.process.md", "notes/foo.widget.md"} {
+			if _, _, isGrain, warn := ClassifyStrictPath(nonGrain); isGrain || warn != "" {
+				t.Fatalf("ClassifyStrictPath(%q) = isGrain=%v warn=%q, want false/empty", nonGrain, isGrain, warn)
+			}
+		}
+
 		cases := []struct {
 			name string
 			path string
@@ -528,14 +544,14 @@ Check the release branch.
 			code string
 		}{
 			{
-				name: "uppercase stem",
-				path: "tasks/BadName.task.grain.md",
+				name: "leading underscore stem",
+				path: "tasks/_bad.task.grain.md",
 				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeBadName,
 			},
 			{
-				name: "uppercase T and Z in stem rejected",
-				path: "tasks/20261016T135830Z-bad.task.grain.md",
+				name: "invalid punctuation in stem",
+				path: "tasks/bad$name.task.grain.md",
 				body: "---\ntitle: T\nrecipient: https://github.com/acme/grain-eu\n---\n",
 				code: CodeBadName,
 			},
@@ -565,9 +581,27 @@ Check the release branch.
 			},
 			{
 				name: "unknown suffix",
-				path: "notes/foo.widget.md",
+				path: "notes/foo.widget.grain.md",
 				body: "---\ntitle: T\n---\n",
 				code: CodeUnknownSuffix,
+			},
+			{
+				name: "from_template wrong suffix on task",
+				path: "tasks/a.task.grain.md",
+				body: "---\ntitle: T\nfrom_template: /templates/p.process.grain.md.jinja2\n---\n",
+				code: CodeMalformedRef,
+			},
+			{
+				name: "from_template wrong suffix on process",
+				path: "processes/p.process.grain.md",
+				body: "---\ntitle: P\nfrom_template: /templates/t.task.grain.md.jinja2\nwhen:\n  manual: {}\n---\n",
+				code: CodeMalformedRef,
+			},
+			{
+				name: "when.push empty filter object",
+				path: "processes/p.process.grain.md",
+				body: "---\ntitle: P\nwhen:\n  push: {}\n---\n",
+				code: CodeSchemaInvalid,
 			},
 			{
 				name: "LFS pointer",
@@ -962,5 +996,209 @@ func TestParseRefAndGlobForms(t *testing.T) {
 		if got := MatchGlob(g.pattern, g.value); got != g.want {
 			t.Errorf("MatchGlob(%q, %q) = %v, want %v", g.pattern, g.value, got, g.want)
 		}
+	}
+}
+
+func TestFromTemplateAndMultiRepoWhenTriggers(t *testing.T) {
+	// 1. Same-repo from_template grants AuthorizedReferences and CheckReferenceAccess;
+	// cross-repo from_template is recorded as provenance without granting read access.
+	sameRepoTask, err := Parse(".grain/tasks/2026-10-18T143000Z-fix-API.task.grain.md", []byte(`---
+title: Fix API from template
+recipient: https://github.com/acme/grain-eu
+from_template: /.grain/templates/rollout.task.grain.md.jinja2
+references:
+  - /docs/spec.md
+---
+Fix API.
+`))
+	if err != nil {
+		t.Fatalf("Parse sameRepoTask: %v", err)
+	}
+	if err := sameRepoTask.ResolveSource(Source{
+		RepoURL: "https://github.com/acme/widgets",
+		Ref:     "refs/heads/main",
+		Commit:  "c111222",
+		Path:    ".grain/tasks/2026-10-18T143000Z-fix-API.task.grain.md",
+	}); err != nil {
+		t.Fatalf("ResolveSource sameRepoTask: %v", err)
+	}
+	if sameRepoTask.FromTemplate != "https://github.com/acme/widgets/blob/main/.grain/templates/rollout.task.grain.md.jinja2" {
+		t.Errorf("FromTemplate = %q", sameRepoTask.FromTemplate)
+	}
+	authRefs, _ := sameRepoTask.AuthorizedReferences("https://github.com/acme/widgets")
+	wantTplRef := "https://github.com/acme/widgets/blob/c111222/.grain/templates/rollout.task.grain.md.jinja2"
+	if !slices.Contains(authRefs, wantTplRef) {
+		t.Errorf("AuthorizedReferences(%v) missing same-repo from_template %q", authRefs, wantTplRef)
+	}
+	if !sameRepoTask.AuthorizesReference("https://github.com/acme/widgets", "/.grain/templates/rollout.task.grain.md.jinja2") {
+		t.Errorf("expected same-repo from_template to be authorized by AuthorizesReference")
+	}
+
+	crossRepoTask, err := Parse(".grain/tasks/cross-tpl.task.grain.md", []byte(`---
+title: Task from cross-repo template
+recipient: https://github.com/acme/grain-eu
+from_template: https://github.com/acme/central-templates/blob/main/templates/rollout.task.grain.md.jinja2
+---
+Cross-repo template task.
+`))
+	if err != nil {
+		t.Fatalf("Parse crossRepoTask: %v", err)
+	}
+	if err := crossRepoTask.ResolveSource(Source{
+		RepoURL: "https://github.com/acme/widgets",
+		Ref:     "refs/heads/main",
+		Commit:  "c111222",
+		Path:    ".grain/tasks/cross-tpl.task.grain.md",
+	}); err != nil {
+		t.Fatalf("ResolveSource crossRepoTask: %v", err)
+	}
+	crossAuth, _ := crossRepoTask.AuthorizedReferences("https://github.com/acme/widgets")
+	if len(crossAuth) != 0 {
+		t.Errorf("expected empty AuthorizedReferences for cross-repo from_template, got %v", crossAuth)
+	}
+	if crossRepoTask.AuthorizesReference("https://github.com/acme/widgets", crossRepoTask.FromTemplate) {
+		t.Errorf("cross-repo from_template must not grant file read access")
+	}
+
+	// 2. RenderTemplate and ParseWithVars auto-populate from_template when unset.
+	tplBytes := []byte(`---
+title: "Rollout {{ region }}"
+template_vars:
+  region:
+    required: true
+---
+Deploy to {{ region }}.
+`)
+	rendered, _, err := RenderTemplate(string(tplBytes), map[string]string{
+		"region":        "eu",
+		"from_template": "https://github.com/acme/widgets/blob/main/.grain/templates/rollout.task.grain.md.jinja2",
+	})
+	if err != nil {
+		t.Fatalf("RenderTemplate: %v", err)
+	}
+	if !strings.Contains(rendered, "from_template: https://github.com/acme/widgets/blob/main/.grain/templates/rollout.task.grain.md.jinja2") {
+		t.Errorf("expected RenderTemplate to auto-populate from_template, got:\n%s", rendered)
+	}
+	parsedTpl, err := ParseWithVars(".grain/templates/rollout.task.grain.md.jinja2", tplBytes, map[string]string{"region": "eu"})
+	if err != nil {
+		t.Fatalf("ParseWithVars: %v", err)
+	}
+	if parsedTpl.FromTemplate != "/.grain/templates/rollout.task.grain.md.jinja2" {
+		t.Errorf("parsedTpl.FromTemplate = %q, want /.grain/templates/rollout.task.grain.md.jinja2", parsedTpl.FromTemplate)
+	}
+
+	// 3. Multi-repo and file/folder/URL triggers in when.push, when.pull_request, when.merge.
+	procRaw := []byte(`---
+title: Multi-repo auth and schema gate
+gate: true
+when:
+  pull_request:
+    - repo: acme/payments
+      branches: ["main", "release/*"]
+      paths:
+        - src/auth/
+        - /pkg/crypto
+        - https://github.com/acme/payments/blob/main/schemas/v2.sql
+      ignore:
+        - src/auth/testdata/
+    - repos:
+        - https://github.com/acme/billing
+        - acme/ledger
+      paths:
+        - https://github.com/acme/billing/tree/main/migrations
+        - /contracts/
+  merge:
+    repos: ["acme/payments", "acme/billing"]
+    branches: ["main"]
+---
+Verify auth and schema changes across repositories.
+`)
+	proc, err := Parse("processes/multi-gate.process.grain.md", procRaw)
+	if err != nil {
+		t.Fatalf("Parse multi-gate process: %v", err)
+	}
+	if err := proc.ResolveSource(Source{
+		RepoURL: "https://github.com/acme/grain-eu",
+		Ref:     "refs/heads/main",
+		Commit:  "c-proc-1",
+		Path:    "processes/multi-gate.process.grain.md",
+	}); err != nil {
+		t.Fatalf("ResolveSource multi-gate process: %v", err)
+	}
+
+	// Matches folder path src/auth/ in acme/payments
+	if ok, paths := proc.MatchedEventPaths(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "main",
+		ChangedPaths: []string{"src/auth/jwt/verify.go", "README.md"},
+	}); !ok || !reflect.DeepEqual(paths, []string{"src/auth/jwt/verify.go"}) {
+		t.Errorf("expected src/auth/ folder match on acme/payments, got ok=%v paths=%v", ok, paths)
+	}
+
+	// Ignored folder src/auth/testdata/ does not fire
+	if proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "main",
+		ChangedPaths: []string{"src/auth/testdata/fixture.json"},
+	}) {
+		t.Errorf("expected ignored folder src/auth/testdata/ not to match")
+	}
+
+	// Matches /pkg/crypto (folder path without trailing slash) on release/v1
+	if !proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "release/v1",
+		ChangedPaths: []string{"pkg/crypto/ed25519.go"},
+	}) {
+		t.Errorf("expected /pkg/crypto folder match on release/v1")
+	}
+
+	// Full blob URL in paths matches exact file on matching branch, and rejects non-matching branch
+	if !proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "main",
+		ChangedPaths: []string{"schemas/v2.sql"},
+	}) {
+		t.Errorf("expected full blob URL https://github.com/acme/payments/blob/main/schemas/v2.sql to match on main")
+	}
+	if proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/payments",
+		Branch:       "release/v1",
+		ChangedPaths: []string{"schemas/v2.sql"},
+	}) {
+		t.Errorf("expected full blob URL pinned to main not to match on release/v1")
+	}
+
+	// Second filter rule matches full tree URL on acme/billing (only on main)
+	if proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/billing",
+		Branch:       "feat/any",
+		ChangedPaths: []string{"migrations/001_init.sql"},
+	}) {
+		t.Errorf("expected full tree URL pinned to main not to match on feat/any")
+	}
+	if !proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/billing",
+		Branch:       "main",
+		ChangedPaths: []string{"migrations/001_init.sql"},
+	}) {
+		t.Errorf("expected full tree URL on acme/billing to match on main")
+	}
+
+	// Unlisted repo acme/widgets does not match
+	if proc.MatchesEvent(ForgeEvent{
+		Source:       TriggerPullRequest,
+		Repo:         "https://github.com/acme/widgets",
+		Branch:       "main",
+		ChangedPaths: []string{"src/auth/jwt.go"},
+	}) {
+		t.Errorf("expected unlisted repo acme/widgets not to match")
 	}
 }

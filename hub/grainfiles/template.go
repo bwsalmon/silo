@@ -81,10 +81,48 @@ func renderTemplateAtPath(path, raw string, vars map[string]string) (string, []s
 	}
 
 	rendered := out.String()
+	if ft := strings.TrimSpace(vars["from_template"]); ft != "" {
+		rendered = EnsureFromTemplate(rendered, ft)
+	}
 	if len(rendered) > MaxFileBytes {
 		return "", undeclared, Errors{newFinding(CodeLimitExceeded, path, "rendered grainfile template exceeds 1 MiB")}
 	}
 	return rendered, undeclared, nil
+}
+
+// EnsureFromTemplate injects `from_template: <templateURL>` into rendered's YAML
+// front matter if `templateURL` is non-empty and `from_template` is not already
+// set in the front matter.
+func EnsureFromTemplate(rendered, templateURL string) string {
+	templateURL = strings.TrimSpace(templateURL)
+	if templateURL == "" {
+		return rendered
+	}
+	fm, _, fErr := splitAndParseFrontMatter("", []byte(rendered))
+	if fErr != nil {
+		return rendered
+	}
+	if existing, ok := fm["from_template"].(string); ok && strings.TrimSpace(existing) != "" {
+		return rendered
+	}
+	norm := strings.ReplaceAll(rendered, "\r\n", "\n")
+	if !strings.HasPrefix(norm, "---\n") {
+		return rendered
+	}
+	rest := norm[4:]
+	closeIdx := -1
+	if strings.HasPrefix(rest, "---\n") || rest == "---" {
+		closeIdx = 0
+	} else if idx := strings.Index(rest, "\n---\n"); idx >= 0 {
+		closeIdx = idx + 1
+	} else if strings.HasSuffix(rest, "\n---") {
+		closeIdx = len(rest) - 3
+	}
+	if closeIdx < 0 {
+		return rendered
+	}
+	line := "from_template: " + templateURL + "\n"
+	return "---\n" + rest[:closeIdx] + line + rest[closeIdx:]
 }
 
 type tokenKind int
