@@ -876,6 +876,16 @@ func CanonicalDeploymentURL(hubURL, id string) string {
 	return base + "/deployments/" + id
 }
 
+var deploymentSlugRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func validDeploymentSlug(raw string) string {
+	id := strings.ToLower(strings.TrimSpace(raw))
+	if !deploymentSlugRe.MatchString(id) {
+		return ""
+	}
+	return id
+}
+
 // DeploymentIDFromRecipient extracts the deployment ID <id> when raw is a
 // canonical Hub deployment URL ("https://<hub-host>/deployments/<id>"), a
 // rooted "/deployments/<id>" reference, or a repository tree URL whose path is
@@ -893,7 +903,7 @@ func DeploymentIDFromRecipient(raw string) string {
 		trimmed := strings.Trim(s, "/")
 		segs := strings.Split(trimmed, "/")
 		if len(segs) == 2 && strings.EqualFold(segs[0], "deployments") && segs[1] != "" {
-			return strings.ToLower(segs[1])
+			return validDeploymentSlug(segs[1])
 		}
 		return ""
 	}
@@ -903,12 +913,12 @@ func DeploymentIDFromRecipient(raw string) string {
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(segs) == 2 && strings.EqualFold(segs[0], "deployments") && segs[1] != "" {
-		return strings.ToLower(segs[1])
+		return validDeploymentSlug(segs[1])
 	}
 	if r, err := ParseRef(s); err == nil && r.Form == RefRemote && r.Mode == "tree" {
 		pSegs := strings.Split(strings.Trim(r.Path, "/"), "/")
 		if len(pSegs) == 2 && strings.EqualFold(pSegs[0], "deployments") && pSegs[1] != "" {
-			return strings.ToLower(pSegs[1])
+			return validDeploymentSlug(pSegs[1])
 		}
 	}
 	return ""
@@ -966,7 +976,13 @@ func (g *Grainfile) AuthorizedReferences(sourceRepoURL string) (sameRepo, crossR
 			crossRepo = append(crossRepo, u)
 		}
 	}
-	for _, raw := range g.Capabilities {
+	capCandidates := slices.Clone(g.Capabilities)
+	for _, rc := range g.ResolvedCapabilities {
+		if !slices.Contains(capCandidates, rc) {
+			capCandidates = append(capCandidates, rc)
+		}
+	}
+	for _, raw := range capCandidates {
 		u, r, err := ResolveRefWithSource(Source{
 			RepoURL: canonSource,
 			Ref:     urlRef,
@@ -1075,6 +1091,7 @@ func (g *Grainfile) CheckReferenceAccess(sourceRepoURL, requestedRef string) (Re
 
 	candidates := slices.Clone(g.References)
 	candidates = append(candidates, g.Capabilities...)
+	candidates = append(candidates, g.ResolvedCapabilities...)
 	if g.FromTemplate != "" {
 		candidates = append(candidates, g.FromTemplate)
 	}

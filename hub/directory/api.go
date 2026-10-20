@@ -790,6 +790,20 @@ func (a *API) setMember(w http.ResponseWriter, r *http.Request, acc *Access) err
 	if err := a.Store.SetMember(r.Context(), team, r.PathValue("principal"), req.Role); err != nil {
 		return err
 	}
+	if req.Role != Admin {
+		if p, err := normPrincipal(r.PathValue("principal")); err == nil {
+			if email, ok := strings.CutPrefix(p, UserPrefix); ok {
+				nodes, err := a.Store.RevokeOwnerTokens(r.Context(), email, team)
+				if err != nil {
+					return err
+				}
+				a.disconnectAll(nodes)
+				if len(nodes) > 0 {
+					a.audit(acc, "demoted %s in deployment %s to %s and revoked their node tokens for it", p, team, req.Role)
+				}
+			}
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

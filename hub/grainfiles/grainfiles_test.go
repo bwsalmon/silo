@@ -1771,3 +1771,84 @@ Run gate check.
 		t.Errorf("expected ignore: [dir/] to take precedence over paths: [/dir]")
 	}
 }
+
+func TestCampaignRegressionSlugCapabilitiesAndClimb(t *testing.T) {
+	// 1. DeploymentIDFromRecipient rejects invalid deployment slugs.
+	for _, invalid := range []string{
+		"/deployments/INVALID_SLUG!",
+		"/deployments/-bad",
+		"/deployments/bad-",
+		"https://hub.example.com/deployments/bad_underscore",
+		"https://github.com/acme/widgets/tree/main/deployments/BAD..SLUG",
+	} {
+		if got := DeploymentIDFromRecipient(invalid); got != "" {
+			t.Errorf("DeploymentIDFromRecipient(%q) = %q, want empty string", invalid, got)
+		}
+	}
+
+	// 2. LintTree reports GF030 on invalid /deployments/<id> slug (matching grainlint.py).
+	tmp := t.TempDir()
+	taskDir := filepath.Join(tmp, ".grain", "tasks")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	badRecipFile := filepath.Join(taskDir, "bad-recip.task.grain.md")
+	badRecipContent := "---\ngrainfile: v1\ntitle: Bad deployment slug\nrecipient: /deployments/INVALID_SLUG!\n---\nBody.\n"
+	if err := os.WriteFile(badRecipFile, []byte(badRecipContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := LintTree(tmp)
+	if err != nil {
+		t.Fatalf("LintTree: %v", err)
+	}
+	hasGF030 := false
+	for _, f := range findings {
+		if f.Code == "GF030" {
+			hasGF030 = true
+		}
+	}
+	if !hasGF030 {
+		t.Errorf("expected LintTree to report GF030 on /deployments/INVALID_SLUG!, got %+v", findings)
+	}
+
+	// 3. AuthorizedReferences and AuthorizesReference include ResolvedCapabilities even when Capabilities is empty.
+	gf := &Grainfile{
+		Grainfile: "v1",
+		Kind:      KindTask,
+		Title:     "Resolved cap test",
+		Repo:      "https://github.com/acme/widgets",
+		Ref:       "refs/heads/main",
+		Commit:    "abc1234",
+		Path:      ".grain/tasks/t.task.grain.md",
+		ResolvedCapabilities: []string{
+			"https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage",
+		},
+	}
+	sameRepo, _ := gf.AuthorizedReferences("https://github.com/acme/widgets")
+	wantPinned := "https://github.com/acme/widgets/blob/abc1234/.grain/capabilities/gcp-key.capability.grain.md#agent-usage"
+	if !slices.Contains(sameRepo, wantPinned) {
+		t.Errorf("AuthorizedReferences with ResolvedCapabilities = %v, want %s", sameRepo, wantPinned)
+	}
+	if !gf.AuthorizesReference("https://github.com/acme/widgets", "/.grain/capabilities/gcp-key.capability.grain.md") {
+		t.Errorf("expected AuthorizesReference to allow capability in ResolvedCapabilities")
+	}
+
+	// 4. Climbing above repo root in references or depends_on emits exactly 1 GF036 per offending reference.
+	_, climbErr := Parse(".grain/tasks/climb.task.grain.md", []byte("---\ngrainfile: v1\ntitle: Climb\nreferences:\n  - ../../../outside.md\ndepends_on:\n  - ../../../other.task.grain.md\n---\nBody.\n"))
+	if climbErr == nil {
+		t.Fatal("expected GF036 error on climbing references/depends_on")
+	}
+	gfErrs, ok := climbErr.(Errors)
+	if !ok {
+		t.Fatalf("expected Errors, got %T: %v", climbErr, climbErr)
+	}
+	gf036Count := 0
+	for _, f := range gfErrs {
+		if f.Code == CodeEscapesRepo {
+			gf036Count++
+		}
+	}
+	if gf036Count != 2 {
+		t.Errorf("expected exactly 2 GF036 findings (1 for references, 1 for depends_on), got %d: %+v", gf036Count, gfErrs)
+	}
+}
