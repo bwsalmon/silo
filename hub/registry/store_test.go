@@ -90,7 +90,9 @@ func TestSharedSeesEachOther(t *testing.T) {
 // that shuts down takes them offline at once.
 func TestSharedPodLeaseLapses(t *testing.T) {
 	pg := pgtest.Start(t)
+	c := &clock{t: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
 	a, b := pod(t, pg.URL, "pod-a"), pod(t, pg.URL, "pod-b")
+	a.Now, b.Now = c.now, c.now
 	a.PodLease = 300 * time.Millisecond
 	l := register(t, a, "ws-1", "alice@example.com", 1)
 	renew(t, a, b)
@@ -99,7 +101,7 @@ func TestSharedPodLeaseLapses(t *testing.T) {
 	}
 
 	// pod-a stops renewing, but its node is still heartbeating.
-	time.Sleep(400 * time.Millisecond)
+	c.advance(400 * time.Millisecond)
 	if st := status(t, b, "ws-1"); st != Offline {
 		t.Errorf("pod-b: ws-1 is %s after pod-a's lease lapsed, want offline", st)
 	}

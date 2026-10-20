@@ -169,7 +169,7 @@ grainapi() { # METHOD PATH [BODY]
 }
 grain_up() {
 	local -a auth; mapfile -t auth < <(grain_auth)
-	curl -sf "${auth[@]}" "http://127.0.0.1:$UI_PORT/api/teams" -o /dev/null
+	curl -sf "${auth[@]}" "http://127.0.0.1:$UI_PORT/api/deployment" -o /dev/null
 }
 
 # until_true SECONDS CMD... runs CMD every second until it succeeds.
@@ -224,29 +224,20 @@ file_task() {
 # GitHub. Nothing here dispatches, so nothing ever clones with it.
 grain_team() {
 	local id="$1" repo="$2" out cur users target_repos
-	cur="$(grainapi GET "/api/teams/$id" 2>/dev/null || true)"
+	cur="$(grainapi GET /api/deployment 2>/dev/null || true)"
 	users="$(echo "$cur" | jq -c --arg u "$USER_EMAIL" '((.users // []) + [$u]) | unique' 2>/dev/null)" || users="$(jq -nc --arg u "$USER_EMAIL" '[$u]')"
 	target_repos="$(echo "$cur" | jq -c --arg r "$repo" '((.targetRepos // []) + [$r]) | unique' 2>/dev/null)" || target_repos="$(jq -nc --arg r "$repo" '[$r]')"
-	out="$(grainapi POST /api/teams "$(jq -nc --arg id "$id" --argjson u "$users" --argjson r "$target_repos" \
+	out="$(grainapi PUT /api/deployment "$(jq -nc --arg id "$id" --argjson u "$users" --argjson r "$target_repos" \
 		'{id: $id, name: $id, users: $u, maxWorkers: 1, targetRepos: $r}')")"
-	if ! grainapi GET "/api/teams/$id" | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null 2>&1; then
-		out="$(grainapi PUT "/api/teams/$id" "$(jq -nc --arg id "$id" --argjson u "$users" --argjson r "$target_repos" \
-			'{id: $id, name: $id, users: $u, maxWorkers: 1, targetRepos: $r}')")"
-	fi
-	grainapi GET "/api/teams/$id" | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null ||
+	grainapi GET /api/deployment | jq -e --arg r "$repo" '.targetRepos | index($r)' >/dev/null ||
 		{ fail setup "could not give grain a team for $repo: $out"; return 1; }
-	out="$(grainapi POST "/api/teams/$id/git-connections" "$(jq -nc --arg h "127.0.0.1:$GITHUB_PORT" \
-		'{host: $h, baseUrl: ("http://" + $h), kind: "github", value: "grain-interop"}')")"
-	grainapi GET "/api/teams/$id/git-connections" |
-		jq -e 'arrays | .[] | select(.status.configured and (.status.commitError // "") == "")' >/dev/null ||
-		{ fail setup "could not give grain's team $id a git connection: $out"; return 1; }
-	# A daemon that resolved -tenancy=auto to single (every new
-	# installation since grain 0324dfc) looks every team's credential up
-	# on its default team, so that team gets the same connection.
-	if ! grainapi GET /api/teams/default/git-connections |
-		jq -e --arg h "127.0.0.1:$GITHUB_PORT" 'arrays | .[] | select(.host == $h)' >/dev/null 2>&1; then
-		grainapi POST /api/teams/default/git-connections "$(jq -nc --arg h "127.0.0.1:$GITHUB_PORT" \
-			'{host: $h, baseUrl: ("http://" + $h), kind: "github", value: "grain-interop"}')" >/dev/null || true
+	if ! grainapi GET /api/deployment/git-connections |
+		jq -e --arg h "127.0.0.1:$GITHUB_PORT" 'arrays | .[] | select(.host == $h and .status.configured and (.status.commitError // "") == "")' >/dev/null 2>&1; then
+		out="$(grainapi POST /api/deployment/git-connections "$(jq -nc --arg h "127.0.0.1:$GITHUB_PORT" \
+			'{host: $h, baseUrl: ("http://" + $h), kind: "github", value: "grain-interop"}')")"
+		grainapi GET /api/deployment/git-connections |
+			jq -e 'arrays | .[] | select(.status.configured and (.status.commitError // "") == "")' >/dev/null ||
+			{ fail setup "could not give grain's team $id a git connection: $out"; return 1; }
 	fi
 }
 
@@ -374,7 +365,7 @@ round_trip() {
 	fi
 	# No sandbox backend, no CI and GitHub nowhere: nothing here runs
 	# an agent or reaches the network.
-	"$grain" daemon -data-dir "$d/grain" -ui-addr "127.0.0.1:$UI_PORT" -ci=false -disable-native-sandboxes \
+	"$grain" daemon -data-dir "$d/grain" -ui-addr "127.0.0.1:$UI_PORT" -as "$USER_EMAIL" -ci=false -disable-native-sandboxes \
 		-github-host "127.0.0.1:$GITHUB_PORT" -github-insecure-http -policy "$d/policy.yml" \
 		-hub-url "http://127.0.0.1:$HUB_PORT" -hub-token-file "$d/token" -hub-node-id "$NODE" \
 		-hub-repos acme/widgets,acme/outside -hub-slots 4 >"$d/grain.log" 2>&1 &

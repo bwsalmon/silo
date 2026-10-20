@@ -2,14 +2,27 @@ package registry
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
 
-type clock struct{ t time.Time }
+type clock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
-func (c *clock) now() time.Time          { return c.t }
-func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 func newRegistry() (*Registry, *clock) {
 	c := &clock{t: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
