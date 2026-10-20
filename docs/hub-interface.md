@@ -198,8 +198,8 @@ hub → node  {"type":"grainfile_event","cursor":"...","action":"added"|"updated
    registered Grainfile is edited to `draft: true`, the hub sends
    `action: "removed"` so the deployment unregisters its trigger or
    withdraws the unstarted task). If `not_before` is present, the
-   deployment holds the task or process inactive until that UTC time or
-   date (`YYYY-MM-DD`, meaning `00:00:00Z`) is reached.
+   deployment holds the task or process inactive until that RFC 3339
+   timestamp (normalized to UTC) is reached.
 3. **On-demand fetch and direct execution:** The deployment fetches the
    `.task.grain.md` or `.process.grain.md` body and its authorized same-repo
    `references` at `commit` — either **on demand through the hub**

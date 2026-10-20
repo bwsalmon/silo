@@ -11,7 +11,7 @@
   - Forbidden Jinja2 tags (`{% include %}`, `{% extends %}`, `{% import %}`, `{% from %}`) are rejected (`GF034`).
   - Jinja2 syntax or evaluation errors are rejected (`GF033`), and both raw and rendered size must fit within `MaxFileBytes` (`GF006`).
   - Undeclared variables are extracted from the AST in deterministic sorted order (`template_vars`).
-- `<stem>` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (uppercase and lowercase ASCII letters, digits, `.`, `_`, `-`, starting with an ASCII letter or digit). Compact ISO timestamps in filename stems MUST use `Z` (UTC), e.g. `2026-10-18T143000Z-fix-API.task.grain.md`. Two Grainfiles in the same repository MUST NOT collide when compared case-insensitively (`GF006`).
+- `<stem>` MUST match `^[A-Za-z0-9][A-Za-z0-9._-]*$` (uppercase and lowercase ASCII letters, digits, `.`, `_`, `-`, starting with an ASCII letter or digit; `GF001`). Two Grainfiles in the same repository MUST NOT collide when compared case-insensitively (`GF006`).
 - Files ending in `.grain.md` or `.grain.md.jinja2` with an unknown `<kind>` suffix (e.g. `foo.unknown.grain.md`) warn with `GF005`. Ordinary `.md` files without `.grain.md` (such as `README.md` or `docs/design.md`) are regular Markdown assets and do not trigger `GF005`.
 
 ## 2. Front Matter (`---` YAML `---` + Optional Markdown Body)
@@ -27,7 +27,7 @@ The finalized `grainfile: v1` front-matter vocabulary consists of **12 fields** 
 | `grainfile` | both | `"v1"` | **Required** (`"v1"`) | Mandatory format version identifier on every `.task.grain.md` and `.process.grain.md` (and rendered `.grain.md.jinja2` output). Omitting `grainfile` or specifying an unsupported version fails validation (`GF020`). |
 | `title` | both | `string` | **Required** | Single-line human-readable summary (`1..200` chars). |
 | `draft` | both | `boolean` | `false` | When `true`, indexed for inspection only; never executes or grants `references` access. |
-| `not_before` | both | `string` | *(none)* | Earliest activation time: `YYYY-MM-DD` (`00:00:00Z` UTC) or RFC 3339 timestamp with `Z` or explicit `±HH:MM` offset (normalized to UTC; `-00:00` and naive timestamps fail with `GF020`). |
+| `not_before` | both | `string` | *(none)* | Earliest activation time: RFC 3339 timestamp (`date-time`, e.g. `2026-10-25T09:00:00Z` or `2026-10-25T09:00:00+02:00`, normalized to UTC; naive timestamps and bare dates fail with `GF020`). |
 | `capabilities` | both | `(string \| {capability: string, with?: object})[]` | `[]` | Requested Streamable HTTP MCP (`POST /mcp`) capabilities (`https://<host>/<path>[#<method>]`, configured in Grain by mapping `(capability_id, port)`), either as a URL string (`<capability-url>[#<method>]`) or as `{capability: "<capability-url>[#<method>]", with: {<args>}}` (`GF020`). |
 | `references` | both | `string[]` | `[]` | Read-only context files/folders (`https://...`, `/repo-rooted`, `./relative`, `../relative`). |
 | `from_template` | both | `string` | *(none)* | Optional provenance link to the source `.task.grain.md.jinja2` or `.process.grain.md.jinja2` template matching the Grainfile's kind (`GF035`). Same-repo templates are added to `authorized_references` at `commit_sha`; auto-populated on `.grain.md.jinja2` rendering. |
@@ -38,9 +38,7 @@ The finalized `grainfile: v1` front-matter vocabulary consists of **12 fields** 
 | `gate` | process | `boolean` | `false` | Advisory merge-gate signal on `pull_request` / `push` / `merge` / `workflow` triggers. |
 
 ### Timestamps, Timezones, and Schedules (`GF020`)
-- **Full timestamps (`not_before` and timestamp metadata):** MUST be valid RFC 3339 strings with an explicit timezone designator — either `Z` (UTC) or a numeric UTC offset `+HH:MM` / `-HH:MM` (`00 <= HH <= 23`, `00 <= MM <= 59`). Naive timestamps without an offset (e.g. `2026-10-25T09:00:00`) and RFC 3339's unknown-local-offset `-00:00` are rejected (`GF020`). All parsed timestamps are converted to and compared in UTC (`Z`).
-- **Bare calendar dates (`YYYY-MM-DD` in `not_before`):** Always represent `00:00:00Z` on that UTC calendar date.
-- **Filename stems:** Compact ISO timestamps in `<stem>` MUST use `Z` (UTC), e.g. `2026-10-18T143000Z-fix-API.task.grain.md`.
+- **RFC 3339 timestamps (`not_before` and timestamp metadata):** MUST be valid RFC 3339 `date-time` strings with an explicit timezone designator — either `Z` (UTC) or a numeric UTC offset `+HH:MM` / `-HH:MM` (`00 <= HH <= 23`, `00 <= MM <= 59`, e.g. `2026-10-25T09:00:00Z` or `2026-10-25T09:00:00+02:00`). Naive timestamps without an offset (e.g. `2026-10-25T09:00:00`) and bare calendar dates (`YYYY-MM-DD`) are rejected (`GF020`). All parsed timestamps are converted to and compared in UTC (`Z`).
 - **Cron schedules (`when.schedule`):** Accepts either a single `{ cron, timezone? }` object or a non-empty list of `{ cron, timezone? }` objects.
   - `timezone` defaults to `"UTC"` when omitted and MUST be `"UTC"` or a valid IANA Time Zone Database identifier (e.g. `"America/Los_Angeles"`, `"Europe/Berlin"`, `"Asia/Tokyo"`). Numeric offsets (e.g. `"+02:00"`), unknown names, and non-IANA abbreviations (e.g. `"PST"`, `"EST"`, `"CET"`) are rejected (`GF020`).
   - **DST transitions:** For non-UTC IANA zones, cron fields are evaluated against local wall-clock time in that zone; during spring-forward gaps a nonexistent wall-clock minute does not fire (or fires once at the transition boundary per scheduler policy), and during fall-back overlaps an ambiguous wall-clock minute fires only on its first occurrence.
@@ -145,8 +143,8 @@ Deploy widget service to `{{ region | default("eu-west-1") }}` in `{{ env | defa
 | `GF003` | error | Duplicate YAML mapping key |
 | `GF004` | error | Disallowed YAML construct (anchor `&`, alias `*`, merge key `<<`, or tag `!`) |
 | `GF005` | warning | Unregistered `.<kind>.grain.md` or `.<kind>.grain.md.jinja2` suffix |
-| `GF006` | error | Invalid filename `<stem>`, non-UTC compact stem timestamp, case-insensitive path collision, or file/front-matter size limit exceeded |
-| `GF020` | error | Schema validation failure: missing/invalid `grainfile: v1`, missing required field (`title`, `when`), kind-mismatch field, invalid capability URL reference (`<capability-url>[#<method>]`) or `with` arguments, invalid timestamp/timezone (`-00:00`, naive timestamp, non-IANA timezone), or invalid trigger filter |
+| `GF006` | error | Case-insensitive path collision, or file/front-matter/path size limit exceeded |
+| `GF020` | error | Schema validation failure: missing/invalid `grainfile: v1`, missing required field (`title`, `when`), kind-mismatch field, invalid capability URL reference (`<capability-url>[#<method>]`) or `with` arguments, invalid timestamp/timezone (non-RFC 3339 `not_before`, naive timestamp, non-IANA timezone), or invalid trigger filter |
 | `GF022` | warning | Unknown top-level front-matter key not prefixed with `x_` |
 | `GF030` | error | Unresolvable local `recipient`, `requestor`, `references`, `depends_on`, or `from_template` path or `#<anchor>` in repository tree |
 | `GF031` | error | Unresolvable or invalid `references` entry |

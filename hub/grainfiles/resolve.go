@@ -1678,7 +1678,7 @@ func validateFrontMatterForLinter(g *Grainfile, fm map[string]any, where string)
 
 	if rawNB, ok := fm["not_before"]; ok {
 		if nb, ok := rawNB.(string); !ok || nb == "" {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "not_before: must be an RFC 3339 UTC timestamp or YYYY-MM-DD date string"))
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "not_before: must be an RFC 3339 timestamp string"))
 		} else if t, err := ParseNotBefore(nb); err != nil {
 			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("not_before: %v", err)))
 		} else {

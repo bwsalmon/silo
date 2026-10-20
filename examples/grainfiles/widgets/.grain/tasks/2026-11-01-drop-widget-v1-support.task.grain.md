@@ -4,7 +4,7 @@ title: Remove legacy v1 widget decoder support after the migration window
 requestor: Bruce Salmon <bsalmon@google.com>
 recipient: https://github.com/acme/grain-eu
 draft: true
-not_before: "2026-11-01"
+not_before: "2026-11-01T00:00:00Z"
 depends_on:
   - ./2026-10-16-widget-schema-v2-migration.task.grain.md
 from_template: ./rollout-region.task.grain.md.jinja2

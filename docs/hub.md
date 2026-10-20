@@ -1065,8 +1065,8 @@ connected repositories:
     - `recipient` (`.task.grain.md` only; resolved to a canonical `https://` deployment URL, default `"/"`)
     - `requestor` (`.task.grain.md` only; optional attribution)
     - `draft` (boolean, default `false`)
-    - `not_before` (optional RFC 3339 UTC timestamp or `YYYY-MM-DD` UTC
-      date, promoted automatically by the leader-leased `PromoteDeferred` ticker)
+    - `not_before` (optional RFC 3339 timestamp normalized to UTC,
+      promoted automatically by the leader-leased `PromoteDeferred` ticker)
     - `references` (resolved list of `https://` or repo-local file or folder
       URLs)
     - `depends_on` (resolved list of `.task.grain.md` / `.process.grain.md` URLs)

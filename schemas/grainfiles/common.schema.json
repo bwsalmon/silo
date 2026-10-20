@@ -38,19 +38,17 @@
         }
       ]
     },
-    "date": {
-      "type": "string",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
-    },
     "timestamp": {
       "type": "string",
-      "description": "RFC 3339 timestamp with explicit timezone ('Z' or '±HH:MM' offset, 00 <= HH <= 23, 00 <= MM <= 59, '-00:00' forbidden); normalized to UTC.",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|\\+(?:[01]\\d|2[0-3]):[0-5]\\d|-(?!00:00)(?:[01]\\d|2[0-3]):[0-5]\\d)$"
+      "format": "date-time",
+      "description": "RFC 3339 timestamp with explicit timezone ('Z' or '±HH:MM' offset, 00 <= HH <= 23, 00 <= MM <= 59); normalized to UTC.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|\\+(?:[01]\\d|2[0-3]):[0-5]\\d|-(?:[01]\\d|2[0-3]):[0-5]\\d)$"
     },
     "notBefore": {
       "type": "string",
-      "description": "Earliest activation timestamp: RFC 3339 timestamp with 'Z' or explicit '±HH:MM' offset (normalized to UTC), or a YYYY-MM-DD calendar date (interpreted as 00:00:00Z).",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|\\+(?:[01]\\d|2[0-3]):[0-5]\\d|-(?!00:00)(?:[01]\\d|2[0-3]):[0-5]\\d))?$"
+      "format": "date-time",
+      "description": "Earliest activation timestamp: RFC 3339 timestamp with 'Z' or explicit '±HH:MM' offset (normalized to UTC).",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|\\+(?:[01]\\d|2[0-3]):[0-5]\\d|-(?:[01]\\d|2[0-3]):[0-5]\\d)$"
     },
     "draft": {
       "type": "boolean",
