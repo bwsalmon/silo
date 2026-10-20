@@ -567,7 +567,7 @@ stage "build"
 build_silo "$SILO" "$W/bin/silo"
 (cd "$SILO" && go build -o "$W/bin/fakeoidc" ./internal/fakeoidc)
 build_grain_pinned "$W/bin/grain-pinned"
-grain_mod="$(grain_silo_import)"
+grain_mod="$(grain_silo_import || true)"
 if ! grain_has_hub_client; then
 	say "NOTICE: grain $grain_sha has no hub node client (its daemon defines no -hub-url, and its go.mod requires ${grain_mod:-no silo module}): there is no interface to round-trip, so every stage is skipped. If grain dropped it by mistake, that is grain's to fix; nothing in silo $silo_sha can"
 	exit 0
