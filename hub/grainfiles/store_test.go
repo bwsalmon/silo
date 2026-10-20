@@ -1272,7 +1272,7 @@ func TestCapabilitiesIndexingAndEvents(t *testing.T) {
 		ctx := context.Background()
 		s.Now = func() time.Time { return time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC) }
 
-		taskRaw := []byte("---\ngrainfile: v1\ntitle: Task with OCI capabilities\nrecipient: https://github.com/acme/grain-eu\ncapabilities:\n  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    with:\n      account: infra-staging\n  - capability: ghcr.io/bwsalmon/grain/capabilities/github:latest#git-repo\n    with:\n      repo: bwsalmon/grain\n      mode: write\n      base: main\n---\nTask body.\n")
+		taskRaw := []byte("---\ngrainfile: v1\ntitle: Task with capability URLs\nrecipient: https://github.com/acme/grain-eu\ncapabilities:\n  - https://github.com/bwsalmon/grain/capabilities/self-debug\n  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n    with:\n      account: infra-staging\n  - capability: https://github.com/bwsalmon/grain/capabilities/github#git-repo\n    with:\n      repo: bwsalmon/grain\n      mode: write\n      base: main\n---\nTask body.\n")
 		taskGF, err := Parse(".grain/tasks/use-cap.task.grain.md", taskRaw)
 		if err != nil {
 			t.Fatalf("Parse task: %v", err)
@@ -1285,13 +1285,13 @@ func TestCapabilitiesIndexingAndEvents(t *testing.T) {
 			t.Fatalf("IndexGrainfile(task): %v", err)
 		}
 		wantCaps := []CapabilityRef{
-			{Capability: "ghcr.io/bwsalmon/grain/capabilities/self-debug:latest"},
+			{Capability: "https://github.com/bwsalmon/grain/capabilities/self-debug"},
 			{
-				Capability: "ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key",
+				Capability: "https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key",
 				With:       map[string]any{"account": "infra-staging"},
 			},
 			{
-				Capability: "ghcr.io/bwsalmon/grain/capabilities/github:latest#git-repo",
+				Capability: "https://github.com/bwsalmon/grain/capabilities/github#git-repo",
 				With: map[string]any{
 					"repo": "bwsalmon/grain",
 					"mode": "write",

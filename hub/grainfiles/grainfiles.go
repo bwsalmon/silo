@@ -212,9 +212,9 @@ type Grainfile struct {
 	Warnings []Finding `json:"-"`
 }
 
-// CapabilityRef represents an OCI-image capability reference
-// (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]) with optional
-// structured arguments (`with:`).
+// CapabilityRef represents a Streamable HTTP MCP capability URL reference
+// (<capability-url>[#<method>], e.g. https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key)
+// with optional structured arguments (`with:`).
 type CapabilityRef struct {
 	Capability string         `json:"capability"`
 	With       map[string]any `json:"with,omitempty"`
@@ -1101,12 +1101,12 @@ func validateDeploymentIdentitySyntax(s, field, where string) *Finding {
 }
 
 var (
-	capabilityRefRe             = regexp.MustCompile(`^(?:localhost(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:[0-9]{1,5})/[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$`)
-	capabilityForbiddenSuffixRe = regexp.MustCompile(`\.(?:grain\.md|jinja2)(?:[:@#]|$)`)
+	capabilityRefRe             = regexp.MustCompile(`^https://(?:localhost(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::[0-9]{1,5})?)(?:/[A-Za-z0-9][A-Za-z0-9._:@-]*)+(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$`)
+	capabilityForbiddenSuffixRe = regexp.MustCompile(`\.(?:grain\.md|jinja2)(?:[#]|$)`)
 )
 
-// IsValidCapabilityRef reports whether s is a valid OCI container image
-// capability reference (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]).
+// IsValidCapabilityRef reports whether s is a valid Streamable HTTP MCP
+// capability URL reference (https://<host>/<path>[#<method>]).
 func IsValidCapabilityRef(s string) bool {
 	if s == "" || capabilityForbiddenSuffixRe.MatchString(s) {
 		return false
@@ -1117,7 +1117,7 @@ func IsValidCapabilityRef(s string) bool {
 func validateCapabilitiesSlice(raw any, where string) ([]CapabilityRef, Errors) {
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, Errors{newFinding(CodeSchemaInvalid, where, "capabilities: must be a list of OCI capability references")}
+		return nil, Errors{newFinding(CodeSchemaInvalid, where, "capabilities: must be a list of capability URL references (<capability-url>[#<method>])")}
 	}
 	var out []CapabilityRef
 	var errs Errors
@@ -1125,7 +1125,7 @@ func validateCapabilitiesSlice(raw any, where string) ([]CapabilityRef, Errors) 
 		switch v := item.(type) {
 		case string:
 			if !IsValidCapabilityRef(v) {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: %q is not a valid OCI capability reference (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>])", i, v)))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: %q is not a valid capability URL reference (<capability-url>[#<method>])", i, v)))
 				continue
 			}
 			out = append(out, CapabilityRef{Capability: v})
@@ -1152,7 +1152,7 @@ func validateCapabilitiesSlice(raw any, where string) ([]CapabilityRef, Errors) 
 				}
 			}
 			if !valid {
-				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: invalid capability object (expected {capability: \"<oci-image>[#<method>]\", with?: <object>})", i)))
+				errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: invalid capability object (expected {capability: \"<capability-url>[#<method>]\", with?: <object>})", i)))
 				continue
 			}
 			out = append(out, CapabilityRef{
@@ -1160,7 +1160,7 @@ func validateCapabilitiesSlice(raw any, where string) ([]CapabilityRef, Errors) 
 				With:       withMap,
 			})
 		default:
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: must be a capability string or {capability, with} object", i)))
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, fmt.Sprintf("capabilities.%d: must be a capability URL string or {capability, with} object", i)))
 		}
 	}
 	return out, errs

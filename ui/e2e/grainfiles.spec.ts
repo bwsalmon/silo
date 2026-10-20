@@ -426,8 +426,8 @@ test('Grainfile v1 .process.grain.md.jinja2 templates, RFC 3339 offset not_befor
       `title: "${hostedTitle}"`,
       `recipient: "${canonicalDeployUrl}"`,
       'capabilities:',
-      '  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest',
-      '  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key',
+      '  - https://github.com/bwsalmon/grain/capabilities/self-debug',
+      '  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key',
       '    with:',
       '      account: infra-staging',
       'references:',
@@ -444,8 +444,8 @@ test('Grainfile v1 .process.grain.md.jinja2 templates, RFC 3339 offset not_befor
   await table.getByText(hostedTitle).click();
   await expect(detail.getByRole('heading', { name: hostedTitle })).toBeVisible();
   await expect(detail.getByRole('link', { name: canonicalDeployUrl })).toHaveAttribute('href', canonicalDeployUrl);
-  await expect(detail.getByText('ghcr.io/bwsalmon/grain/capabilities/self-debug:latest')).toBeVisible();
-  await expect(detail.getByText('ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key (account=infra-staging)')).toBeVisible();
+  await expect(detail.getByText('https://github.com/bwsalmon/grain/capabilities/self-debug')).toBeVisible();
+  await expect(detail.getByText('https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key (account=infra-staging)')).toBeVisible();
   await expect(detail.getByText('Authorized (same-repo)')).toBeVisible();
   await expect(detail.getByText('task_ready').first()).toBeVisible();
 });

@@ -11,7 +11,7 @@ when:
     paths: ["src/**"]
 gate: true
 capabilities:
-  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest
+  - https://github.com/bwsalmon/grain/capabilities/self-debug
 references:
   - /docs/widget-schema.md
   - /src/widget.go

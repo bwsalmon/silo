@@ -33,9 +33,9 @@ const sampleOverview = {
       authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
       depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md'],
       capabilities: [
-        { capability: 'ghcr.io/bwsalmon/grain/capabilities/self-debug:latest' },
+        { capability: 'https://github.com/bwsalmon/grain/capabilities/self-debug' },
         {
-          capability: 'ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key',
+          capability: 'https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key',
           with: { account: 'infra-staging' },
         },
       ],
@@ -173,9 +173,9 @@ describe('Grain Hub branding, /grainfiles, and /nodes deployment views', () => {
     expect(screen.getByText('acme/app:tasks/00-prep.task.grain.md').getAttribute('href')).toBe(
       'https://github.com/acme/app/blob/main/tasks/00-prep.task.grain.md',
     );
-    expect(screen.getAllByText('ghcr.io/bwsalmon/grain/capabilities/self-debug:latest').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('https://github.com/bwsalmon/grain/capabilities/self-debug').length).toBeGreaterThanOrEqual(2);
     expect(
-      screen.getAllByText('ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key (account=infra-staging)').length,
+      screen.getAllByText('https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key (account=infra-staging)').length,
     ).toBeGreaterThanOrEqual(2);
 
     // Inspection panel for first Grainfile (Deploy service to staging)

@@ -64,9 +64,9 @@
     },
     "capabilityRef": {
       "type": "string",
-      "description": "OCI container image reference with optional #<method> suffix (<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]).",
+      "description": "Streamable HTTP MCP capability URL with optional #<method> fragment (https://<host>/<path>[#<method>]).",
       "minLength": 1,
-      "pattern": "^(?!.*\\.(?:grain\\.md|jinja2)(?:[:@#]|$))(?:localhost(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?:[0-9]{1,5})/[a-z0-9]+(?:[._-]+[a-z0-9]+)*(?:/[a-z0-9]+(?:[._-]+[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$"
+      "pattern": "^https://(?!.*\\.(?:grain\\.md|jinja2)(?:[#]|$))(?:localhost(?::[0-9]{1,5})?|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::[0-9]{1,5})?)(?:/[A-Za-z0-9][A-Za-z0-9._:@-]*)+(?:#[A-Za-z0-9][A-Za-z0-9._-]*)?$"
     },
     "capabilityItem": {
       "oneOf": [

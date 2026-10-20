@@ -577,17 +577,17 @@ Task body.
 			},
 		},
 		{
-			Name: "oci-capabilities-and-with-args",
+			Name: "url-capabilities-and-with-args",
 			Files: map[string]string{
 				"tasks/use-cap.task.grain.md": `---
 grainfile: v1
-title: Task requesting OCI capabilities
+title: Task requesting capability URLs
 capabilities:
-  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest
-  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key
+  - https://github.com/bwsalmon/grain/capabilities/self-debug
+  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key
     with:
       account: infra-staging
-  - capability: ghcr.io/bwsalmon/grain/capabilities/github:latest#git-repo
+  - capability: https://github.com/bwsalmon/grain/capabilities/github#git-repo
     with:
       repo: bwsalmon/grain
       mode: write
@@ -597,9 +597,9 @@ Run with capabilities.
 `,
 				"processes/use-cap.process.grain.md": `---
 grainfile: v1
-title: Process requesting OCI capability
+title: Process requesting capability URL
 capabilities:
-  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest
+  - https://github.com/bwsalmon/grain/capabilities/self-debug
 when:
   manual: {}
 ---
@@ -608,7 +608,7 @@ Run process with capability.
 			},
 		},
 		{
-			Name: "capabilities-invalid-oci-refs-and-unregistered-capability-suffix",
+			Name: "capabilities-invalid-url-refs-and-unregistered-capability-suffix",
 			Files: map[string]string{
 				"capabilities/legacy.capability.grain.md": `---
 grainfile: v1
@@ -621,9 +621,9 @@ grainfile: v1
 title: T
 capabilities:
   - /.grain/capabilities/gcp-key.capability.grain.md
-  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key
+  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key
     with: not-a-map
-  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key
+  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key
     extra: 1
 ---
 Body.
