@@ -80,9 +80,9 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Errorf("v2.References = %v, want %v", v2.References, wantV2Refs)
 	}
 	wantV2Caps := []CapabilityRef{
-		{Capability: "ghcr.io/bwsalmon/grain/capabilities/self-debug:latest"},
+		{Capability: "https://github.com/bwsalmon/grain/capabilities/self-debug"},
 		{
-			Capability: "ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key",
+			Capability: "https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key",
 			With: map[string]any{
 				"account": "infra-staging",
 			},
@@ -626,13 +626,13 @@ Check the release branch.
 			{
 				name: "process capabilities with non-mapping with field",
 				path: "processes/p.process.grain.md",
-				body: "---\ngrainfile: v1\ntitle: P\ncapabilities:\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    with: invalid\nwhen:\n  manual: {}\n---\n",
+				body: "---\ngrainfile: v1\ntitle: P\ncapabilities:\n  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n    with: invalid\nwhen:\n  manual: {}\n---\n",
 				code: CodeSchemaInvalid,
 			},
 			{
 				name: "task capabilities with unknown property on entry object",
 				path: "tasks/a.task.grain.md",
-				body: "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    extra: 1\n---\n",
+				body: "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n    extra: 1\n---\n",
 				code: CodeSchemaInvalid,
 			},
 			{

@@ -4,8 +4,8 @@ title: Add version header to the widget binary schema
 requestor: Bruce Salmon <bsalmon@google.com>
 recipient: https://github.com/acme/grain-eu
 capabilities:
-  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest
-  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key
+  - https://github.com/bwsalmon/grain/capabilities/self-debug
+  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key
     with:
       account: infra-staging
 references:

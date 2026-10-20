@@ -437,24 +437,24 @@ class TestGrainlint(unittest.TestCase):
             )
             self.assertEqual([f.code for f in grainlint.lint(root)], ["GF020"])
 
-    def test_capabilities_oci_references_and_with_args(self):
+    def test_capabilities_url_references_and_with_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             (root / "deploy.task.grain.md").write_text(
                 "---\n"
                 "grainfile: v1\n"
-                "title: Deploy service with OCI capabilities\n"
+                "title: Deploy service with capability URLs\n"
                 "capabilities:\n"
-                "  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest\n"
-                "  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n"
+                "  - https://github.com/bwsalmon/grain/capabilities/self-debug\n"
+                "  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n"
                 "    with:\n"
                 "      account: infra-staging\n"
-                "  - capability: ghcr.io/bwsalmon/grain/capabilities/github:latest#git-repo\n"
+                "  - capability: https://github.com/bwsalmon/grain/capabilities/github#git-repo\n"
                 "    with:\n"
                 "      repo: bwsalmon/grain\n"
                 "      mode: write\n"
                 "      base: main\n"
-                "  - localhost:5000/grain/self-debug@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef#debug\n"
+                "  - https://ghcr.io/bwsalmon/grain/capabilities/self-debug:latest#debug\n"
                 "---\n"
                 "Run deploy.\n",
                 encoding="utf-8",
@@ -465,8 +465,8 @@ class TestGrainlint(unittest.TestCase):
                 "title: Gate on integration check with GCP key\n"
                 "gate: true\n"
                 "capabilities:\n"
-                "  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest\n"
-                "  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n"
+                "  - https://github.com/bwsalmon/grain/capabilities/self-debug\n"
+                "  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n"
                 "    with:\n"
                 "      account: infra-staging\n"
                 "when:\n"
@@ -491,11 +491,13 @@ class TestGrainlint(unittest.TestCase):
             "capabilities:\n  - ./gcp-key.capability.grain.md#agent-usage",
             "capabilities:\n  - https://github.com/acme/shared/blob/main/.grain/caps/vault.capability.grain.md",
             "capabilities:\n  - self-debug",
-            "capabilities:\n  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest#",
-            "capabilities:\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    with: not-a-mapping",
-            "capabilities:\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    extra: 1",
+            "capabilities:\n  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest",
+            "capabilities:\n  - http://github.com/bwsalmon/grain/capabilities/self-debug",
+            "capabilities:\n  - https://github.com/bwsalmon/grain/capabilities/self-debug#",
+            "capabilities:\n  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n    with: not-a-mapping",
+            "capabilities:\n  - capability: https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key\n    extra: 1",
             "capabilities:\n  - with:\n      account: staging",
-            "capabilities: ghcr.io/bwsalmon/grain/capabilities/self-debug:latest",
+            "capabilities: https://github.com/bwsalmon/grain/capabilities/self-debug",
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 root = pathlib.Path(tmp)

@@ -324,9 +324,9 @@ describe('Grainfiles and node subscriptions', () => {
         authorized_references: ['https://github.com/acme/app/blob/main/docs/arch.md'],
         depends_on: ['https://github.com/acme/app/blob/main/tasks/00-prep.task.md'],
         capabilities: [
-          { capability: 'ghcr.io/bwsalmon/grain/capabilities/self-debug:latest' },
+          { capability: 'https://github.com/bwsalmon/grain/capabilities/self-debug' },
           {
-            capability: 'ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key',
+            capability: 'https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key',
             with: { account: 'infra-staging' },
           },
         ],
@@ -414,9 +414,9 @@ describe('Grainfiles and node subscriptions', () => {
     expect(tasks[0].requestor).toBe('Alice <alice@example.com>');
     expect(tasks[0].depends_on).toEqual(['https://github.com/acme/app/blob/main/tasks/00-prep.task.md']);
     expect(tasks[0].capabilities).toEqual([
-      { capability: 'ghcr.io/bwsalmon/grain/capabilities/self-debug:latest' },
+      { capability: 'https://github.com/bwsalmon/grain/capabilities/self-debug' },
       {
-        capability: 'ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key',
+        capability: 'https://github.com/bwsalmon/grain/capabilities/gcp#gcp-key',
         with: { account: 'infra-staging' },
       },
     ]);
