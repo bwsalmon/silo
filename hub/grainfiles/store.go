@@ -525,7 +525,19 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 			cp.Recipient = CanonicalDeploymentURL(s.HubURL, depID)
 		}
 	}
-	if cp.URL == "" || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) || (cp.FromTemplate != "" && !strings.Contains(cp.FromTemplate, "://")) {
+	hasLocalRef := false
+	for _, list := range [][]string{cp.References, cp.DependsOn} {
+		for _, c := range list {
+			if !strings.Contains(c, "://") {
+				hasLocalRef = true
+				break
+			}
+		}
+		if hasLocalRef {
+			break
+		}
+	}
+	if cp.URL == "" || hasLocalRef || (cp.Kind == KindTask && !strings.Contains(cp.Recipient, "://")) || (cp.Recipient != "" && !strings.Contains(cp.Recipient, "://")) || (cp.FromTemplate != "" && !strings.Contains(cp.FromTemplate, "://")) {
 		if err := cp.ResolveSource(Source{
 			RepoURL: cp.Repo,
 			Ref:     cp.Ref,

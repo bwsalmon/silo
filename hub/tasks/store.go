@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/silo/hub/dbaccess"
@@ -31,6 +32,7 @@ const maxConns = 16
 type Store struct {
 	db       *sql.DB
 	postgres bool
+	chatTxMu sync.Mutex
 	// Now, when set, is the clock tasks are stamped with.
 	Now func() time.Time
 	// OnTerminal, when set, is called when a task transitions to a terminal

@@ -83,24 +83,32 @@ grain_silo_import() {
 
 # build_grain_pinned OUT builds grain as grain's main has it. If grain's
 # tip commit on main does not compile on its own (an upstream break in
-# bwsalmon/grain unrelated to silo), step back to the most recent commit on
-# grain's main that builds.
+# bwsalmon/grain unrelated to silo) or has removed the silo dependency, step
+# back to the most recent commit on grain's main that requires silo and builds.
 build_grain_pinned() {
-	if (cd "$GRAIN_SRC" && go build -o "$1" ./cmd/grain) 2>"$W/pinned.err"; then
+	if [ -n "$(grain_silo_import)" ] && (cd "$GRAIN_SRC" && go build -o "$1" ./cmd/grain) 2>"$W/pinned.err"; then
 		return 0
 	fi
-	say "NOTICE: grain main ($grain_sha) does not build on its own:"
-	sed 's/^/  /' "$W/pinned.err"
-	git -C "$GRAIN_SRC" fetch -q --deepen=10 origin main 2>/dev/null || true
+	if [ -z "$(grain_silo_import)" ]; then
+		say "NOTICE: grain main ($grain_sha) has no github.com/bwsalmon/silo dependency; stepping back to the last commit that did"
+	else
+		say "NOTICE: grain main ($grain_sha) does not build on its own:"
+		sed 's/^/  /' "$W/pinned.err"
+	fi
+	git -C "$GRAIN_SRC" fetch -q --deepen=50 origin main 2>/dev/null || true
 	local rev
-	for rev in $(git -C "$GRAIN_SRC" rev-list --first-parent --max-count=10 HEAD~1 2>/dev/null); do
+	for rev in $(git -C "$GRAIN_SRC" rev-list --first-parent --max-count=50 HEAD~1 2>/dev/null); do
 		git -C "$GRAIN_SRC" checkout -q "$rev"
-		if (cd "$GRAIN_SRC" && go build -o "$1" ./cmd/grain) 2>/dev/null; then
+		if [ -n "$(grain_silo_import)" ] && (cd "$GRAIN_SRC" && go build -o "$1" ./cmd/grain) 2>/dev/null; then
 			grain_sha="$(git -C "$GRAIN_SRC" rev-parse --short=12 HEAD)"
 			say "NOTICE: stepped back to grain $grain_sha ($(git -C "$GRAIN_SRC" log -1 --format=%s HEAD))"
 			return 0
 		fi
 	done
+	if [ -z "$(grain_silo_import)" ]; then
+		say "skipped: no recent grain commit requires github.com/bwsalmon/silo"
+		exit 0
+	fi
 	cat "$W/pinned.err" >&2
 	return 1
 }

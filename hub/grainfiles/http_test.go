@@ -759,3 +759,107 @@ Inspect the CI workflow run.
 		t.Fatalf("workflow_run cancelled: expected 0 events, got %+v", resCancel.Events)
 	}
 }
+
+func TestNonDefaultBranchPushDoesNotPoisonProcessOrTaskIndex(t *testing.T) {
+	ctx := context.Background()
+	dbURL := "sqlite:" + filepath.Join(t.TempDir(), "branch-isolation.db")
+	store, err := Open(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fetcher := NewMemoryFetcher()
+	api := NewAPI(store, fetcher)
+	api.WebhookSecret = "branch-secret"
+	srv := httptest.NewServer(api.Handler())
+	defer srv.Close()
+
+	repo := "https://github.com/acme/widgets"
+	procPath := ".grain/processes/gate.process.grain.md"
+	otherProcPath := ".grain/processes/audit.process.grain.md"
+	taskPath := ".grain/tasks/evil.task.grain.md"
+
+	mainProcRaw := "---\ngrainfile: v1\ntitle: Trusted Main Gate Process\nwhen:\n  push:\n    branches: [\"main\", \"feat/*\"]\n    paths: [\"src/**\"]\n---\nTrusted prompt.\n"
+	mainOtherProcRaw := "---\ngrainfile: v1\ntitle: Trusted Audit Process\nwhen:\n  manual: {}\n---\nTrusted audit.\n"
+	fetcher.SetString(repo, "sha-main-1", procPath, mainProcRaw)
+	fetcher.SetString(repo, "sha-main-1", otherProcPath, mainOtherProcRaw)
+
+	postWH := func(payload map[string]any) WebhookResponse {
+		t.Helper()
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequest(http.MethodPost, srv.URL+GitHubWebhookPath, bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", SignGitHubWebhook(api.WebhookSecret, raw))
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST webhook: status %d, body: %s", resp.StatusCode, body)
+		}
+		var out WebhookResponse
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// 1. Push on default branch (main) indexes both processes.
+	resMain := postWH(map[string]any{
+		"ref":   "refs/heads/main",
+		"after": "sha-main-1",
+		"repository": map[string]any{
+			"html_url":       repo,
+			"default_branch": "main",
+		},
+		"added": []string{procPath, otherProcPath},
+	})
+	if len(resMain.Indexed) != 2 {
+		t.Fatalf("main push: expected 2 indexed grainfiles, got %d", len(resMain.Indexed))
+	}
+
+	// 2. Push on non-default branch (refs/heads/feat/attacker) attempting to overwrite
+	// one process, remove the other process, and add a task while touching src/app.go.
+	evilProcRaw := "---\ngrainfile: v1\ntitle: Poisoned Feature Process\nwhen:\n  push:\n    branches: [\"*\"]\n---\nPoisoned.\n"
+	evilTaskRaw := "---\ngrainfile: v1\ntitle: Evil Feature Task\nrecipient: /deployments/grain-eu\n---\nEvil.\n"
+	fetcher.SetString(repo, "sha-feat-evil", procPath, evilProcRaw)
+	fetcher.SetString(repo, "sha-feat-evil", taskPath, evilTaskRaw)
+
+	resFeat := postWH(map[string]any{
+		"ref":   "refs/heads/feat/attacker",
+		"after": "sha-feat-evil",
+		"repository": map[string]any{
+			"html_url":       repo,
+			"default_branch": "main",
+		},
+		"added":    []string{taskPath, "src/app.go"},
+		"modified": []string{procPath},
+		"removed":  []string{otherProcPath},
+	})
+	if len(resFeat.Indexed) != 0 {
+		t.Fatalf("non-default branch push must not index grainfiles, got %+v", resFeat.Indexed)
+	}
+	if len(resFeat.Events) != 1 || resFeat.Events[0].Title != "Trusted Main Gate Process" {
+		t.Fatalf("expected when.push on feat/attacker to evaluate against trusted main process, got %+v", resFeat.Events)
+	}
+
+	// Verify both processes on main were neither overwritten nor removed.
+	otherIdx, err := store.GetIndex(ctx, repo, otherProcPath, "")
+	if err != nil || otherIdx.removed || otherIdx.Title != "Trusted Audit Process" || otherIdx.CommitSHA != "sha-main-1" {
+		t.Fatalf("process index poisoned by non-default branch push: err=%v rec=%+v", err, otherIdx)
+	}
+	procIdx, err := store.GetIndex(ctx, repo, procPath, "")
+	if err != nil || procIdx.removed || procIdx.Title != "Trusted Main Gate Process" || procIdx.CommitSHA != "sha-main-1" {
+		t.Fatalf("process index poisoned by non-default branch push: err=%v rec=%+v", err, procIdx)
+	}
+}

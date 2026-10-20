@@ -943,7 +943,7 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 
 	// references (optional list of refs)
 	if rawRefs, ok := fm["references"]; ok {
-		refs, refErrs := validateRefSlice(rawRefs, "references", where, false)
+		refs, refErrs := validateRefSliceWithSourcePath(rawRefs, "references", where, false, g.Path)
 		errs = append(errs, refErrs...)
 		g.References = refs
 	}
@@ -1008,18 +1008,6 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 			errs = append(errs, whenErrs...)
 			g.When = triggers
 			g.On = triggers
-		}
-	}
-
-	// Validate local climbing above repo root if g.Path is relative to repo root.
-	for _, ref := range g.References {
-		if f := checkLocalClimb(ref, "references", where, g.Path); f != nil {
-			errs = append(errs, *f)
-		}
-	}
-	for _, ref := range g.DependsOn {
-		if f := checkLocalClimb(ref, "depends_on", where, g.Path); f != nil {
-			errs = append(errs, *f)
 		}
 	}
 

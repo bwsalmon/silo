@@ -603,6 +603,9 @@ func (s *Store) DeleteUser(ctx context.Context, email string) error {
 		if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM accepted_users WHERE email = ?`), e); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM team_members WHERE principal = ?`), UserPrefix+e); err != nil {
+			return err
+		}
 		if curSys != 0 {
 			var remaining int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accepted_users WHERE sys_admin <> 0`).Scan(&remaining); err != nil {

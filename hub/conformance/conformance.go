@@ -844,8 +844,12 @@ func (k *kit) restart(ctx context.Context) (string, error) {
 	if _, ok := w.Await(k.cfg.Timeout, func(e live.Event) bool { return e.Seq > before }); !ok {
 		return "", fmt.Errorf("no event after seq %d reached the restarted hub", before)
 	}
-	after, err := k.h.task(ctx, t.ID)
-	if err != nil {
+	var after tasks.Task
+	if err := eventually(ctx, k.cfg.Timeout, "the restarted hub to resume the task", func() (bool, error) {
+		var err error
+		after, err = k.h.task(ctx, t.ID)
+		return err == nil && after.State != tasks.Lost, err
+	}); err != nil {
 		return "", err
 	}
 	switch {

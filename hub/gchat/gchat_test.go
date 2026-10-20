@@ -985,3 +985,106 @@ func TestHTTPSenderOAuth2AndREST(t *testing.T) {
 		t.Fatalf("unexpected PATCH Authorization: %q", gotPatchAuth)
 	}
 }
+
+func TestGoogleChatBotAndOutboundEchoLoopPrevention(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	tok := env.validToken()
+
+	code, createRaw := env.doAs("alice@example.com", http.MethodPost, tasks.ChatsPath, map[string]any{
+		"title":      "Loop Prevention Room",
+		"deployment": "infra",
+		"reply_mode": "all",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create chat failed: %d %s", code, createRaw)
+	}
+	var chat chats.ChatSession
+	must(t, json.Unmarshal(createRaw, &chat))
+
+	code, _ = env.doAs("alice@example.com", http.MethodPut, tasks.ChatsPath+"/"+chat.ID+"/bindings/google-chat", map[string]string{
+		"space_name":  "spaces/LOOP1",
+		"thread_name": "spaces/LOOP1/threads/t1",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("bind google-chat failed: %d", code)
+	}
+
+	// 1. Inbound event from a BOT user must be ignored (200 OK, 0 chat messages).
+	code, _, _ = env.postWebhook(tok, gchat.Event{
+		Type:  "MESSAGE",
+		User:  gchat.User{Email: "alice@example.com", Type: "BOT"},
+		Space: gchat.Space{Name: "spaces/LOOP1"},
+		Message: &gchat.Message{
+			Name:   "spaces/LOOP1/messages/bot-1",
+			Text:   "[@infra]: automated bot reply",
+			Thread: &gchat.Thread{Name: "spaces/LOOP1/threads/t1"},
+			Sender: &gchat.User{Email: "alice@example.com", Type: "BOT"},
+		},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("BOT message webhook status = %d, want 200", code)
+	}
+
+	// 2. Outbound Web UI message and agent transcript reply echoed back by Google Chat must be ignored.
+	env.sender.Reset()
+	code, _ = env.doAs("alice@example.com", http.MethodPost, tasks.ChatsPath+"/"+chat.ID+"/messages", map[string]any{
+		"text": "initial human message from web",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("POST web message failed: %d", code)
+	}
+	env.hub.Live.OnEvent(live.Event{
+		Task: chat.TaskID,
+		Event: events.Event{
+			Seq:  1,
+			Time: time.Now().UTC(),
+			Type: events.TypeTranscript,
+			Transcript: &events.Item{
+				Kind: events.ItemText,
+				Text: "Agent response from infra",
+			},
+		},
+	})
+	sent := env.sender.Messages()
+	if len(sent) != 2 {
+		t.Fatalf("expected 2 outbound messages, got %d", len(sent))
+	}
+
+	// Echo both outbound messages back into the Google Chat webhook (by message Name and by [@infra]: prefix).
+	for _, s := range sent {
+		code, _, _ = env.postWebhook(tok, gchat.Event{
+			Type:  "MESSAGE",
+			User:  gchat.User{Email: "alice@example.com"},
+			Space: gchat.Space{Name: "spaces/LOOP1"},
+			Message: &gchat.Message{
+				Name:   s.Name,
+				Text:   s.Text,
+				Thread: &gchat.Thread{Name: "spaces/LOOP1/threads/t1"},
+			},
+		})
+		if code != http.StatusOK {
+			t.Fatalf("echoed outbound message status = %d, want 200", code)
+		}
+	}
+	code, _, _ = env.postWebhook(tok, gchat.Event{
+		Type:  "MESSAGE",
+		User:  gchat.User{Email: "alice@example.com"},
+		Space: gchat.Space{Name: "spaces/LOOP1"},
+		Message: &gchat.Message{
+			Name:   "spaces/LOOP1/messages/brand-new-echo-id",
+			Text:   "[@infra]: echoed agent output with new message ID",
+			Thread: &gchat.Thread{Name: "spaces/LOOP1/threads/t1"},
+		},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("echoed [@infra]: message status = %d, want 200", code)
+	}
+
+	// Only the 1 original human web message should exist in chat_messages!
+	storedMsgs, err := env.hub.Backlog.ChatMessages(ctx, chat.ID, 0)
+	must(t, err)
+	if len(storedMsgs) != 1 {
+		t.Fatalf("expected only 1 stored human message (no bot/echo loops), got %d: %+v", len(storedMsgs), storedMsgs)
+	}
+}

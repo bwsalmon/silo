@@ -166,6 +166,7 @@ type Handler struct {
 
 	mu           sync.Mutex
 	cardMessages map[string]string
+	sentMessages map[string]bool
 }
 
 // Handler returns an http.Handler serving POST /v1/integrations/google-chat/events.
@@ -248,6 +249,12 @@ func (h *Handler) serveEvents(w http.ResponseWriter, r *http.Request) {
 	var ev Event
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ev); err != nil {
 		http.Error(w, "bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if strings.EqualFold(strings.TrimSpace(ev.User.Type), "BOT") ||
+		(ev.Message != nil && ev.Message.Sender != nil && strings.EqualFold(strings.TrimSpace(ev.Message.Sender.Type), "BOT")) {
+		writeCardResponse(w, http.StatusOK, OutboundMessage{})
 		return
 	}
 
@@ -588,9 +595,15 @@ func (h *Handler) handleMessage(ctx context.Context, w http.ResponseWriter, acc 
 		return
 	}
 
+	msgID := strings.TrimSpace(ev.Message.Name)
 	rawText := ev.Message.Text
 	if strings.TrimSpace(rawText) == "" && strings.TrimSpace(ev.Message.ArgumentText) != "" {
 		rawText = ev.Message.ArgumentText
+	}
+	trimmedLower := strings.ToLower(strings.TrimSpace(rawText))
+	if h.isSentMessage(msgID) || (chat.Deployment != "" && strings.HasPrefix(trimmedLower, "[@"+strings.ToLower(chat.Deployment)+"]:")) {
+		writeCardResponse(w, http.StatusOK, OutboundMessage{})
+		return
 	}
 	cleanedText, hadLeadingBotMention := stripLeadingBotMention(rawText)
 	botAnnotation := hasBotMentionAnnotation(ev.Message)
@@ -607,7 +620,6 @@ func (h *Handler) handleMessage(ctx context.Context, w http.ResponseWriter, acc 
 		}
 	}
 
-	msgID := strings.TrimSpace(ev.Message.Name)
 	createdMsg, taskMsg, dup, err := h.Store.PostChatMessage(ctx, chat.ID, tasks.PostChatMessageOptions{
 		ID:           msgID,
 		Text:         cleanedText,
@@ -812,6 +824,29 @@ func (h *Handler) handleCardClicked(ctx context.Context, w http.ResponseWriter, 
 	writeCardResponse(w, http.StatusOK, updatedCard)
 }
 
+func (h *Handler) markSentMessage(msgName string) {
+	msgName = strings.TrimSpace(msgName)
+	if msgName == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.sentMessages == nil {
+		h.sentMessages = map[string]bool{}
+	}
+	h.sentMessages[msgName] = true
+}
+
+func (h *Handler) isSentMessage(msgName string) bool {
+	msgName = strings.TrimSpace(msgName)
+	if msgName == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sentMessages[msgName]
+}
+
 func (h *Handler) trackCardMessage(key, msgName string) {
 	if key == "" || msgName == "" {
 		return
@@ -860,7 +895,9 @@ func (h *Handler) OnWebMessage(chat tasks.ChatSession, msg tasks.ChatMessage) {
 		out := OutboundMessage{
 			Text: fmt.Sprintf("[%s]: %s", msg.Sender, msg.Text),
 		}
-		_, _ = h.Sender.SendMessage(context.Background(), b.ExternalID, b.ThreadID, out)
+		if msgName, err := h.Sender.SendMessage(context.Background(), b.ExternalID, b.ThreadID, out); err == nil && msgName != "" {
+			h.markSentMessage(msgName)
+		}
 	}
 }
 
@@ -925,8 +962,11 @@ func (h *Handler) OnChatTaskEvent(chat tasks.ChatSession, ev tasks.ChatEvent) {
 	}
 	for _, b := range bindings {
 		msgName, err := h.Sender.SendMessage(context.Background(), b.ExternalID, b.ThreadID, *out)
-		if err == nil && trackKey != "" && msgName != "" {
-			h.trackCardMessage(trackKey, msgName)
+		if err == nil && msgName != "" {
+			h.markSentMessage(msgName)
+			if trackKey != "" {
+				h.trackCardMessage(trackKey, msgName)
+			}
 		}
 	}
 }
