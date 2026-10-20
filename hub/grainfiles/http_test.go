@@ -110,7 +110,7 @@ Draft prompt body.
 grainfile: v1
 title: Deferred widget v1 removal
 recipient: https://github.com/acme/grain-eu
-not_before: "2026-11-01"
+not_before: "2026-11-01T00:00:00Z"
 ---
 Drop v1 support on Nov 1.
 `

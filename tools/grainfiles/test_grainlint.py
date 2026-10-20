@@ -339,21 +339,21 @@ class TestGrainlint(unittest.TestCase):
         t_z = grainlint.parse_time_utc("2026-10-25T07:00:00Z")
         t_plus = grainlint.parse_time_utc("2026-10-25T09:00:00+02:00")
         t_minus = grainlint.parse_time_utc("2026-10-25T00:00:00-07:00")
-        t_date = grainlint.parse_time_utc("2026-10-25", allow_date=True)
+        t_neg_zero = grainlint.parse_time_utc("2026-10-25T07:00:00-00:00")
         self.assertIsNotNone(t_z)
         self.assertEqual(t_z, t_plus)
         self.assertEqual(t_z, t_minus)
-        self.assertEqual(t_date.isoformat(), "2026-10-25T00:00:00+00:00")
+        self.assertEqual(t_z, t_neg_zero)
 
-        # Reject -00:00, naive timestamps, and out-of-range offsets.
+        # Reject bare YYYY-MM-DD dates, naive timestamps, and out-of-range offsets.
         for bad_ts in (
-            "2026-10-25T09:00:00-00:00",
+            "2026-10-25",
             "2026-10-25T09:00:00",
             "2026-10-25T09:00:00+24:00",
             "2026-10-25T09:00:00+02:60",
             "2026-02-29T09:00:00+02:00",
         ):
-            self.assertIsNone(grainlint.parse_time_utc(bad_ts, allow_date=True), msg=bad_ts)
+            self.assertIsNone(grainlint.parse_time_utc(bad_ts), msg=bad_ts)
 
         # 2. IANA timezone validation.
         for valid_tz in ("UTC", "Etc/UTC", "America/Los_Angeles", "Europe/Berlin", "Asia/Tokyo"):

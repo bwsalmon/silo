@@ -448,7 +448,6 @@ var (
 	repoSlugRe         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$`)
 	userIdentityRe     = regexp.MustCompile(`^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$`)
 	timeRe             = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|\+(?:[01]\d|2[0-3]):[0-5]\d|-(?:[01]\d|2[0-3]):[0-5]\d)$`)
-	dateRe             = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	ianaTZRe           = regexp.MustCompile(`^(UTC|Etc/(?:UTC|GMT)|[A-Z][A-Za-z_+-]+(?:/[A-Za-z_+-]+)+)$`)
 )
 
@@ -547,12 +546,9 @@ func IsUserIdentity(s string) bool {
 }
 
 // ParseTime parses and validates an RFC 3339 timestamp with an explicit timezone
-// designator (`Z` or `±HH:MM` with `00 <= HH <= 23`, `00 <= MM <= 59`, `-00:00`
-// forbidden) and normalizes it to UTC (`Z`; docs/grainfiles-spec.md §1.4).
+// designator (`Z` or `±HH:MM` with `00 <= HH <= 23`, `00 <= MM <= 59`)
+// and normalizes it to UTC (`Z`; docs/grainfiles-spec.md §1.4).
 func ParseTime(s string) (time.Time, error) {
-	if strings.HasSuffix(s, "-00:00") {
-		return time.Time{}, fmt.Errorf("invalid timestamp %q: -00:00 unknown local offset is not allowed", s)
-	}
 	m := timeRe.FindStringSubmatch(s)
 	if m == nil {
 		return time.Time{}, fmt.Errorf("invalid RFC 3339 timestamp %q", s)
@@ -594,18 +590,10 @@ func ValidIANATimezone(tz string) bool {
 	return err == nil
 }
 
-// ParseNotBefore parses and validates a `not_before` string, which may be
-// either an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) or a UTC calendar
-// date (`YYYY-MM-DD`, representing 00:00:00Z at the start of that day in UTC;
+// ParseNotBefore parses and validates a `not_before` string as an RFC 3339
+// timestamp (`Z` or explicit `±HH:MM` offset, normalized to UTC;
 // docs/grainfiles-spec.md §1.4, §6.4).
 func ParseNotBefore(s string) (time.Time, error) {
-	if dateRe.MatchString(s) {
-		t, err := time.Parse("2006-01-02", s)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid calendar date %q: %w", s, err)
-		}
-		return t.UTC(), nil
-	}
 	return ParseTime(s)
 }
 
@@ -926,10 +914,10 @@ func validateFrontMatter(g *Grainfile, fm map[string]any, where string) Errors {
 		}
 	}
 
-	// not_before (optional RFC 3339 UTC timestamp or YYYY-MM-DD UTC date)
+	// not_before (optional RFC 3339 timestamp, normalized to UTC)
 	if rawNB, ok := fm["not_before"]; ok {
 		if nb, ok := rawNB.(string); !ok || nb == "" {
-			errs = append(errs, newFinding(CodeSchemaInvalid, where, "not_before: must be an RFC 3339 UTC timestamp or YYYY-MM-DD date string"))
+			errs = append(errs, newFinding(CodeSchemaInvalid, where, "not_before: must be an RFC 3339 timestamp string"))
 		} else {
 			t, err := ParseNotBefore(nb)
 			if err != nil {

@@ -90,10 +90,10 @@ case("gf020-bad-draft", ["GF020"], {
     "r/tasks/a.task.grain.md": task('draft: "yes"\n'),
 })
 case("gf020-bad-not-before", ["GF020"], {
-    "r/tasks/a.task.grain.md": task('not_before: "2026-02-30"\n'),
+    "r/tasks/a.task.grain.md": task('not_before: "2026-02-30T00:00:00Z"\n'),
 })
 case("gf020-bad-not-before-format", ["GF020"], {
-    "r/processes/p.process.grain.md": process(extra='when:\n  manual: {}\nnot_before: "2026-10-25T09:00:00-00:00"\n'),
+    "r/processes/p.process.grain.md": process(extra='when:\n  manual: {}\nnot_before: "2026-10-25"\n'),
 })
 case("gf020-bad-schedule-timezone", ["GF020"], {
     "r/processes/p.process.grain.md": process(extra='when:\n  schedule:\n    cron: "0 2 * * *"\n    timezone: "PST"\n'),

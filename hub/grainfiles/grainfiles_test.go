@@ -134,7 +134,7 @@ func TestExamplesGrainfiles(t *testing.T) {
 		t.Errorf("mig.DependsOn = %v, want %v", mig.DependsOn, wantMigDeps)
 	}
 
-	// 4. Test widgets/2026-11-01-drop-widget-v1-support.task.grain.md (draft: true, YYYY-MM-DD not_before)
+	// 4. Test widgets/2026-11-01-drop-widget-v1-support.task.grain.md (draft: true, RFC 3339 not_before)
 	dropPath := filepath.Join(examplesDir, "widgets", ".grain", "tasks", "2026-11-01-drop-widget-v1-support.task.grain.md")
 	drop, err := ParseFile(dropPath)
 	if err != nil {
@@ -458,7 +458,7 @@ func TestParseAndValidateFields(t *testing.T) {
 grainfile: v1
 title: Compact task
 requestor: https://github.com/acme/team-a
-not_before: 2026-10-20
+not_before: 2026-10-20T00:00:00Z
 draft: false
 depends_on:
   - /tasks/lead.task.grain.md
@@ -1346,7 +1346,7 @@ func TestMandatoryGrainfileVersionAndUniversalTimezoneSemantics(t *testing.T) {
 		}
 	})
 
-	t.Run("not_before and created_at accept Z, explicit offsets, and bare dates, normalizing to UTC", func(t *testing.T) {
+	t.Run("not_before accepts Z and explicit offsets, normalizing to UTC, and rejects bare dates", func(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
 			notBef  string
@@ -1368,9 +1368,9 @@ func TestMandatoryGrainfileVersionAndUniversalTimezoneSemantics(t *testing.T) {
 				wantUTC: time.Date(2026, 11, 1, 7, 0, 0, 500_000_000, time.UTC),
 			},
 			{
-				name:    "bare calendar date YYYY-MM-DD",
-				notBef:  "2026-11-01",
-				wantUTC: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+				name:    "negative zero offset -00:00",
+				notBef:  "2026-11-01T07:00:00-00:00",
+				wantUTC: time.Date(2026, 11, 1, 7, 0, 0, 0, time.UTC),
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -1400,8 +1400,8 @@ func TestMandatoryGrainfileVersionAndUniversalTimezoneSemantics(t *testing.T) {
 		}
 
 		for _, badTS := range []string{
+			"2026-11-01",                // bare calendar date YYYY-MM-DD
 			"2026-11-01T09:00:00",       // naive timestamp without Z or offset
-			"2026-11-01T09:00:00-00:00", // RFC 3339 unknown local offset
 			"2026-11-01T09:00:00+24:00", // out-of-range hour offset
 			"2026-11-01T09:00:00+02:60", // out-of-range minute offset
 			"2026-02-30T00:00:00Z",      // invalid calendar date

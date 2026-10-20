@@ -38,7 +38,7 @@ Earlier drafts of the format had eleven kinds (`config`, `task`, `comment`, `tem
 
 Collapsing the format to portable **`.task.grain.md`** and **`.process.grain.md`** (`**/*.grain.md`) documents—which Grain can easily export and import either from and to Git repositories or by parsing issues—eliminates that indirection:
 
-- **Distinct `.grain.md` suffix.** Using `.task.grain.md` and `.process.grain.md` allows fast `**/*.grain.md` glob discovery without colliding with ordinary prose documentation (`*.md`), while supporting clean ASCII stems `[A-Za-z0-9][A-Za-z0-9._-]*` (including ISO/compact UTC timestamps like `2026-10-18T143000Z-fix-API.task.grain.md`).
+- **Distinct `.grain.md` suffix.** Using `.task.grain.md` and `.process.grain.md` allows fast `**/*.grain.md` glob discovery without colliding with ordinary prose documentation (`*.md`), while supporting clean ASCII stems `[A-Za-z0-9][A-Za-z0-9._-]*`.
 - **No separate `trigger`, `template`, or `gate` kinds.** A standing job or review check is one `<name>.process.grain.md` file: its front matter says when it fires (`when`) and whether it gates a commit or pull request (`gate: true`), and its Markdown body *is* the prompt given to the agent.
 - **No separate `config` or `GRAINOWNERS` files.** Any repository can hold `.task.grain.md` and `.process.grain.md` files (for example under `.grain/` in a code repository or in a dedicated tasks repository) without needing a marker file, and standard forge branch protection and `CODEOWNERS` govern who can merge changes.
 

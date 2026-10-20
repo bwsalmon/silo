@@ -55,8 +55,7 @@ STEM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 USER_IDENTITY = re.compile(r"^[^<>\s][^<>]*\s+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$")
 ANCHOR_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|\+(?:[01]\d|2[0-3]):[0-5]\d|-(?!00:00)(?:[01]\d|2[0-3]):[0-5]\d)$")
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|\+(?:[01]\d|2[0-3]):[0-5]\d|-(?:[01]\d|2[0-3]):[0-5]\d)$")
 IANA_TZ_RE = re.compile(r"^(UTC|Etc/(?:UTC|GMT)|[A-Z][A-Za-z_+-]+(?:/[A-Za-z_+-]+)+)$")
 WORKFLOW_EVENTS = {
     "triggered": "triggered",
@@ -68,15 +67,9 @@ WORKFLOW_EVENTS = {
 }
 
 
-def parse_time_utc(s, allow_date=False):
+def parse_time_utc(s):
     if not isinstance(s, str):
         return None
-    if allow_date and DATE_RE.match(s):
-        try:
-            d = datetime.date.fromisoformat(s)
-            return datetime.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=datetime.timezone.utc)
-        except ValueError:
-            return None
     m = TIME_RE.match(s)
     if not m:
         return None
@@ -98,8 +91,12 @@ def parse_time_utc(s, allow_date=False):
     return dt.replace(tzinfo=tz).astimezone(datetime.timezone.utc)
 
 
-def valid_time_or_date(s, allow_date=False):
-    return parse_time_utc(s, allow_date=allow_date) is not None
+def valid_time(s):
+    return parse_time_utc(s) is not None
+
+
+def valid_time_or_date(s):
+    return valid_time(s)
 
 
 def valid_iana_timezone(tz):
@@ -938,8 +935,8 @@ class Linter:
         if isinstance(title, str) and "\n" in title:
             self.add("GF020", where, "title must be a single line")
         nb = fm.get("not_before")
-        if isinstance(nb, str) and (DATE_RE.match(nb) or TIME_RE.match(nb)) and not valid_time_or_date(nb, allow_date=True):
-            self.add("GF020", where, "not_before: invalid calendar date or UTC time %r" % nb)
+        if isinstance(nb, str) and TIME_RE.match(nb) and not valid_time(nb):
+            self.add("GF020", where, "not_before: invalid RFC 3339 timestamp %r" % nb)
         if "from_template" in fm and isinstance(fm["from_template"], str):
             self.check_from_template(it, fm["from_template"], where)
         if it.kind == "task":
