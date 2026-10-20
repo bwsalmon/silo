@@ -146,6 +146,13 @@ grain_has() {
 		xargs -0 -r grep -qE "$1"
 }
 
+# grain_has_hub_client is whether grain's daemon speaks to a hub at all:
+# it defines -hub-url. A grain whose main has dropped its hub node
+# client has nothing for this job to round-trip.
+grain_has_hub_client() {
+	grep -rqF --include='*.go' --exclude='*_test.go' '"hub-url"' "$GRAIN_SRC" 2>/dev/null
+}
+
 # ---- HTTP -----------------------------------------------------------
 
 hub() { # METHOD PATH [BODY]
@@ -560,14 +567,24 @@ stage "build"
 build_silo "$SILO" "$W/bin/silo"
 (cd "$SILO" && go build -o "$W/bin/fakeoidc" ./internal/fakeoidc)
 build_grain_pinned "$W/bin/grain-pinned"
-say "grain pins $(grain_silo_import) $(cd "$GRAIN_SRC" && go list -m -f '{{.Version}}' "$(grain_silo_import)")"
-if build_grain_against "$SILO" "$W/bin/grain-head" 2>"$W/build.err"; then
-	say "grain $grain_sha builds and its hub tests pass against silo $silo_sha"
-	trips="pinned head"
+grain_mod="$(grain_silo_import || true)"
+if ! grain_has_hub_client; then
+	say "NOTICE: grain $grain_sha has no hub node client (its daemon defines no -hub-url, and its go.mod requires ${grain_mod:-no silo module}): there is no interface to round-trip, so every stage is skipped. If grain dropped it by mistake, that is grain's to fix; nothing in silo $silo_sha can"
+	exit 0
+fi
+if [ -n "$grain_mod" ]; then
+	say "grain pins $grain_mod $(cd "$GRAIN_SRC" && go list -m -f '{{.Version}}' "$grain_mod")"
+	if build_grain_against "$SILO" "$W/bin/grain-head" 2>"$W/build.err"; then
+		say "grain $grain_sha builds and its hub tests pass against silo $silo_sha"
+		trips="pinned head"
+	else
+		cat "$W/build.err"
+		blame "grain $grain_sha does not build (or its hub tests fail) against silo $silo_sha's packages" rerun_build
+		status=1
+		trips="pinned"
+	fi
 else
-	cat "$W/build.err"
-	blame "grain $grain_sha does not build (or its hub tests fail) against silo $silo_sha's packages" rerun_build
-	status=1
+	say "NOTICE: grain $grain_sha speaks to a hub but requires no github.com/bwsalmon/silo module, so it cannot be built against silo $silo_sha's packages: only the round trip with grain as it is runs"
 	trips="pinned"
 fi
 
