@@ -31,6 +31,7 @@ import {
   getGrainfilesOverview,
   putPersonalGrainfile,
   putTeamGrainfile,
+  type CapabilityRef,
   type EventFilter,
   type Grainfile,
   type GrainfileEvent,
@@ -65,6 +66,17 @@ function shortTargetLabel(url: string): string {
     return `${blobMatch[1]}:${blobMatch[2]}`;
   }
   return trimmed;
+}
+
+function formatCapabilityRef(cap: CapabilityRef | string): string {
+  if (typeof cap === 'string') return cap;
+  if (cap.with && Object.keys(cap.with).length > 0) {
+    const args = Object.entries(cap.with)
+      .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+      .join(', ');
+    return `${cap.capability} (${args})`;
+  }
+  return cap.capability;
 }
 
 function formatEventFilter(name: string, f?: EventFilter): string | null {
@@ -231,12 +243,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
 
   const handleEditorKindChange = (nextKind: GrainfileKind) => {
     setEditorKind(nextKind);
-    if (nextKind === 'capability') {
-      setEditorPath('capabilities/example.capability.grain.md');
-      setEditorContent(
-        '---\ngrainfile: v1\ntitle: "Example capability"\n---\nDescribe the capability grant and how agents use it.\n',
-      );
-    } else if (nextKind === 'process') {
+    if (nextKind === 'process') {
       setEditorPath('processes/example.process.grain.md');
       setEditorContent(
         '---\ngrainfile: v1\ntitle: "Example process"\nwhen:\n  manual: {}\n---\nDescribe the recurring process.\n',
@@ -329,7 +336,7 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
         <Box>
           <Typography variant="h5">Grainfiles &amp; Processes</Typography>
           <Typography variant="body2" color="text.secondary">
-            Indexed <code>.task.grain.md</code> tasks, <code>.process.grain.md</code> standing processes, and <code>.capability.grain.md</code> capabilities across watched repositories.
+            Indexed <code>.task.grain.md</code> tasks and <code>.process.grain.md</code> standing processes across watched repositories.
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
@@ -363,7 +370,6 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
             <MenuItem value="all">All kinds</MenuItem>
             <MenuItem value="task">Tasks (.task.grain.md)</MenuItem>
             <MenuItem value="process">Processes (.process.grain.md)</MenuItem>
-            <MenuItem value="capability">Capabilities (.capability.grain.md)</MenuItem>
           </TextField>
           <TextField
             select
@@ -517,18 +523,19 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                           />
                         </Box>
                       ))}
-                      {g.capabilities?.map((cap) => (
-                        <Box key={`cap-${cap}`}>
-                          <Typography variant="caption" color="text.secondary">
-                            capabilities:{' '}
-                          </Typography>
-                          <SafeExternalLink
-                            url={cap}
-                            label={shortTargetLabel(cap)}
-                            sx={{ fontFamily: mono, fontSize: 12 }}
-                          />
-                        </Box>
-                      ))}
+                      {g.capabilities?.map((cap, idx) => {
+                        const label = formatCapabilityRef(cap);
+                        return (
+                          <Box key={`cap-${idx}-${label}`}>
+                            <Typography variant="caption" color="text.secondary">
+                              capabilities:{' '}
+                            </Typography>
+                            <Typography component="span" sx={{ fontFamily: mono, fontSize: 12 }}>
+                              {label}
+                            </Typography>
+                          </Box>
+                        );
+                      })}
                       {(!g.depends_on || g.depends_on.length === 0) &&
                         (!g.capabilities || g.capabilities.length === 0) && (
                           <Typography variant="caption" color="text.secondary">
@@ -733,9 +740,14 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
                       capabilities
                     </Typography>
                     <Stack spacing={0.25}>
-                      {selected.capabilities.map((cap) => (
-                        <SafeExternalLink key={cap} url={cap} sx={{ fontFamily: mono, fontSize: 12 }} />
-                      ))}
+                      {selected.capabilities.map((cap, idx) => {
+                        const label = formatCapabilityRef(cap);
+                        return (
+                          <Typography key={`${idx}-${label}`} sx={{ fontFamily: mono, fontSize: 12 }}>
+                            {label}
+                          </Typography>
+                        );
+                      })}
                     </Stack>
                   </Box>
                 )}
@@ -868,7 +880,6 @@ export function Grainfiles({ me: _me }: { me?: Me }) {
               >
                 <MenuItem value="task">Task (.task.grain.md)</MenuItem>
                 <MenuItem value="process">Process (.process.grain.md)</MenuItem>
-                <MenuItem value="capability">Capability (.capability.grain.md)</MenuItem>
               </TextField>
               {editorScope === 'team' && (
                 <TextField

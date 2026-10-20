@@ -11,7 +11,7 @@ This document explains the design rationale for the Grainfile Format (`grainfile
 1. Purpose, versioning (`grainfile: v1`), and scope
 2. Two kinds executed directly: `.task.grain.md` and `.process.grain.md`
 3. Source authority and task identities: `recipient` (default `/`) and optional `requestor`
-4. References and `depends_on` target rules
+4. References, `capabilities`, and `depends_on` target rules
 5. Triggers (`when`) and merge gating (`gate`)
 6. Direct execution, task lifecycle, and security invariants
 7. Prior art and design evolution
@@ -53,12 +53,15 @@ Accordingly, `.task.grain.md` files (1-to-1 work items) separate routing from op
   - A **user identity** in standard RFC 5322 / git author notation (`Bruce Salmon <bsalmon@google.com>`), or
   - A **deployment / URL identity** (`https://<hub-host>/deployments/<id>` or `https://github.com/acme/grain-eu`).
 
-## 4. References and `depends_on` target rules
+## 4. References, `capabilities`, and `depends_on` target rules
 
-Grainfiles use two reference lists (`references` and `depends_on`), both sharing the same plain `https://` and repo-local reference syntax (spec §8.1):
+Grainfiles use two repository/forge reference lists (`references` and `depends_on`), sharing the same plain `https://` and repo-local reference syntax (spec §8.1), plus an optional `capabilities` list of OCI container image references (spec §6.3, [`docs/design/capabilities.md`](design/capabilities.md)):
 
-- **Cross-repository references** use standard clickable forge URLs (`https://github.com/acme/widgets/blob/main/docs/widget-schema.md#schema-version-header`, `https://github.com/acme/widgets/tree/main/src`).
-- **Repository-local references** use `/`-rooted paths from the repository root (`/docs/widget-schema.md`, `/src/widget.go`) or relative paths (`./2026-10-16-widget-schema-v2.task.grain.md`).
+- **Cross-repository references (`references`, `depends_on`)** use standard clickable forge URLs (`https://github.com/acme/widgets/blob/main/docs/widget-schema.md#schema-version-header`, `https://github.com/acme/widgets/tree/main/src`).
+- **Repository-local references (`references`, `depends_on`)** use `/`-rooted paths from the repository root (`/docs/widget-schema.md`, `/src/widget.go`) or relative paths (`./2026-10-16-widget-schema-v2.task.grain.md`).
+- **Capabilities (`capabilities` on `.task.grain.md` and `.process.grain.md`):** Capabilities are deployed as OCI container images speaking Streamable HTTP MCP on port `8080` and embedding their metadata (`name`, `description`, `inputSchema`, `_meta`) in the MCP server itself (there is no `.capability.grain.md` file kind). Each entry in `capabilities:` is either:
+  1. A string (`<oci-image>[#<method>]`) when no arguments are passed (e.g. `ghcr.io/bwsalmon/grain/capabilities/self-debug:latest` or `ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key`), or
+  2. An object (`{capability: "<oci-image>[#<method>]", with: {<args>}}`) when passing structured arguments to the capability method (validated against `<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]` with `GF020`).
 
 ### `depends_on` target rules (spec §7, §8.3) and `.grain.md.jinja2` templates (spec §5.7)
 

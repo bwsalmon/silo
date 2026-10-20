@@ -1400,9 +1400,9 @@ func (a *API) serveGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	//     definitions from the untrusted head; evaluate triggers against the
 	//     indexed .process.grain.md definitions.
 	//   - On push events to non-default/unprotected branches, never index or
-	//     remove Grainfile definitions (.task.grain.md, .process.grain.md, or
-	//     .capability.grain.md) in grainfile_index; evaluate when.push triggers
-	//     against the indexed base-branch .process.grain.md definitions.
+	//     remove Grainfile definitions (.task.grain.md or .process.grain.md)
+	//     in grainfile_index; evaluate when.push triggers against the indexed
+	//     base-branch .process.grain.md definitions.
 	if source != TriggerPullRequest && source != TriggerWorkflow && isDefaultBranch {
 		for _, remPath := range removedPaths {
 			if _, _, isGF, _ := ClassifyPath(remPath); isGF {
@@ -1966,12 +1966,11 @@ func (a *API) isNodeAuthorizedForRecord(ctx context.Context, sub Subscriptions, 
 			}
 		}
 	}
-	// A .process.grain.md or .capability.grain.md is a 1-to-many reusable
-	// definition that any number of Grain deployments may subscribe to (by repo,
-	// enclosing folder, or explicit Grainfile URL). When subscribed by explicit
-	// Grainfile URL (or when rec.Repo has no exclusive team owner in Directory),
-	// allow access.
-	if rec.Kind == KindProcess || rec.Kind == KindCapability {
+	// A .process.grain.md is a 1-to-many reusable/standing process that any
+	// number of Grain deployments may subscribe to (by repo, enclosing folder, or
+	// explicit .process.grain.md URL). When subscribed by explicit Grainfile URL
+	// (or when rec.Repo has no exclusive team owner in Directory), allow access.
+	if rec.Kind == KindProcess {
 		for _, gf := range sub.Grainfiles {
 			if matchesGrainfileRef(rec, gf) {
 				return true

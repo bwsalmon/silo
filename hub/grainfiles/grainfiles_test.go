@@ -79,16 +79,21 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if !reflect.DeepEqual(v2.References, wantV2Refs) {
 		t.Errorf("v2.References = %v, want %v", v2.References, wantV2Refs)
 	}
-	wantV2Caps := []string{
-		"https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage",
+	wantV2Caps := []CapabilityRef{
+		{Capability: "ghcr.io/bwsalmon/grain/capabilities/self-debug:latest"},
+		{
+			Capability: "ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key",
+			With: map[string]any{
+				"account": "infra-staging",
+			},
+		},
 	}
-	if !reflect.DeepEqual(v2.Capabilities, wantV2Caps) || !reflect.DeepEqual(v2.ResolvedCapabilities, wantV2Caps) {
-		t.Errorf("v2.Capabilities = %v (ResolvedCapabilities = %v), want %v", v2.Capabilities, v2.ResolvedCapabilities, wantV2Caps)
+	if !reflect.DeepEqual(v2.Capabilities, wantV2Caps) {
+		t.Errorf("v2.Capabilities = %#v, want %#v", v2.Capabilities, wantV2Caps)
 	}
-	wantV2AuthRefs := append(slices.Clone(wantV2Refs), wantV2Caps...)
 	sameRefs, crossRefs := v2.AuthorizedReferences("https://github.com/acme/widgets")
-	if !reflect.DeepEqual(sameRefs, wantV2AuthRefs) || len(crossRefs) != 0 {
-		t.Errorf("v2.AuthorizedReferences = (%v, %v), want (%v, nil)", sameRefs, crossRefs, wantV2AuthRefs)
+	if !reflect.DeepEqual(sameRefs, wantV2Refs) || len(crossRefs) != 0 {
+		t.Errorf("v2.AuthorizedReferences = (%v, %v), want (%v, nil)", sameRefs, crossRefs, wantV2Refs)
 	}
 	if !v2.AuthorizesReference("https://github.com/acme/widgets", "/docs/widget-schema.md") {
 		t.Errorf("expected v2 to authorize /docs/widget-schema.md")
@@ -96,33 +101,8 @@ func TestExamplesGrainfiles(t *testing.T) {
 	if !v2.AuthorizesReference("https://github.com/acme/widgets", "/src/widget.go") {
 		t.Errorf("expected v2 to authorize /src/widget.go")
 	}
-	if !v2.AuthorizesReference("https://github.com/acme/widgets", "/.grain/capabilities/gcp-key.capability.grain.md") {
-		t.Errorf("expected v2 to authorize /.grain/capabilities/gcp-key.capability.grain.md via capabilities")
-	}
 	if v2.AuthorizesReference("https://github.com/acme/widgets", "/src/other.go") {
 		t.Errorf("expected v2 not to authorize /src/other.go")
-	}
-
-	// 2b. Test widgets/gcp-key.capability.grain.md
-	capPath := filepath.Join(examplesDir, "widgets", ".grain", "capabilities", "gcp-key.capability.grain.md")
-	capGF, err := ParseFile(capPath)
-	if err != nil {
-		t.Fatalf("ParseFile(gcp-key.capability.grain.md): %v", err)
-	}
-	if capGF.Kind != KindCapability {
-		t.Errorf("capGF.Kind = %q, want %q", capGF.Kind, KindCapability)
-	}
-	if capGF.Name != "gcp-key" {
-		t.Errorf("capGF.Name = %q, want gcp-key", capGF.Name)
-	}
-	if capGF.Title != "Provision a short-lived GCP service-account key in the sandbox" {
-		t.Errorf("capGF.Title = %q", capGF.Title)
-	}
-	if err := capGF.Resolve("https://github.com/acme/widgets", "main", ".grain/capabilities/gcp-key.capability.grain.md"); err != nil {
-		t.Fatalf("capGF.Resolve: %v", err)
-	}
-	if capGF.URL != "https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md" {
-		t.Errorf("capGF.URL = %q", capGF.URL)
 	}
 
 	// 3. Test widgets/2026-10-16-widget-schema-v2-migration.task.grain.md (no requestor, depends_on, RFC 3339 not_before)
@@ -632,40 +612,28 @@ Check the release branch.
 				code: CodeMalformedRef,
 			},
 			{
-				name: "from_template wrong suffix on capability",
+				name: "unregistered capability suffix on grainfile",
 				path: "capabilities/c.capability.grain.md",
-				body: "---\ngrainfile: v1\ntitle: C\nfrom_template: /templates/t.task.grain.md.jinja2\n---\n",
-				code: CodeMalformedRef,
+				body: "---\ngrainfile: v1\ntitle: C\n---\n",
+				code: CodeUnknownSuffix,
 			},
 			{
-				name: "forbidden recipient on capability",
-				path: "capabilities/c.capability.grain.md",
-				body: "---\ngrainfile: v1\ntitle: C\nrecipient: /\n---\n",
-				code: CodeSchemaInvalid,
-			},
-			{
-				name: "forbidden capabilities on capability",
-				path: "capabilities/c.capability.grain.md",
-				body: "---\ngrainfile: v1\ntitle: C\ncapabilities:\n  - ./other.capability.grain.md\n---\n",
-				code: CodeSchemaInvalid,
-			},
-			{
-				name: "forbidden when on capability",
-				path: "capabilities/c.capability.grain.md",
-				body: "---\ngrainfile: v1\ntitle: C\nwhen:\n  manual: {}\n---\n",
-				code: CodeSchemaInvalid,
-			},
-			{
-				name: "task capabilities points to task",
+				name: "task capabilities points to .capability.grain.md file path",
 				path: "tasks/a.task.grain.md",
-				body: "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - ./other.task.grain.md\n---\n",
-				code: CodeWrongTargetKind,
+				body: "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - /.grain/capabilities/gcp-key.capability.grain.md\n---\n",
+				code: CodeSchemaInvalid,
 			},
 			{
-				name: "process capabilities points to jinja2 template",
+				name: "process capabilities with non-mapping with field",
 				path: "processes/p.process.grain.md",
-				body: "---\ngrainfile: v1\ntitle: P\ncapabilities:\n  - ./cap.capability.grain.md.jinja2\nwhen:\n  manual: {}\n---\n",
-				code: CodeWrongTargetKind,
+				body: "---\ngrainfile: v1\ntitle: P\ncapabilities:\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    with: invalid\nwhen:\n  manual: {}\n---\n",
+				code: CodeSchemaInvalid,
+			},
+			{
+				name: "task capabilities with unknown property on entry object",
+				path: "tasks/a.task.grain.md",
+				body: "---\ngrainfile: v1\ntitle: T\ncapabilities:\n  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key\n    extra: 1\n---\n",
+				code: CodeSchemaInvalid,
 			},
 			{
 				name: "when.push empty filter object",
@@ -1811,29 +1779,7 @@ func TestCampaignRegressionSlugCapabilitiesAndClimb(t *testing.T) {
 		t.Errorf("expected LintTree to report GF030 on /deployments/INVALID_SLUG!, got %+v", findings)
 	}
 
-	// 3. AuthorizedReferences and AuthorizesReference include ResolvedCapabilities even when Capabilities is empty.
-	gf := &Grainfile{
-		Grainfile: "v1",
-		Kind:      KindTask,
-		Title:     "Resolved cap test",
-		Repo:      "https://github.com/acme/widgets",
-		Ref:       "refs/heads/main",
-		Commit:    "abc1234",
-		Path:      ".grain/tasks/t.task.grain.md",
-		ResolvedCapabilities: []string{
-			"https://github.com/acme/widgets/blob/main/.grain/capabilities/gcp-key.capability.grain.md#agent-usage",
-		},
-	}
-	sameRepo, _ := gf.AuthorizedReferences("https://github.com/acme/widgets")
-	wantPinned := "https://github.com/acme/widgets/blob/abc1234/.grain/capabilities/gcp-key.capability.grain.md#agent-usage"
-	if !slices.Contains(sameRepo, wantPinned) {
-		t.Errorf("AuthorizedReferences with ResolvedCapabilities = %v, want %s", sameRepo, wantPinned)
-	}
-	if !gf.AuthorizesReference("https://github.com/acme/widgets", "/.grain/capabilities/gcp-key.capability.grain.md") {
-		t.Errorf("expected AuthorizesReference to allow capability in ResolvedCapabilities")
-	}
-
-	// 4. Climbing above repo root in references or depends_on emits exactly 1 GF036 per offending reference.
+	// 3. Climbing above repo root in references or depends_on emits exactly 1 GF036 per offending reference.
 	_, climbErr := Parse(".grain/tasks/climb.task.grain.md", []byte("---\ngrainfile: v1\ntitle: Climb\nreferences:\n  - ../../../outside.md\ndepends_on:\n  - ../../../other.task.grain.md\n---\nBody.\n"))
 	if climbErr == nil {
 		t.Fatal("expected GF036 error on climbing references/depends_on")

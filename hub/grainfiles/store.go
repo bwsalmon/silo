@@ -31,8 +31,6 @@ const (
 	EventProcessUpdated      = "process_updated"
 	EventProcessTriggered    = "process_triggered"
 	EventProcessRemoved      = "process_removed"
-	EventCapabilityUpdated   = "capability_updated"
-	EventCapabilityRemoved   = "capability_removed"
 	EventDependencyCompleted = "dependency_completed"
 )
 
@@ -321,35 +319,35 @@ func isRetryableTxError(err error) bool {
 // front-matter metadata per (repo, path, commit_sha). It never holds the
 // Grainfile Markdown prompt body or source code.
 type IndexRecord struct {
-	Grainfile            string    `json:"grainfile"`
-	SpecSummaryPath      string    `json:"spec_summary_path"`
-	SpecPath             string    `json:"spec_path"`
-	Repo                 string    `json:"repo"`
-	Path                 string    `json:"path"`
-	CommitSHA            string    `json:"commit_sha"`
-	Ref                  string    `json:"ref,omitempty"`
-	URL                  string    `json:"url"`
-	Kind                 Kind      `json:"kind"`
-	Title                string    `json:"title"`
-	Recipient            string    `json:"recipient"`
-	Requestor            string    `json:"requestor,omitempty"`
-	FromTemplate         string    `json:"from_template,omitempty"`
-	Draft                bool      `json:"draft"`
-	NotBefore            time.Time `json:"not_before,omitempty,omitzero"`
-	CreatedAt            time.Time `json:"created_at,omitempty,omitzero"`
-	References           []string  `json:"references,omitempty"`
-	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
-	DependsOn            []string  `json:"depends_on,omitempty"`
-	Capabilities         []string  `json:"capabilities,omitempty"`
-	When                 Triggers  `json:"when,omitempty,omitzero"`
-	On                   Triggers  `json:"on,omitempty,omitzero"`
-	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
-	Gate                 bool      `json:"gate,omitempty"`
-	IsTemplate           bool      `json:"is_template"`
-	TemplateVars         []string  `json:"template_vars,omitempty"`
-	SubscribedNodes      []string  `json:"subscribed_nodes,omitempty"`
-	RecentEvents         []Event   `json:"recent_events,omitempty"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	Grainfile            string          `json:"grainfile"`
+	SpecSummaryPath      string          `json:"spec_summary_path"`
+	SpecPath             string          `json:"spec_path"`
+	Repo                 string          `json:"repo"`
+	Path                 string          `json:"path"`
+	CommitSHA            string          `json:"commit_sha"`
+	Ref                  string          `json:"ref,omitempty"`
+	URL                  string          `json:"url"`
+	Kind                 Kind            `json:"kind"`
+	Title                string          `json:"title"`
+	Recipient            string          `json:"recipient"`
+	Requestor            string          `json:"requestor,omitempty"`
+	FromTemplate         string          `json:"from_template,omitempty"`
+	Draft                bool            `json:"draft"`
+	NotBefore            time.Time       `json:"not_before,omitempty,omitzero"`
+	CreatedAt            time.Time       `json:"created_at,omitempty,omitzero"`
+	References           []string        `json:"references,omitempty"`
+	AuthorizedReferences []string        `json:"authorized_references,omitempty"`
+	DependsOn            []string        `json:"depends_on,omitempty"`
+	Capabilities         []CapabilityRef `json:"capabilities,omitempty"`
+	When                 Triggers        `json:"when,omitempty,omitzero"`
+	On                   Triggers        `json:"on,omitempty,omitzero"`
+	OnSpec               Triggers        `json:"on_spec,omitempty,omitzero"`
+	Gate                 bool            `json:"gate,omitempty"`
+	IsTemplate           bool            `json:"is_template"`
+	TemplateVars         []string        `json:"template_vars,omitempty"`
+	SubscribedNodes      []string        `json:"subscribed_nodes,omitempty"`
+	RecentEvents         []Event         `json:"recent_events,omitempty"`
+	UpdatedAt            time.Time       `json:"updated_at"`
 
 	readyEmitted bool
 	removed      bool
@@ -380,31 +378,30 @@ func (r IndexRecord) ToGrainfile() *Grainfile {
 		triggers = r.OnSpec
 	}
 	return &Grainfile{
-		Grainfile:            ver,
-		SpecSummaryPath:      specSummary,
-		SpecPath:             specPath,
-		Kind:                 r.Kind,
-		Path:                 r.Path,
-		URL:                  r.URL,
-		Repo:                 r.Repo,
-		Ref:                  r.Ref,
-		Commit:               r.CommitSHA,
-		Title:                r.Title,
-		Recipient:            r.Recipient,
-		Requestor:            r.Requestor,
-		FromTemplate:         r.FromTemplate,
-		Draft:                r.Draft,
-		NotBefore:            r.NotBefore,
-		CreatedAt:            r.CreatedAt,
-		References:           slices.Clone(r.References),
-		DependsOn:            slices.Clone(r.DependsOn),
-		Capabilities:         slices.Clone(r.Capabilities),
-		ResolvedCapabilities: slices.Clone(r.Capabilities),
-		When:                 triggers,
-		On:                   triggers,
-		Gate:                 r.Gate,
-		IsTemplate:           r.IsTemplate,
-		TemplateVars:         slices.Clone(r.TemplateVars),
+		Grainfile:       ver,
+		SpecSummaryPath: specSummary,
+		SpecPath:        specPath,
+		Kind:            r.Kind,
+		Path:            r.Path,
+		URL:             r.URL,
+		Repo:            r.Repo,
+		Ref:             r.Ref,
+		Commit:          r.CommitSHA,
+		Title:           r.Title,
+		Recipient:       r.Recipient,
+		Requestor:       r.Requestor,
+		FromTemplate:    r.FromTemplate,
+		Draft:           r.Draft,
+		NotBefore:       r.NotBefore,
+		CreatedAt:       r.CreatedAt,
+		References:      slices.Clone(r.References),
+		DependsOn:       slices.Clone(r.DependsOn),
+		Capabilities:    slices.Clone(r.Capabilities),
+		When:            triggers,
+		On:              triggers,
+		Gate:            r.Gate,
+		IsTemplate:      r.IsTemplate,
+		TemplateVars:    slices.Clone(r.TemplateVars),
 	}
 }
 
@@ -427,78 +424,78 @@ type Subscriptions struct {
 // Event is a discoverable Grainfile event stored in grainfile_events
 // (task_ready, task_removed, process_updated, process_triggered, process_removed, dependency_completed).
 type Event struct {
-	Seq                  int64     `json:"seq"`
-	Type                 string    `json:"type"`
-	Action               string    `json:"action,omitempty"`
-	Grainfile            string    `json:"grainfile,omitempty"`
-	SpecSummaryPath      string    `json:"spec_summary_path,omitempty"`
-	SpecPath             string    `json:"spec_path,omitempty"`
-	Repo                 string    `json:"repo"`
-	Path                 string    `json:"path,omitempty"`
-	CommitSHA            string    `json:"commit_sha,omitempty"`
-	Ref                  string    `json:"ref,omitempty"`
-	Branch               string    `json:"branch,omitempty"`
-	PRNumber             int       `json:"pr_number,omitempty"`
-	Paths                []string  `json:"paths,omitempty"`
-	TriggerRepo          string    `json:"trigger_repo,omitempty"`
-	TriggerCommitSHA     string    `json:"trigger_commit_sha,omitempty"`
-	GrainfileURL         string    `json:"grainfile_url"`
-	Kind                 Kind      `json:"kind,omitempty"`
-	Title                string    `json:"title,omitempty"`
-	Recipient            string    `json:"recipient,omitempty"`
-	Requestor            string    `json:"requestor,omitempty"`
-	FromTemplate         string    `json:"from_template,omitempty"`
-	NotBefore            time.Time `json:"not_before,omitempty,omitzero"`
-	References           []string  `json:"references,omitempty"`
-	AuthorizedReferences []string  `json:"authorized_references,omitempty"`
-	DependsOn            []string  `json:"depends_on,omitempty"`
-	Capabilities         []string  `json:"capabilities,omitempty"`
-	When                 Triggers  `json:"when,omitempty,omitzero"`
-	On                   Triggers  `json:"on,omitempty,omitzero"`
-	OnSpec               Triggers  `json:"on_spec,omitempty,omitzero"`
-	Gate                 bool      `json:"gate,omitempty"`
-	IsTemplate           bool      `json:"is_template,omitempty"`
-	TemplateVars         []string  `json:"template_vars,omitempty"`
-	TriggerSource        string    `json:"trigger_source,omitempty"`
-	TriggeredBy          string    `json:"triggered_by,omitempty"`
-	WorkflowName         string    `json:"workflow_name,omitempty"`
-	WorkflowPath         string    `json:"workflow_path,omitempty"`
-	WorkflowEvent        string    `json:"workflow_event,omitempty"`
-	WorkflowURL          string    `json:"workflow_url,omitempty"`
-	ChangedPaths         []string  `json:"changed_paths,omitempty"`
-	DependencyURL        string    `json:"dependency_url,omitempty"`
-	DependencyState      string    `json:"dependency_state,omitempty"`
-	Reason               string    `json:"reason,omitempty"`
-	CreatedAt            time.Time `json:"created_at,omitzero"`
+	Seq                  int64           `json:"seq"`
+	Type                 string          `json:"type"`
+	Action               string          `json:"action,omitempty"`
+	Grainfile            string          `json:"grainfile,omitempty"`
+	SpecSummaryPath      string          `json:"spec_summary_path,omitempty"`
+	SpecPath             string          `json:"spec_path,omitempty"`
+	Repo                 string          `json:"repo"`
+	Path                 string          `json:"path,omitempty"`
+	CommitSHA            string          `json:"commit_sha,omitempty"`
+	Ref                  string          `json:"ref,omitempty"`
+	Branch               string          `json:"branch,omitempty"`
+	PRNumber             int             `json:"pr_number,omitempty"`
+	Paths                []string        `json:"paths,omitempty"`
+	TriggerRepo          string          `json:"trigger_repo,omitempty"`
+	TriggerCommitSHA     string          `json:"trigger_commit_sha,omitempty"`
+	GrainfileURL         string          `json:"grainfile_url"`
+	Kind                 Kind            `json:"kind,omitempty"`
+	Title                string          `json:"title,omitempty"`
+	Recipient            string          `json:"recipient,omitempty"`
+	Requestor            string          `json:"requestor,omitempty"`
+	FromTemplate         string          `json:"from_template,omitempty"`
+	NotBefore            time.Time       `json:"not_before,omitempty,omitzero"`
+	References           []string        `json:"references,omitempty"`
+	AuthorizedReferences []string        `json:"authorized_references,omitempty"`
+	DependsOn            []string        `json:"depends_on,omitempty"`
+	Capabilities         []CapabilityRef `json:"capabilities,omitempty"`
+	When                 Triggers        `json:"when,omitempty,omitzero"`
+	On                   Triggers        `json:"on,omitempty,omitzero"`
+	OnSpec               Triggers        `json:"on_spec,omitempty,omitzero"`
+	Gate                 bool            `json:"gate,omitempty"`
+	IsTemplate           bool            `json:"is_template,omitempty"`
+	TemplateVars         []string        `json:"template_vars,omitempty"`
+	TriggerSource        string          `json:"trigger_source,omitempty"`
+	TriggeredBy          string          `json:"triggered_by,omitempty"`
+	WorkflowName         string          `json:"workflow_name,omitempty"`
+	WorkflowPath         string          `json:"workflow_path,omitempty"`
+	WorkflowEvent        string          `json:"workflow_event,omitempty"`
+	WorkflowURL          string          `json:"workflow_url,omitempty"`
+	ChangedPaths         []string        `json:"changed_paths,omitempty"`
+	DependencyURL        string          `json:"dependency_url,omitempty"`
+	DependencyState      string          `json:"dependency_state,omitempty"`
+	Reason               string          `json:"reason,omitempty"`
+	CreatedAt            time.Time       `json:"created_at,omitzero"`
 }
 
 // GrainfileEvent is an alias for Event.
 type GrainfileEvent = Event
 
 type eventPayload struct {
-	Action               string   `json:"action,omitempty"`
-	Grainfile            string   `json:"grainfile,omitempty"`
-	Requestor            string   `json:"requestor,omitempty"`
-	FromTemplate         string   `json:"from_template,omitempty"`
-	Branch               string   `json:"branch,omitempty"`
-	PRNumber             int      `json:"pr_number,omitempty"`
-	Paths                []string `json:"paths,omitempty"`
-	TriggerRepo          string   `json:"trigger_repo,omitempty"`
-	TriggerCommitSHA     string   `json:"trigger_commit_sha,omitempty"`
-	WorkflowName         string   `json:"workflow_name,omitempty"`
-	WorkflowPath         string   `json:"workflow_path,omitempty"`
-	WorkflowEvent        string   `json:"workflow_event,omitempty"`
-	WorkflowURL          string   `json:"workflow_url,omitempty"`
-	NotBeforeMillis      int64    `json:"not_before_ms,omitempty"`
-	References           []string `json:"references,omitempty"`
-	AuthorizedReferences []string `json:"authorized_references,omitempty"`
-	DependsOn            []string `json:"depends_on,omitempty"`
-	Capabilities         []string `json:"capabilities,omitempty"`
-	OnSpec               Triggers `json:"on_spec,omitempty"`
-	IsTemplate           bool     `json:"is_template,omitempty"`
-	TemplateVars         []string `json:"template_vars,omitempty"`
-	ChangedPaths         []string `json:"changed_paths,omitempty"`
-	Reason               string   `json:"reason,omitempty"`
+	Action               string          `json:"action,omitempty"`
+	Grainfile            string          `json:"grainfile,omitempty"`
+	Requestor            string          `json:"requestor,omitempty"`
+	FromTemplate         string          `json:"from_template,omitempty"`
+	Branch               string          `json:"branch,omitempty"`
+	PRNumber             int             `json:"pr_number,omitempty"`
+	Paths                []string        `json:"paths,omitempty"`
+	TriggerRepo          string          `json:"trigger_repo,omitempty"`
+	TriggerCommitSHA     string          `json:"trigger_commit_sha,omitempty"`
+	WorkflowName         string          `json:"workflow_name,omitempty"`
+	WorkflowPath         string          `json:"workflow_path,omitempty"`
+	WorkflowEvent        string          `json:"workflow_event,omitempty"`
+	WorkflowURL          string          `json:"workflow_url,omitempty"`
+	NotBeforeMillis      int64           `json:"not_before_ms,omitempty"`
+	References           []string        `json:"references,omitempty"`
+	AuthorizedReferences []string        `json:"authorized_references,omitempty"`
+	DependsOn            []string        `json:"depends_on,omitempty"`
+	Capabilities         []CapabilityRef `json:"capabilities,omitempty"`
+	OnSpec               Triggers        `json:"on_spec,omitempty"`
+	IsTemplate           bool            `json:"is_template,omitempty"`
+	TemplateVars         []string        `json:"template_vars,omitempty"`
+	ChangedPaths         []string        `json:"changed_paths,omitempty"`
+	Reason               string          `json:"reason,omitempty"`
 }
 
 // IndexGrainfile stores or updates the resolved metadata of g in
@@ -529,7 +526,7 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		}
 	}
 	hasLocalRef := false
-	for _, list := range [][]string{cp.References, cp.DependsOn, cp.Capabilities} {
+	for _, list := range [][]string{cp.References, cp.DependsOn} {
 		for _, c := range list {
 			if !strings.Contains(c, "://") {
 				hasLocalRef = true
@@ -578,12 +575,9 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 	if deps == nil {
 		deps = []string{}
 	}
-	caps := cp.Capabilities
-	if len(caps) == 0 && len(cp.ResolvedCapabilities) > 0 {
-		caps = slices.Clone(cp.ResolvedCapabilities)
-	}
+	caps := slices.Clone(cp.Capabilities)
 	if caps == nil {
-		caps = []string{}
+		caps = []CapabilityRef{}
 	}
 	if IsTemplatePath(cp.Path) {
 		cp.IsTemplate = true
@@ -800,31 +794,6 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 		}
 
 		if hasPrevLatest && prevLatestDraft == 0 && rec.Draft {
-			if rec.Kind == KindCapability {
-				_, err = s.insertEventTx(tx, ctx, Event{
-					Type:                 EventCapabilityRemoved,
-					Action:               "removed",
-					Grainfile:            rec.Grainfile,
-					SpecSummaryPath:      rec.SpecSummaryPath,
-					SpecPath:             rec.SpecPath,
-					Repo:                 rec.Repo,
-					Path:                 rec.Path,
-					CommitSHA:            rec.CommitSHA,
-					Ref:                  rec.Ref,
-					GrainfileURL:         rec.URL,
-					Kind:                 rec.Kind,
-					Title:                rec.Title,
-					FromTemplate:         rec.FromTemplate,
-					NotBefore:            rec.NotBefore,
-					References:           rec.References,
-					AuthorizedReferences: rec.AuthorizedReferences,
-					IsTemplate:           rec.IsTemplate,
-					TemplateVars:         rec.TemplateVars,
-					Reason:               "capability grainfile marked draft",
-					CreatedAt:            now,
-				})
-				return err
-			}
 			if rec.Kind == KindProcess {
 				_, err = s.insertEventTx(tx, ctx, Event{
 					Type:                 EventProcessRemoved,
@@ -895,11 +864,8 @@ func (s *Store) indexGrainfileAt(ctx context.Context, g *Grainfile, at time.Time
 
 		if emitNow {
 			evType := EventTaskReady
-			switch rec.Kind {
-			case KindProcess:
+			if rec.Kind == KindProcess {
 				evType = EventProcessUpdated
-			case KindCapability:
-				evType = EventCapabilityUpdated
 			}
 			_, err = s.insertEventTx(tx, ctx, Event{
 				Type:                 evType,
@@ -1020,31 +986,6 @@ func (s *Store) RemoveGrainfile(ctx context.Context, repo, filePath string) erro
 		}
 		if scanErr != nil || latest.Draft {
 			return nil
-		}
-		if latest.Kind == KindCapability {
-			_, err = s.insertEventTx(tx, ctx, Event{
-				Type:                 EventCapabilityRemoved,
-				Action:               "removed",
-				Grainfile:            latest.Grainfile,
-				SpecSummaryPath:      latest.SpecSummaryPath,
-				SpecPath:             latest.SpecPath,
-				Repo:                 latest.Repo,
-				Path:                 latest.Path,
-				CommitSHA:            latest.CommitSHA,
-				Ref:                  latest.Ref,
-				GrainfileURL:         latest.URL,
-				Kind:                 latest.Kind,
-				Title:                latest.Title,
-				NotBefore:            latest.NotBefore,
-				FromTemplate:         latest.FromTemplate,
-				References:           latest.References,
-				AuthorizedReferences: latest.AuthorizedReferences,
-				IsTemplate:           latest.IsTemplate,
-				TemplateVars:         latest.TemplateVars,
-				Reason:               "capability grainfile deleted",
-				CreatedAt:            now,
-			})
-			return err
 		}
 		if latest.Kind == KindProcess {
 			_, err = s.insertEventTx(tx, ctx, Event{
@@ -1199,11 +1140,8 @@ func (s *Store) PromoteDeferred(ctx context.Context, at time.Time) ([]Event, err
 				}
 			}
 			evType := EventTaskReady
-			switch rec.Kind {
-			case KindProcess:
+			if rec.Kind == KindProcess {
 				evType = EventProcessUpdated
-			case KindCapability:
-				evType = EventCapabilityUpdated
 			}
 			ev, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 evType,
@@ -2075,7 +2013,7 @@ func (s *Store) insertEventTx(tx *sql.Tx, ctx context.Context, ev Event) (Event,
 	ev.When = ev.OnSpec
 	ev.On = ev.OnSpec
 
-	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved || ev.Type == EventCapabilityRemoved) {
+	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
 		ev.Action = "removed"
 	}
 
@@ -2182,7 +2120,7 @@ func scanEvent(r interface{ Scan(...any) error }) (Event, error) {
 		ev.WorkflowURL = pl.WorkflowURL
 		ev.Reason = pl.Reason
 	}
-	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved || ev.Type == EventCapabilityRemoved) {
+	if ev.Action == "" && (ev.Type == EventTaskRemoved || ev.Type == EventProcessRemoved) {
 		ev.Action = "removed"
 	}
 	if ev.Grainfile == "" {
@@ -2713,11 +2651,8 @@ func (s *Store) ReplayForNode(ctx context.Context, nodeID string) ([]Event, erro
 				}
 			}
 			wantType := EventTaskReady
-			switch rec.Kind {
-			case KindProcess:
+			if rec.Kind == KindProcess {
 				wantType = EventProcessUpdated
-			case KindCapability:
-				wantType = EventCapabilityUpdated
 			}
 			ins, err := s.insertEventTx(tx, ctx, Event{
 				Type:                 wantType,

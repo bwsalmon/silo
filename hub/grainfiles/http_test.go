@@ -760,7 +760,7 @@ Inspect the CI workflow run.
 	}
 }
 
-func TestNonDefaultBranchPushDoesNotPoisonProcessOrCapabilityIndex(t *testing.T) {
+func TestNonDefaultBranchPushDoesNotPoisonProcessOrTaskIndex(t *testing.T) {
 	ctx := context.Background()
 	dbURL := "sqlite:" + filepath.Join(t.TempDir(), "branch-isolation.db")
 	store, err := Open(ctx, dbURL)
@@ -777,13 +777,13 @@ func TestNonDefaultBranchPushDoesNotPoisonProcessOrCapabilityIndex(t *testing.T)
 
 	repo := "https://github.com/acme/widgets"
 	procPath := ".grain/processes/gate.process.grain.md"
-	capPath := ".grain/capabilities/gcp-key.capability.grain.md"
+	otherProcPath := ".grain/processes/audit.process.grain.md"
 	taskPath := ".grain/tasks/evil.task.grain.md"
 
 	mainProcRaw := "---\ngrainfile: v1\ntitle: Trusted Main Gate Process\nwhen:\n  push:\n    branches: [\"main\", \"feat/*\"]\n    paths: [\"src/**\"]\n---\nTrusted prompt.\n"
-	mainCapRaw := "---\ngrainfile: v1\ntitle: Trusted GCP Key Capability\n---\nTrusted capability.\n"
+	mainOtherProcRaw := "---\ngrainfile: v1\ntitle: Trusted Audit Process\nwhen:\n  manual: {}\n---\nTrusted audit.\n"
 	fetcher.SetString(repo, "sha-main-1", procPath, mainProcRaw)
-	fetcher.SetString(repo, "sha-main-1", capPath, mainCapRaw)
+	fetcher.SetString(repo, "sha-main-1", otherProcPath, mainOtherProcRaw)
 
 	postWH := func(payload map[string]any) WebhookResponse {
 		t.Helper()
@@ -814,7 +814,7 @@ func TestNonDefaultBranchPushDoesNotPoisonProcessOrCapabilityIndex(t *testing.T)
 		return out
 	}
 
-	// 1. Push on default branch (main) indexes both the process and capability.
+	// 1. Push on default branch (main) indexes both processes.
 	resMain := postWH(map[string]any{
 		"ref":   "refs/heads/main",
 		"after": "sha-main-1",
@@ -822,14 +822,14 @@ func TestNonDefaultBranchPushDoesNotPoisonProcessOrCapabilityIndex(t *testing.T)
 			"html_url":       repo,
 			"default_branch": "main",
 		},
-		"added": []string{procPath, capPath},
+		"added": []string{procPath, otherProcPath},
 	})
 	if len(resMain.Indexed) != 2 {
 		t.Fatalf("main push: expected 2 indexed grainfiles, got %d", len(resMain.Indexed))
 	}
 
 	// 2. Push on non-default branch (refs/heads/feat/attacker) attempting to overwrite
-	// the process, remove the capability, and add a task while touching src/app.go.
+	// one process, remove the other process, and add a task while touching src/app.go.
 	evilProcRaw := "---\ngrainfile: v1\ntitle: Poisoned Feature Process\nwhen:\n  push:\n    branches: [\"*\"]\n---\nPoisoned.\n"
 	evilTaskRaw := "---\ngrainfile: v1\ntitle: Evil Feature Task\nrecipient: /deployments/grain-eu\n---\nEvil.\n"
 	fetcher.SetString(repo, "sha-feat-evil", procPath, evilProcRaw)
@@ -844,7 +844,7 @@ func TestNonDefaultBranchPushDoesNotPoisonProcessOrCapabilityIndex(t *testing.T)
 		},
 		"added":    []string{taskPath, "src/app.go"},
 		"modified": []string{procPath},
-		"removed":  []string{capPath},
+		"removed":  []string{otherProcPath},
 	})
 	if len(resFeat.Indexed) != 0 {
 		t.Fatalf("non-default branch push must not index grainfiles, got %+v", resFeat.Indexed)
@@ -853,10 +853,10 @@ func TestNonDefaultBranchPushDoesNotPoisonProcessOrCapabilityIndex(t *testing.T)
 		t.Fatalf("expected when.push on feat/attacker to evaluate against trusted main process, got %+v", resFeat.Events)
 	}
 
-	// Verify capability and process on main were neither overwritten nor removed.
-	capIdx, err := store.GetIndex(ctx, repo, capPath, "")
-	if err != nil || capIdx.removed || capIdx.Title != "Trusted GCP Key Capability" || capIdx.CommitSHA != "sha-main-1" {
-		t.Fatalf("capability index poisoned by non-default branch push: err=%v rec=%+v", err, capIdx)
+	// Verify both processes on main were neither overwritten nor removed.
+	otherIdx, err := store.GetIndex(ctx, repo, otherProcPath, "")
+	if err != nil || otherIdx.removed || otherIdx.Title != "Trusted Audit Process" || otherIdx.CommitSHA != "sha-main-1" {
+		t.Fatalf("process index poisoned by non-default branch push: err=%v rec=%+v", err, otherIdx)
 	}
 	procIdx, err := store.GetIndex(ctx, repo, procPath, "")
 	if err != nil || procIdx.removed || procIdx.Title != "Trusted Main Gate Process" || procIdx.CommitSHA != "sha-main-1" {

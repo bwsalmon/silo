@@ -11,7 +11,7 @@ See [`docs/grainfile-v1.md`](../../docs/grainfile-v1.md) and [`docs/grainfiles-s
 ## `widgets/`: a code repository (`https://github.com/acme/widgets`)
 
 - `docs/widget-schema.md` and `src/widget.go`: design documentation and Go source code referenced by tasks and processes.
-- `.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md`: a discrete `grainfile: v1` task with optional user attribution (`Bruce Salmon <bsalmon@google.com>`) addressed to the `grain-eu` deployment (`https://github.com/acme/grain-eu`), referencing the design doc heading `/docs/widget-schema.md#schema-version-header` and `/src/widget.go`.
+- `.grain/tasks/2026-10-16-widget-schema-v2.task.grain.md`: a discrete `grainfile: v1` task with optional user attribution (`Bruce Salmon <bsalmon@google.com>`) addressed to the `grain-eu` deployment (`https://github.com/acme/grain-eu`), declaring OCI capability references (`ghcr.io/bwsalmon/grain/capabilities/self-debug:latest` and `ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key` with `with: {account: infra-staging}`) and referencing the design doc heading `/docs/widget-schema.md#schema-version-header` and `/src/widget.go`.
 - `.grain/tasks/2026-10-16-widget-schema-v2-migration.task.grain.md`: a follow-up task omitting optional `requestor`, with `depends_on: ["./2026-10-16-widget-schema-v2.task.grain.md"]` and `not_before: "2026-10-25T09:00:00Z"`.
 - `.grain/tasks/2026-11-01-drop-widget-v1-support.task.grain.md`: a work-in-progress draft task (`draft: true`, `not_before: "2026-11-01"`, `from_template: ./rollout-region.task.grain.md.jinja2`) depending on the migration task; validated by `grainlint.py` while ignored by recipient deployments until `draft` is `false` or removed.
 - `.grain/tasks/rollout-region.task.grain.md.jinja2`: a self-contained Jinja2 task template parameterizing `title`, `recipient`, `requestor`, and the rollout prompt (`template_vars`: `dry_run`, `environment`, `recipient_url`, `region`, `requestor`) while depending on the concrete `./2026-10-16-widget-schema-v2-migration.task.grain.md` task.
@@ -19,7 +19,6 @@ See [`docs/grainfile-v1.md`](../../docs/grainfile-v1.md) and [`docs/grainfiles-s
 - `.grain/processes/ci-triage.process.grain.md`: a reusable process triggered via `when.workflow` (`triggered`, `succeeded`, `failed` across `"grain CI"`, `"e2e-*"`, and `".github/workflows/release.yml"`) and a multi-timezone `when.schedule` (`America/Los_Angeles` and `Europe/Berlin`).
 - `.grain/processes/release-cut-check.process.grain.md`: a reusable process triggered via `when:` on a `scenario` condition and `manual: {}`.
 - `.grain/processes/branch-audit.process.grain.md.jinja2`: a self-contained Jinja2 process template parameterizing `title`, `when.push.branches`, `gate`, and the audit prompt (`template_vars`: `enforce_gate`, `target_branch`).
-- `.grain/capabilities/gcp-key.capability.grain.md`: a capability definition (`grainfile: v1`, `kind = "capability"`) describing the `gcp-key` sandbox credential grant and referenced via `capabilities:` by `2026-10-16-widget-schema-v2.task.grain.md` and `schema-security-review.process.grain.md`.
 
 ## `grain-eu/`: a deployment repository (`https://github.com/acme/grain-eu`)
 

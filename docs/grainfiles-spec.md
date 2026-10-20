@@ -2,9 +2,9 @@
 
 **Status:** draft for review (bsalmon@google.com). Normative.
 
-This document specifies the Grainfile Format (`grainfile: v1`): a portable, git-native format for authoring discrete **tasks** (`<name>.task.grain.md`), standing **processes** (`<name>.process.grain.md`), and named **capabilities** (`<name>.capability.grain.md`) that Grain deployments execute and provision directly. It defines the three grainfile kinds (`**/*.grain.md`), their YAML front matter (`grainfile: v1`) and Markdown bodies, repository source authority, task deployment identities (`recipient`, defaulting to `/`) and optional attribution metadata (`requestor`), draft and deferral controls (`draft`, `not_before`), cross-repository and repo-local references (`references`, `depends_on`, `capabilities`), structured process triggers (`when`) and merge gating (`gate`), the direct execution lifecycle model, security invariants, and the lint rules that validate a repository tree.
+This document specifies the Grainfile Format (`grainfile: v1`): a portable, git-native format for authoring discrete **tasks** (`<name>.task.grain.md`) and standing **processes** (`<name>.process.grain.md`) that Grain deployments execute directly. It defines the two grainfile kinds (`**/*.grain.md`), their YAML front matter (`grainfile: v1`) and Markdown prompt bodies, repository source authority, task deployment identities (`recipient`, defaulting to `/`) and optional attribution metadata (`requestor`), draft and deferral controls (`draft`, `not_before`), cross-repository and repo-local references (`references`, `depends_on`), structured process triggers (`when`) and merge gating (`gate`), the direct execution lifecycle model, security invariants, and the lint rules that validate a repository tree.
 
-It is **not** an engine's internal database schema. Live run state, sandbox orchestration, queue ranking, and execution logs are each deployment's own concern (§2.3); deployments watch repositories for `.task.grain.md`, `.process.grain.md`, and `.capability.grain.md` files addressed to them and execute or provision them directly (§9).
+It is **not** an engine's internal database schema. Live run state, sandbox orchestration, queue ranking, and execution logs are each deployment's own concern (§2.3); deployments watch repositories for `.task.grain.md` and `.process.grain.md` files addressed to them and execute them directly (§9).
 
 A concise, low-token quick-reference summary for agents is in [`docs/grainfile-v1.md`](grainfile-v1.md). The design rationale and architectural background are in [`docs/grainfiles.md`](grainfiles.md). Where the design or summary ever disagrees with this specification, **this document wins**. The machine-readable schemas are in [`schemas/grainfiles/`](../schemas/grainfiles/) and the reference linter is [`tools/grainfiles/grainlint.py`](../tools/grainfiles/grainlint.py). The worked example of Appendix A is in [`examples/grainfiles/`](../examples/grainfiles/README.md).
 
@@ -18,7 +18,7 @@ Where this specification makes a normative design choice, the choice is marked *
 4. Files and names
 5. Grainfile syntax
 6. Identities and common fields
-7. The kinds (`task`, `process`, and `capability`)
+7. The kinds (`task` and `process`)
 8. References and graphs
 9. Direct execution and lifecycle model
 10. Errors and lint
@@ -49,19 +49,16 @@ Where this specification makes a normative design choice, the choice is marked *
 ### 2.1 Terms
 
 **grainfile**
-: One UTF-8 Markdown file named `<name>.task.grain.md`, `<name>.process.grain.md`, or `<name>.capability.grain.md` (§4.1, glob `**/*.grain.md`), with YAML front matter and a Markdown body (§5). Plain `.grain.md` files are 100% literal with zero template evaluation.
+: One UTF-8 Markdown file named `<name>.task.grain.md` or `<name>.process.grain.md` (§4.1, glob `**/*.grain.md`), with YAML front matter and a Markdown body (§5). Plain `.grain.md` files are 100% literal with zero template evaluation.
 
 **grainfile template**
-: A self-contained Jinja2 template file named `<name>.task.grain.md.jinja2`, `<name>.process.grain.md.jinja2`, or `<name>.capability.grain.md.jinja2` (§4.1, §5.7, glob `**/*.grain.md.jinja2`). Rendering a `.grain.md.jinja2` template in a sandboxed Jinja2 environment with a variable map `vars` (or its `| default(...)` fallback values) produces a `<name>.task.grain.md`, `<name>.process.grain.md`, or `<name>.capability.grain.md` document.
+: A self-contained Jinja2 template file named `<name>.task.grain.md.jinja2` or `<name>.process.grain.md.jinja2` (§4.1, §5.7, glob `**/*.grain.md.jinja2`). Rendering a `.grain.md.jinja2` template in a sandboxed Jinja2 environment with a variable map `vars` (or its `| default(...)` fallback values) produces a `<name>.task.grain.md` or `<name>.process.grain.md` document.
 
 **task**
 : A `<name>.task.grain.md` grainfile (§7.1): a discrete unit of work to run once per canonical `(repo_url, file_path)` on the repository's default or protected branch. Its Markdown body is the prompt given directly to the run.
 
 **process**
 : A `<name>.process.grain.md` grainfile (§7.2): a standing, repeatable process with structured triggers (`when`) and an optional `gate` flag. Its Markdown body is the prompt dispatched whenever the process fires.
-
-**capability**
-: A `<name>.capability.grain.md` grainfile (§7.3): a named capability, toolset, or credential grant that deployments can offer and that `.task.grain.md` and `.process.grain.md` files can request via `capabilities`. Its Markdown body describes the capability for humans and agents (what it grants, how a deployment provisions it, and how an agent uses it), and its `references` may point to companion documentation, scripts, or provisioning assets.
 
 **deployment**
 : An execution engine (such as a Grain deployment) identified by the plain `https://` URL of a git repository or folder that it controls (§6.2.2).
@@ -78,11 +75,11 @@ Where this specification makes a normative design choice, the choice is marked *
 ### 2.2 In scope
 
 The format defines:
-- the three grainfile kinds, `task` (`<name>.task.grain.md`), `process` (`<name>.process.grain.md`), and `capability` (`<name>.capability.grain.md`), and their self-contained Jinja2 template counterparts (`<name>.task.grain.md.jinja2`, `<name>.process.grain.md.jinja2`, and `<name>.capability.grain.md.jinja2`) (§4.1, §5.7, §7);
+- the two grainfile kinds, `task` (`<name>.task.grain.md`) and `process` (`<name>.process.grain.md`), and their self-contained Jinja2 template counterparts (`<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2`) (§4.1, §5.7, §7);
 - the mandatory format version field `grainfile: v1` (required in every Grainfile; `GF020` when omitted) and programmatic version mapping to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3);
 - source authority from the repository/folder URL where the grainfile lives, task `recipient` deployment identities (defaulting to `"/"` when omitted), and optional task `requestor` attribution (`Name <email>` or plain `https://` URL) (§6);
 - work-in-progress drafting (`draft: true`) and deferred execution/activation (`not_before`) (§6.3, §6.4);
-- plain `https://` remote references (including standard forge `/blob/<ref>/<path>` and `/tree/<ref>/<path>` URLs) and repo-local references in `references`, task/process `capabilities`, and task-only `depends_on` (§8);
+- plain `https://` remote references (including standard forge `/blob/<ref>/<path>` and `/tree/<ref>/<path>` URLs) and repo-local references in `references` and task-only `depends_on` (§8);
 - structured process triggers (`when`: `schedule`, `push`, `merge`, `pull_request`, `workflow`, `manual`, `scenario`) and commit/pull-request gating (`gate: true`) (§7.2);
 - the direct execution and lifecycle model by which deployments watch repositories and execute matching `.task.grain.md` and `.process.grain.md` files (§9);
 - the validation rules, lint codes (§10), and security invariants (§11).
@@ -107,12 +104,12 @@ The reference linter is `tools/grainfiles/grainlint.py`; where it differs from t
 
 ## 3. Versioning and extension
 
-3.1. **Kind by suffix and mandatory version by `grainfile`.** A grainfile's kind is determined solely by its filename suffix: `.task.grain.md` (`task`), `.process.grain.md` (`process`), or `.capability.grain.md` (`capability`) (§4.1). Front matter on every `.task.grain.md`, `.process.grain.md`, and `.capability.grain.md` file (and on the rendered output of every `.task.grain.md.jinja2`, `.process.grain.md.jinja2`, and `.capability.grain.md.jinja2` template) MUST declare `grainfile: v1` (string). Omitting `grainfile`, providing a non-string `grainfile` value, or specifying an unrecognised version string is a validation error (GF020).
+3.1. **Kind by suffix and mandatory version by `grainfile`.** A grainfile's kind is determined solely by its filename suffix: `.task.grain.md` (`task`) or `.process.grain.md` (`process`) (§4.1). Front matter on every `.task.grain.md` and `.process.grain.md` file (and on the rendered output of every `.task.grain.md.jinja2` and `.process.grain.md.jinja2` template) MUST declare `grainfile: v1` (string). Omitting `grainfile`, providing a non-string `grainfile` value, or specifying an unrecognised version string is a validation error (GF020).
 
 3.1.1. **Programmatic version mapping.** Version `"v1"` maps programmatically to:
 - `spec_summary_path`: `"docs/grainfile-v1.md"` (concise agent quick-reference summary)
 - `spec_path`: `"docs/grainfiles-spec.md"` (this normative specification)
-- `schemas`: `"schemas/grainfiles/common.schema.json"`, `"schemas/grainfiles/task.schema.json"`, `"schemas/grainfiles/process.schema.json"`, and `"schemas/grainfiles/capability.schema.json"`
+- `schemas`: `"schemas/grainfiles/common.schema.json"`, `"schemas/grainfiles/task.schema.json"`, and `"schemas/grainfiles/process.schema.json"`
 
 Hub APIs, SDKs, and UI responses expose `grainfile`, `spec_summary_path`, and `spec_path` on indexed grainfiles and grainfile events.
 
@@ -136,10 +133,10 @@ The JSON Schemas set `additionalProperties: false` and allow `^x_` via `patternP
 grainfile-name          = stem "." kind ".grain.md"
 grainfile-template-name = stem "." kind ".grain.md.jinja2"
 stem                    = ( ALPHA / DIGIT ) *( ALPHA / DIGIT / "." / "-" / "_" )
-kind                    = %s"task" / %s"process" / %s"capability" ; registered in §12.1
+kind                    = %s"task" / %s"process"            ; registered in §12.1
 ```
 
-4.1.1. A filename is parsed from the right: the trailing `.grain.md` (or `.grain.md.jinja2` for a Jinja2 template; §5.7), then the kind suffix immediately preceding it (`.task`, `.process`, or `.capability`), and everything before that as the `stem`.
+4.1.1. A filename is parsed from the right: the trailing `.grain.md` (or `.grain.md.jinja2` for a Jinja2 template; §5.7), then the kind suffix immediately preceding it (`.task` or `.process`), and everything before that as the `stem`.
 
 4.1.2. The **name** of a grainfile (or grainfile template) is its stem: `2026-10-16-widget-schema-v2` is the name of `2026-10-16-widget-schema-v2.task.grain.md`, and `rollout-region` is the name of `rollout-region.task.grain.md.jinja2`.
 
@@ -151,7 +148,7 @@ kind                    = %s"task" / %s"process" / %s"capability" ; registered i
 
 4.2.1. Grainfiles and grainfile templates MAY be placed in any directory of a git repository (`**/*.grain.md` and `**/*.grain.md.jinja2`; by convention under `.grain/` in a source code repository, or in top-level directories such as `tasks/` and `processes/` in a dedicated repository).
 
-4.2.2. A file is a concrete grainfile if and only if its name ends in `.<kind>.grain.md` for a kind registered in §12.1 (`.task.grain.md`, `.process.grain.md`, or `.capability.grain.md`). A file is a grainfile template if and only if its name ends in `.<kind>.grain.md.jinja2` for a registered kind (`.task.grain.md.jinja2`, `.process.grain.md.jinja2`, or `.capability.grain.md.jinja2`; §5.7). Every concrete grainfile—and the rendered output of every grainfile template—MUST start with YAML front matter (GF003).
+4.2.2. A file is a concrete grainfile if and only if its name ends in `.<kind>.grain.md` for a kind registered in §12.1 (`.task.grain.md` or `.process.grain.md`). A file is a grainfile template if and only if its name ends in `.<kind>.grain.md.jinja2` for a registered kind (`.task.grain.md.jinja2` or `.process.grain.md.jinja2`; §5.7). Every concrete grainfile—and the rendered output of every grainfile template—MUST start with YAML front matter (GF003).
 
 4.2.3. Every other file in the repository is an asset. A `.grain.md` or `.grain.md.jinja2` file whose kind segment is not a registered kind (for example, `notes/x.widget.grain.md`) is treated as an asset, and a linter SHOULD emit a warning (GF005) to catch misspelled kind suffixes. Ordinary `.md` files that do not end in `.grain.md` (or `.grain.md.jinja2`) are normal Markdown assets and MUST NOT trigger GF005.
 
@@ -188,22 +185,22 @@ A reader MUST support at least, and MAY refuse beyond (GF006): a grainfile of 1 
 
 ### 6.1 Common fields
 
-The entire Grainfile `v1` front-matter vocabulary consists of **12 orthogonal fields** (plus `x_*` extensions):
-- **Shared across all 3 kinds (`task`, `process`, `capability`) (6):** `grainfile` (`"v1"`, **required**), `title` (**required**), `draft`, `not_before`, `references`, `from_template`
-- **Shared by `.task.grain.md` and `.process.grain.md` (1):** `capabilities` (optional; targets must resolve to concrete `.capability.grain.md` files, never `.task.grain.md`, `.process.grain.md`, or unrendered `.jinja2` templates; `GF032`)
-- **`.task.grain.md` only (3):** `recipient` (optional, default `"/"`), `requestor` (optional), `depends_on` (optional; targets must resolve to concrete `.task.grain.md` files, never `.process.grain.md`, `.capability.grain.md`, or unrendered `.jinja2` templates)
+The entire Grainfile `v1` front-matter vocabulary consists of **11 orthogonal fields** (plus `title` and `x_*` extensions):
+- **Shared (6):** `grainfile` (`"v1"`, **required**), `title` (**required**), `draft`, `not_before`, `capabilities`, `references`, `from_template`
+- **`.task.grain.md` only (3):** `recipient` (optional, default `"/"`), `requestor` (optional), `depends_on` (optional; targets must resolve to concrete `.task.grain.md` files, never `.process.grain.md` and never unrendered `.jinja2` templates)
 - **`.process.grain.md` only (2):** `when` (required), `gate` (optional, default `false`)
 
-Every `.task.grain.md`, `.process.grain.md`, and `.capability.grain.md` shares the following base fields and MAY include `x_*` extension fields (§3.3):
+Every `.task.grain.md` and `.process.grain.md` shares the following base fields and MAY include `x_*` extension fields (§3.3):
 
 | Field | Type | Req. | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `grainfile` | `"v1"` | **Req.** | `"v1"` | Mandatory Grainfile specification version (§3.1, GF020). |
-| `title` | single-line string | **Req.** | | Non-empty one-line summary of the task, process, or capability (GF020). |
+| `title` | single-line string | **Req.** | | Non-empty one-line summary of the task or process (GF020). |
 | `draft` | boolean | Opt. | `false` | When `true`, marks the grainfile as a work-in-progress draft that deployments MUST ignore until `draft` is `false` or omitted (§6.3, §9). |
-| `not_before` | *time* or `YYYY-MM-DD` (§1.4) | Opt. | | Earliest activation timestamp (`2026-10-25T09:00:00Z` or `2026-10-25T09:00:00+02:00`, normalized to UTC) or UTC date (`2026-10-25`, meaning `00:00:00Z` of that day) at which the grainfile takes effect (§6.4, §9). |
-| `references` | list of *ref* (§8) | Opt. | `[]` | References to relevant documents, code paths, design docs, or grainfiles provided as context. |
-| `from_template` | *ref* to `.grain.md.jinja2` (§6.5) | Opt. | | Optional provenance link to the `.task.grain.md.jinja2`, `.process.grain.md.jinja2`, or `.capability.grain.md.jinja2` template from which this grainfile was rendered or materialized (GF035). |
+| `not_before` | *time* or `YYYY-MM-DD` (§1.4) | Opt. | | Earliest activation timestamp (`2026-10-25T09:00:00Z` or `2026-10-25T09:00:00+02:00`, normalized to UTC) or UTC date (`2026-10-25`, meaning `00:00:00Z` of that day) at which the task may execute or the process may fire (§6.4, §9). |
+| `capabilities` | list of *capability-ref* (§6.6) | Opt. | `[]` | Requested OCI-image capabilities (`<oci-image>[#<method>]` or `{capability: "<oci-image>[#<method>]", with: {<args>}}`; §6.6, GF020). |
+| `references` | list of *ref* (§8) | Opt. | `[]` | References to relevant documents, code paths, design docs, or grainfiles provided as context to the run. |
+| `from_template` | *ref* to `.grain.md.jinja2` (§6.5) | Opt. | | Optional provenance link to the `.task.grain.md.jinja2` or `.process.grain.md.jinja2` template from which this grainfile was rendered or materialized (GF035). |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
 
 **Decision:** There is no `created_at` or `trigger_with` front-matter field; git commit history already records creation and modification timestamps authoritatively, and `depends_on` is restricted exclusively to `.task.grain.md` because a `.task.grain.md` has a single identity `(repo_url, file_path)`, a single `recipient` deployment, and a single terminal `done` state, whereas a `.process.grain.md` is a standing 1-to-many trigger with no `recipient` and no single completion state. Multi-step or cross-task coordination inside a process is expressed in natural language in the `.process.grain.md` prompt itself.
@@ -256,14 +253,22 @@ A **deployment identity** is a reference (§8.1) naming the canonical Hub deploy
 
 ### 6.5 Template provenance (`from_template`)
 
-- **`from_template`** (OPTIONAL on `.task.grain.md`, `.process.grain.md`, and `.capability.grain.md`, string) records the source Jinja2 Grainfile template from which the grainfile was rendered or materialized.
-- **Value and validation (GF035):** Must be a non-empty string (`https://` URL or repo-relative `/path` or relative `./path`, normalized with the same rules as `references` / `depends_on`, without `#<anchor>`). On a `.task.grain.md` it MUST end with `.task.grain.md.jinja2`; on a `.process.grain.md` it MUST end with `.process.grain.md.jinja2`; on a `.capability.grain.md` it MUST end with `.capability.grain.md.jinja2` (GF035). When the target repository is in the linted tree, the referenced template file MUST exist (GF030).
+- **`from_template`** (OPTIONAL on both `.task.grain.md` and `.process.grain.md`, string) records the source Jinja2 Grainfile template from which the grainfile was rendered or materialized.
+- **Value and validation (GF035):** Must be a non-empty string (`https://` URL or repo-relative `/path` or relative `./path`, normalized with the same rules as `references` / `depends_on`, without `#<anchor>`). On a `.task.grain.md` it MUST end with `.task.grain.md.jinja2`; on a `.process.grain.md` it MUST end with `.process.grain.md.jinja2` (GF035). When the target repository is in the linted tree, the referenced template file MUST exist (GF030).
 - **Same-repo reference and cross-repo provenance:** If `from_template` is in the same repository as the grainfile, its canonical URL pinned at the grainfile's `commit_sha` is included in `authorized_references` (authorizing on-demand read access via `/v1/grainfiles/content`). If `from_template` is cross-repo, the canonical URL is recorded as provenance metadata on the indexed grainfile and events without granting cross-repo file read access.
 - **Auto-population on template rendering:** When Grain Hub renders a `.grain.md.jinja2` template (`RenderTemplate`, `/v1/grainfiles/content` with `?var.*`, or `fetch_grainfile`), it automatically populates `from_template` with the canonical URL of the `.grain.md.jinja2` template if not already set.
 
+### 6.6 Capabilities (`capabilities`)
+
+- **OCI-image capability model:** Capabilities are deployed as OCI container images speaking Streamable HTTP MCP on port `8080` and embedding their metadata (`name`, `description`, `inputSchema`, `_meta`) in the MCP server itself (see [`docs/design/capabilities.md`](design/capabilities.md)). There is no `.capability.grain.md` file kind.
+- **Entry forms (GF020):** On both `.task.grain.md` and `.process.grain.md`, `capabilities` is an optional list where each entry is either:
+  1. A string (`<oci-image>[#<method>]`) when no arguments are passed (e.g. `ghcr.io/bwsalmon/grain/capabilities/self-debug:latest` or `ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key`), or
+  2. An object (`{capability: "<oci-image>[#<method>]", with: {<args>}}`) when passing structured arguments (`with` must be a mapping when present, and unknown keys on the entry object are rejected with `GF020`).
+- **OCI image reference grammar (GF020):** Each capability reference MUST match `<registry>/<repository>[:<tag>][@sha256:<digest>][#<method>]` (`common.schema.json#/$defs/capabilityRef`), where `<registry>` is a domain with at least one `.`, `localhost[:<port>]`, or `<host>:<port>`, `<repository>` is one or more lowercase path components (`[a-z0-9]+(?:[._-]+[a-z0-9]+)*`) not ending in `.grain.md` or `.jinja2`, optional `:<tag>` matches `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`, optional `@sha256:<digest>` is 64 lowercase hex digits, and optional `#<method>` matches `[A-Za-z0-9][A-Za-z0-9._-]*`. Any invalid capability entry or `.capability.grain.md` file path fails validation with `GF020`.
+
 ## 7. The kinds
 
-Each subsection defines one of the three grainfile kinds. The corresponding JSON Schemas are `schemas/grainfiles/task.schema.json`, `schemas/grainfiles/process.schema.json`, and `schemas/grainfiles/capability.schema.json`.
+Each subsection defines one of the two grainfile kinds. The corresponding JSON Schemas are `schemas/grainfiles/task.schema.json` and `schemas/grainfiles/process.schema.json`.
 
 ### 7.1 `task` (`<name>.task.grain.md`)
 
@@ -278,12 +283,12 @@ A `task` grainfile describes a discrete unit of work to be executed once by its 
 | `draft` | boolean | Opt. | `false` | When `true`, recipient deployments ignore the task until `draft` is `false` or omitted (§6.3, §9). |
 | `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest RFC 3339 timestamp (`Z` or `±HH:MM`, normalized to UTC) or UTC date (`00:00:00Z`) at which the task may execute (§6.4, §9). |
 | `depends_on` | list of *ref* to `task` | Opt. | `[]` | `.task.grain.md` files that must finish before this task runs (§8.3). |
-| `capabilities` | list of *ref* to `capability` | Opt. | `[]` | `.capability.grain.md` files required by this task (§7.3, §8.3, GF032). |
+| `capabilities` | list of *capability-ref* | Opt. | `[]` | OCI-image capability references (`<oci-image>[#<method>]` or `{capability, with}`) requested by this task (§6.6, GF020). |
 | `references` | list of *ref* | Opt. | `[]` | Relevant files, folders, repositories, design docs, or grainfiles made available to the run. |
 | `from_template` | *ref* to `.task.grain.md.jinja2` | Opt. | | Optional provenance link to the source `.task.grain.md.jinja2` template (§6.5, GF035). |
 | `x_*` | any | Opt. | | Extension fields (§3.3). |
 
-**Decision:** `recipient` and `requestor` are restricted to `.task.grain.md` only, `trigger_with` is removed, a `.task.grain.md`'s `depends_on` entries MUST resolve only to `.task.grain.md` files, and `capabilities` entries MUST resolve only to concrete `.capability.grain.md` files (GF032; §8.3).
+**Decision:** `recipient` and `requestor` are restricted to `.task.grain.md` only, `trigger_with` is removed, and a `.task.grain.md`'s `depends_on` entries MUST resolve only to `.task.grain.md` files (GF032; §8.3).
 
 Example (`2026-10-16-widget-schema-v2.task.grain.md`):
 
@@ -293,6 +298,11 @@ grainfile: v1
 title: Add version header to the widget binary schema
 requestor: Bruce Salmon <bsalmon@google.com>
 recipient: https://github.com/acme/grain-eu
+capabilities:
+  - ghcr.io/bwsalmon/grain/capabilities/self-debug:latest
+  - capability: ghcr.io/bwsalmon/grain/capabilities/gcp:latest#gcp-key
+    with:
+      account: infra-staging
 references:
   - /docs/widget-schema.md#schema-version-header
   - /src/widget.go
@@ -312,7 +322,7 @@ A `process` grainfile describes a standing, repeatable 1-to-many process that an
 | `title` | string | **Req.** | | One-line summary. |
 | `draft` | boolean | Opt. | `false` | When `true`, subscribed deployments ignore the process until `draft` is `false` or omitted (§6.3, §9). |
 | `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest RFC 3339 timestamp (`Z` or `±HH:MM`, normalized to UTC) or UTC date (`00:00:00Z`) at which the process may fire (§6.4, §9). |
-| `capabilities` | list of *ref* to `capability` | Opt. | `[]` | `.capability.grain.md` files required by this process (§7.3, §8.3, GF032). |
+| `capabilities` | list of *capability-ref* | Opt. | `[]` | OCI-image capability references (`<oci-image>[#<method>]` or `{capability, with}`) requested by this process (§6.6, GF020). |
 | `references` | list of *ref* | Opt. | `[]` | Relevant files, folders, repositories, design docs, or grainfiles made available to each run. |
 | `from_template` | *ref* to `.process.grain.md.jinja2` | Opt. | | Optional provenance link to the source `.process.grain.md.jinja2` template (§6.5, GF035). |
 | `when` | mapping of source → options | **Req.** | | Structured triggers specifying when the process fires (§7.2.1). |
@@ -382,35 +392,6 @@ rules in `docs/widget-schema.md`. Leave inline review comments on any
 bounds-checking or downgrade issue.
 ```
 
-### 7.3 `capability` (`<name>.capability.grain.md`)
-
-A `capability` grainfile defines a named capability, toolset, or credential grant that Grain deployments can offer and that `.task.grain.md` and `.process.grain.md` files can request via `capabilities:` (§7.1, §7.2, §8.3). Its Markdown body describes the capability for humans and agents (what it grants, how a deployment provisions it, and how an agent uses it), and its `references:` may point to companion documentation, scripts, or provisioning assets.
-
-| Field | Type | Req. | Default | Meaning |
-| --- | --- | --- | --- | --- |
-| `grainfile` | `"v1"` | **Req.** | `"v1"` | Mandatory specification version (§3.1, GF020). |
-| `title` | string | **Req.** | | One-line summary of the capability (GF020). |
-| `draft` | boolean | Opt. | `false` | When `true`, marks the capability definition as a work-in-progress draft (§6.3, §9). |
-| `not_before` | *time* or `YYYY-MM-DD` | Opt. | | Earliest RFC 3339 timestamp (`Z` or `±HH:MM`, normalized to UTC) or UTC date (`00:00:00Z`) at which the capability definition takes effect (§6.4, §9). |
-| `references` | list of *ref* | Opt. | `[]` | Companion documentation, provisioning scripts, or configuration assets. |
-| `from_template` | *ref* to `.capability.grain.md.jinja2` | Opt. | | Optional provenance link to the source `.capability.grain.md.jinja2` template (§6.5, GF035). |
-| `x_*` | any | Opt. | | Extension fields (§3.3). |
-
-A `.capability.grain.md` MUST specify `grainfile: v1` and `title` (GF020) and MUST NOT specify `recipient`, `requestor`, `depends_on`, `capabilities`, `when`, `on`, or `gate` (GF020).
-
-Example (`gcp-key.capability.grain.md`):
-
-```markdown
----
-grainfile: v1
-title: Provision a short-lived GCP service-account key in the sandbox
-references:
-  - /docs/widget-schema.md
----
-Grants a short-lived Google Cloud service-account credential to a task or
-process sandbox, mounted at `$GOOGLE_APPLICATION_CREDENTIALS`.
-```
-
 ## 8. References and graphs
 
 ### 8.1 Reference forms
@@ -460,8 +441,7 @@ To resolve a reference from a grainfile in repository `R`:
 ### 8.3 Target kinds
 
 References in fields that expect a specific kind of target MUST resolve to that target kind when the target repository is available (GF032):
-- **`depends_on` (valid on `.task.grain.md` only; GF020 on `.process.grain.md` and `.capability.grain.md`):** each entry MUST resolve only to a concrete `.task.grain.md` (`task`) grainfile. A `.task.grain.md` (or rendered `.task.grain.md.jinja2`) whose `depends_on` targets a `.process.grain.md`, a `.capability.grain.md`, an unrendered `.jinja2` template, an asset file, or a directory is an error (GF032), because a standing process or capability has no single terminal completion and an unrendered `.jinja2` file is a template rather than a concrete task instance.
-- **`capabilities` (valid on `.task.grain.md` and `.process.grain.md`; GF020 on `.capability.grain.md`):** each entry MUST resolve only to a concrete `.capability.grain.md` (`capability`) grainfile. A `capabilities` entry that targets a `.task.grain.md`, a `.process.grain.md`, an unrendered `.jinja2` template, an asset file, or a directory is an error (GF032; missing file or heading is GF030). Same-repository `capabilities` targets are included in `authorized_references` at the referring grainfile's `commit_sha`.
+- **`depends_on` (valid on `.task.grain.md` only; GF020 on `.process.grain.md`):** each entry MUST resolve only to a concrete `.task.grain.md` (`task`) grainfile. A `.task.grain.md` (or rendered `.task.grain.md.jinja2`) whose `depends_on` targets a `.process.grain.md`, an unrendered `.jinja2` template (`.task.grain.md.jinja2` or `.process.grain.md.jinja2`), an asset file, or a directory is an error (GF032), because a standing process has no single terminal completion and an unrendered `.jinja2` file is a template rather than a concrete task instance.
 - **`recipient` (and `requestor` when it is a deployment or URL identity on a `.task.grain.md`):** MUST resolve to a repository or directory, never a file (GF032).
 - **`references`:** MAY resolve to any grainfile, grainfile template, asset file, directory, or repository.
 
@@ -484,8 +464,8 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 9.3. **Lifecycle: identity, idempotency, edits, deletion, and `draft: true` withdrawal.**
 - **Canonical identity:** A grainfile's identity is its canonical `(repo_url, file_path)` pair on the repository's default/protected branch.
 - **Idempotency after completion:** Once a `.task.grain.md` identified by `(repo_url, file_path)` has completed (`done` / `completed` / `success`), subsequent pushes or edits to that file path MUST NOT re-queue or re-run the task.
-- **Editing an incomplete task:** Editing a `.task.grain.md` while it is still queued or deferred (not yet completed) updates its indexed definition (`title`, prompt body, `not_before`, `depends_on`, `capabilities`, `references`, `recipient`) in place.
-- **Deleting or drafting a grainfile (`task_removed` / `process_removed` / `capability_removed`):** Deleting an active `.task.grain.md` or updating it from `draft: false` to `draft: true` emits a `task_removed` event (`action: "removed"`) and, if the task has not yet completed, cancels any queued/running run (`dependency_completed` with `cancelled`). Deleting a `.task.grain.md` that has already completed preserves its completion record so downstream `depends_on` consumers stay satisfied. Deleting an active `.process.grain.md` or updating it from `draft: false` to `draft: true` emits a `process_removed` event (`action: "removed"`) so subscribed deployments unregister the process trigger immediately. Adding or updating an active `.capability.grain.md` emits `capability_updated`, and deleting an active `.capability.grain.md` or updating it from `draft: false` to `draft: true` emits `capability_removed` (`action: "removed"`).
+- **Editing an incomplete task:** Editing a `.task.grain.md` while it is still queued or deferred (not yet completed) updates its indexed definition (`title`, prompt body, `not_before`, `depends_on`, `references`, `recipient`) in place.
+- **Deleting or drafting a grainfile (`task_removed` / `process_removed`):** Deleting an active `.task.grain.md` or updating it from `draft: false` to `draft: true` emits a `task_removed` event (`action: "removed"`) and, if the task has not yet completed, cancels any queued/running run (`dependency_completed` with `cancelled`). Deleting a `.task.grain.md` that has already completed preserves its completion record so downstream `depends_on` consumers stay satisfied. Deleting an active `.process.grain.md` or updating it from `draft: false` to `draft: true` emits a `process_removed` event (`action: "removed"`) so subscribed deployments unregister the process trigger immediately.
 
 ## 10. Errors and lint
 
@@ -500,13 +480,13 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 | GF004 | error | Front matter outside the YAML subset: not a mapping, non-string key, duplicate key, or uses YAML anchors, aliases, merge keys, or tags (§5.3). |
 | GF005 | warning | A Markdown file has an unregistered `.<kind>.grain.md` (or `.<kind>.grain.md.jinja2`) suffix (§4.2.3). |
 | GF006 | error | A path or file size limit of §4.1.4 or §4.3 is exceeded (including rendered `.jinja2` output), or two paths in a repository differ only in case. |
-| GF020 | error | Schema or field validation failure: missing, unsupported, or non-string `grainfile` version (`"v1"` required), missing required field (`grainfile`, `title`, or `when` on `process`), prohibited field (`trigger_with`, `recipient`/`requestor`/`depends_on` on a `process`, `when`/`gate` on a `task`, or `recipient`/`requestor`/`depends_on`/`capabilities`/`when`/`gate` on a `capability`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `not_before` date/time or `-00:00`/naive offset, unknown `when` trigger source, or invalid `schedule.cron` / `schedule.timezone` (non-IANA timezone) / event or workflow filter (§3.1, §6, §7). |
+| GF020 | error | Schema or field validation failure: missing, unsupported, or non-string `grainfile` version (`"v1"` required), missing required field (`grainfile`, `title`, or `when` on `process`), prohibited field (`trigger_with`, `recipient`/`requestor`/`depends_on` on a `process`, or `when`/`gate` on a `task`), wrong field type (such as non-boolean `draft`), multiline `title`, invalid `requestor` or `recipient` identity, invalid `capabilities` OCI image reference or `with` mapping, invalid `not_before` date/time or `-00:00`/naive offset, unknown `when` trigger source, or invalid `schedule.cron` / `schedule.timezone` (non-IANA timezone) / event or workflow filter (§3.1, §6, §7). |
 | GF022 | warning | Unknown front-matter field not beginning with `x_` (§3.3). |
 | GF030 | error | A reference does not resolve: missing file, missing directory, or missing Markdown heading `#<anchor>` (§8.2). |
-| GF032 | error | A reference resolves to the wrong kind: `task` `depends_on` targets a `process`, `capability`, or an unrendered `.jinja2` template instead of a concrete `.task.grain.md`, `capabilities` targets a `task`, `process`, unrendered `.jinja2` template, asset, or folder instead of a concrete `.capability.grain.md`, `depends_on` target is not a grainfile, or a deployment identity resolves to a file instead of a repository or folder (§6.2.2, §8.3). |
-| GF033 | error | Jinja2 template syntax or evaluation error in a `.task.grain.md.jinja2`, `.process.grain.md.jinja2`, or `.capability.grain.md.jinja2` file (§5.7). |
+| GF032 | error | A reference resolves to the wrong kind: `task` `depends_on` targets a `process` or an unrendered `.jinja2` template instead of a concrete `.task.grain.md`, `depends_on` target is not a grainfile, or a deployment identity resolves to a file instead of a repository or folder (§6.2.2, §8.3). |
+| GF033 | error | Jinja2 template syntax or evaluation error in a `.task.grain.md.jinja2` or `.process.grain.md.jinja2` file (§5.7). |
 | GF034 | error | Cycle in `depends_on` (§8.4), or forbidden external-inclusion Jinja2 tag (`include`, `extends`, `import`, `from`) in a `.grain.md.jinja2` template (§5.7). |
-| GF035 | error | Malformed reference or `from_template`: not a valid `https://` (or `file://`) URL or local path, uses a `git::` prefix, `//` path separator, unsupported scheme, or query parameter, attaches `#<anchor>` to a deployment identity or `from_template`, or `from_template` does not end with `.task.grain.md.jinja2` (on a task) / `.process.grain.md.jinja2` (on a process) / `.capability.grain.md.jinja2` (on a capability) (§6.2.2, §6.5, §8.1). |
+| GF035 | error | Malformed reference or `from_template`: not a valid `https://` (or `file://`) URL or local path, uses a `git::` prefix, `//` path separator, unsupported scheme, or query parameter, attaches `#<anchor>` to a deployment identity or `from_template`, or `from_template` does not end with `.task.grain.md.jinja2` (on a task) / `.process.grain.md.jinja2` (on a process) (§6.2.2, §6.5, §8.1). |
 | GF036 | error | A relative reference climbs above its repository root (§8.1.2). |
 
 ## 11. Security considerations
@@ -529,7 +509,7 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 
 ## 12. Registries of identifiers
 
-12.1. **Kinds:** `task`, `process`, `capability`.
+12.1. **Kinds:** `task`, `process`.
 
 12.2. **Trigger sources:** `schedule`, `push`, `merge`, `pull_request`, `workflow`, `manual`, `scenario`.
 
@@ -541,17 +521,17 @@ The **canonical reference** of a repository, folder, or grainfile is its plain `
 
 [`examples/grainfiles/`](../examples/grainfiles/README.md) contains two example repositories mapped via `stubs.yaml`; `python3 tools/grainfiles/grainlint.py examples/grainfiles` validates them all:
 
-- **`widgets/`** (`https://github.com/acme/widgets`): a code repository with design notes (`docs/widget-schema.md`), Go source (`src/widget.go`), a capability definition in `.grain/capabilities/` (`gcp-key.capability.grain.md`), three discrete tasks and one Jinja2 task template in `.grain/tasks/` (`2026-10-16-widget-schema-v2.task.grain.md`, `2026-10-16-widget-schema-v2-migration.task.grain.md` omitting optional `requestor` and using `depends_on` and `not_before: "2026-10-25T09:00:00Z"`, `2026-11-01-drop-widget-v1-support.task.grain.md` with `draft: true` and `not_before: "2026-11-01"`, and `rollout-region.task.grain.md.jinja2` parameterizing `recipient`, `requestor`, `title`, and the rollout prompt), and two reusable processes plus one Jinja2 process template in `.grain/processes/` (`schema-security-review.process.grain.md` with `gate: true` on pull requests and pushes under `when:`, `release-cut-check.process.grain.md` with `scenario` and `manual` triggers under `when:`, and `branch-audit.process.grain.md.jinja2`).
+- **`widgets/`** (`https://github.com/acme/widgets`): a code repository with design notes (`docs/widget-schema.md`), Go source (`src/widget.go`), three discrete tasks and one Jinja2 task template in `.grain/tasks/` (`2026-10-16-widget-schema-v2.task.grain.md`, `2026-10-16-widget-schema-v2-migration.task.grain.md` omitting optional `requestor` and using `depends_on` and `not_before: "2026-10-25T09:00:00Z"`, `2026-11-01-drop-widget-v1-support.task.grain.md` with `draft: true` and `not_before: "2026-11-01"`, and `rollout-region.task.grain.md.jinja2` parameterizing `recipient`, `requestor`, `title`, and the rollout prompt), and two reusable processes plus one Jinja2 process template in `.grain/processes/` (`schema-security-review.process.grain.md` with `gate: true` on pull requests and pushes under `when:`, `release-cut-check.process.grain.md` with `scenario` and `manual` triggers under `when:`, and `branch-audit.process.grain.md.jinja2`).
 - **`grain-eu/`** (`https://github.com/acme/grain-eu`): a deployment repository with a two-step nightly qualification suite in `processes/qualification/`: `smoke.process.grain.md` (with `when.schedule` in `Europe/Berlin` and cross-repo `https://` `/tree/` and `/blob/` `references`) and `report.process.grain.md` (with `when.schedule` and `when.manual`, referencing `./smoke.process.grain.md` and `./criteria.md#pass-thresholds` in `references`).
 
 Broken fixtures exercising the lint codes of §10 are under `tools/grainfiles/testdata/bad/`, generated by `tools/grainfiles/testdata/mkfixtures.py` and checked by `python3 tools/grainfiles/grainlint.py --self-test`.
 
 ## Appendix B. Decisions made by this specification
 
-1. **Three Grainfile kinds (`<name>.task.grain.md`, `<name>.process.grain.md`, and `<name>.capability.grain.md`) and self-contained `.grain.md.jinja2` templates.** Discrete one-off tasks are `<name>.task.grain.md`, standing/repeatable processes are `<name>.process.grain.md`, and capability definitions are `<name>.capability.grain.md` (`**/*.grain.md`, 100% literal), while `<name>.<kind>.grain.md.jinja2` templates apply sandboxed Jinja2 to the whole file to produce a standard `.task.grain.md`, `.process.grain.md`, or `.capability.grain.md` (§2.1, §4.1, §5.7, §7, §7A, §9).
-2. **Mandatory version field (`grainfile: v1`) and agent quick-reference.** Front matter on every `.task.grain.md`, `.process.grain.md`, and `.capability.grain.md` (and rendered `.grain.md.jinja2` output) MUST declare `grainfile: v1` (omission or unsupported version fails with `GF020`), programmatically mapped to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3.1).
+1. **Two directly executed kinds (`<name>.task.grain.md` and `<name>.process.grain.md`) and self-contained `.grain.md.jinja2` templates.** Discrete one-off tasks are `<name>.task.grain.md` and standing/repeatable processes are `<name>.process.grain.md` (`**/*.grain.md`, 100% literal), while `<name>.task.grain.md.jinja2` and `<name>.process.grain.md.jinja2` apply sandboxed Jinja2 to the whole file to produce a standard `.task.grain.md` or `.process.grain.md` (§2.1, §4.1, §5.7, §7, §9).
+2. **Mandatory version field (`grainfile: v1`) and agent quick-reference.** Front matter on every `.task.grain.md` and `.process.grain.md` (and rendered `.grain.md.jinja2` output) MUST declare `grainfile: v1` (omission or unsupported version fails with `GF020`), programmatically mapped to `docs/grainfile-v1.md`, `docs/grainfiles-spec.md`, and `schemas/grainfiles/` (§3.1).
 3. **Mixed-case ASCII stems (`^[A-Za-z0-9][A-Za-z0-9._-]*$`) with compact UTC stem timestamps (`Z`) and case-collision detection (`GF006`).** Grainfile stems use ASCII letters, digits, `.`, `-`, and `_` (starting with an ASCII letter or digit), require compact stem timestamps (`YYYYMMDDTHHMMSSZ`) to use `Z` (UTC), and reject case-insensitive path collisions within a repository (`GF006`) so filenames remain portable across case-insensitive file systems (§4.1.3).
-4. **Finalized orthogonal front-matter vocabulary (`grainfile`, `title`, `draft`, `not_before`, `references`, `from_template`, `capabilities`, `recipient`, `requestor`, `depends_on`, `when`, `gate`).** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` and `trigger_with` are omitted (§6.1, §7.2); `capabilities` is allowed on `.task.grain.md` and `.process.grain.md` (not on `.capability.grain.md`); and `recipient` (defaulting to `"/"`), `requestor`, and `depends_on` are restricted to `.task.grain.md` because tasks are 1-to-1 with a single completion state while processes are standing 1-to-many triggers (§6.1, §6.2.3, §7, §7A, §8.3).
+4. **Finalized orthogonal front-matter vocabulary (`grainfile`, `title`, `draft`, `not_before`, `capabilities`, `references`, `from_template`, `recipient`, `requestor`, `depends_on`, `when`, `gate`).** Process triggers use `when` instead of `on` to avoid YAML 1.1 boolean misparsing (§5.3, §7.2.1); `created_at` and `trigger_with` are omitted (§6.1, §7.2); `capabilities` references OCI container images (`<oci-image>[#<method>]` or `{capability, with}`; §6.6); and `recipient` (defaulting to `"/"`), `requestor`, and `depends_on` are restricted to `.task.grain.md` because tasks are 1-to-1 with a single completion state while processes are standing 1-to-many triggers (§6.1, §6.2.3, §7, §8.3).
 5. **Unknown fields warn; `x_*` extends; unknown trigger sources fail closed.** Unrecognised fields emit a warning (`GF022`) while `x_*` extension fields are silent; unknown `when` trigger sources are an error (`GF020`) (§3.3, §3.4).
-6. **Task lifecycle idempotency, withdrawal events, and `depends_on` / `capabilities` target kind rules.** A `.task.grain.md`'s identity is `(repo_url, file_path)`: once completed, pushes do not re-run it; editing a queued task updates it; deleting or drafting an active task, process, or capability emits `task_removed`, `process_removed`, or `capability_removed` (`action: "removed"`); deleting a completed task is a no-op (§9.3). Only `.task.grain.md` may declare `depends_on` (`GF020` on `.process.grain.md`), every `depends_on` entry must resolve to a concrete `.task.grain.md` file, and every `capabilities` entry must resolve to a concrete `.capability.grain.md` file, never an unrendered `.jinja2` template (`GF032`; §8.3).
+6. **Task lifecycle idempotency, withdrawal events, and `depends_on` target kind rules.** A `.task.grain.md`'s identity is `(repo_url, file_path)`: once completed, pushes do not re-run it; editing a queued task updates it; deleting or drafting an active task or process emits `task_removed` / `process_removed` (`action: "removed"`); deleting a completed task is a no-op (§9.3). Only `.task.grain.md` may declare `depends_on` (`GF020` on `.process.grain.md`), and every `depends_on` entry must resolve to a concrete `.task.grain.md` file, never a `.process.grain.md` or an unrendered `.jinja2` template (`GF032`; §8.3).
 7. **Security invariants.** `.task.grain.md` executes only from default/protected branches and `when.pull_request` reads `.process.grain.md` definitions from the base branch (§11.1); Hub enforces directory-verified subscription authorization (§11.2), commit-SHA pinning and regular-file/tree checks on `/v1/grainfiles/content` and mux streams (§11.3), `depends_on` DAG cycle detection (§11.4), and structural separation between trusted prompts and untrusted references/diffs (§11.5).

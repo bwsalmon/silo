@@ -19,7 +19,7 @@
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/notBefore"
     },
     "capabilities": {
-      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
+      "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/capabilityList"
     },
     "references": {
       "$ref": "https://grain.dev/schemas/grainfiles/common.schema.json#/$defs/refList"
