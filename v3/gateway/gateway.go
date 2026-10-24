@@ -1,7 +1,11 @@
-// Package gateway is silo's root daemon (design §4): it creates agent users,
-// starts each agent as a sandboxed transient systemd service, keeps the
-// parent/child tree, stops whole subtrees, and writes the audit log. Callers
-// reach it over a Unix socket and are identified by SO_PEERCRED.
+// Package gateway is silo's root daemon (design §4): the Silo Hub's record
+// of every agent. Agents run wherever their registrar put them (a systemd
+// unit, a container, a microVM, a subprocess) and dial in with
+// `silo connect`; the gateway registers them, hands out and checks their
+// tokens, keeps the parent/child tree, routes parent → child messages,
+// records page links and secret requests, stops whole subtrees, and writes
+// the audit log. Callers reach it over a Unix socket and are identified by
+// SO_PEERCRED or by an agent token.
 package gateway
 
 import (
@@ -18,14 +22,13 @@ import (
 
 // Deps are the gateway's connections to the host.
 type Deps struct {
-	Systemd  Systemd
-	Users    Users
-	Procs    Procs
-	Clock    Clock
-	Launcher Launcher
-	Audit    *AuditLog
-	Store    Store
-	Logf     func(format string, args ...any)
+	Clock Clock
+	Audit *AuditLog
+	Store Store
+	// LookupUID returns the uid of a user name, or -1 if there is none.
+	// It is used to recognise the bridge.
+	LookupUID func(name string) (int, error)
+	Logf      func(format string, args ...any)
 }
 
 // Gateway holds the agent tree. All methods are safe for concurrent use;
@@ -54,65 +57,69 @@ func New(cfg *Config, d Deps) (*Gateway, error) {
 	return &Gateway{cfg: cfg, d: d, st: st, bridgeUID: -1}, nil
 }
 
-// Lifetime is how long an agent lives (design §8.1). In M1a "until-done"
-// and "persistent" both mean "until its process exits or it is stopped".
-type Lifetime struct {
-	Kind    string `json:"kind"`
-	Seconds int    `json:"seconds,omitempty"`
-}
-
-const (
-	LifetimeUntilDone  = "until-done"
-	LifetimeTTL        = "ttl"
-	LifetimePersistent = "persistent"
-)
-
-func (l Lifetime) validate() error {
-	switch l.Kind {
-	case LifetimeUntilDone, LifetimePersistent:
-		if l.Seconds != 0 {
-			return fmt.Errorf("lifetime %s takes no seconds", l.Kind)
-		}
-	case LifetimeTTL:
-		if l.Seconds <= 0 {
-			return fmt.Errorf("lifetime ttl needs seconds > 0")
-		}
-	default:
-		return fmt.Errorf("lifetime kind %q: want until-done, ttl or persistent", l.Kind)
-	}
-	return nil
-}
-
 // maxDepth is how many levels of agents may sit below root (design §8.3).
 const maxDepth = 3
 
-var (
-	agentIDRe   = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,23}[a-z0-9])?$`)
-	childUserRe = regexp.MustCompile(`^silo-a-[a-z0-9]([a-z0-9-]{0,23}[a-z0-9])?$`)
+// Bounds on what one caller can make the gateway hold.
+const (
+	maxInbox       = 100
+	maxMessage     = 64 << 10
+	maxBrief       = 64 << 10
+	maxPendingSecs = 20
+	maxPages       = 50 // per owner
 )
 
-// Start reconciles the persisted agents with systemd, re-adopting units
-// that are still running and tombstoning those that are not, then creates
-// the root agent if it is not running.
-func (g *Gateway) Start(ctx context.Context) error {
+var (
+	agentIDRe  = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,23}[a-z0-9])?$`)
+	unixUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	runtimeRe  = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,31}$`)
+)
+
+var locationKinds = map[string]bool{
+	"systemd": true, "container": true, "microvm": true, "subprocess": true, "remote": true, "other": true,
+}
+
+// Start seeds the standing agents (root and the default user agent) on
+// first start and re-arms any that are not connected, then times out
+// connections that went quiet while the gateway was down.
+func (g *Gateway) Start(_ context.Context) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if u, err := g.d.Users.Lookup(g.cfg.BridgeUser); err != nil {
-		return err
-	} else if u != nil {
-		g.bridgeUID = u.UID
+	if g.d.LookupUID != nil {
+		uid, err := g.d.LookupUID(g.cfg.BridgeUser)
+		if err != nil {
+			return err
+		}
+		g.bridgeUID = uid
 	}
 	if _, err := g.d.Audit.Append("gateway", EvGatewayStart, map[string]any{"pid": os.Getpid(), "agents": len(g.st.Agents)}); err != nil {
 		return err
 	}
-	if err := g.reconcileLocked(ctx, true); err != nil {
-		return err
+	g.expireLocked()
+	if g.cfg.RootEnabled() {
+		if err := g.ensureStandingLocked(RootAgentID, "", true, g.cfg.RootAgent, true); err != nil {
+			return fmt.Errorf("seeding the root agent: %w", err)
+		}
 	}
-	return g.ensureRootLocked(ctx)
+	if g.cfg.UserAgentEnabled() {
+		// The default user agent is the root agent's child, so root may
+		// message it and it may never message root (design §8.7).
+		parent := ""
+		if g.cfg.RootEnabled() {
+			parent = RootAgentID
+		}
+		if err := g.ensureStandingLocked(g.cfg.UserAgent.Name, parent, false, g.cfg.UserAgent, true); err != nil {
+			return fmt.Errorf("seeding the user agent: %w", err)
+		}
+	}
+	return g.saveLocked()
 }
 
-// Run reconciles periodically until ctx is done.
+// Run times out silent connections periodically until ctx is done.
 func (g *Gateway) Run(ctx context.Context) {
+	if g.cfg.ReconcileIntervalSec <= 0 {
+		return
+	}
 	t := time.NewTicker(time.Duration(g.cfg.ReconcileIntervalSec) * time.Second)
 	defer t.Stop()
 	for {
@@ -120,73 +127,82 @@ func (g *Gateway) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := g.Reconcile(ctx); err != nil {
+			if err := g.Reconcile(); err != nil {
 				g.d.Logf("reconcile: %v", err)
 			}
 		}
 	}
 }
 
-// Reconcile notices agents whose units have ended.
-func (g *Gateway) Reconcile(ctx context.Context) error {
+// Reconcile marks connected agents whose wrapper has gone quiet as
+// disconnected, re-arming standing ones.
+func (g *Gateway) Reconcile() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.reconcileLocked(ctx, false)
-}
-
-func (g *Gateway) reconcileLocked(ctx context.Context, startup bool) error {
-	changed := false
-	for _, a := range g.byDepth() {
-		if a.State != StateRunning {
-			continue // stopped earlier in this pass, with its parent
-		}
-		st, err := g.d.Systemd.Status(ctx, a.Unit)
-		if err != nil {
-			return fmt.Errorf("agent %s: %w", a.ID, err)
-		}
-		if st.Active() {
-			if startup {
-				g.audit("gateway", EvAdopt, map[string]any{"agent": a.ID, "unit": a.Unit, "state": st.String(), "main_pid": st.MainPID})
-			}
-			continue
-		}
-		cause := "exited"
-		if startup {
-			cause = "exited while the gateway was down"
-		}
-		g.tombstone(a, st, cause, StateExited)
-		if st.Exists {
-			// The tombstone holds the result now; free the unit name.
-			_ = g.d.Systemd.ResetFailed(ctx, a.Unit)
-		}
-		g.audit("gateway", EvExit, map[string]any{"agent": a.ID, "tombstone": a.Tombstone})
-		changed = true
-		// A parent's exit stops its subtree (on_parent_exit "stop", design
-		// §8.4). The root agent's children are left alone.
-		if !a.Root {
-			if _, err := g.stopSubtreeLocked(ctx, a, false, false, "gateway", ""); err != nil {
-				g.d.Logf("stopping children of exited agent %s: %v", a.ID, err)
-			}
-		}
-	}
-	if changed {
-		if err := g.saveLocked(); err != nil {
-			return err
-		}
-	}
-	if !startup {
-		if r := g.st.Agents[RootAgentID]; r != nil && r.State == StateExited && r.Tombstone != nil &&
-			r.Tombstone.Time.Sub(r.Created) >= rootRestartMinUptime {
-			g.d.Logf("root agent exited (%s); restarting it", r.Tombstone.LastState)
-			return g.ensureRootLocked(ctx)
-		}
+	if g.expireLocked() {
+		return g.saveLocked()
 	}
 	return nil
 }
 
-// rootRestartMinUptime keeps a root agent that dies at once from being
-// restarted in a loop; it is restarted again on the next gateway start.
-const rootRestartMinUptime = time.Minute
+func (g *Gateway) expireLocked() bool {
+	if g.cfg.HeartbeatTimeoutSec <= 0 {
+		return false
+	}
+	now := g.d.Clock.Now()
+	limit := time.Duration(g.cfg.HeartbeatTimeoutSec) * time.Second
+	changed := false
+	for _, a := range g.byDepth() {
+		if a.State != StateConnected || a.LastSeen == nil || now.Sub(*a.LastSeen) < limit {
+			continue
+		}
+		g.disconnectLocked(a, "gateway", "no heartbeat for "+now.Sub(*a.LastSeen).Round(time.Second).String())
+		changed = true
+	}
+	return changed
+}
+
+// ensureStandingLocked creates a standing agent if it is missing and
+// re-arms it (a fresh registration token, written to its token file) if it
+// is not connected. rearmStopped also re-arms one the human stopped, which
+// happens only on gateway start.
+func (g *Gateway) ensureStandingLocked(id, parent string, root bool, sc StandingAgentConfig, rearmStopped bool) error {
+	a := g.st.Agents[id]
+	if a != nil && (!a.Standing || a.Root != root) {
+		return fmt.Errorf("agent %q exists and is not the standing agent", id)
+	}
+	if a == nil || (a.State == StateStopped && rearmStopped) {
+		if a != nil {
+			g.st.History = append(g.st.History, a)
+		}
+		a = &Agent{
+			ID: id, Root: root, Standing: true, User: sc.User, Parent: parent,
+			Location: Location{Kind: "systemd", Detail: "silo-agent@" + id + ".service"},
+			Runtime:  sc.Runtime, Brief: sc.Brief, Limits: sc.Limits, MayRegister: true,
+			State: StateRegistered, Created: g.d.Clock.Now(), RegisteredBy: "gateway",
+		}
+		g.st.Agents[id] = a
+		g.audit("gateway", EvRegister, registerPayload(a))
+	}
+	switch a.State {
+	case StateConnected:
+		return nil
+	case StateStopped:
+		return nil
+	}
+	return g.armLocked(a)
+}
+
+// armLocked gives a standing agent a fresh registration token and writes it
+// to its token file, mode 0600 in the root-only state directory.
+func (g *Gateway) armLocked(a *Agent) error {
+	tok, h := newToken(regTokenPrefix)
+	if err := writeFileAtomic(g.cfg.TokenDir(), a.ID, []byte(tok+"\n"), 0o600); err != nil {
+		return err
+	}
+	a.TokenHash, a.SessionHash, a.State = h, "", StateRegistered
+	return nil
+}
 
 // byDepth lists the current agents parents-first, then by id.
 func (g *Gateway) byDepth() []*Agent {
@@ -227,69 +243,46 @@ func (g *Gateway) chain(a *Agent) []string {
 	return out
 }
 
-func (g *Gateway) ensureRootLocked(ctx context.Context) error {
-	if !g.cfg.RootEnabled() {
-		return nil
-	}
-	if r := g.st.Agents[RootAgentID]; r != nil && r.State == StateRunning {
-		return nil
-	}
-	_, err := g.spawnLocked(ctx, "gateway", spawnSpec{
-		ID: RootAgentID, Root: true, User: RootUser, CLI: g.cfg.RootAgent.CLI,
-		Brief: g.cfg.RootAgent.Brief, Limits: g.cfg.RootAgent.Limits,
-		Lifetime: Lifetime{Kind: LifetimePersistent},
-	})
-	if err != nil {
-		return fmt.Errorf("starting the root agent: %w", err)
-	}
-	return nil
-}
+func active(a *Agent) bool { return a != nil && a.State != StateStopped }
 
-// ---- spawn -----------------------------------------------------------------
+// ---- agent.register ---------------------------------------------------------
 
-// SpawnParams is the spawn request (design §8.1, the parts M1a implements).
-type SpawnParams struct {
-	Relay
-	// Name is the agent id, also used in its unit name.
+// RegisterParams is agent.register (design §8.1).
+type RegisterParams struct {
+	Auth
+	// Name is the agent id.
 	Name string `json:"name"`
-	// User defaults to silo-a-<name>.
-	User string `json:"user,omitempty"`
-	// Parent may be set only by a human; for agents it is the caller.
-	Parent   string   `json:"parent,omitempty"`
-	CLI      string   `json:"cli"`
-	Brief    string   `json:"brief"`
-	Limits   Limits   `json:"limits"`
-	Lifetime Lifetime `json:"lifetime"`
+	// Parent may be set only by the human; for agents it is the caller.
+	Parent      string   `json:"parent,omitempty"`
+	User        string   `json:"user,omitempty"`
+	Location    Location `json:"location"`
+	Runtime     string   `json:"runtime,omitempty"`
+	Brief       string   `json:"brief,omitempty"`
+	Limits      Limits   `json:"limits"`
+	BudgetUSD   float64  `json:"budget_usd,omitempty"`
+	MayRegister bool     `json:"may_register,omitempty"`
+	StopCmd     []string `json:"stop_cmd,omitempty"`
 }
 
-// SpawnResult is what spawn returns (design §8.2, without the ACP session,
-// which M1b adds).
-type SpawnResult struct {
-	Agent string `json:"agent"`
-	User  string `json:"user"`
-	Unit  string `json:"unit"`
-	Slice string `json:"slice"`
+// RegisterResult carries the single-use registration token. It is shown
+// once and never stored; the registrar passes it to `silo connect` in the
+// agent's environment as SILO_AGENT_TOKEN.
+type RegisterResult struct {
+	Agent  string `json:"agent"`
+	Token  string `json:"token"`
+	HubURL string `json:"hub_url"`
 }
 
-type spawnSpec struct {
-	ID, Parent, User, CLI, Brief string
-	Root                         bool
-	Limits                       Limits
-	Lifetime                     Lifetime
-}
-
-// Spawn starts a new agent for caller.
-func (g *Gateway) Spawn(ctx context.Context, c Caller, p SpawnParams) (*SpawnResult, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	// Only the human and the root agent may spawn in M1 (may_spawn is M2).
-	if !c.Human() && c.Agent != RootAgentID {
-		return nil, g.deny(c, "spawn", "only the human and the root agent may spawn agents")
-	}
+// Register records a new agent for caller.
+func (g *Gateway) Register(c Caller, p RegisterParams) (*RegisterResult, error) {
 	parent := p.Parent
 	if !c.Human() {
+		ca := g.st.Agents[c.Agent]
+		if !ca.MayRegister {
+			return nil, g.deny(c, "agent.register", fmt.Sprintf("agent %q may not register agents", c.Agent))
+		}
 		if p.Parent != "" && p.Parent != c.Agent {
-			return nil, g.deny(c, "spawn", "agents spawn only their own children")
+			return nil, g.deny(c, "agent.register", "agents register only their own children")
 		}
 		parent = c.Agent
 	}
@@ -299,106 +292,65 @@ func (g *Gateway) Spawn(ctx context.Context, c Caller, p SpawnParams) (*SpawnRes
 	if p.Name == RootAgentID {
 		return nil, invalidParams("name %q is reserved for the root agent", p.Name)
 	}
-	user := p.User
-	if user == "" {
-		user = ChildUserPrefix + p.Name
+	if p.User != "" && (!unixUserRe.MatchString(p.User) || p.User == "root" || p.User == g.cfg.RootAgent.User) {
+		return nil, invalidParams("user %q: want a Unix user name other than root and %s", p.User, g.cfg.RootAgent.User)
 	}
-	if !childUserRe.MatchString(user) {
-		return nil, invalidParams("user %q: agent users are named %s<name>", user, ChildUserPrefix)
+	loc := p.Location
+	if loc.Kind == "" {
+		loc.Kind = "other"
+	}
+	if !locationKinds[loc.Kind] {
+		return nil, invalidParams("location.kind %q: want systemd, container, microvm, subprocess, remote or other", loc.Kind)
+	}
+	if len(loc.Detail) > 256 {
+		return nil, invalidParams("location.detail: at most 256 bytes")
+	}
+	if p.Runtime != "" && !runtimeRe.MatchString(p.Runtime) {
+		return nil, invalidParams("runtime %q: want a CLI name such as claude", p.Runtime)
+	}
+	if len(p.Brief) > maxBrief {
+		return nil, invalidParams("brief: at most %d bytes", maxBrief)
 	}
 	if err := p.Limits.Validate(); err != nil {
 		return nil, invalidParams("limits: %v", err)
 	}
-	lt := p.Lifetime
-	if lt.Kind == "" {
-		lt.Kind = LifetimeUntilDone
+	if p.BudgetUSD < 0 {
+		return nil, invalidParams("budget_usd: must not be negative")
 	}
-	if err := lt.validate(); err != nil {
-		return nil, invalidParams("%v", err)
+	for _, s := range p.StopCmd {
+		if s == "" || len(s) > 1024 {
+			return nil, invalidParams("stop_cmd: arguments must be 1-1024 bytes")
+		}
+	}
+	if len(p.StopCmd) > 32 {
+		return nil, invalidParams("stop_cmd: at most 32 arguments")
 	}
 	if parent != "" {
 		pa := g.st.Agents[parent]
-		if pa == nil || pa.State != StateRunning {
-			return nil, invalidParams("parent %q is not a running agent", parent)
+		if !active(pa) {
+			return nil, invalidParams("parent %q is not an active agent", parent)
 		}
 		if len(g.chain(pa)) >= maxDepth {
 			return nil, invalidParams("parent %q is already %d levels below root", parent, maxDepth)
 		}
 	}
-	return g.spawnLocked(ctx, c.Actor(), spawnSpec{
-		ID: p.Name, Parent: parent, User: user, CLI: p.CLI, Brief: p.Brief,
-		Limits: p.Limits.withDefaults(g.cfg.DefaultLimits), Lifetime: lt,
-	})
-}
-
-func (g *Gateway) spawnLocked(ctx context.Context, actor string, s spawnSpec) (res *SpawnResult, err error) {
-	defer func() {
-		if err != nil {
-			g.audit(actor, EvSpawnFailed, map[string]any{"agent": s.ID, "user": s.User, "parent": s.Parent, "cli": s.CLI, "error": err.Error()})
-		}
-	}()
-	prev := g.st.Agents[s.ID]
-	if prev != nil && prev.State == StateRunning {
-		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is already running", s.ID)}
+	prev := g.st.Agents[p.Name]
+	if active(prev) {
+		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is already registered (%s)", p.Name, prev.State)}
 	}
-	for _, a := range g.st.Agents {
-		if a.State == StateRunning && a.User == s.User {
-			return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("user %s is in use by agent %q", s.User, a.ID)}
+	if p.User != "" {
+		for _, a := range g.st.Agents {
+			if active(a) && a.User == p.User && a.Standing {
+				return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("user %s belongs to standing agent %q", p.User, a.ID)}
+			}
 		}
 	}
+	tok, h := newToken(regTokenPrefix)
 	a := &Agent{
-		ID: s.ID, Root: s.Root, User: s.User, CLI: s.CLI, Brief: s.Brief, Parent: s.Parent,
-		Unit: unitName(s.ID), Limits: s.Limits, Lifetime: s.Lifetime, State: StateRunning,
-		Created: g.d.Clock.Now(), SpawnedBy: actor,
-	}
-	// The chain walk needs the parent link only, so compute the slice from
-	// a provisional view of the tree.
-	if s.Root {
-		a.Slice = rootSlice
-	} else {
-		a.Slice = sliceName(append(g.chainOf(s.Parent), s.ID))
-	}
-
-	u, err := g.ensureUserLocked(actor, s.User)
-	if err != nil {
-		return nil, err
-	}
-	a.UID, a.Home = u.UID, u.Home
-
-	proc, err := g.d.Launcher.Prepare(ctx, LaunchRequest{Agent: a.ID, CLI: a.CLI, Brief: a.Brief, User: *u, Root: a.Root})
-	if err != nil {
-		return nil, err
-	}
-
-	if st, err := g.d.Systemd.Status(ctx, a.Unit); err != nil {
-		return nil, err
-	} else if st.Active() {
-		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("unit %s is already running but not known to the gateway", a.Unit)}
-	} else if st.Exists {
-		_ = g.d.Systemd.ResetFailed(ctx, a.Unit)
-	}
-
-	env := map[string]string{
-		"HOME": u.Home, "USER": u.Name, "LOGNAME": u.Name, "SILO_AGENT": a.ID,
-		"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
-	}
-	for k, v := range proc.Env {
-		env[k] = v
-	}
-	spec := UnitSpec{
-		Name: a.Unit, Slice: a.Slice, Description: "silo agent " + a.ID,
-		Argv: proc.Argv, Env: env, Properties: serviceProps(g.cfg, a, *u),
-	}
-	if err := g.d.Systemd.StartService(ctx, spec); err != nil {
-		return nil, fmt.Errorf("starting %s: %w", a.Unit, err)
-	}
-	if !a.Root {
-		// The subtree's slice carries the limits too, so descendants are
-		// capped together with the agent (design §4.2).
-		if err := g.d.Systemd.SetProperties(ctx, a.Slice, limitProps(a.Limits)); err != nil {
-			_ = g.d.Systemd.Stop(ctx, a.Slice)
-			return nil, fmt.Errorf("limiting %s: %w", a.Slice, err)
-		}
+		ID: p.Name, User: p.User, Parent: parent, Location: loc, Runtime: p.Runtime, Brief: p.Brief,
+		Limits: p.Limits.withDefaults(g.cfg.DefaultLimits), BudgetUSD: p.BudgetUSD, MayRegister: p.MayRegister,
+		StopCmd: p.StopCmd, State: StateRegistered, Created: g.d.Clock.Now(), RegisteredBy: c.Actor(),
+		TokenHash: h,
 	}
 	if prev != nil {
 		g.st.History = append(g.st.History, prev)
@@ -407,110 +359,172 @@ func (g *Gateway) spawnLocked(ctx context.Context, actor string, s spawnSpec) (r
 	if err := g.saveLocked(); err != nil {
 		return nil, err
 	}
-	g.audit(actor, EvSpawn, map[string]any{
-		"agent": a.ID, "root": a.Root, "parent": a.Parent, "user": a.User, "uid": a.UID,
-		"cli": a.CLI, "brief": a.Brief, "argv": proc.Argv, "limits": a.Limits, "lifetime": a.Lifetime,
-		"unit": a.Unit, "slice": a.Slice,
-	})
-	return &SpawnResult{Agent: a.ID, User: a.User, Unit: a.Unit, Slice: a.Slice}, nil
+	g.audit(c.Actor(), EvRegister, registerPayload(a))
+	return &RegisterResult{Agent: a.ID, Token: tok, HubURL: g.cfg.HubURL}, nil
 }
 
-func (g *Gateway) chainOf(id string) []string {
-	if a := g.st.Agents[id]; a != nil {
-		return g.chain(a)
+func registerPayload(a *Agent) map[string]any {
+	return map[string]any{
+		"agent": a.ID, "root": a.Root, "standing": a.Standing, "parent": a.Parent, "user": a.User,
+		"location": a.Location, "runtime": a.Runtime, "brief": a.Brief, "limits": a.Limits,
+		"budget_usd": a.BudgetUSD, "may_register": a.MayRegister, "stop_cmd": a.StopCmd,
 	}
-	return nil
 }
 
-// ensureUserLocked returns the silo-managed user name, creating it if it
-// does not exist. It never returns uid 0 or a user silo did not create.
-func (g *Gateway) ensureUserLocked(actor, name string) (*UserInfo, error) {
-	u, err := g.d.Users.Lookup(name)
-	if err != nil {
-		return nil, err
+// ---- agent.connect, heartbeat, disconnect ------------------------------------
+
+// ConnectParams is agent.connect: `silo connect` presenting its
+// registration token.
+type ConnectParams struct {
+	Auth
+	Token string `json:"token"`
+	Host  string `json:"host,omitempty"`
+	PID   int    `json:"pid,omitempty"`
+}
+
+// ConnectResult is the agent's session: the token every later call from
+// the wrapper (and from silo-mcp beside it) carries as agent_token.
+type ConnectResult struct {
+	Agent        string `json:"agent"`
+	SessionToken string `json:"session_token"`
+	Parent       string `json:"parent,omitempty"`
+	Root         bool   `json:"root,omitempty"`
+	Runtime      string `json:"runtime,omitempty"`
+	Brief        string `json:"brief,omitempty"`
+	// HeartbeatSec is how often the wrapper must call agent.heartbeat.
+	HeartbeatSec int `json:"heartbeat_s"`
+}
+
+// Connect activates the agent whose registration token this is. The token
+// is used up: a second connect with it fails.
+func (g *Gateway) Connect(c Caller, cred PeerCred, p ConnectParams) (*ConnectResult, error) {
+	if p.Token == "" {
+		return nil, invalidParams("token is required")
 	}
-	if u != nil {
-		recorded, ok := g.st.Users[name]
-		inRange := u.UID >= g.cfg.UIDMin && u.UID <= g.cfg.UIDMax
-		if u.UID == 0 || !inRange || (ok && recorded != u.UID) {
-			return nil, &Error{Code: CodeForbidden, Message: fmt.Sprintf("user %s (uid %d) exists and was not created by silo", name, u.UID)}
+	h := hashToken(p.Token)
+	var a *Agent
+	for _, cand := range g.st.Agents {
+		if hashEqual(cand.TokenHash, h) {
+			a = cand
 		}
-		if !ok {
-			// A user in silo's uid range was made by silo (or its
-			// installer); adopt it into the record.
-			g.st.Users[name] = u.UID
-		}
-		return u, nil
 	}
-	used := map[int]bool{}
-	for _, uid := range g.st.Users {
-		used[uid] = true
+	if a == nil || a.State == StateStopped {
+		g.audit(c.Actor(), EvAuthDeny, map[string]any{"method": "agent.connect", "uid": cred.UID, "pid": cred.PID, "reason": "unknown or used registration token"})
+		return nil, &Error{Code: CodeForbidden, Message: "permission denied: unknown or used registration token"}
 	}
-	uid := -1
-	for cand := g.cfg.UIDMin; cand <= g.cfg.UIDMax; cand++ {
-		if used[cand] {
-			continue
-		}
-		taken, err := g.d.Users.UIDTaken(cand)
-		if err != nil {
-			return nil, err
-		}
-		if !taken {
-			uid = cand
-			break
-		}
-	}
-	if uid < 0 {
-		return nil, fmt.Errorf("no free uid in %d-%d", g.cfg.UIDMin, g.cfg.UIDMax)
-	}
-	if err := os.MkdirAll(g.cfg.HomeRoot, 0o755); err != nil {
-		return nil, err
-	}
-	home := filepath.Join(g.cfg.HomeRoot, name)
-	u, err = g.d.Users.Create(name, uid, home)
-	if err != nil {
-		return nil, fmt.Errorf("creating user %s: %w", name, err)
-	}
-	if u == nil || u.UID != uid {
-		return nil, fmt.Errorf("creating user %s: it does not have uid %d afterwards", name, uid)
-	}
-	g.st.Users[name] = uid
+	sess, sh := newToken(sessionTokenPrefix)
+	now := g.d.Clock.Now()
+	a.TokenHash, a.SessionHash, a.State = "", sh, StateConnected
+	a.ConnectedAt, a.LastSeen = &now, &now
+	a.Peer = &Peer{Host: p.Host, PID: p.PID, UID: cred.UID}
 	if err := g.saveLocked(); err != nil {
 		return nil, err
 	}
-	g.audit(actor, EvUserCreate, map[string]any{"user": name, "uid": uid, "home": home})
-	return u, nil
+	if a.Standing {
+		_ = os.Remove(filepath.Join(g.cfg.TokenDir(), a.ID))
+	}
+	g.audit("agent:"+a.ID, EvConnect, map[string]any{"agent": a.ID, "host": p.Host, "pid": p.PID, "uid": cred.UID})
+	hb := g.cfg.HeartbeatTimeoutSec / 3
+	if hb <= 0 {
+		hb = 30
+	}
+	return &ConnectResult{
+		Agent: a.ID, SessionToken: sess, Parent: a.Parent, Root: a.Root, Runtime: a.Runtime,
+		Brief: a.Brief, HeartbeatSec: hb,
+	}, nil
 }
 
-// ---- stop ------------------------------------------------------------------
+// HeartbeatResult tells the wrapper whether to keep going.
+type HeartbeatResult struct {
+	State string `json:"state"`
+	// Stop is "graceful" (SIGTERM the CLI's process group, SIGKILL after
+	// 30s) or "kill" (SIGKILL at once) once the agent has been stopped.
+	Stop string `json:"stop,omitempty"`
+	// Inbox is how many messages are waiting in agent.inbox.
+	Inbox int `json:"inbox"`
+	// Secrets is how many of the agent's secret requests are pending.
+	Secrets int `json:"secrets"`
+}
 
-// StopParams is the stop request.
+// Heartbeat records that the caller's wrapper is alive.
+func (g *Gateway) Heartbeat(c Caller) (*HeartbeatResult, error) {
+	a := g.st.Agents[c.Agent]
+	if a.State == StateStopped {
+		return &HeartbeatResult{State: a.State, Stop: a.StopMode}, nil
+	}
+	now := g.d.Clock.Now()
+	a.LastSeen = &now
+	// A heartbeat is not audited and not saved at once: losing one on a
+	// crash costs nothing.
+	n := 0
+	for _, s := range g.st.Secrets {
+		if s.Agent == a.ID && s.State == SecretPending {
+			n++
+		}
+	}
+	return &HeartbeatResult{State: a.State, Inbox: len(a.Inbox), Secrets: n}, nil
+}
+
+// Disconnect is the wrapper saying it is going away: its CLI exited. The
+// session token is revoked; a standing agent is re-armed so its unit can
+// reconnect when systemd restarts it.
+func (g *Gateway) Disconnect(c Caller, reason string) (*AgentInfo, error) {
+	a := g.st.Agents[c.Agent]
+	if a.State == StateConnected {
+		g.disconnectLocked(a, c.Actor(), reason)
+	} else {
+		a.SessionHash = ""
+	}
+	if err := g.saveLocked(); err != nil {
+		return nil, err
+	}
+	return g.infoLocked(a), nil
+}
+
+func (g *Gateway) disconnectLocked(a *Agent, actor, reason string) {
+	a.State, a.SessionHash = StateDisconnected, ""
+	if reason == "" {
+		reason = "disconnected"
+	}
+	g.audit(actor, EvDisconnect, map[string]any{"agent": a.ID, "reason": reason})
+	if a.Standing {
+		if err := g.armLocked(a); err != nil {
+			g.d.Logf("re-arming standing agent %s: %v", a.ID, err)
+		}
+	}
+}
+
+// ---- agent.stop ----------------------------------------------------------------
+
+// StopParams is agent.stop.
 type StopParams struct {
-	Relay
+	Auth
 	Agent string `json:"agent"`
 	// Mode is "graceful" (SIGTERM, then SIGKILL after 30s; the default) or
 	// "kill" (SIGKILL at once).
 	Mode string `json:"mode,omitempty"`
 }
 
-// StopResult lists every agent that was stopped, the target first.
+// StopResult lists every agent that was stopped, the target first. StopCmds
+// are the registrars' stop commands for the stopped agents that have one
+// (a `docker rm -f`, say), for the caller's `silo stop` to run as the
+// caller once the wrappers have had their chance. The gateway never runs
+// them itself: it would be running a registrar's command as root.
 type StopResult struct {
-	Stopped   []string   `json:"stopped"`
-	Tombstone *Tombstone `json:"tombstone"`
+	Stopped   []string            `json:"stopped"`
+	Tombstone *Tombstone          `json:"tombstone"`
+	StopCmds  map[string][]string `json:"stop_cmds,omitempty"`
 }
 
 // Stop stops an agent and every descendant, leaving tombstones.
-func (g *Gateway) Stop(ctx context.Context, c Caller, p StopParams) (*StopResult, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *Gateway) Stop(c Caller, p StopParams) (*StopResult, error) {
 	if !c.Human() && !g.isDescendant(p.Agent, c.Agent) {
-		return nil, g.deny(c, "stop", fmt.Sprintf("agent %q is not a descendant of %q", p.Agent, c.Agent))
+		return nil, g.deny(c, "agent.stop", fmt.Sprintf("agent %q is not a descendant of %q", p.Agent, c.Agent))
 	}
-	kill := false
 	switch p.Mode {
-	case "", "graceful":
-	case "kill":
-		kill = true
+	case "":
+		p.Mode = "graceful"
+	case "graceful", "kill":
 	default:
 		return nil, invalidParams("mode %q: want graceful or kill", p.Mode)
 	}
@@ -518,112 +532,58 @@ func (g *Gateway) Stop(ctx context.Context, c Caller, p StopParams) (*StopResult
 	if a == nil {
 		return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no agent %q", p.Agent)}
 	}
-	if a.State != StateRunning {
-		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is not running (%s)", p.Agent, a.State)}
+	if a.State == StateStopped {
+		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is already stopped", p.Agent)}
 	}
-	stopped, err := g.stopSubtreeLocked(ctx, a, true, kill, c.Actor(), "stopped by "+c.Actor())
-	if err != nil {
-		return nil, err
-	}
-	return &StopResult{Stopped: stopped, Tombstone: a.Tombstone}, nil
-}
-
-// stopSubtreeLocked stops a's running descendants and, with self, a itself.
-// It tombstones each one, saves, and writes one stop audit entry.
-func (g *Gateway) stopSubtreeLocked(ctx context.Context, a *Agent, self, kill bool, actor, cause string) ([]string, error) {
-	var targets []*Agent // a (if self) then descendants, parents first
-	if self {
-		targets = append(targets, a)
-	}
+	targets := []*Agent{a}
 	for _, d := range g.byDepth() {
-		if d.State == StateRunning && g.isDescendant(d.ID, a.ID) {
+		if active(d) && g.isDescendant(d.ID, a.ID) {
 			targets = append(targets, d)
 		}
 	}
-	if len(targets) == 0 {
-		return nil, nil
-	}
-	last := map[string]UnitStatus{}
+	res := &StopResult{}
+	now := g.d.Clock.Now()
 	for _, t := range targets {
-		st, err := g.d.Systemd.Status(ctx, t.Unit)
-		if err != nil {
-			return nil, err
+		cause := "stopped by " + c.Actor()
+		if t != a {
+			cause = fmt.Sprintf("parent %s stopped", t.Parent)
 		}
-		last[t.ID] = st
-	}
-	if kill {
-		for i := len(targets) - 1; i >= 0; i-- {
-			_ = g.d.Systemd.Kill(ctx, targets[i].Unit)
+		// The session token stays valid for agent.heartbeat only, which
+		// is how the wrapper learns to signal its CLI; every other method
+		// refuses a stopped agent.
+		t.State, t.StopMode, t.TokenHash = StateStopped, p.Mode, ""
+		t.Inbox = nil
+		t.Tombstone = &Tombstone{Time: now, Cause: cause}
+		if ch := g.childrenOf(t.ID); len(ch) > 0 {
+			t.Tombstone.Children = ch
 		}
-	}
-	// Stop the deepest first. A non-root agent's slice holds its whole
-	// subtree, so stopping it is the one step that matters; the per-unit
-	// stops make sure nothing is missed if a unit sits elsewhere.
-	var firstErr error
-	for i := len(targets) - 1; i >= 0; i-- {
-		t := targets[i]
-		if !t.Root {
-			if err := g.d.Systemd.Stop(ctx, t.Slice); err != nil && firstErr == nil {
-				firstErr = err
+		if len(t.StopCmd) > 0 {
+			if res.StopCmds == nil {
+				res.StopCmds = map[string][]string{}
+			}
+			res.StopCmds[t.ID] = t.StopCmd
+		}
+		for _, pg := range g.st.Pages {
+			if pg.Owner == t.ID {
+				pg.Active = false
 			}
 		}
-		_ = g.d.Systemd.Stop(ctx, t.Unit)
-	}
-	var stopped []string
-	var stillUp []string
-	for _, t := range targets {
-		st, err := g.d.Systemd.Status(ctx, t.Unit)
-		if err != nil {
-			return nil, err
+		for _, s := range g.st.Secrets {
+			if s.Agent == t.ID && s.State == SecretPending {
+				s.State, s.Resolved = SecretCancelled, &now
+			}
 		}
-		if st.Active() {
-			stillUp = append(stillUp, t.ID)
-			continue
+		if t.Standing {
+			_ = os.Remove(filepath.Join(g.cfg.TokenDir(), t.ID))
 		}
-		tc := cause
-		switch {
-		case t == a && self:
-		case t.Parent == a.ID && !self:
-			tc = fmt.Sprintf("parent %s exited", t.Parent)
-		default:
-			tc = fmt.Sprintf("parent %s stopped", t.Parent)
-		}
-		g.tombstone(t, last[t.ID], tc, StateStopped)
-		if st.Exists {
-			_ = g.d.Systemd.ResetFailed(ctx, t.Unit)
-		}
-		stopped = append(stopped, t.ID)
+		res.Stopped = append(res.Stopped, t.ID)
 	}
 	if err := g.saveLocked(); err != nil {
 		return nil, err
 	}
-	payload := map[string]any{"agent": a.ID, "kill": kill, "stopped": stopped}
-	if self {
-		payload["tombstone"] = a.Tombstone
-	}
-	if len(stillUp) > 0 {
-		payload["still_running"] = stillUp
-	}
-	g.audit(actor, EvStop, payload)
-	if len(stillUp) > 0 {
-		if firstErr == nil {
-			firstErr = fmt.Errorf("units still active")
-		}
-		return stopped, fmt.Errorf("could not stop %v: %w", stillUp, firstErr)
-	}
-	return stopped, nil
-}
-
-// tombstone records how a ended. Must be called with g.mu held.
-func (g *Gateway) tombstone(a *Agent, last UnitStatus, cause, state string) {
-	a.State = state
-	a.Tombstone = &Tombstone{
-		Time: g.d.Clock.Now(), LastState: last.String(), Result: last.Result,
-		ExitStatus: last.ExecMainStatus, Cause: cause,
-	}
-	if c := g.childrenOf(a.ID); len(c) > 0 {
-		a.Tombstone.Children = c
-	}
+	res.Tombstone = a.Tombstone
+	g.audit(c.Actor(), EvStop, map[string]any{"agent": a.ID, "mode": p.Mode, "stopped": res.Stopped, "tombstone": a.Tombstone})
+	return res, nil
 }
 
 func (g *Gateway) childrenOf(id string) []string {
@@ -637,28 +597,106 @@ func (g *Gateway) childrenOf(id string) []string {
 	return out
 }
 
-// ---- list and status ----------------------------------------------------
+// ---- agent.message and agent.inbox ---------------------------------------------
 
-// ListParams filters list.
+// MessageParams is agent.message (design §8.7).
+type MessageParams struct {
+	Auth
+	Agent string `json:"agent"`
+	Text  string `json:"text"`
+}
+
+// MessageResult says where the message went.
+type MessageResult struct {
+	Agent string `json:"agent"`
+	Seq   int64  `json:"seq"`
+	// Queued is how many messages now wait for the child, this one
+	// included.
+	Queued int `json:"queued"`
+}
+
+// Message queues text for agent p.Agent. Messages go strictly downward: an
+// agent may message only the agents it registered itself (whose parent it
+// is); the human may message any agent. A child can never reach its
+// parent, root or a sibling this way, so a prompt-injected child cannot
+// inject instructions upward.
+func (g *Gateway) Message(c Caller, p MessageParams) (*MessageResult, error) {
+	t := g.st.Agents[p.Agent]
+	if !c.Human() && (t == nil || t.Parent != c.Agent) {
+		return nil, g.deny(c, "agent.message", fmt.Sprintf("agent %q may message only agents it registered, and %q is not one", c.Agent, p.Agent))
+	}
+	if t == nil {
+		return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no agent %q", p.Agent)}
+	}
+	if t.State == StateStopped {
+		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is stopped", p.Agent)}
+	}
+	if p.Text == "" || len(p.Text) > maxMessage {
+		return nil, invalidParams("text: must be 1-%d bytes", maxMessage)
+	}
+	if len(t.Inbox) >= maxInbox {
+		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q has %d undelivered messages", p.Agent, len(t.Inbox))}
+	}
+	t.NextMsg++
+	m := Message{Seq: t.NextMsg, FromAgent: c.Agent, From: c.Actor(), Text: p.Text, Time: g.d.Clock.Now()}
+	t.Inbox = append(t.Inbox, m)
+	if err := g.saveLocked(); err != nil {
+		return nil, err
+	}
+	g.audit(c.Actor(), EvMessage, map[string]any{"agent": t.ID, "from_agent": c.Agent, "seq": m.Seq, "text": m.Text})
+	return &MessageResult{Agent: t.ID, Seq: m.Seq, Queued: len(t.Inbox)}, nil
+}
+
+// Inbox hands the caller's wrapper its waiting messages, oldest first, and
+// forgets them. The wrapper injects each into the ACP session as a prompt
+// tagged from_agent, queued behind a turn in progress.
+func (g *Gateway) Inbox(c Caller) ([]Message, error) {
+	a := g.st.Agents[c.Agent]
+	out := a.Inbox
+	if out == nil {
+		out = []Message{}
+	}
+	if len(a.Inbox) > 0 {
+		a.Inbox = nil
+		if err := g.saveLocked(); err != nil {
+			return nil, err
+		}
+		seqs := make([]int64, len(out))
+		for i, m := range out {
+			seqs[i] = m.Seq
+		}
+		g.audit(c.Actor(), EvDeliver, map[string]any{"agent": a.ID, "seqs": seqs})
+	}
+	return out, nil
+}
+
+// ---- agent.list and agent.status ------------------------------------------------
+
+// ListParams filters agent.list.
 type ListParams struct {
-	Relay
+	Auth
 	Parent *string  `json:"parent,omitempty"`
 	State  []string `json:"state,omitempty"`
 	// History includes earlier incarnations of reused ids.
 	History bool `json:"history,omitempty"`
 }
 
-// AgentInfo is an agent as list and status report it.
+// AgentInfo is an agent as list and status report it. Tokens and the inbox
+// are never reported.
 type AgentInfo struct {
 	Agent
-	Children []string    `json:"children"`
-	UnitNow  *UnitStatus `json:"unit_status,omitempty"`
+	Children []string `json:"children"`
+	Inbox    int      `json:"inbox"`
+}
+
+func (g *Gateway) infoLocked(a *Agent) *AgentInfo {
+	info := &AgentInfo{Agent: *a, Children: g.childrenOf(a.ID), Inbox: len(a.Inbox)}
+	info.TokenHash, info.SessionHash, info.Agent.Inbox = "", "", nil
+	return info
 }
 
 // List returns the agents the caller may see, sorted by id.
-func (g *Gateway) List(_ context.Context, c Caller, p ListParams) ([]AgentInfo, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *Gateway) List(c Caller, p ListParams) ([]AgentInfo, error) {
 	want := map[string]bool{}
 	for _, s := range p.State {
 		want[s] = true
@@ -678,9 +716,9 @@ func (g *Gateway) List(_ context.Context, c Caller, p ListParams) ([]AgentInfo, 
 		if len(want) > 0 && !want[a.State] {
 			continue
 		}
-		info := AgentInfo{Agent: *a, Children: g.childrenOf(a.ID)}
+		info := g.infoLocked(a)
 		info.Brief = ""
-		out = append(out, info)
+		out = append(out, *info)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
@@ -688,27 +726,17 @@ func (g *Gateway) List(_ context.Context, c Caller, p ListParams) ([]AgentInfo, 
 
 // StatusParams names one agent.
 type StatusParams struct {
-	Relay
+	Auth
 	Agent string `json:"agent"`
 }
 
-// Status returns one agent with its live unit state.
-func (g *Gateway) Status(ctx context.Context, c Caller, p StatusParams) (*AgentInfo, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+// Status returns one agent.
+func (g *Gateway) Status(c Caller, p StatusParams) (*AgentInfo, error) {
 	a := g.st.Agents[p.Agent]
 	if a == nil || !g.canSee(c, p.Agent) {
 		return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no agent %q", p.Agent)}
 	}
-	info := &AgentInfo{Agent: *a, Children: g.childrenOf(a.ID)}
-	if a.State == StateRunning {
-		st, err := g.d.Systemd.Status(ctx, a.Unit)
-		if err != nil {
-			return nil, err
-		}
-		info.UnitNow = &st
-	}
-	return info, nil
+	return g.infoLocked(a), nil
 }
 
 // ---- helpers ---------------------------------------------------------------

@@ -174,34 +174,70 @@ func decodeParams(raw json.RawMessage, v any) error {
 	return nil
 }
 
-// relayed is implemented by every params type through the embedded Relay.
-type relayed interface{ relay() *OnBehalf }
+// authed is implemented by every params type through the embedded Auth.
+type authed interface{ auth() Auth }
 
-func (r Relay) relay() *OnBehalf { return r.OnBehalfOf }
+func (a Auth) auth() Auth { return a }
 
 // AuditReadParams pages through the audit log.
 type AuditReadParams struct {
-	Relay
+	Auth
 	After int64 `json:"after,omitempty"`
 	Limit int   `json:"limit,omitempty"`
 }
 
-func (s *Server) dispatch(ctx context.Context, cred PeerCred, method string, raw json.RawMessage) (any, error) {
+// DisconnectParams is agent.disconnect.
+type DisconnectParams struct {
+	Auth
+	Reason string `json:"reason,omitempty"`
+}
+
+// humanOnly methods may not be called by agents.
+var humanOnly = map[string]bool{
+	"audit.read": true, "audit.verify": true, "secret.provide": true, "secret.reject": true,
+}
+
+// agentOnly methods act on the calling agent's own session.
+var agentOnly = map[string]bool{
+	"agent.heartbeat": true, "agent.disconnect": true, "agent.inbox": true, "secret.request": true,
+}
+
+func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw json.RawMessage) (any, error) {
 	g := s.G
-	var params relayed
+	var params authed
 	switch method {
-	case "spawn":
-		params = &SpawnParams{}
-	case "stop":
+	case "agent.register":
+		params = &RegisterParams{}
+	case "agent.connect":
+		params = &ConnectParams{}
+	case "agent.heartbeat", "agent.inbox":
+		params = &Auth{}
+	case "agent.disconnect":
+		params = &DisconnectParams{}
+	case "agent.stop":
 		params = &StopParams{}
-	case "list":
+	case "agent.list":
 		params = &ListParams{}
-	case "status":
+	case "agent.status":
 		params = &StatusParams{}
+	case "agent.message":
+		params = &MessageParams{}
+	case "page.register":
+		params = &PageRegisterParams{}
+	case "page.unregister":
+		params = &PageUnregisterParams{}
+	case "page.list":
+		params = &PageListParams{}
+	case "secret.request":
+		params = &SecretRequestParams{}
+	case "secret.provide", "secret.reject":
+		params = &SecretResolveParams{}
+	case "secret.list":
+		params = &SecretListParams{}
 	case "audit.read":
 		params = &AuditReadParams{}
 	case "audit.verify":
-		params = &Relay{}
+		params = &Auth{}
 	default:
 		return nil, &Error{Code: CodeMethodNotFound, Message: fmt.Sprintf("no method %q", method)}
 	}
@@ -209,37 +245,78 @@ func (s *Server) dispatch(ctx context.Context, cred PeerCred, method string, raw
 		return nil, err
 	}
 	g.mu.Lock()
-	c, err := g.identify(cred, params.relay())
+	defer g.mu.Unlock()
+	c, err := g.identify(cred, params.auth())
 	if err != nil {
 		g.audit(fmt.Sprintf("uid=%d", cred.UID), EvAuthDeny, map[string]any{"method": method, "uid": cred.UID, "pid": cred.PID, "reason": err.Error()})
-		g.mu.Unlock()
 		return nil, &Error{Code: CodeForbidden, Message: "permission denied: " + err.Error()}
 	}
-	if (method == "audit.read" || method == "audit.verify") && !c.Human() {
-		err := g.deny(c, method, "only the human may read the audit log")
-		g.mu.Unlock()
-		return nil, err
+	// agent.connect is authenticated by the registration token in its
+	// params, whoever dials; everything else needs a known caller.
+	if method == "agent.connect" {
+		if c.Role == RoleAgent {
+			return nil, g.deny(c, method, "an agent session cannot connect another agent")
+		}
+		return g.Connect(c, cred, *params.(*ConnectParams))
 	}
-	g.mu.Unlock()
+	switch {
+	case c.Role == RoleConnect:
+		return nil, g.deny(c, method, fmt.Sprintf("uid %d is not an admin or the bridge, and gave no agent token", cred.UID))
+	case humanOnly[method] && !c.Human():
+		return nil, g.deny(c, method, "only the human may call "+method)
+	case agentOnly[method] && c.Role != RoleAgent:
+		return nil, invalidParams("%s is called by an agent's wrapper, with its agent_token", method)
+	}
+	// A stopped agent's session token still answers agent.heartbeat (that
+	// is how its wrapper learns to stop) and agent.disconnect; nothing else.
+	if c.Role == RoleAgent && method != "agent.heartbeat" && method != "agent.disconnect" {
+		if a := g.st.Agents[c.Agent]; a.State != StateConnected {
+			return nil, g.deny(c, method, fmt.Sprintf("agent %q is %s", c.Agent, a.State))
+		}
+	}
 
 	switch p := params.(type) {
-	case *SpawnParams:
-		return g.Spawn(ctx, c, *p)
+	case *RegisterParams:
+		return g.Register(c, *p)
+	case *DisconnectParams:
+		return g.Disconnect(c, p.Reason)
 	case *StopParams:
-		return g.Stop(ctx, c, *p)
+		return g.Stop(c, *p)
 	case *ListParams:
-		return g.List(ctx, c, *p)
+		return g.List(c, *p)
 	case *StatusParams:
-		return g.Status(ctx, c, *p)
+		return g.Status(c, *p)
+	case *MessageParams:
+		return g.Message(c, *p)
+	case *PageRegisterParams:
+		return g.PageRegister(c, *p)
+	case *PageUnregisterParams:
+		return g.PageUnregister(c, *p)
+	case *PageListParams:
+		return g.PageList(c, *p)
+	case *SecretRequestParams:
+		return g.SecretRequest(c, *p)
+	case *SecretResolveParams:
+		if method == "secret.provide" {
+			return g.SecretProvide(c, *p)
+		}
+		return g.SecretReject(c, *p)
+	case *SecretListParams:
+		return g.SecretList(c, *p)
 	case *AuditReadParams:
 		limit := p.Limit
 		if limit <= 0 || limit > 1000 {
 			limit = 1000
 		}
 		return g.d.Audit.Read(p.After, limit)
-	default: // audit.verify
-		return g.d.Audit.Verify()
 	}
+	switch method {
+	case "agent.heartbeat":
+		return g.Heartbeat(c)
+	case "agent.inbox":
+		return g.Inbox(c)
+	}
+	return g.d.Audit.Verify() // audit.verify
 }
 
 // PeerCredOf reads SO_PEERCRED from a Unix socket connection.

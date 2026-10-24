@@ -31,14 +31,19 @@ type AuditEntry struct {
 
 // Audit events written by the gateway.
 const (
-	EvGatewayStart = "gateway.start"
-	EvSpawn        = "spawn"
-	EvSpawnFailed  = "spawn.failed"
-	EvStop         = "stop"
-	EvExit         = "agent.exit"
-	EvAdopt        = "agent.adopt"
-	EvAuthDeny     = "auth.deny"
-	EvUserCreate   = "user.create"
+	EvGatewayStart   = "gateway.start"
+	EvRegister       = "agent.register"
+	EvConnect        = "agent.connect"
+	EvDisconnect     = "agent.disconnect"
+	EvStop           = "agent.stop"
+	EvMessage        = "agent.message"
+	EvDeliver        = "agent.deliver"
+	EvPageRegister   = "page.register"
+	EvPageUnregister = "page.unregister"
+	EvSecretRequest  = "secret.request"
+	EvSecretProvide  = "secret.provide"
+	EvSecretReject   = "secret.reject"
+	EvAuthDeny       = "auth.deny"
 )
 
 // AuditLog is the append-only, hash-chained audit log. Only the gateway
