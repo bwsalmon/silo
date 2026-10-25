@@ -14,12 +14,13 @@ as a chat session, along with the approval queue, the agent schedules, the
 page links agents publish, and the secrets they ask for. `silo up` deploys the
 whole thing into a dedicated GCP project behind IAP with a single command.
 
-A fresh silo starts with two agents already connected: `root` (user
-`silo-root`), the human-gated agent that changes the system, and `main` (user
-`silo-user`), an unprivileged coding agent with internet access, ready to use
-the moment you open the UI. `main` is root's child. Messages between agents
-only ever go from a parent to the children it registered, so a child can never
-push instructions into its parent or into root.
+A fresh silo starts with two standing agents: `root` (user `silo-root`), the
+human-gated agent that changes the system, and `main` (user `silo-user`), an
+unprivileged coding agent with internet access, ready to use the moment you
+open the UI. `main` is root's child. By default, `root`, `main`, and any newly
+registered agent require human approval on anything they do (`permissions: "ask"`
+default). Parents drive children using the CLIs' own built-in `--resume` / MCP /
+ACP session mechanisms.
 
 silo v3 is not a new OS and does not manage the machine's packages or config.
 
@@ -29,12 +30,22 @@ this repository belongs to v3.
 
 What exists so far:
 
-- `cmd/silo`: the single `silo` binary (`silo gateway`, `silo call`).
+- `cmd/silo`: the single `silo` binary (`silo gateway`, `silo bridge`,
+  `silo connect`, `silo mcp`, `silo page`, `silo secret`, `silo call`).
 - `gateway/`: the root daemon: agent registration with single-use tokens
-  for `silo connect`, the two standing agents (`root` and `main`), the
-  parent/child tree with cascading stop, parent → child messages, page
-  links, secret requests, the audit log, and the JSON-RPC API on
-  `/run/silo/gateway.sock`. See [docs/api.md](docs/api.md).
+  for `silo connect`, the two standing agents (`root` and `main`, both
+  defaulting to `permissions: "ask"`), the parent/child tree with cascading
+  stop, page links, secret requests, agent escalation requests, the audit log,
+  and the JSON-RPC API on `/run/silo/gateway.sock`. See [docs/api.md](docs/api.md).
+- `bridge/`: the session bridge and HTTP/WebSocket hub: owns ACP sessions from
+  `silo connect`, persists JSONL transcripts under `/var/lib/silo/sessions/`,
+  holds pending permission prompts under `permissions: "ask"`, reverse-proxies
+  `/p/<slug>/...` page links, routes human-provided secrets to `silo connect`
+  (`0600` files) without exposing secret values in LLM contexts or logs, and
+  serves the `silo-mcp` stdio server.
+- `acp/`: ACP JSON-RPC 2.0 protocol types and `/etc/silo/clis.d/` preset loader.
+- `instructions/`: shipped default `/usr/share/silo/root.md` and `/etc/silo/root.d/`
+  assembler.
 
 CI (`.grain/workflows/v3.yml`) runs gofmt, build, vet and race tests for this
 module on every push.

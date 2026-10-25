@@ -33,16 +33,19 @@ type AuditEntry struct {
 const (
 	EvGatewayStart   = "gateway.start"
 	EvRegister       = "agent.register"
+	EvApprove        = "agent.approve"
+	EvPermissions    = "agent.permissions"
 	EvConnect        = "agent.connect"
 	EvDisconnect     = "agent.disconnect"
 	EvStop           = "agent.stop"
-	EvMessage        = "agent.message"
-	EvDeliver        = "agent.deliver"
+	EvReport         = "agent.report"
 	EvPageRegister   = "page.register"
 	EvPageUnregister = "page.unregister"
 	EvSecretRequest  = "secret.request"
 	EvSecretProvide  = "secret.provide"
 	EvSecretReject   = "secret.reject"
+	EvRequestFile    = "request.file"
+	EvRequestResolve = "request.resolve"
 	EvAuthDeny       = "auth.deny"
 )
 

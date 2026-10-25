@@ -26,10 +26,11 @@ const (
 
 // Caller is an authenticated caller.
 type Caller struct {
-	UID   int    `json:"uid"`
-	PID   int    `json:"pid"`
-	Role  Role   `json:"role"`
-	Agent string `json:"agent,omitempty"`
+	UID      int    `json:"uid"`
+	PID      int    `json:"pid"`
+	Role     Role   `json:"role"`
+	Agent    string `json:"agent,omitempty"`
+	Approved bool   `json:"approved,omitempty"`
 }
 
 // Human reports whether the caller acts for the human: an admin, or the
@@ -66,7 +67,8 @@ type Auth struct {
 
 // OnBehalf names the agent the bridge is relaying for.
 type OnBehalf struct {
-	Agent string `json:"agent"`
+	Agent    string `json:"agent"`
+	Approved bool   `json:"approved,omitempty"`
 }
 
 // Token prefixes, so a leaked token says what it is.
@@ -119,7 +121,7 @@ func (g *Gateway) identify(cred PeerCred, auth Auth) (Caller, error) {
 		if a == nil || a.State != StateConnected {
 			return c, fmt.Errorf("agent %q is not connected", auth.OnBehalfOf.Agent)
 		}
-		c.Role, c.Agent = RoleAgent, a.ID
+		c.Role, c.Agent, c.Approved = RoleAgent, a.ID, auth.OnBehalfOf.Approved
 		return c, nil
 	}
 	if cred.UID == 0 {

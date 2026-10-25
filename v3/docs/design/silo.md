@@ -237,15 +237,16 @@ notation. "Who" lists the callers allowed to use each method.
 
 ```ts
 // ---- agents (§8) ------------------------------------------------------------
-agent.register(req: RegisterRequest): {agent, token, hub_url}  // who: human; agent with may_register (own children)
+agent.register(req: RegisterRequest): {agent, token, hub_url, state}  // who: human; agent with may_register (own children)
+agent.approve(agent, approve?, comment?): AgentInfo                  // who: human (activates a pending child registration)
+agent.permissions(agent, permissions: "ask" | "auto" | "deny-shell"): AgentInfo  // who: human
 agent.connect(token, host?, pid?): ConnectResult  // who: anyone holding the registration token; single use
-agent.heartbeat(): {state, stop?, inbox, secrets}  // who: the agent's own wrapper
-agent.disconnect(reason?): AgentInfo            // who: the agent's own wrapper
+agent.heartbeat(): {state, stop?, secrets}        // who: the agent's own wrapper
+agent.disconnect(reason?, exit_code?): AgentInfo  // who: the agent's own wrapper
 agent.stop(agent, mode: "graceful" | "kill"): {stopped, tombstone, stop_cmds}  // human; ancestors
 agent.list(filter?: {parent?, state?, history?}): AgentInfo[]  // human: all; agent: self + descendants
 agent.status(agent): AgentInfo
-agent.message(agent, text): {seq, queued}       // human: any agent; agent: ONLY its own children (§8.7)
-agent.inbox(): Message[]                        // who: the agent's own wrapper
+agent.report(status, summary): AgentInfo          // who: the agent itself
 
 // ---- page links (§6.5) and secret requests (§5.6) -------------------------
 page.register({slug, title, port, host?, expose_port?} | {slug, title, url}): Page
@@ -526,7 +527,7 @@ re-applies the table at startup and when agents change:
 `/var/log/silo/audit.jsonl` is append-only and independent of agent transcripts:
 
 - One JSON object per line: `seq`, `time`, `actor` (human email or credential
-  id, agent id, `gateway`, `timer`), `event` (`agent.register`, `agent.connect`, `agent.stop`, `agent.message`, `page.register`, `secret.request`, `batch.submit`,
+  id, agent id, `gateway`, `timer`), `event` (`agent.register`, `agent.approve`, `agent.permissions`, `agent.connect`, `agent.stop`, `agent.report`, `page.register`, `secret.request`, `batch.submit`,
   `batch.decide`, `batch.exec.step`, `standing.create`, `standing.use`,
   `schedule.*`, `request.*`, `snapshot`, `policy.apply`, `gateway.start`), the
   payload (batch hash and full batch, not just a summary), and `prev` = sha256
@@ -547,22 +548,22 @@ re-applies the table at startup and when agents change:
 
 `silo-bridge` runs as user `silo` and is the ACP *client* for every agent:
 
-- When an agent's `silo connect` dials in (locally through the gateway's
+- When an agent's `silo connect` dials in (locally through the bridge's Unix
   socket, or from another location through the bridge's `/connect`
   WebSocket, which relays `agent.connect` to the gateway), the bridge takes
   the ACP stream `silo connect` pipes from the CLI's stdio and runs the ACP
   handshake (`initialize`, then `session/new`, or `session/load` when
-  resuming).
-- It delivers queued parent → child messages (§8.7) into the child's session
-  and carries secret values from the UI to the agent's `silo connect` (§5.6).
+  resuming), then sends the initial `brief` prompt if one was registered on
+  the agent.
+- It carries secret values from the UI to the agent's `silo connect` (§5.6).
 - It runs one ACP connection per agent process and multiplexes it to any number
-  of UI viewers, with one writer at a time. Prompts from the human and from
-  authorised agents are queued per session in order.
+  of UI viewers, with one writer at a time. Prompts are queued per session in
+  order.
 - It persists each session's ACP update stream (`session/update` notifications:
   messages, thoughts, tool calls with their diffs, plans) as JSONL under
   `/var/lib/silo/sessions/<session>/`. That file is the transcript.
 - It answers the CLI's `session/request_permission` calls by per-agent policy
-  (§5.4).
+  (§5.4), holding them in the pending-permissions queue by default (`permissions: "ask"`).
 - It serves the silo MCP tools to agents (§5.3) and the web UI's API (§5.5).
 
 Driving each CLI:
@@ -594,7 +595,7 @@ Three existing protocols are relevant, and each does a different job:
   adapters.
 - **MCP, the Model Context Protocol**: how an agent calls *tools*. All three
   CLIs can load MCP servers. This is how an agent should reach silo
-  capabilities (register an agent, message a child, file a request).
+  capabilities (register an agent, publish a page link, request a secret, file a request).
 - **A2A, Agent2Agent** (Linux Foundation): how opaque agents ask other agents to
   do *tasks* over HTTP, with agent cards. It was designed for agents of
   different vendors and organisations talking over the network. It has no
@@ -615,13 +616,12 @@ always means the Agent Client Protocol.
    mode and multiplexing, are carried in ACP's `_meta` extension fields and can
    safely be ignored.
 2. **Control plane = a small REST/JSON API** (`/api/v1`, §5.5) for things that
-   are not sessions: agents, approvals, schedules, the audit log. These are
+   are not sessions: agents, approvals, permissions, schedules, the audit log. These are
    plain CRUD, and squeezing them into ACP would be inventing a protocol.
-3. **Agent ↔ silo and agent ↔ agent = MCP tools** served by `silo-mcp` (§5.3).
-   An agent messaging one of its own children calls an MCP tool. The bridge
-   turns the call into an ACP prompt on the child's session, carrying the
-   sender's identity and labelled as agent-originated content. Messages only
-   ever flow from parent to child (§8.7).
+3. **Agent ↔ silo = MCP tools** served by `silo-mcp` (§5.3). Communicating with
+   a child agent is not a special case in Silo: parents pass an initial `brief`
+   at registration and drive children using the CLIs' own built-in `--resume` /
+   MCP / ACP session mechanisms (§8.7).
 4. **A2A is optional and comes later**: an A2A façade (agent card plus
    `message/send` mapped onto registration and prompt) for programmatic clients off the
    box. It is not needed for anything in v3's first milestones.
@@ -637,45 +637,51 @@ it.
 
 `silo-mcp` is a stdio MCP server binary that the agent's CLI loads. It sits
 beside `silo connect` in the agent's location and authenticates with the
-session token `silo connect` was given (§4.1), so it works the same in a
-systemd unit, a container or a microVM. The tools offered depend on who the
-agent is:
+session token `silo connect` was given (or `SO_PEERCRED`, §4.1), so it works
+the same in a systemd unit, a container or a microVM. The tools offered depend
+on who the agent is:
 
 | Tool | Root agent | Other agents | Notes |
 |---|---|---|---|
 | `run_as_root(batch)` | ✔ | ✘ | §7.4 |
 | `batch_status(id)` | ✔ | ✘ | |
-| `register_agent(spec)` | ✔ | if `may_register` | §8.1; returns the token for `silo connect` |
+| `register_agent(spec)` | ✔ | if `may_register` | §8.1; waits for human approval when `permissions: "ask"`, then returns the token for `silo connect` |
 | `list_agents()` | ✔ (all) | self and descendants | |
-| `send_message(id, text)` / `message_agent(id, text)` | own children only | own children only | §8.7: never up, never sideways |
 | `read_agent(id, since?)` | structured status only by default (§8.6) | own children: transcript | |
 | `stop_agent(id)` | descendants | descendants | |
-| `register_page(slug, title, port \| url, …)` / `unregister_page(slug)` | ✔ | ✔ | §6.5 |
+| `register_page(slug, title, port \| url, …)` / `unregister_page(slug)` / `list_pages()` | ✔ | ✔ | §6.5 |
 | `request_secret(name, reason, path?)` | ✔ | ✔ | §5.6; the value never enters the agent's context |
 | `file_request(kind, summary, detail)` | ✘ | ✔ | goes to the human's queue |
 | `propose_schedule(def)` | ✔ | own user, own limits | needs human approval |
 | `report(status, summary)` | ✔ | ✔ | marks the session's outcome for the parent and the UI |
 
 The same operations are on the `silo` CLI inside an agent's location, for
-scripts: `silo agent register`, `silo msg <child> <text>`, `silo page
-register`, `silo secret request`.
+scripts: `silo page add`, `silo page rm`, `silo page list`, `silo secret request`.
 
-### 5.4 The CLIs' own permission prompts
+### 5.4 The CLIs' own permission prompts (human approval required by default)
 
-The CLIs ask for permission before their own tool calls (edit a file, run a
-shell command). Those actions run as the agent's own unprivileged uid inside its
-sandbox, so they are not what silo gates. silo gates crossing the uid boundary.
-The policy is per template:
+By default, the non-root agent (`main` / `silo-user`), `root`, and any newly
+registered agent require human approval on anything they do (**`permissions: "ask"`**
+is the default for all agents unless the human explicitly configures otherwise).
 
-- `permissions: auto` (the default for children and for root): the bridge
-  allows the CLI's own tool calls. The uid, cgroup and network policy are the
-  boundary, and asking would only cause approval fatigue.
-- `permissions: ask`: the bridge forwards the CLI's permission requests to the
-  UI as non-privileged prompts, shown separately from the root approval queue.
-- `permissions: deny-shell`: shell tools are refused, edits are allowed.
+Every ACP `session/request_permission` call from an agent (shell commands, file
+edits, tool invocations) and any hub action that creates new authority (such as
+registering a new child agent or schedule) is held for human approval in the UI
+by default, unless the human has explicitly switched that agent's permission
+mode or granted a standing rule:
 
-The UI keeps these permission prompts visually apart from root approvals, so
-the two never get confused.
+- `permissions: "ask"` (**the default for `root`, `main`, and all newly registered agents**):
+  the bridge holds the CLI's `session/request_permission` calls and child
+  `register_agent` calls in the pending-permissions queue until the human
+  approves or denies them in the UI or API.
+- `permissions: "auto"`: only the human may set an agent to `"auto"`. When set,
+  the bridge automatically approves that agent's own ACP tool calls inside its
+  sandbox and its attenuated child registrations.
+- `permissions: "deny-shell"`: shell/execute tool calls are refused automatically;
+  non-shell edits are allowed.
+
+The UI keeps ACP tool permission prompts visually distinct from root batch
+approvals, so the two never get confused.
 
 ### 5.5 Bridge HTTP API
 
@@ -688,9 +694,11 @@ passkey login (§11.3). Routes that change something on the box need a
 GET    /api/v1/agents                         list (tree), state, usage, budget
 POST   /api/v1/agents                         human registers an agent → token (HumanSig)
 GET    /api/v1/agents/:id
+POST   /api/v1/agents/:id/approve             human approves or rejects a pending child registration
+POST   /api/v1/agents/:id/permissions         human sets an agent's permission policy ("ask" | "auto" | "deny-shell")
 POST   /api/v1/agents/:id/stop
-POST   /api/v1/agents/:id/messages            human messages any agent
 GET    /api/v1/pages                          page links (§6.5)
+POST   /api/v1/pages
 DELETE /api/v1/pages/:slug
 GET    /api/v1/secrets                        secret requests (§5.6)
 POST   /api/v1/secrets/:id/provide            {value} → the agent's silo connect, never stored
@@ -699,7 +707,11 @@ WS     /connect                               silo connect from other locations 
 ANY    /p/:slug/...                           page link proxy (§6.5)
 GET    /api/v1/sessions?agent=&schedule=      list sessions
 GET    /api/v1/sessions/:id/transcript        JSONL of ACP updates (paged)
+POST   /api/v1/sessions/:id/prompt            send an ACP prompt to a session
+POST   /api/v1/sessions/:id/cancel            cancel the active turn on a session
 WS     /acp/v1/sessions/:id                   ACP: prompt, cancel, live updates
+GET    /api/v1/permissions?agent=&pending=    pending/resolved ACP & child-registration permissions
+POST   /api/v1/permissions/:id/decision       human approves or rejects a pending permission
 GET    /api/v1/approvals                      pending batches/registrations/schedules/requests
 GET    /api/v1/approvals/:id                  full presentation (§6.3)
 POST   /api/v1/approvals/:id/challenge        → nonce for WebAuthn
@@ -892,9 +904,8 @@ agent's (§7.6).
 ### 7.3 Input only from the human
 
 - The root agent's session takes prompts only from authenticated humans in the
-  UI. Root has no parent, and `agent.message` lets an agent message only its
-  own children (§8.7), so the gateway refuses every agent's message to `root`
-  (including `main`'s, though root registered it).
+  UI. Root has no parent, and Silo has no inter-agent message RPC: no agent
+  (including `main`, though root is its parent) can send prompts to `root`.
 - Children file **requests** (`file_request`) into the human's queue. The human
   may **forward to root**, which starts a root turn whose prompt is the
   human's note followed by the request in a block clearly marked *"Request from
@@ -959,14 +970,18 @@ human the moment they first open the UI:
 | Unix user | `silo-root` | `silo-user` |
 | Parent | none | `root` |
 | Privilege | `run_as_root` batches, human-gated | none: its own uid, home and workspace |
+| Default `permissions` | `"ask"` (human approval required by default) | `"ask"` (human approval required by default) |
 | Network | credential proxy only | normal internet egress (metadata server still blocked) |
-| `may_register` | yes | yes: it may register and message its own children |
+| `may_register` | yes | yes: it may register its own children (pending human approval under `permissions: "ask"`) |
 | Typical use | change the system, bootstrap | write code, run servers, publish page links, fan out to child agents |
 
-`main` is root's child, so the authority goes the right way: root (and the
-human) may message `main`, and `main` can never message root or inject text
-into root's session (§8.7). Stopping root cascades to `main`; both are
-re-armed on the next gateway start. Its name and user can be changed in
+`main` is root's child, so the authority goes the right way: `main` can never
+inject text into root's session (§7.3, §8.7). By default, both `root` and `main`
+run with `permissions: "ask"`, so every ACP `session/request_permission` call
+and any hub action that creates new authority (such as registering a child agent)
+requires human approval in the UI unless the human explicitly switches that
+agent's permission policy to `"auto"`. Stopping root cascades to `main`; both
+are re-armed on the next gateway start. Its name and user can be changed in
 `gateway.toml` (`[user_agent]`), or it can be turned off.
 
 The gateway seeds both agents on first start, writes each one's registration
@@ -988,7 +1003,7 @@ Hypervisor microVM, a subprocess, or a machine elsewhere.
 
 ### 8.1 Registration: what the creator specifies
 
-`agent.register` (MCP `register_agent`, CLI `silo agent register`):
+`agent.register` (MCP `register_agent`, CLI `silo call agent.register`):
 
 ```ts
 interface RegisterRequest {
@@ -1001,6 +1016,7 @@ interface RegisterRequest {
   template?: string;                 // /etc/silo/agents/<role>.md
   model?: string;
   brief?: string;                    // the first prompt
+  permissions?: "ask" | "auto" | "deny-shell";  // default "ask"; only the human may grant "auto"
   shares?: {name: string, access: "rw" | "ro"}[];  // shared dirs/groups (below)
   limits?: {memory_max?, memory_high?, cpu_quota?, tasks_max?, disk_quota?};
   budget_usd?: number;               // enforced by the credential proxy
@@ -1012,14 +1028,19 @@ interface RegisterRequest {
 interface RegisterResult {
   agent: AgentId;
   token: string;    // SILO_AGENT_TOKEN: single use, shown once, stored only as a hash
-  hub_url: string;  // what silo connect dials: unix:///run/silo/gateway.sock on the box,
+  hub_url: string;  // what silo connect dials: unix:///run/silo/bridge.sock on the box,
                     // or the bridge's wss://…/connect from elsewhere
+  state: "pending" | "registered";
 }
 ```
 
-The gateway records the agent (`registered`), audits the full request (never
-the token), and returns the token. The creator then starts the agent in the
-location it chose, passing `SILO_AGENT_TOKEN` (and `SILO_HUB_URL`) into it:
+The gateway records the agent (`pending` when registered by an agent with
+`permissions: "ask"`, or `registered` when registered by the human or an agent
+with `permissions: "auto"`), audits the full request (never the token), and
+returns the token (in `silo-mcp`, `register_agent` waits for human approval
+before returning the active token to the calling agent). The creator then starts
+the agent in the location it chose, passing `SILO_AGENT_TOKEN` (and
+`SILO_HUB_URL`) into it:
 
 ```sh
 # on the box, as a unit (standing agents and new-user children):
@@ -1058,30 +1079,30 @@ location:
 1. It reads `SILO_AGENT_TOKEN` (or `$CREDENTIALS_DIRECTORY/token`) and
    `SILO_HUB_URL`, dials the hub, and calls `agent.connect` with the token.
    The token is used up; the gateway marks the agent `connected` and returns
-   a **session token**, the agent's parent, runtime and brief, and a
-   heartbeat interval. A token that is unknown, already used, or belongs to a
-   stopped agent is refused and audited.
+   a **session token**, the agent's parent, runtime, brief, permissions, and a
+   heartbeat interval. A token that is unknown, already used, awaiting human
+   approval (`pending`), or belongs to a stopped agent is refused and audited.
 2. It starts the CLI in ACP stdio mode in its own process group, with
-   `silo-mcp` configured beside it (sharing the session token through a 0600
-   file), and pipes ACP JSON-RPC frames between the hub and the CLI's stdio.
-   The bridge runs the ACP handshake over that pipe (§5.1).
+   `silo-mcp` configured beside it, and pipes ACP JSON-RPC frames between the
+   hub and the CLI's stdio. The bridge runs the ACP handshake over that pipe
+   and sends the initial `brief` prompt if one was registered (§5.1).
 3. It calls `agent.heartbeat` every interval. A heartbeat answers the agent's
-   state, how many messages wait in `agent.inbox`, how many secret requests
-   are pending, and, once the agent has been stopped, the stop mode.
+   state, how many secret requests are pending, and, once the agent has been
+   stopped, the stop mode.
 4. When the CLI exits it calls `agent.disconnect`. An agent that misses
    heartbeats for `heartbeat_timeout_s` (default 90) is marked
    `disconnected` by the gateway. Its session token is revoked either way.
 
-States: `registered` → `connected` ⇄ `disconnected` → `stopped`. A
+States: `pending` → `registered` → `connected` ⇄ `disconnected` → `stopped`. A
 non-standing agent that disconnects is re-registered by its creator if it
 should run again; a standing agent is re-armed by the gateway (§7.6).
 
-Approval: a registration by the root agent needs human approval unless a
-standing `register` rule matches. A registration by an agent with
-`may_register` does not need approval, as long as it is within that agent's
-attenuated authority (above): it cannot create anything the human did not
-already approve for the agent itself. Every registration, connection and
-disconnection is audit-logged.
+Approval: by default (`permissions: "ask"`), any child registration by an agent
+with `may_register` enters `pending` state and requires human approval in the UI
+(`agent.approve` / `/api/v1/permissions/:id/decision`) before the registration
+token can connect, unless the human has explicitly switched that parent agent to
+`permissions: "auto"` or granted a standing `register` rule. Every registration,
+approval, connection and disconnection is audit-logged.
 
 ### 8.3 Grandchildren
 
@@ -1096,14 +1117,13 @@ the agent. It:
 
 1. marks the agent and every registered descendant `stopped`, with a
    tombstone saying who stopped it (or "parent X stopped");
-2. revokes their registration tokens and drops their undelivered messages;
-   their session tokens now answer only `agent.heartbeat` (and
-   `agent.disconnect`);
+2. revokes their registration tokens; their session tokens now answer only
+   `agent.heartbeat` (and `agent.disconnect`);
 3. greys out (inactivates) their page links and cancels their pending secret
    requests;
-4. tells each live `silo connect` wrapper, on its next heartbeat, to
-   `SIGTERM` the CLI's process group (`SIGKILL` after 30 s; at once with
-   `"kill"`) and close the ACP session;
+4. tells each live `silo connect` wrapper, immediately and on its next
+   heartbeat, to `SIGTERM` the CLI's process group (`SIGKILL` after 30 s; at
+   once with `"kill"`) and close the ACP session;
 5. returns the registrars' `stop_cmd`s, which `silo stop` runs as the caller
    (never by the gateway as root) for locations whose wrapper is gone, such
    as removing a container or destroying a microVM.
@@ -1115,45 +1135,34 @@ They are kept for inspection, and `silo gc` (or the UI) removes them after
 
 ### 8.5 Sibling rules
 
-- Siblings cannot message each other. Siblings can share data through shares
-  the parent granted to both; files are inspectable and auditable.
-- Nobody messages root. Children reach the human through `file_request`.
+- Siblings can share data through shares the parent granted to both; files are
+  inspectable and auditable.
+- No agent can send prompts to `root`. Children reach the human through
+  `file_request`.
 
 ### 8.6 Root reading its children
 
 For a non-root parent, `read_agent` returns the child's transcript. For the root
 agent, it returns **structured status only** by default: state, exit, the
-`report()` outcome the child set (an enum and a 200-character summary), budget
-used, and the files changed in shares. That keeps child-written prose out of
-root's context. The human can read any transcript and forward what matters
-(§7.3). Whether root should be able to read full child transcripts is listed in
-§15.
+`report()` outcome the child set (an enum and a summary), budget used, and the
+files changed in shares. That keeps child-written prose out of root's context.
+The human can read any transcript and forward what matters (§7.3). Whether root
+should be able to read full child transcripts is listed in §15.
 
-### 8.7 Parent → child messages
+### 8.7 Driving child agents (no special-case inter-agent messaging)
 
-`agent.message(agent, text)` (MCP `send_message` / `message_agent`, CLI
-`silo msg <agent> <text>`) is **strictly downward**:
+Communicating with a child agent is **not** a special case in Silo:
 
-- **The rule.** An agent may message only agents whose `parent` is the
-  caller, that is, agents it registered itself through the hub. The human
-  may message any agent.
-- **Never up, never sideways.** A child can never message its parent, root,
-  a sibling, a grandparent's other children, or its own grandchildren (they
-  are its children's to message). The gateway refuses and audits every such
-  attempt. A prompt-injected child therefore has no channel to push
-  instructions into its parent or into root. If a child needs privileged
-  action or the human's help, it uses `file_request`, which goes to the
-  human's queue.
-- **Delivery.** The gateway queues the message on the child (in order, at
-  most 100 waiting, 64 KiB each) and audits it with its text. The bridge
-  delivers it into the child's ACP session as a prompt tagged
-  `from_agent: <parent>`: immediately if the child is idle, or after the
-  current turn if it is mid-turn. A child that is registered but not yet
-  connected gets its messages when it connects (`agent.inbox`). Both
-  transcripts record the message.
-- **Replies.** A child answers its parent by finishing its turn and calling
-  `report`; the parent reads that with `read_agent`. No reply travels as a
-  prompt into the parent's session.
+- **Initial task brief.** The parent passes a self-contained `brief` in
+  `register_agent`; when the child attaches via `silo connect`, the bridge
+  runs the ACP handshake and delivers `brief` as the child's first ACP turn.
+- **Built-in CLI mechanisms.** For follow-up turns or multi-turn orchestration,
+  parents drive children using the coding-agent CLIs' own built-in `--resume`,
+  MCP, or ACP session mechanisms rather than a custom Silo message queue.
+- **Completion and escalation.** A child reports its outcome by calling `report`
+  (which the parent reads with `read_agent`, along with the transcript if the
+  parent is non-root). If a child needs privileged action or human assistance,
+  it calls `file_request`, which goes to the human's queue.
 
 ---
 
@@ -1549,10 +1558,10 @@ agent; anyone on the network; a compromised bridge process.
 
 | # | Threat | Mitigations | Residual risk |
 |---|---|---|---|
-| T1 | **Prompt injection reaches the root agent** and steers it into a harmful batch. | Root takes prompts only from the human (§7.3); messages go strictly parent → child, so no agent (not even `main`, root's own child) can message it (§8.7); forwarded requests are marked untrusted; root has no browsing and no egress except the model proxy (§4.7); it reads only structured child status by default (§8.6); and, above all, every privileged effect needs a human-approved batch whose exact content is shown (§6.3). | Root can still *read files* that agents wrote (with `CAP_DAC_READ_SEARCH`), and could be injected that way during diagnosis. In that case the attack must get past the approval screen, which is why the screen puts computed facts and risk flags before the agent's explanation. |
-| T2 | **Root agent exfiltrates what it can read** (secrets, user data). | No egress; silo's own secrets are hidden with `InaccessiblePaths=` (§7.2); the human may hide more. | Root can still write into a share or send a message to a child that has egress. `root.md` forbids it, but that is guidance only. Registration and message events are audited. A future option is to deny root writing to shares used by children with open egress. |
+| T1 | **Prompt injection reaches the root agent** and steers it into a harmful batch. | Root takes prompts only from the human (§7.3); there is no inter-agent message RPC (§8.7); forwarded requests are marked untrusted; root has no browsing and no egress except the model proxy (§4.7); it reads only structured child status by default (§8.6); and, above all, every privileged effect needs a human-approved batch whose exact content is shown (§6.3). | Root can still *read files* that agents wrote (with `CAP_DAC_READ_SEARCH`), and could be injected that way during diagnosis. In that case the attack must get past the approval screen, which is why the screen puts computed facts and risk flags before the agent's explanation. |
+| T2 | **Root agent exfiltrates what it can read** (secrets, user data). | No egress; silo's own secrets are hidden with `InaccessiblePaths=` (§7.2); the human may hide more. | Root can still write into a share used by a child that has egress. `root.md` forbids it, but that is guidance only. Registration events are audited. A future option is to deny root writing to shares used by children with open egress. |
 | T3 | **Child steals credentials**: model keys, the SA token through the metadata server, other agents' files. | Keys live only in the gateway; agents get placeholder tokens bound to their uid (§4.6). Metadata is blocked by nftables *and* `IPAddressDeny=` (§4.7). `ProtectHome=tmpfs` hides other homes; homes are 0700; `NoNewPrivileges`. | A kernel local privilege escalation from an agent uid beats all of this. Keep the box patched (the root agent's routine `pkg.install` standing approval helps); stronger isolation backends are future work. |
-| T4 | **Approval fatigue**: the human rubber-stamps. | Batches are coherent changes, not per-command prompts. The CLIs' own permission prompts inside the sandbox are off by default (§5.4). Typed operations plus scoped, expiring standing approvals cover routine work (§7.5). There is no approve-all. Risk flags, typed-hash confirmation for the worst cases, and forced paging of long batches. Scheduled runs never ask for root. Notifications only when attention is needed. | The UI tracks the median time to approve and approvals per day, and shows them to the human as a nudge. |
+| T4 | **Approval fatigue**: the human rubber-stamps. | Batches are coherent changes, not per-command prompts. Agents default to `permissions: "ask"` (§5.4), and the human can switch a trusted sandboxed agent to `permissions: "auto"` or grant scoped, expiring standing approvals for routine work (§7.5). There is no approve-all for root batches. Risk flags, typed-hash confirmation for the worst cases, and forced paging of long batches. Scheduled runs never ask for root. Notifications only when attention is needed. | The UI tracks the median time to approve and approvals per day, and shows them to the human as a nudge. |
 | T5 | **Time-of-check/time-of-use swap** between approval and execution. | Staging into root-owned storage, content hash over everything executed or written, executables hashed, agent-writable paths refused, and a re-hash at execution (§4.3); WebAuthn signature over the hash (§4.4). | Typed operations that fetch from the network (apt) rely on the distribution's signature chain, which is acceptable. |
 | T6 | **Misleading approval screen**: unicode tricks, a deceptive reason, a huge diff hiding one line. | argv shown element by element with escaping; bidi and control characters flagged; the reason is labelled untrusted and shown after the facts; pagination with must-view; hash shown. | Human attention. |
 | T7 | **Compromised bridge** (it is network-facing). | It runs as an unprivileged user; it cannot approve anything, because the gateway checks the WebAuthn signature over the item hash, and the IAP JWT again in GCP mode (§4.4); it has no credentials. | It can show false transcripts and drop prompts, and so mislead the human about agents (not about batches, whose content the gateway hashes and the passkey signs). It can read every transcript. |
@@ -1560,7 +1569,7 @@ agent; anyone on the network; a compromised bridge process.
 | T9 | **Audit log tampering**. | Hash chain, `chattr +a`, journald and Cloud Logging copies, and hidden from root (§4.8). | Real root (an approved batch) can rewrite the local file, but not the off-box copy. |
 | T10 | **Schedules as persistence**: an agent installs standing authority. | Agent-created schedules need approval; they are limited to the agent's own user and limits; no `run_as_root` in scheduled runs (§10.6). | |
 | T11 | **Gateway bugs**: it is the only root component. | Small surface: Unix socket only, no network listener for humans; JSON-RPC with strict schemas; written in Go; fuzzed batch canonicalisation; `silo-gatewayd.service` itself sandboxed as far as root allows (`ProtectHome=read-only` except silo paths, `MemoryDenyWriteExecute=`). | The core trust assumption. |
-| T13 | **Injection flows upward between agents**: a child reads hostile content and tries to steer its parent. | `agent.message` accepts only parent → child; every refused attempt is audited (§8.7). Children reach the human only through `file_request`. | The parent still reads its child's `report` and, for non-root parents, transcript (§8.6); the parent must treat both as untrusted. |
+| T13 | **Injection flows upward between agents**: a child reads hostile content and tries to steer its parent. | Silo has no upward inter-agent message RPC (§8.7). Children reach the human only through `file_request`. | The parent still reads its child's `report` and, for non-root parents, transcript (§8.6); the parent must treat both as untrusted. |
 | T14 | **Stolen agent token**. | Registration tokens are single use; session tokens are stored only as hashes, scoped to one agent, and revoked on disconnect or stop; standing agents' token files are 0600 root, read by systemd. | A token stolen from a live wrapper is worth that agent's authority until it disconnects. |
 | T15 | **Hostile page link** script attacks the UI. | Silo's cookie is scoped to `/api` and `/acp`; mutations need a CSRF header; the proxy strips credentials; separate CSP for `/p/` (§6.5). | A page can still phish the human with look-alike content; the UI frames page links with their owner's name. |
 | T16 | **Secret leaks into an agent's context or logs**. | The value goes UI → bridge → `silo connect` → a 0600 file; the gateway's methods cannot carry it, and it is never in the transcript or audit log (§5.6). | The agent can read the file it asked for; that is the point. |
@@ -1672,7 +1681,7 @@ v3/
 - Gateway (M1a, done): agent registration with single-use tokens,
   `agent.connect` / heartbeat / disconnect, `agent.list`, `agent.status`,
   cascading `agent.stop`, the two seeded standing agents (`root` and `main`,
-  §7.6), parent-only `agent.message`, page links and secret requests.
+  §7.6), default `permissions: "ask"`, page links and secret requests.
 - Gateway (M1b): the `silo-agent@.service` template with the limits and sandbox
   properties of §4.2, `silo connect`, the full `run_as_root`
   path with staging, hashing, re-hash, and execution (with snapshot reporting,
@@ -1682,8 +1691,8 @@ v3/
   tokens.
 - Bridge: ACP to Claude Code (adapter) and Gemini CLI (native); Codex can wait
   for M2 if its adapter is not ready. Transcripts; ACP over WebSocket; silo MCP
-  tools `run_as_root`, `register_agent`, `send_message`, `read_agent`,
-  `register_page`, `request_secret`, `report`; the `/p/<slug>/` proxy.
+  tools `run_as_root`, `register_agent`, `list_agents`, `read_agent`, `stop_agent`,
+  `register_page`, `unregister_page`, `list_pages`, `request_secret`, `file_request`, `report`; the `/p/<slug>/` proxy.
 - UI: passkey login, agents and sessions, chat, approval screen per §6.3 with
   WebAuthn-signed decisions, requests queue.
 - `root.md` (Appendix A) and one example template.
@@ -1692,8 +1701,8 @@ v3/
   batch (`pkg.install`), which the human approves and which runs; `main` is
   already connected and the human codes with it, publishes a page link and
   provides a secret it asked for; `main` registers one child in a rootless
-  container and messages it, and the child's attempt to message `main` or
-  root is refused.
+  container (approved by the human under default `permissions: "ask"`), and the
+  child completes its brief and calls `report`.
   A tampered staged file and a replaced executable both cause the batch to be
   refused at execution. A child cannot reach `169.254.169.254` or read root's
   home.
@@ -1787,11 +1796,11 @@ Everything that needs root goes through the `run_as_root` tool as a *batch*:
   user, a container or a microVM), with the smallest limits, budget and
   shares. Stop it when it is done. For everyday coding, the human has `main`.
 - Grant `may_register` only when the job really needs sub-agents. Siblings
-  cannot message each other; give them a shared directory instead.
+  share work through a shared directory.
 - Give each child a self-contained brief: goal, constraints, what "done" means,
   and to use `report` when finished and `file_request` when it needs something.
-- You can message your children; they can never message you. If one needs
-  something privileged, it asks the human, who decides whether to involve you.
+- Children can never send prompts to you. If one needs something privileged, it
+  asks the human via `file_request`, who decides whether to involve you.
 - Do not use children to get around your own restrictions. Do not ask them to
   fetch things for you from the internet, and do not pass them data you read
   from protected files.

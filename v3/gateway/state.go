@@ -12,6 +12,9 @@ import (
 
 // Agent states (design §8.2).
 const (
+	// StatePending: registered by an agent under permissions="ask" and
+	// awaiting human approval before its registration token may connect.
+	StatePending = "pending"
 	// StateRegistered: recorded, with an unused registration token; no
 	// `silo connect` has dialled in yet.
 	StateRegistered = "registered"
@@ -22,6 +25,15 @@ const (
 	StateDisconnected = "disconnected"
 	// StateStopped: stopped on request, or with an ancestor. Final.
 	StateStopped = "stopped"
+)
+
+// Agent permission policies (design §5.4). The default for every agent is
+// PermAsk: human approval is required for tool calls and new authority unless
+// the human explicitly switches the agent to PermAuto.
+const (
+	PermAsk       = "ask"
+	PermAuto      = "auto"
+	PermDenyShell = "deny-shell"
 )
 
 // Location says where an agent runs. It is the registrar's claim, kept for
@@ -48,6 +60,7 @@ type Agent struct {
 	// Runtime names the coding-agent CLI, e.g. "claude" or "gemini".
 	Runtime     string    `json:"runtime,omitempty"`
 	Brief       string    `json:"brief,omitempty"`
+	Permissions string    `json:"permissions"`
 	Limits      Limits    `json:"limits"`
 	BudgetUSD   float64   `json:"budget_usd,omitempty"`
 	MayRegister bool      `json:"may_register"`
@@ -61,6 +74,10 @@ type Agent struct {
 	LastSeen    *time.Time `json:"last_seen,omitempty"`
 	// Peer is what the connecting wrapper reported about itself.
 	Peer *Peer `json:"peer,omitempty"`
+	// ExitCode is the exit status reported by `silo connect` when the CLI exited.
+	ExitCode *int `json:"exit_code,omitempty"`
+	// Report is the outcome recorded by the agent via report().
+	Report *Report `json:"report,omitempty"`
 	// StopMode is set once the agent is stopped: the wrapper reads it on its
 	// next heartbeat and signals its CLI's process group accordingly.
 	StopMode  string     `json:"stop_mode,omitempty"`
@@ -70,11 +87,6 @@ type Agent struct {
 	// session tokens. The tokens themselves are never stored.
 	TokenHash   string `json:"token_hash,omitempty"`
 	SessionHash string `json:"session_hash,omitempty"`
-
-	// Inbox holds messages from the agent's parent (or the human) that the
-	// wrapper has not collected yet, oldest first.
-	Inbox   []Message `json:"inbox,omitempty"`
-	NextMsg int64     `json:"next_msg,omitempty"`
 }
 
 // Peer describes a connected `silo connect` wrapper.
@@ -93,14 +105,11 @@ type Tombstone struct {
 	Children []string `json:"children,omitempty"`
 }
 
-// Message is one parent → child message (design §8.7).
-type Message struct {
-	Seq int64 `json:"seq"`
-	// FromAgent is the sending agent, "" for the human.
-	FromAgent string    `json:"from_agent,omitempty"`
-	From      string    `json:"from"` // the audit actor
-	Text      string    `json:"text"`
-	Time      time.Time `json:"time"`
+// Report is the structured outcome an agent records via the report MCP tool.
+type Report struct {
+	Status  string    `json:"status"`
+	Summary string    `json:"summary"`
+	Time    time.Time `json:"time"`
 }
 
 // Page is a link in the UI (design §6.5): an agent's service on a port,
@@ -146,16 +155,40 @@ type SecretRequest struct {
 	Note string `json:"note,omitempty"`
 }
 
+// Agent request states (file_request).
+const (
+	RequestPending   = "pending"
+	RequestResolved  = "resolved"
+	RequestRejected  = "rejected"
+	RequestForwarded = "forwarded"
+)
+
+// AgentRequest is an agent filing a request to the human queue (design §7.3).
+type AgentRequest struct {
+	ID         string     `json:"id"`
+	Agent      string     `json:"agent"`
+	Kind       string     `json:"kind"`
+	Summary    string     `json:"summary"`
+	Detail     string     `json:"detail,omitempty"`
+	State      string     `json:"state"`
+	Created    time.Time  `json:"created"`
+	Resolved   *time.Time `json:"resolved,omitempty"`
+	Resolution string     `json:"resolution,omitempty"`
+	Note       string     `json:"note,omitempty"`
+}
+
 // State is everything the gateway persists. It is small, so it is kept as
 // one JSON document rewritten atomically on every change.
 type State struct {
 	Version int               `json:"version"`
 	Agents  map[string]*Agent `json:"agents"`
 	// History holds earlier incarnations whose id has been reused.
-	History    []*Agent         `json:"history,omitempty"`
-	Pages      map[string]*Page `json:"pages"`
-	Secrets    []*SecretRequest `json:"secrets,omitempty"`
-	NextSecret int64            `json:"next_secret,omitempty"`
+	History     []*Agent         `json:"history,omitempty"`
+	Pages       map[string]*Page `json:"pages"`
+	Secrets     []*SecretRequest `json:"secrets,omitempty"`
+	NextSecret  int64            `json:"next_secret,omitempty"`
+	Requests    []*AgentRequest  `json:"requests,omitempty"`
+	NextRequest int64            `json:"next_request,omitempty"`
 }
 
 // stateVersion 2 replaced the spawned-unit records of version 1 with
@@ -193,6 +226,11 @@ func (s Store) Load() (*State, error) {
 	}
 	if st.Pages == nil {
 		st.Pages = map[string]*Page{}
+	}
+	for _, a := range st.Agents {
+		if a.Permissions == "" {
+			a.Permissions = PermAsk
+		}
 	}
 	return st, nil
 }
