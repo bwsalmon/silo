@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ func TestUsage(t *testing.T) {
 	if err := run([]string{"help"}, &out, &errOut); err != nil || !strings.Contains(out.String(), "gateway") {
 		t.Fatalf("help: %v %q", err, out.String())
 	}
-	for _, want := range []string{"bridge", "connect", "mcp", "page", "secret", "call"} {
+	for _, want := range []string{"bridge", "ui", "connect", "mcp", "page", "secret", "call"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("usage missing %q: %q", want, out.String())
 		}
@@ -122,5 +123,31 @@ func TestPageAndSecretCLI(t *testing.T) {
 	}
 	if strings.Join(methods, ",") != strings.Join(wantMethods, ",") {
 		t.Fatalf("methods = %v, want %v", methods, wantMethods)
+	}
+}
+
+func TestUITokenCLI(t *testing.T) {
+	tokFile := filepath.Join(t.TempDir(), "ui-token.sha256")
+	var out, errOut bytes.Buffer
+	if err := run([]string{"ui", "token", "-file", tokFile}, &out, &errOut); err != nil {
+		t.Fatalf("silo ui token: %v (stderr=%s)", err, errOut.String())
+	}
+	tok := strings.TrimSpace(out.String())
+	if !strings.HasPrefix(tok, "silo_ui_") {
+		t.Fatalf("unexpected token output: %q", tok)
+	}
+	st, err := os.Stat(tokFile)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", tokFile, err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %04o, want 0600", st.Mode().Perm())
+	}
+	hashBytes, err := os.ReadFile(tokFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(string(hashBytes))) != 64 {
+		t.Fatalf("expected 64-hex-char SHA-256 hash in file, got %q", string(hashBytes))
 	}
 }

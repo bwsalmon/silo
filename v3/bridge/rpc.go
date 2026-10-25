@@ -326,9 +326,23 @@ func (b *Bridge) DispatchRPC(ctx context.Context, cred gateway.PeerCred, method 
 		}
 		return list, nil
 	case "request.resolve":
+		if res, ok := m["resolution"].(string); ok {
+			switch res {
+			case "resolve":
+				m["resolution"] = gateway.RequestResolved
+			case "dismiss", "dismissed", "reject":
+				m["resolution"] = gateway.RequestRejected
+			case "forward":
+				m["resolution"] = gateway.RequestForwarded
+			}
+		}
+		note, _ := m["note"].(string)
 		var req gateway.AgentRequest
 		if err := b.gwCall(ctx, "request.resolve", withAuth(auth, m), &req); err != nil {
 			return nil, err
+		}
+		if req.State == gateway.RequestForwarded {
+			b.ForwardRequestToRoot(ctx, req, note)
 		}
 		return &req, nil
 
@@ -394,7 +408,15 @@ func (b *Bridge) DispatchRPC(ctx context.Context, cred gateway.PeerCred, method 
 		comment, _ := m["comment"].(string)
 		return b.DecidePermission(ctx, id, approve, optID, comment)
 
-	case "audit.read", "audit.verify":
+	case "audit.read", "audit.verify",
+		"approval.list", "approval.show", "approval.decide",
+		"run_as_root.submit", "run_as_root.wait", "run_as_root.status", "run_as_root.cancel":
+		if _, hasBatchID := m["batch_id"]; !hasBatchID {
+			if id, ok := m["id"].(string); ok && id != "" {
+				m["batch_id"] = id
+				delete(m, "id")
+			}
+		}
 		var out json.RawMessage
 		if err := b.gwCall(ctx, method, withAuth(auth, m), &out); err != nil {
 			return nil, err

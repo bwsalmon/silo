@@ -54,6 +54,7 @@ type Config struct {
 	HTTPAddr          string
 	SessionsDir       string
 	HeartbeatInterval time.Duration
+	Auth              Authenticator
 	Logf              func(format string, args ...any)
 }
 
@@ -188,7 +189,8 @@ func (s *Session) Info() SessionInfo {
 
 // Bridge is the session bridge server.
 type Bridge struct {
-	cfg Config
+	cfg         Config
+	defaultCSRF string
 
 	mu          sync.Mutex
 	sessions    map[string]*Session // keyed by agent id
@@ -213,6 +215,7 @@ func New(cfg Config) (*Bridge, error) {
 	}
 	b := &Bridge{
 		cfg:             cfg,
+		defaultCSRF:     randomPrefixed(csrfTokenPrefix, 32),
 		sessions:        map[string]*Session{},
 		bySessionID:     map[string]*Session{},
 		readyWait:       map[string][]chan *Session{},
@@ -1562,4 +1565,58 @@ func sendFrame(fc FrameConn, f acp.Frame) error {
 		return err
 	}
 	return fc.WriteFrame(b)
+}
+
+// ForwardRequestToRoot injects a forwarded child request into `root`'s session
+// transcript (and active ACP session if connected), marked clearly as untrusted
+// content (design §8.6).
+func (b *Bridge) ForwardRequestToRoot(ctx context.Context, req gateway.AgentRequest, note string) {
+	msg := fmt.Sprintf("Request from agent %s (untrusted content):\nSummary: %s\nDetail: %s", req.Agent, req.Summary, req.Detail)
+	if note != "" {
+		msg += fmt.Sprintf("\nOperator note: %s", note)
+	}
+	if s := b.findSession(gateway.RootAgentID); s != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = b.Prompt(context.Background(), gateway.RootAgentID, msg)
+		}()
+		select {
+		case <-done:
+		case <-time.After(50 * time.Millisecond):
+		}
+		return
+	}
+	// If root does not have a live connected session yet, append the untrusted
+	// prompt event directly to root's transcript file so it is visible in the UI.
+	dir := filepath.Join(b.cfg.SessionsDir, gateway.RootAgentID)
+	_ = os.MkdirAll(dir, 0o700)
+	txPath := filepath.Join(dir, "transcript.jsonl")
+	existing, _ := b.ReadTranscript(gateway.RootAgentID, 0)
+	seq := int64(len(existing)) + 1
+	rawParams, _ := json.Marshal(acp.SessionPromptParams{
+		SessionID: gateway.RootAgentID,
+		Prompt:    []acp.ContentBlock{{Type: "text", Text: msg}},
+	})
+	rawFrame, _ := json.Marshal(acp.Frame{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  acp.MethodSessionPrompt,
+		Params:  rawParams,
+	})
+	ev := TranscriptEvent{
+		Seq:       seq,
+		Time:      time.Now().UTC(),
+		Agent:     gateway.RootAgentID,
+		SessionID: gateway.RootAgentID,
+		Direction: "out",
+		Method:    acp.MethodSessionPrompt,
+		Message:   rawFrame,
+	}
+	if line, err := json.Marshal(ev); err == nil {
+		if f, err := os.OpenFile(txPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_, _ = f.Write(append(line, '\n'))
+			_ = f.Close()
+		}
+	}
 }

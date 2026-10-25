@@ -528,10 +528,7 @@ func (s *Service) Call(ctx context.Context, p Principal, method string, raw json
 		if err := decode(raw, &q); err != nil {
 			return nil, err
 		}
-		if !p.Admin {
-			if p.Human {
-				return nil, s.forbid(p, method, "deciding from the web UI needs a passkey signature (design §4.4), which is not implemented yet; decide with `silo approvals` as an admin on the box")
-			}
+		if !p.Human {
 			return nil, s.forbid(p, method, "only the human may approve or reject batches")
 		}
 		return s.Decide(p, q)

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>silo v3 — Session Bridge &amp; Root Gateway</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <!-- Login Modal (shown when Auth is enabled and session is unauthenticated) -->
+  <div id="login-overlay" class="modal-overlay hidden" role="dialog" aria-labelledby="login-title">
+    <div class="modal-card login-card">
+      <div class="brand-row">
+        <span class="brand-logo">silo</span>
+        <span class="brand-badge">v3</span>
+      </div>
+      <h2 id="login-title">Authenticate to Silo Hub</h2>
+      <p class="muted-text">Enter the login token generated at install (<code>silo ui token</code>) to obtain a scoped session cookie (<code>Path=/api</code> &amp; <code>/acp</code>, <code>HttpOnly</code>, <code>SameSite=Strict</code>).</p>
+      <form id="login-form">
+        <label class="field-label" for="login-token-input">Login Token</label>
+        <input id="login-token-input" type="password" class="input-field mono" placeholder="silo_ui_..." autocomplete="current-password" required>
+        <div id="login-error" class="error-banner hidden"></div>
+        <div class="modal-actions">
+          <button type="submit" id="login-submit-btn" class="btn btn-primary">Sign In</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Stop Agent Confirmation Modal -->
+  <div id="stop-modal" class="modal-overlay hidden" role="dialog" aria-labelledby="stop-modal-title">
+    <div class="modal-card">
+      <h3 id="stop-modal-title">Stop Agent &amp; Subtree</h3>
+      <p id="stop-modal-desc" class="muted-text"></p>
+      <div class="field-group">
+        <label class="field-label" for="stop-mode-select">Signal Mode</label>
+        <select id="stop-mode-select" class="input-field">
+          <option value="graceful">Graceful (SIGTERM, then SIGKILL after 30s)</option>
+          <option value="kill">Immediate Kill (SIGKILL at once)</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="stop-cancel-btn" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="stop-confirm-btn" class="btn btn-danger">Stop Agent &amp; Subtree</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Header & Navigation -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand-row">
+        <span class="brand-logo">silo</span>
+        <span class="brand-badge">v3 hub</span>
+      </div>
+      <nav class="main-nav" aria-label="Primary Navigation">
+        <button type="button" class="nav-tab active" data-view="agents" id="nav-agents">
+          <span>Agents &amp; Sessions</span>
+          <span class="badge badge-neutral" id="badge-agents">0</span>
+        </button>
+        <button type="button" class="nav-tab" data-view="approvals" id="nav-approvals">
+          <span>Approvals &amp; Requests</span>
+          <span class="badge badge-warning" id="badge-approvals">0</span>
+        </button>
+        <button type="button" class="nav-tab" data-view="pages" id="nav-pages">
+          <span>Pages</span>
+          <span class="badge badge-info" id="badge-pages">0</span>
+        </button>
+        <button type="button" class="nav-tab" data-view="session" id="nav-session">
+          <span>Session Chat</span>
+          <span class="badge badge-neutral" id="badge-session-agent">main</span>
+        </button>
+        <button type="button" class="nav-tab" data-view="audit" id="nav-audit">
+          <span>Audit</span>
+          <span class="badge badge-ok" id="badge-audit">OK</span>
+        </button>
+      </nav>
+    </div>
+    <div class="topbar-right">
+      <span id="system-snapshot-pill" class="status-pill" title="Snapshot capability">no snapshot available — not undoable</span>
+      <span id="auth-subject-pill" class="status-pill mono">local</span>
+      <button type="button" id="refresh-all-btn" class="btn btn-sm btn-secondary" title="Refresh state">Refresh</button>
+      <button type="button" id="logout-btn" class="btn btn-sm btn-secondary hidden">Sign Out</button>
+    </div>
+  </header>
+
+  <div id="global-toast" class="toast hidden" role="status"></div>
+
+  <!-- Main Workspace -->
+  <main class="workspace">
+    <!-- 1. AGENTS & SESSIONS (BRIDGE VIEW) -->
+    <section id="view-agents" class="view-section">
+      <div class="section-header">
+        <div>
+          <h1>Agents &amp; Sessions (Bridge Tree)</h1>
+          <p class="subtitle">Registered agents (root first) in the parent/child hierarchy, runtime locations, clickable page links, and pending approval badges.</p>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="toggle-register-agent-btn" class="btn btn-primary">+ Register Agent</button>
+        </div>
+      </div>
+
+      <!-- Register Agent Drawer + Minted Token Box -->
+      <div id="register-agent-panel" class="card panel-collapsible hidden">
+        <h3>Register Agent</h3>
+        <p class="muted-text">Mint a single-use registration token (<code>silo_reg_…</code>) and get the <code>silo connect</code> command to run in any systemd unit, container, microVM, or subprocess.</p>
+        <form id="register-agent-form" class="form-grid">
+          <div>
+            <label class="field-label" for="reg-agent-name">Agent Name (<code>[a-z0-9-]</code>)</label>
+            <input id="reg-agent-name" type="text" class="input-field mono" placeholder="web-worker" required pattern="[a-z]([a-z0-9-]{0,23}[a-z0-9])?">
+          </div>
+          <div>
+            <label class="field-label" for="reg-agent-parent">Parent Agent</label>
+            <select id="reg-agent-parent" class="input-field mono">
+              <option value="">(none — top-level)</option>
+              <option value="root">root</option>
+              <option value="main" selected>main</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label" for="reg-agent-location-kind">Location Kind</label>
+            <select id="reg-agent-location-kind" class="input-field">
+              <option value="systemd">systemd (host unit)</option>
+              <option value="container" selected>container (podman / docker)</option>
+              <option value="microvm">microvm (firecracker / cloud-hypervisor)</option>
+              <option value="subprocess">subprocess</option>
+              <option value="remote">remote</option>
+              <option value="other">other</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label" for="reg-agent-location-detail">Location Detail</label>
+            <input id="reg-agent-location-detail" type="text" class="input-field mono" placeholder="podman:web-dev or silo-agent@web.service">
+          </div>
+          <div>
+            <label class="field-label" for="reg-agent-runtime">ACP Runtime CLI</label>
+            <select id="reg-agent-runtime" class="input-field mono">
+              <option value="claude">claude (Claude Code ACP)</option>
+              <option value="gemini">gemini (Gemini CLI --experimental-acp)</option>
+              <option value="codex">codex (Codex ACP)</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label" for="reg-agent-user">Unix User (optional)</label>
+            <input id="reg-agent-user" type="text" class="input-field mono" placeholder="silo-web">
+          </div>
+          <div>
+            <label class="field-label" for="reg-agent-permissions">Permission Policy</label>
+            <select id="reg-agent-permissions" class="input-field">
+              <option value="ask" selected>ask (human approval required — default)</option>
+              <option value="auto">auto (auto-approve sandboxed ACP calls)</option>
+              <option value="deny-shell">deny-shell (allow edits, refuse shell)</option>
+            </select>
+          </div>
+          <div class="checkbox-row">
+            <label class="checkbox-label">
+              <input id="reg-agent-may-register" type="checkbox">
+              <span>May register child agents (<code>may_register</code>)</span>
+            </label>
+          </div>
+          <div class="full-width">
+            <label class="field-label" for="reg-agent-brief">Initial Task Brief (optional)</label>
+            <textarea id="reg-agent-brief" class="input-field" rows="2" placeholder="Build the HTTP service on port 3000 and publish a page link..."></textarea>
+          </div>
+          <div class="full-width form-actions">
+            <button type="button" id="cancel-register-agent-btn" class="btn btn-secondary">Close</button>
+            <button type="submit" id="submit-register-agent-btn" class="btn btn-primary">Mint Token &amp; Register</button>
+          </div>
+        </form>
+
+        <!-- Minted Token & silo connect Output Box -->
+        <div id="minted-token-box" class="token-result-box hidden">
+          <div class="token-result-header">
+            <span class="badge badge-ok">Token Minted (Single-Use — Shown Once)</span>
+            <span id="minted-agent-id" class="mono bold"></span>
+          </div>
+          <div class="token-block">
+            <div class="token-label">Registration Token (<code>SILO_AGENT_TOKEN</code>):</div>
+            <pre id="minted-token-value" class="code-box mono"></pre>
+            <div class="token-label">Run anywhere inside the agent's location (<code>silo connect</code>):</div>
+            <pre id="minted-connect-cmd" class="code-box mono"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent Tree Container -->
+      <div id="agents-tree-container" class="agent-tree"></div>
+    </section>
+
+    <!-- 2. PAGES (SERVICE & EXTERNAL LINKS VIEW) -->
+    <section id="view-pages" class="view-section hidden">
+      <div class="section-header">
+        <div>
+          <h1>Pages — Internal Service Proxies &amp; External Links</h1>
+          <p class="subtitle">Active page links registered by agents. Admin session cookies are scoped to <code>/api</code> and <code>/acp</code> so proxied apps under <code>/p/&lt;slug&gt;/</code> cannot read credentials or mutate <code>/api/v1/*</code>.</p>
+        </div>
+        <div class="header-actions">
+          <label class="checkbox-label">
+            <input id="pages-show-inactive" type="checkbox">
+            <span>Include inactive links</span>
+          </label>
+          <button type="button" id="toggle-register-page-btn" class="btn btn-primary">+ Register Page Link</button>
+        </div>
+      </div>
+
+      <!-- Register Page Form -->
+      <div id="register-page-panel" class="card panel-collapsible hidden">
+        <h3>Register Page Link</h3>
+        <form id="register-page-form" class="form-grid">
+          <div>
+            <label class="field-label" for="page-slug-input">Slug (<code>/p/&lt;slug&gt;/</code>)</label>
+            <input id="page-slug-input" type="text" class="input-field mono" placeholder="preview" required>
+          </div>
+          <div>
+            <label class="field-label" for="page-title-input">Title</label>
+            <input id="page-title-input" type="text" class="input-field" placeholder="Preview Server" required>
+          </div>
+          <div>
+            <label class="field-label" for="page-kind-select">Link Kind</label>
+            <select id="page-kind-select" class="input-field">
+              <option value="internal" selected>Internal Service Port (/p/&lt;slug&gt;/ proxy)</option>
+              <option value="external">External HTTP(S) URL</option>
+            </select>
+          </div>
+          <div id="page-internal-fields" class="form-subgrid">
+            <div>
+              <label class="field-label" for="page-port-input">Target Port</label>
+              <input id="page-port-input" type="number" class="input-field mono" placeholder="3000" min="1" max="65535">
+            </div>
+            <div>
+              <label class="field-label" for="page-host-input">Target Host</label>
+              <input id="page-host-input" type="text" class="input-field mono" value="127.0.0.1">
+            </div>
+            <div>
+              <label class="field-label" for="page-expose-input">Expose Port (optional)</label>
+              <input id="page-expose-input" type="number" class="input-field mono" placeholder="8443" min="1024" max="65535">
+            </div>
+          </div>
+          <div id="page-external-fields" class="full-width hidden">
+            <label class="field-label" for="page-url-input">External Destination URL (<code>http://</code> or <code>https://</code>)</label>
+            <input id="page-url-input" type="url" class="input-field mono" placeholder="https://example.com/docs">
+          </div>
+          <div class="full-width form-actions">
+            <button type="button" id="cancel-register-page-btn" class="btn btn-secondary">Close</button>
+            <button type="submit" class="btn btn-primary">Save Page Link</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="pages-split">
+        <div class="card">
+          <div class="card-title-row">
+            <h2>Internal Service Links (<code>/p/&lt;slug&gt;/</code>)</h2>
+            <span id="internal-pages-count" class="badge badge-info">0</span>
+          </div>
+          <p class="muted-text small">Reverse-proxied by the bridge with <code>Cookie</code> and <code>Authorization</code> stripped and isolated CSP.</p>
+          <div id="internal-pages-list" class="stack-list"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row">
+            <h2>External Service Links (<code>http(s)://</code>)</h2>
+            <span id="external-pages-count" class="badge badge-neutral">0</span>
+          </div>
+          <p class="muted-text small">Opened in a new tab with <code>target="_blank" rel="noopener noreferrer"</code> and full target URL shown.</p>
+          <div id="external-pages-list" class="stack-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. SESSION VIEW (LIVE ACP TRANSCRIPT, CHAT, INLINE PERMISSIONS & SECRETS) -->
+    <section id="view-session" class="view-section hidden">
+      <div class="session-layout">
+        <!-- Session Agent Sidebar -->
+        <aside class="session-sidebar card">
+          <h3>Agent Sessions</h3>
+          <div id="session-agent-selector" class="agent-selector-list"></div>
+        </aside>
+
+        <!-- Active Session Main Panel -->
+        <div class="session-main">
+          <div id="session-header-bar" class="card session-header-card"></div>
+
+          <!-- Inline Pending Secret Requests for this Agent -->
+          <div id="session-inline-secrets" class="stack-list"></div>
+
+          <!-- Inline Pending ACP Permission Requests for this Agent -->
+          <div id="session-inline-permissions" class="stack-list"></div>
+
+          <!-- Live ACP Transcript Stream -->
+          <div class="card transcript-card">
+            <div class="transcript-toolbar">
+              <span class="mono bold" id="transcript-title">ACP Session Transcript</span>
+              <span id="ws-stream-status" class="badge badge-neutral">WS: idle</span>
+            </div>
+            <div id="session-transcript-log" class="transcript-stream" aria-live="polite"></div>
+          </div>
+
+          <!-- Prompt Input & Cancel -->
+          <form id="session-prompt-form" class="card prompt-bar">
+            <textarea id="session-prompt-input" class="input-field prompt-textarea" rows="2" placeholder="Send an ACP prompt to this agent… (Enter to send, Shift+Enter for newline)"></textarea>
+            <div class="prompt-actions">
+              <button type="button" id="session-cancel-btn" class="btn btn-danger" title="Send ACP session/cancel">Cancel Turn</button>
+              <button type="submit" id="session-send-btn" class="btn btn-primary">Send Prompt</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. APPROVALS & REQUESTS (PRIORITY VIEW) -->
+    <section id="view-approvals" class="view-section hidden">
+      <div class="section-header">
+        <div>
+          <h1>Approvals &amp; Requests Queue</h1>
+          <p class="subtitle">Human-gated root execution batches (<code>run_as_root</code>), secret requests (<code>request_secret</code>), ACP tool permissions, and escalation requests (<code>file_request</code>).</p>
+        </div>
+      </div>
+
+      <!-- 4A. Pending run_as_root Batches -->
+      <div class="queue-block">
+        <div class="queue-block-header">
+          <h2>Pending <code>run_as_root</code> Batches</h2>
+          <span id="pending-batches-count" class="badge badge-danger">0</span>
+        </div>
+        <p class="muted-text small">Computed facts, risk flags, file writes, unified diffs, and element-by-element resolved <code>argv</code> are always shown <strong>before</strong> the agent's untrusted explanation.</p>
+        <div id="pending-batches-list" class="stack-list"></div>
+      </div>
+
+      <!-- 4B. Secret Requests Box (request_secret) -->
+      <div class="queue-block">
+        <div class="queue-block-header">
+          <h2>Secret Requests (<code>request_secret</code>)</h2>
+          <span id="pending-secrets-count" class="badge badge-warning">0</span>
+        </div>
+        <p class="muted-text small">Secrets provided here are streamed directly over <code>silo connect</code> and written atomically (<code>0600</code>) to the target path in the agent's environment. They are never stored in gateway state, transcripts, or the audit log.</p>
+        <div id="pending-secrets-list" class="stack-list"></div>
+      </div>
+
+      <!-- 4C. Pending ACP Tool & Child Registration Permissions -->
+      <div class="queue-block">
+        <div class="queue-block-header">
+          <h2>Pending ACP Tool &amp; Child Registration Permissions</h2>
+          <span id="pending-perms-count" class="badge badge-info">0</span>
+        </div>
+        <div id="pending-perms-list" class="stack-list"></div>
+      </div>
+
+      <!-- 4D. General Agent Requests Queue (file_request) -->
+      <div class="queue-block">
+        <div class="queue-block-header">
+          <h2>Agent Escalation Requests (<code>file_request</code>)</h2>
+          <span id="pending-requests-count" class="badge badge-neutral">0</span>
+        </div>
+        <p class="muted-text small">Resolve with a note to the agent, forward to <code>root</code> (clearly marked untrusted content), or dismiss.</p>
+        <div id="pending-requests-list" class="stack-list"></div>
+      </div>
+
+      <!-- 4E. History of Decided run_as_root Batches -->
+      <div class="queue-block">
+        <div class="queue-block-header">
+          <h2>Decided <code>run_as_root</code> Batches &amp; Step Outputs</h2>
+          <span id="decided-batches-count" class="badge badge-neutral">0</span>
+        </div>
+        <div id="decided-batches-list" class="stack-list"></div>
+      </div>
+    </section>
+
+    <!-- 5. AUDIT VIEW -->
+    <section id="view-audit" class="view-section hidden">
+      <div class="section-header">
+        <div>
+          <h1>Hash-Chained Audit Log</h1>
+          <p class="subtitle">Read-only view of <code>/var/log/silo/audit.jsonl</code>. Each entry carries the SHA-256 hash of the previous line.</p>
+        </div>
+        <div class="header-actions">
+          <input id="audit-filter-input" type="search" class="input-field" placeholder="Filter by actor, event, or payload…">
+          <button type="button" id="verify-audit-btn" class="btn btn-secondary">Re-verify Hash Chain</button>
+        </div>
+      </div>
+
+      <div id="audit-verify-banner" class="verify-banner"></div>
+
+      <div class="card table-card">
+        <table class="data-table" id="audit-table">
+          <thead>
+            <tr>
+              <th>Seq</th>
+              <th>Timestamp (UTC)</th>
+              <th>Actor</th>
+              <th>Event</th>
+              <th>Payload</th>
+              <th>Prev SHA-256</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
