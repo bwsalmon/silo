@@ -7,6 +7,8 @@
 //	silo page <add|rm|list> [flags]
 //	silo secret <request|provide|reject|list> [flags]
 //	silo call [-socket PATH] METHOD [PARAMS-JSON]
+//	silo root propose BATCH.json                    the root agent proposes a batch
+//	silo approvals list|show|approve|reject         the human's approval queue
 //
 // Invoked as silo-gatewayd, silo-bridge, or silo-mcp (for example via a
 // symlink), it dispatches to gateway, bridge, or mcp respectively.
@@ -41,6 +43,8 @@ commands:
   call      make one JSON-RPC call to a Silo socket, e.g.
             silo call agent.list
             silo call agent.register '{"name":"web","runtime":"claude","location":{"kind":"container"}}'
+  root      the root agent's run_as_root: silo root propose BATCH.json
+  approvals the approval queue: silo approvals list|show|approve|reject
 `
 
 func main() {
@@ -155,6 +159,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		_, err = fmt.Fprintf(stdout, "%s\n", out)
 		return err
 
+	case "root":
+		return runRoot(args[1:], stdout, stderr)
+	case "approvals":
+		return runApprovals(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return nil

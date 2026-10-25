@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/bwsalmon/silo/v3/gateway/approval"
 	"github.com/bwsalmon/silo/v3/internal/tomlite"
 )
 
@@ -61,6 +62,10 @@ type Config struct {
 
 	RootAgent StandingAgentConfig `json:"root_agent"`
 	UserAgent StandingAgentConfig `json:"user_agent"`
+
+	// RunAsRoot configures batches: wait timeout, snapshots and standing
+	// approvals (design §4.3, §7.5).
+	RunAsRoot approval.Config `json:"run_as_root"`
 }
 
 // StandingAgentConfig configures one of the two agents the gateway seeds
