@@ -2,10 +2,10 @@
 // of every agent. Agents run wherever their registrar put them (a systemd
 // unit, a container, a microVM, a subprocess) and dial in with
 // `silo connect`; the gateway registers them, hands out and checks their
-// tokens, keeps the parent/child tree, routes parent → child messages,
-// records page links and secret requests, stops whole subtrees, and writes
-// the audit log. Callers reach it over a Unix socket and are identified by
-// SO_PEERCRED or by an agent token.
+// tokens, keeps the parent/child tree, records permission policies (default
+// permissions="ask"), page links, secret requests and agent requests, stops
+// whole subtrees, and writes the audit log. Callers reach it over a Unix
+// socket and are identified by SO_PEERCRED or by an agent token.
 package gateway
 
 import (
@@ -44,6 +44,7 @@ type Gateway struct {
 
 // New loads the persisted state. Call Start before serving.
 func New(cfg *Config, d Deps) (*Gateway, error) {
+	cfg.setDefaults()
 	if d.Logf == nil {
 		d.Logf = log.Printf
 	}
@@ -62,10 +63,9 @@ const maxDepth = 3
 
 // Bounds on what one caller can make the gateway hold.
 const (
-	maxInbox       = 100
-	maxMessage     = 64 << 10
 	maxBrief       = 64 << 10
 	maxPendingSecs = 20
+	maxPendingReqs = 50
 	maxPages       = 50 // per owner
 )
 
@@ -77,6 +77,10 @@ var (
 
 var locationKinds = map[string]bool{
 	"systemd": true, "container": true, "microvm": true, "subprocess": true, "remote": true, "other": true,
+}
+
+func validPermissions(p string) bool {
+	return p == PermAsk || p == PermAuto || p == PermDenyShell
 }
 
 // Start seeds the standing agents (root and the default user agent) on
@@ -102,8 +106,6 @@ func (g *Gateway) Start(_ context.Context) error {
 		}
 	}
 	if g.cfg.UserAgentEnabled() {
-		// The default user agent is the root agent's child, so root may
-		// message it and it may never message root (design §8.7).
 		parent := ""
 		if g.cfg.RootEnabled() {
 			parent = RootAgentID
@@ -156,7 +158,7 @@ func (g *Gateway) expireLocked() bool {
 		if a.State != StateConnected || a.LastSeen == nil || now.Sub(*a.LastSeen) < limit {
 			continue
 		}
-		g.disconnectLocked(a, "gateway", "no heartbeat for "+now.Sub(*a.LastSeen).Round(time.Second).String())
+		g.disconnectLocked(a, "gateway", "no heartbeat for "+now.Sub(*a.LastSeen).Round(time.Second).String(), nil)
 		changed = true
 	}
 	return changed
@@ -171,6 +173,10 @@ func (g *Gateway) ensureStandingLocked(id, parent string, root bool, sc Standing
 	if a != nil && (!a.Standing || a.Root != root) {
 		return fmt.Errorf("agent %q exists and is not the standing agent", id)
 	}
+	perm := sc.Permissions
+	if perm == "" {
+		perm = PermAsk
+	}
 	if a == nil || (a.State == StateStopped && rearmStopped) {
 		if a != nil {
 			g.st.History = append(g.st.History, a)
@@ -178,11 +184,14 @@ func (g *Gateway) ensureStandingLocked(id, parent string, root bool, sc Standing
 		a = &Agent{
 			ID: id, Root: root, Standing: true, User: sc.User, Parent: parent,
 			Location: Location{Kind: "systemd", Detail: "silo-agent@" + id + ".service"},
-			Runtime:  sc.Runtime, Brief: sc.Brief, Limits: sc.Limits, MayRegister: true,
+			Runtime:  sc.Runtime, Brief: sc.Brief, Permissions: perm, Limits: sc.Limits, MayRegister: true,
 			State: StateRegistered, Created: g.d.Clock.Now(), RegisteredBy: "gateway",
 		}
 		g.st.Agents[id] = a
 		g.audit("gateway", EvRegister, registerPayload(a))
+	}
+	if a.Permissions == "" {
+		a.Permissions = perm
 	}
 	switch a.State {
 	case StateConnected:
@@ -245,7 +254,7 @@ func (g *Gateway) chain(a *Agent) []string {
 
 func active(a *Agent) bool { return a != nil && a.State != StateStopped }
 
-// ---- agent.register ---------------------------------------------------------
+// ---- agent.register, approve, permissions -----------------------------------
 
 // RegisterParams is agent.register (design §8.1).
 type RegisterParams struct {
@@ -258,6 +267,7 @@ type RegisterParams struct {
 	Location    Location `json:"location"`
 	Runtime     string   `json:"runtime,omitempty"`
 	Brief       string   `json:"brief,omitempty"`
+	Permissions string   `json:"permissions,omitempty"`
 	Limits      Limits   `json:"limits"`
 	BudgetUSD   float64  `json:"budget_usd,omitempty"`
 	MayRegister bool     `json:"may_register,omitempty"`
@@ -271,13 +281,15 @@ type RegisterResult struct {
 	Agent  string `json:"agent"`
 	Token  string `json:"token"`
 	HubURL string `json:"hub_url"`
+	State  string `json:"state"`
 }
 
 // Register records a new agent for caller.
 func (g *Gateway) Register(c Caller, p RegisterParams) (*RegisterResult, error) {
 	parent := p.Parent
+	var ca *Agent
 	if !c.Human() {
-		ca := g.st.Agents[c.Agent]
+		ca = g.st.Agents[c.Agent]
 		if !ca.MayRegister {
 			return nil, g.deny(c, "agent.register", fmt.Sprintf("agent %q may not register agents", c.Agent))
 		}
@@ -285,6 +297,16 @@ func (g *Gateway) Register(c Caller, p RegisterParams) (*RegisterResult, error) 
 			return nil, g.deny(c, "agent.register", "agents register only their own children")
 		}
 		parent = c.Agent
+	}
+	perm := p.Permissions
+	if perm == "" {
+		perm = PermAsk
+	}
+	if !validPermissions(perm) {
+		return nil, invalidParams("permissions %q: want ask, auto or deny-shell", perm)
+	}
+	if !c.Human() && perm != PermAsk {
+		return nil, g.deny(c, "agent.register", "only the human may grant permissions other than ask")
 	}
 	if !agentIDRe.MatchString(p.Name) {
 		return nil, invalidParams("name %q: want 1-25 lower-case letters, digits and inner dashes", p.Name)
@@ -345,12 +367,16 @@ func (g *Gateway) Register(c Caller, p RegisterParams) (*RegisterResult, error) 
 			}
 		}
 	}
+	state := StateRegistered
+	if !c.Human() && !c.Approved && ca != nil && ca.Permissions != PermAuto {
+		state = StatePending
+	}
 	tok, h := newToken(regTokenPrefix)
 	a := &Agent{
 		ID: p.Name, User: p.User, Parent: parent, Location: loc, Runtime: p.Runtime, Brief: p.Brief,
-		Limits: p.Limits.withDefaults(g.cfg.DefaultLimits), BudgetUSD: p.BudgetUSD, MayRegister: p.MayRegister,
-		StopCmd: p.StopCmd, State: StateRegistered, Created: g.d.Clock.Now(), RegisteredBy: c.Actor(),
-		TokenHash: h,
+		Permissions: perm, Limits: p.Limits.withDefaults(g.cfg.DefaultLimits), BudgetUSD: p.BudgetUSD,
+		MayRegister: p.MayRegister, StopCmd: p.StopCmd, State: state, Created: g.d.Clock.Now(),
+		RegisteredBy: c.Actor(), TokenHash: h,
 	}
 	if prev != nil {
 		g.st.History = append(g.st.History, prev)
@@ -360,15 +386,79 @@ func (g *Gateway) Register(c Caller, p RegisterParams) (*RegisterResult, error) 
 		return nil, err
 	}
 	g.audit(c.Actor(), EvRegister, registerPayload(a))
-	return &RegisterResult{Agent: a.ID, Token: tok, HubURL: g.cfg.HubURL}, nil
+	return &RegisterResult{Agent: a.ID, Token: tok, HubURL: g.cfg.HubURL, State: a.State}, nil
 }
 
 func registerPayload(a *Agent) map[string]any {
 	return map[string]any{
 		"agent": a.ID, "root": a.Root, "standing": a.Standing, "parent": a.Parent, "user": a.User,
-		"location": a.Location, "runtime": a.Runtime, "brief": a.Brief, "limits": a.Limits,
-		"budget_usd": a.BudgetUSD, "may_register": a.MayRegister, "stop_cmd": a.StopCmd,
+		"location": a.Location, "runtime": a.Runtime, "brief": a.Brief, "permissions": a.Permissions,
+		"limits": a.Limits, "budget_usd": a.BudgetUSD, "may_register": a.MayRegister, "stop_cmd": a.StopCmd,
+		"state": a.State,
 	}
+}
+
+// ApproveParams is agent.approve: the human approving or rejecting a pending
+// child registration.
+type ApproveParams struct {
+	Auth
+	Agent   string `json:"agent"`
+	Approve *bool  `json:"approve,omitempty"`
+	Comment string `json:"comment,omitempty"`
+}
+
+// Approve activates a pending agent registration (or rejects it, stopping it).
+func (g *Gateway) Approve(c Caller, p ApproveParams) (*AgentInfo, error) {
+	a := g.st.Agents[p.Agent]
+	if a == nil {
+		return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no agent %q", p.Agent)}
+	}
+	if a.State != StatePending {
+		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is %s, not pending", p.Agent, a.State)}
+	}
+	approve := p.Approve == nil || *p.Approve
+	if approve {
+		a.State = StateRegistered
+	} else {
+		now := g.d.Clock.Now()
+		cause := "registration rejected by " + c.Actor()
+		if p.Comment != "" {
+			cause += ": " + p.Comment
+		}
+		a.State, a.TokenHash = StateStopped, ""
+		a.Tombstone = &Tombstone{Time: now, Cause: cause}
+	}
+	if err := g.saveLocked(); err != nil {
+		return nil, err
+	}
+	g.audit(c.Actor(), EvApprove, map[string]any{"agent": a.ID, "approved": approve, "comment": p.Comment})
+	return g.infoLocked(a), nil
+}
+
+// PermissionsParams is agent.permissions: the human setting an agent's
+// permission policy ("ask", "auto", or "deny-shell").
+type PermissionsParams struct {
+	Auth
+	Agent       string `json:"agent"`
+	Permissions string `json:"permissions"`
+}
+
+// SetPermissions changes an agent's permission policy. Only the human may call it.
+func (g *Gateway) SetPermissions(c Caller, p PermissionsParams) (*AgentInfo, error) {
+	if !validPermissions(p.Permissions) {
+		return nil, invalidParams("permissions %q: want ask, auto or deny-shell", p.Permissions)
+	}
+	a := g.st.Agents[p.Agent]
+	if a == nil {
+		return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no agent %q", p.Agent)}
+	}
+	prev := a.Permissions
+	a.Permissions = p.Permissions
+	if err := g.saveLocked(); err != nil {
+		return nil, err
+	}
+	g.audit(c.Actor(), EvPermissions, map[string]any{"agent": a.ID, "from": prev, "permissions": a.Permissions})
+	return g.infoLocked(a), nil
 }
 
 // ---- agent.connect, heartbeat, disconnect ------------------------------------
@@ -382,8 +472,9 @@ type ConnectParams struct {
 	PID   int    `json:"pid,omitempty"`
 }
 
-// ConnectResult is the agent's session: the token every later call from
-// the wrapper (and from silo-mcp beside it) carries as agent_token.
+// ConnectResult is what the wrapper gets when its registration token is
+// accepted. SessionToken goes into every subsequent call from the wrapper
+// and from silo-mcp.
 type ConnectResult struct {
 	Agent        string `json:"agent"`
 	SessionToken string `json:"session_token"`
@@ -391,22 +482,30 @@ type ConnectResult struct {
 	Root         bool   `json:"root,omitempty"`
 	Runtime      string `json:"runtime,omitempty"`
 	Brief        string `json:"brief,omitempty"`
-	// HeartbeatSec is how often the wrapper must call agent.heartbeat.
-	HeartbeatSec int `json:"heartbeat_s"`
+	Permissions  string `json:"permissions"`
+	HeartbeatSec int    `json:"heartbeat_s"`
 }
 
-// Connect activates the agent whose registration token this is. The token
-// is used up: a second connect with it fails.
+// Connect consumes a single-use registration token, marks the agent
+// connected, and returns a session token for the wrapper.
 func (g *Gateway) Connect(c Caller, cred PeerCred, p ConnectParams) (*ConnectResult, error) {
 	if p.Token == "" {
 		return nil, invalidParams("token is required")
+	}
+	if len(p.Host) > 256 || p.PID < 0 {
+		return nil, invalidParams("bad host or pid")
 	}
 	h := hashToken(p.Token)
 	var a *Agent
 	for _, cand := range g.st.Agents {
 		if hashEqual(cand.TokenHash, h) {
 			a = cand
+			break
 		}
+	}
+	if a != nil && a.State == StatePending {
+		g.audit(c.Actor(), EvAuthDeny, map[string]any{"method": "agent.connect", "agent": a.ID, "uid": cred.UID, "pid": cred.PID, "reason": "agent registration is awaiting human approval"})
+		return nil, &Error{Code: CodeForbidden, Message: fmt.Sprintf("permission denied: registration of agent %q is awaiting human approval", a.ID)}
 	}
 	if a == nil || a.State == StateStopped {
 		g.audit(c.Actor(), EvAuthDeny, map[string]any{"method": "agent.connect", "uid": cred.UID, "pid": cred.PID, "reason": "unknown or used registration token"})
@@ -430,7 +529,7 @@ func (g *Gateway) Connect(c Caller, cred PeerCred, p ConnectParams) (*ConnectRes
 	}
 	return &ConnectResult{
 		Agent: a.ID, SessionToken: sess, Parent: a.Parent, Root: a.Root, Runtime: a.Runtime,
-		Brief: a.Brief, HeartbeatSec: hb,
+		Brief: a.Brief, Permissions: a.Permissions, HeartbeatSec: hb,
 	}, nil
 }
 
@@ -440,8 +539,6 @@ type HeartbeatResult struct {
 	// Stop is "graceful" (SIGTERM the CLI's process group, SIGKILL after
 	// 30s) or "kill" (SIGKILL at once) once the agent has been stopped.
 	Stop string `json:"stop,omitempty"`
-	// Inbox is how many messages are waiting in agent.inbox.
-	Inbox int `json:"inbox"`
 	// Secrets is how many of the agent's secret requests are pending.
 	Secrets int `json:"secrets"`
 }
@@ -454,26 +551,27 @@ func (g *Gateway) Heartbeat(c Caller) (*HeartbeatResult, error) {
 	}
 	now := g.d.Clock.Now()
 	a.LastSeen = &now
-	// A heartbeat is not audited and not saved at once: losing one on a
-	// crash costs nothing.
 	n := 0
 	for _, s := range g.st.Secrets {
 		if s.Agent == a.ID && s.State == SecretPending {
 			n++
 		}
 	}
-	return &HeartbeatResult{State: a.State, Inbox: len(a.Inbox), Secrets: n}, nil
+	return &HeartbeatResult{State: a.State, Secrets: n}, nil
 }
 
 // Disconnect is the wrapper saying it is going away: its CLI exited. The
 // session token is revoked; a standing agent is re-armed so its unit can
 // reconnect when systemd restarts it.
-func (g *Gateway) Disconnect(c Caller, reason string) (*AgentInfo, error) {
+func (g *Gateway) Disconnect(c Caller, p DisconnectParams) (*AgentInfo, error) {
 	a := g.st.Agents[c.Agent]
 	if a.State == StateConnected {
-		g.disconnectLocked(a, c.Actor(), reason)
+		g.disconnectLocked(a, c.Actor(), p.Reason, p.ExitCode)
 	} else {
 		a.SessionHash = ""
+		if p.ExitCode != nil {
+			a.ExitCode = p.ExitCode
+		}
 	}
 	if err := g.saveLocked(); err != nil {
 		return nil, err
@@ -481,12 +579,19 @@ func (g *Gateway) Disconnect(c Caller, reason string) (*AgentInfo, error) {
 	return g.infoLocked(a), nil
 }
 
-func (g *Gateway) disconnectLocked(a *Agent, actor, reason string) {
+func (g *Gateway) disconnectLocked(a *Agent, actor, reason string, exitCode *int) {
 	a.State, a.SessionHash = StateDisconnected, ""
+	if exitCode != nil {
+		a.ExitCode = exitCode
+	}
 	if reason == "" {
 		reason = "disconnected"
 	}
-	g.audit(actor, EvDisconnect, map[string]any{"agent": a.ID, "reason": reason})
+	payload := map[string]any{"agent": a.ID, "reason": reason}
+	if exitCode != nil {
+		payload["exit_code"] = *exitCode
+	}
+	g.audit(actor, EvDisconnect, payload)
 	if a.Standing {
 		if err := g.armLocked(a); err != nil {
 			g.d.Logf("re-arming standing agent %s: %v", a.ID, err)
@@ -552,7 +657,6 @@ func (g *Gateway) Stop(c Caller, p StopParams) (*StopResult, error) {
 		// is how the wrapper learns to signal its CLI; every other method
 		// refuses a stopped agent.
 		t.State, t.StopMode, t.TokenHash = StateStopped, p.Mode, ""
-		t.Inbox = nil
 		t.Tombstone = &Tombstone{Time: now, Cause: cause}
 		if ch := g.childrenOf(t.ID); len(ch) > 0 {
 			t.Tombstone.Children = ch
@@ -597,77 +701,135 @@ func (g *Gateway) childrenOf(id string) []string {
 	return out
 }
 
-// ---- agent.message and agent.inbox ---------------------------------------------
+// ---- agent.report and request.file/list/resolve -----------------------------
 
-// MessageParams is agent.message (design §8.7).
-type MessageParams struct {
+// ReportParams is agent.report.
+type ReportParams struct {
 	Auth
-	Agent string `json:"agent"`
-	Text  string `json:"text"`
+	Status  string `json:"status"`
+	Summary string `json:"summary"`
 }
 
-// MessageResult says where the message went.
-type MessageResult struct {
-	Agent string `json:"agent"`
-	Seq   int64  `json:"seq"`
-	// Queued is how many messages now wait for the child, this one
-	// included.
-	Queued int `json:"queued"`
-}
-
-// Message queues text for agent p.Agent. Messages go strictly downward: an
-// agent may message only the agents it registered itself (whose parent it
-// is); the human may message any agent. A child can never reach its
-// parent, root or a sibling this way, so a prompt-injected child cannot
-// inject instructions upward.
-func (g *Gateway) Message(c Caller, p MessageParams) (*MessageResult, error) {
-	t := g.st.Agents[p.Agent]
-	if !c.Human() && (t == nil || t.Parent != c.Agent) {
-		return nil, g.deny(c, "agent.message", fmt.Sprintf("agent %q may message only agents it registered, and %q is not one", c.Agent, p.Agent))
+// Report records the outcome of the calling agent's work.
+func (g *Gateway) Report(c Caller, p ReportParams) (*AgentInfo, error) {
+	switch p.Status {
+	case "ok", "failed", "needs_attention":
+	default:
+		return nil, invalidParams("status %q: want ok, failed or needs_attention", p.Status)
 	}
-	if t == nil {
-		return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no agent %q", p.Agent)}
+	if p.Summary == "" || len(p.Summary) > 1000 {
+		return nil, invalidParams("summary: must be 1-1000 bytes")
 	}
-	if t.State == StateStopped {
-		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q is stopped", p.Agent)}
-	}
-	if p.Text == "" || len(p.Text) > maxMessage {
-		return nil, invalidParams("text: must be 1-%d bytes", maxMessage)
-	}
-	if len(t.Inbox) >= maxInbox {
-		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q has %d undelivered messages", p.Agent, len(t.Inbox))}
-	}
-	t.NextMsg++
-	m := Message{Seq: t.NextMsg, FromAgent: c.Agent, From: c.Actor(), Text: p.Text, Time: g.d.Clock.Now()}
-	t.Inbox = append(t.Inbox, m)
+	a := g.st.Agents[c.Agent]
+	a.Report = &Report{Status: p.Status, Summary: p.Summary, Time: g.d.Clock.Now()}
 	if err := g.saveLocked(); err != nil {
 		return nil, err
 	}
-	g.audit(c.Actor(), EvMessage, map[string]any{"agent": t.ID, "from_agent": c.Agent, "seq": m.Seq, "text": m.Text})
-	return &MessageResult{Agent: t.ID, Seq: m.Seq, Queued: len(t.Inbox)}, nil
+	g.audit(c.Actor(), EvReport, map[string]any{"agent": a.ID, "status": p.Status, "summary": p.Summary})
+	return g.infoLocked(a), nil
 }
 
-// Inbox hands the caller's wrapper its waiting messages, oldest first, and
-// forgets them. The wrapper injects each into the ACP session as a prompt
-// tagged from_agent, queued behind a turn in progress.
-func (g *Gateway) Inbox(c Caller) ([]Message, error) {
-	a := g.st.Agents[c.Agent]
-	out := a.Inbox
-	if out == nil {
-		out = []Message{}
+var requestKinds = map[string]bool{
+	"wake_root": true, "privileged": true, "access": true, "other": true,
+}
+
+// RequestFileParams is request.file.
+type RequestFileParams struct {
+	Auth
+	Kind    string `json:"kind"`
+	Summary string `json:"summary"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// RequestFile files a request from an agent to the human queue.
+func (g *Gateway) RequestFile(c Caller, p RequestFileParams) (*AgentRequest, error) {
+	if c.Human() {
+		return nil, invalidParams("request.file is for agents")
 	}
-	if len(a.Inbox) > 0 {
-		a.Inbox = nil
-		if err := g.saveLocked(); err != nil {
-			return nil, err
+	if p.Kind == "" {
+		p.Kind = "other"
+	}
+	if !requestKinds[p.Kind] {
+		return nil, invalidParams("kind %q: want wake_root, privileged, access or other", p.Kind)
+	}
+	if p.Summary == "" || len(p.Summary) > 500 {
+		return nil, invalidParams("summary: must be 1-500 bytes")
+	}
+	if len(p.Detail) > 16<<10 {
+		return nil, invalidParams("detail: at most 16384 bytes")
+	}
+	pending := 0
+	for _, r := range g.st.Requests {
+		if r.Agent == c.Agent && r.State == RequestPending {
+			pending++
 		}
-		seqs := make([]int64, len(out))
-		for i, m := range out {
-			seqs[i] = m.Seq
+	}
+	if pending >= maxPendingReqs {
+		return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("agent %q has %d pending requests", c.Agent, pending)}
+	}
+	g.st.NextRequest++
+	req := &AgentRequest{
+		ID: fmt.Sprintf("req-%d", g.st.NextRequest), Agent: c.Agent, Kind: p.Kind,
+		Summary: p.Summary, Detail: p.Detail, State: RequestPending, Created: g.d.Clock.Now(),
+	}
+	g.st.Requests = append(g.st.Requests, req)
+	if err := g.saveLocked(); err != nil {
+		return nil, err
+	}
+	g.audit(c.Actor(), EvRequestFile, req)
+	return req, nil
+}
+
+// RequestListParams is request.list.
+type RequestListParams struct {
+	Auth
+	Pending bool `json:"pending,omitempty"`
+}
+
+// RequestList returns the human every request, an agent its own.
+func (g *Gateway) RequestList(c Caller, p RequestListParams) ([]AgentRequest, error) {
+	out := []AgentRequest{}
+	for _, r := range g.st.Requests {
+		if (c.Human() || r.Agent == c.Agent) && (!p.Pending || r.State == RequestPending) {
+			out = append(out, *r)
 		}
-		g.audit(c.Actor(), EvDeliver, map[string]any{"agent": a.ID, "seqs": seqs})
 	}
 	return out, nil
+}
+
+// RequestResolveParams is request.resolve.
+type RequestResolveParams struct {
+	Auth
+	ID         string `json:"id"`
+	Resolution string `json:"resolution"`
+	Note       string `json:"note,omitempty"`
+}
+
+// RequestResolve resolves a pending agent request.
+func (g *Gateway) RequestResolve(c Caller, p RequestResolveParams) (*AgentRequest, error) {
+	switch p.Resolution {
+	case RequestResolved, RequestRejected, RequestForwarded:
+	default:
+		return nil, invalidParams("resolution %q: want resolved, rejected or forwarded", p.Resolution)
+	}
+	if len(p.Note) > 1000 {
+		return nil, invalidParams("note: at most 1000 bytes")
+	}
+	for _, r := range g.st.Requests {
+		if r.ID == p.ID {
+			if r.State != RequestPending {
+				return nil, &Error{Code: CodeConflict, Message: fmt.Sprintf("request %s is %s", p.ID, r.State)}
+			}
+			now := g.d.Clock.Now()
+			r.State, r.Resolution, r.Resolved, r.Note = p.Resolution, p.Resolution, &now, p.Note
+			if err := g.saveLocked(); err != nil {
+				return nil, err
+			}
+			g.audit(c.Actor(), EvRequestResolve, map[string]any{"id": r.ID, "agent": r.Agent, "resolution": r.Resolution, "note": r.Note})
+			return r, nil
+		}
+	}
+	return nil, &Error{Code: CodeNotFound, Message: fmt.Sprintf("no request %q", p.ID)}
 }
 
 // ---- agent.list and agent.status ------------------------------------------------
@@ -681,17 +843,18 @@ type ListParams struct {
 	History bool `json:"history,omitempty"`
 }
 
-// AgentInfo is an agent as list and status report it. Tokens and the inbox
-// are never reported.
+// AgentInfo is an agent as list and status report it. Tokens are never reported.
 type AgentInfo struct {
 	Agent
 	Children []string `json:"children"`
-	Inbox    int      `json:"inbox"`
 }
 
 func (g *Gateway) infoLocked(a *Agent) *AgentInfo {
-	info := &AgentInfo{Agent: *a, Children: g.childrenOf(a.ID), Inbox: len(a.Inbox)}
-	info.TokenHash, info.SessionHash, info.Agent.Inbox = "", "", nil
+	info := &AgentInfo{Agent: *a, Children: g.childrenOf(a.ID)}
+	info.TokenHash, info.SessionHash = "", ""
+	if info.Permissions == "" {
+		info.Permissions = PermAsk
+	}
 	return info
 }
 

@@ -151,9 +151,19 @@ func (e *env) connect(reg string) string {
 }
 
 // spawn registers and connects an agent, returning its session token.
+// If the registration requires human approval (default permissions="ask"),
+// spawn approves it as the human before connecting.
 func (e *env) spawn(cred PeerCred, tok string, params map[string]any) string {
 	e.t.Helper()
-	return e.connect(e.register(cred, tok, params))
+	if tok != "" {
+		params = with(tok, params)
+	}
+	var r RegisterResult
+	e.mustCall(cred, "agent.register", params, &r)
+	if r.State == StatePending {
+		e.mustCall(adminCred, "agent.approve", map[string]any{"agent": r.Agent}, nil)
+	}
+	return e.connect(r.Token)
 }
 
 // standing connects a standing agent with the token from its token file.

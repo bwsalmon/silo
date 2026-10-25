@@ -189,17 +189,22 @@ type AuditReadParams struct {
 // DisconnectParams is agent.disconnect.
 type DisconnectParams struct {
 	Auth
-	Reason string `json:"reason,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
 }
 
 // humanOnly methods may not be called by agents.
 var humanOnly = map[string]bool{
-	"audit.read": true, "audit.verify": true, "secret.provide": true, "secret.reject": true,
+	"agent.approve": true, "agent.permissions": true,
+	"audit.read": true, "audit.verify": true,
+	"secret.provide": true, "secret.reject": true,
+	"request.resolve": true,
 }
 
 // agentOnly methods act on the calling agent's own session.
 var agentOnly = map[string]bool{
-	"agent.heartbeat": true, "agent.disconnect": true, "agent.inbox": true, "secret.request": true,
+	"agent.heartbeat": true, "agent.disconnect": true, "agent.report": true,
+	"secret.request": true, "request.file": true,
 }
 
 func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw json.RawMessage) (any, error) {
@@ -208,9 +213,13 @@ func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw j
 	switch method {
 	case "agent.register":
 		params = &RegisterParams{}
+	case "agent.approve":
+		params = &ApproveParams{}
+	case "agent.permissions":
+		params = &PermissionsParams{}
 	case "agent.connect":
 		params = &ConnectParams{}
-	case "agent.heartbeat", "agent.inbox":
+	case "agent.heartbeat":
 		params = &Auth{}
 	case "agent.disconnect":
 		params = &DisconnectParams{}
@@ -220,8 +229,8 @@ func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw j
 		params = &ListParams{}
 	case "agent.status":
 		params = &StatusParams{}
-	case "agent.message":
-		params = &MessageParams{}
+	case "agent.report":
+		params = &ReportParams{}
 	case "page.register":
 		params = &PageRegisterParams{}
 	case "page.unregister":
@@ -234,6 +243,12 @@ func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw j
 		params = &SecretResolveParams{}
 	case "secret.list":
 		params = &SecretListParams{}
+	case "request.file":
+		params = &RequestFileParams{}
+	case "request.list":
+		params = &RequestListParams{}
+	case "request.resolve":
+		params = &RequestResolveParams{}
 	case "audit.read":
 		params = &AuditReadParams{}
 	case "audit.verify":
@@ -278,16 +293,20 @@ func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw j
 	switch p := params.(type) {
 	case *RegisterParams:
 		return g.Register(c, *p)
+	case *ApproveParams:
+		return g.Approve(c, *p)
+	case *PermissionsParams:
+		return g.SetPermissions(c, *p)
 	case *DisconnectParams:
-		return g.Disconnect(c, p.Reason)
+		return g.Disconnect(c, *p)
 	case *StopParams:
 		return g.Stop(c, *p)
 	case *ListParams:
 		return g.List(c, *p)
 	case *StatusParams:
 		return g.Status(c, *p)
-	case *MessageParams:
-		return g.Message(c, *p)
+	case *ReportParams:
+		return g.Report(c, *p)
 	case *PageRegisterParams:
 		return g.PageRegister(c, *p)
 	case *PageUnregisterParams:
@@ -303,6 +322,12 @@ func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw j
 		return g.SecretReject(c, *p)
 	case *SecretListParams:
 		return g.SecretList(c, *p)
+	case *RequestFileParams:
+		return g.RequestFile(c, *p)
+	case *RequestListParams:
+		return g.RequestList(c, *p)
+	case *RequestResolveParams:
+		return g.RequestResolve(c, *p)
 	case *AuditReadParams:
 		limit := p.Limit
 		if limit <= 0 || limit > 1000 {
@@ -310,11 +335,8 @@ func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw j
 		}
 		return g.d.Audit.Read(p.After, limit)
 	}
-	switch method {
-	case "agent.heartbeat":
+	if method == "agent.heartbeat" {
 		return g.Heartbeat(c)
-	case "agent.inbox":
-		return g.Inbox(c)
 	}
 	return g.d.Audit.Verify() // audit.verify
 }

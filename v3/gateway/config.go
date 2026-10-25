@@ -70,11 +70,12 @@ type StandingAgentConfig struct {
 	// that want no default user agent.
 	Enabled *bool `json:"enabled"`
 	// Name is the agent id; only the user agent's may be changed.
-	Name    string `json:"name"`
-	User    string `json:"user"`
-	Runtime string `json:"runtime"`
-	Brief   string `json:"brief"`
-	Limits  Limits `json:"limits"`
+	Name        string `json:"name"`
+	User        string `json:"user"`
+	Runtime     string `json:"runtime"`
+	Brief       string `json:"brief"`
+	Permissions string `json:"permissions"`
+	Limits      Limits `json:"limits"`
 }
 
 // RootEnabled reports whether the gateway should keep a root agent.
@@ -124,9 +125,11 @@ func (c *Config) setDefaults() {
 	def(&c.RootAgent.Name, RootAgentID)
 	def(&c.RootAgent.User, RootUser)
 	def(&c.RootAgent.Runtime, defaultRuntime)
+	def(&c.RootAgent.Permissions, PermAsk)
 	def(&c.UserAgent.Name, UserAgentID)
 	def(&c.UserAgent.User, UserAgentUser)
 	def(&c.UserAgent.Runtime, defaultRuntime)
+	def(&c.UserAgent.Permissions, PermAsk)
 	if c.HeartbeatTimeoutSec == 0 {
 		c.HeartbeatTimeoutSec = defaultTimeout
 	}
@@ -160,6 +163,11 @@ func (c *Config) validate() error {
 	}
 	if c.UserAgent.User == c.RootAgent.User {
 		return fmt.Errorf("user_agent.user %q: must differ from the root agent's", c.UserAgent.User)
+	}
+	for _, p := range []string{c.RootAgent.Permissions, c.UserAgent.Permissions} {
+		if !validPermissions(p) {
+			return fmt.Errorf("permissions %q: want ask, auto or deny-shell", p)
+		}
 	}
 	if err := c.DefaultLimits.Validate(); err != nil {
 		return fmt.Errorf("default_limits: %w", err)
