@@ -11,6 +11,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+
+	"github.com/bwsalmon/silo/v3/gateway/approval"
 )
 
 // Listen creates the API socket at path, mode 0660 and group gid (root's
@@ -108,7 +110,18 @@ func Main(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	srv := &Server{G: g}
+	approvals, err := approval.New(cfg.RunAsRoot, approval.Deps{
+		Dir: cfg.StateDir, RootAgent: RootAgentID, Logf: log.Printf,
+		Audit: func(actor, event string, payload any) {
+			if _, err := audit.Append(actor, event, payload); err != nil {
+				log.Printf("AUDIT WRITE FAILED: %s %s: %v", actor, event, err)
+			}
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("run_as_root: %w", err)
+	}
+	srv := &Server{G: g, Approvals: approvals}
 	go func() {
 		<-ctx.Done()
 		l.Close()

@@ -2,6 +2,8 @@
 //
 //	silo gateway [-config /etc/silo/gateway.toml]   the root daemon
 //	silo call [-socket PATH] METHOD [PARAMS-JSON]   one gateway API call
+//	silo root propose BATCH.json                    the root agent proposes a batch
+//	silo approvals list|show|approve|reject         the human's approval queue
 //
 // Invoked as silo-gatewayd (for example through a symlink, as the design's
 // unit names it), it runs the gateway.
@@ -30,6 +32,8 @@ commands:
             silo call agent.list
             silo call agent.register '{"name":"web","runtime":"claude","location":{"kind":"container"}}'
             silo call agent.message '{"agent":"main","text":"..."}'
+  root      the root agent's run_as_root: silo root propose BATCH.json
+  approvals the approval queue: silo approvals list|show|approve|reject
 `
 
 func main() {
@@ -92,6 +96,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		_, err = fmt.Fprintf(stdout, "%s\n", out)
 		return err
+	case "root":
+		return runRoot(args[1:], stdout, stderr)
+	case "approvals":
+		return runApprovals(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return nil
