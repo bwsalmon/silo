@@ -1,11 +1,14 @@
 # silo v3: design
 
-Status: draft for review. This is a spec only; no v3 code exists yet.
+Status: draft for review. The gateway's agent registry (M1a, `v3/gateway`)
+exists; the rest is spec.
 
 silo v3 is a thin layer installed on an ordinary Linux machine that lets coding
-agents live on it safely. Each agent is a Unix user. One small root daemon (the
-*gateway*) creates those users, starts agents with limits, holds every
-credential, and is the only path to root. That path is gated by a human who
+agents live on it safely. Agents run wherever their creator puts them (a
+systemd unit as their own Unix user, a container, a microVM, a subprocess) and
+register with the *Silo Hub*: one small root daemon (the *gateway*) that
+records every agent, its parent and its limits, holds every credential, and is
+the only path to root. That path is gated by a human who
 sees exactly what will run. A *session bridge* drives the stock coding-agent
 CLIs (Claude Code, Codex, Gemini CLI) over the Agent Client Protocol, and a
 *web UI* shows every agent as a chat session next to an approval queue and a
@@ -24,7 +27,7 @@ Contents:
 5. [Session bridge and protocol choice](#5-session-bridge-and-protocol-choice)
 6. [Web UI](#6-web-ui)
 7. [Root agent](#7-root-agent)
-8. [Spawn contract](#8-spawn-contract)
+8. [Registration contract](#8-registration-contract)
 9. [Editable instructions](#9-editable-instructions)
 10. [Agent schedules](#10-agent-schedules)
 11. [Installing on an existing box](#11-installing-on-an-existing-box)
@@ -54,9 +57,15 @@ Contents:
   (btrfs, ZFS, LVM thin, GCE persistent-disk snapshots), network namespaces and
   `chattr +a` are each detected at runtime. When one is missing, silo says so
   wherever it matters (for example on the approval screen) and carries on.
-- **Unix users are the agent boundary.** Every agent runs as its own uid, in its
-  own systemd unit with cgroup limits, a private `/tmp` and a mode-700 home.
-  Nothing new is invented where the kernel already enforces the boundary.
+- **Agents run anywhere; the hub is the boundary of authority.** An agent
+  is whatever dials the hub with `silo connect`: a systemd unit as its own
+  uid (the default on the box, with cgroup limits, a private `/tmp` and a
+  mode-700 home), a rootless container, a microVM or a plain subprocess.
+  Where the agent runs decides its isolation; the hub decides what it may
+  ask for, whom it may message, and who may stop it (§8).
+- **Ready on first open.** Every fresh silo has two agents connected out of
+  the box: `root`, the human-gated system agent, and `main`, an unprivileged
+  coding agent the human can use at once (§7.6).
 - **The human holds root.** No agent ever runs as uid 0. Every privileged change
   is a *batch* that the human approves after seeing exactly what will run, and
   the approval is bound to the batch's content hash.
@@ -79,8 +88,8 @@ Contents:
   configuration management either: the root agent uses the distribution's own
   tools, and the human approves the result.
 - Containers or VMs as the agent boundary. silo does not stop you running agents
-  in containers, but it does not depend on them. Stronger isolation (gVisor,
-  microVMs) is a possible later backend for `spawn`, not part of v3.
+  in containers, but it does not depend on them. Containers and microVMs are
+  *locations* an agent may be registered in (§8.1), not a requirement.
 - Multi-tenant hosting. One silo serves one human owner, or a small set named in
   config. The GCP deployment expects one dedicated project per silo.
 - A model or agent framework. silo hosts other people's agent CLIs and does not
@@ -99,12 +108,16 @@ Contents:
 |---|---|
 | **gateway** | `silo-gatewayd`, the only process that runs as root. |
 | **bridge** | `silo-bridge`, the session bridge. It runs as the unprivileged system user `silo` and also serves the web UI. |
-| **agent** | One running coding-agent CLI process tree, as one Unix user, in one systemd unit, with one or more sessions. |
+| **agent** | One coding-agent CLI process tree, registered with the hub and connected to it by one `silo connect` wrapper, with one or more sessions. It runs in some *location*: a systemd unit, a container, a microVM or a subprocess. |
+| **hub** | The Silo Hub: the gateway (registry, authority, audit) plus the bridge (sessions, UI). Agents dial it with `silo connect`. |
+| **`silo connect`** | The wrapper that runs inside an agent's location: it starts the CLI in ACP stdio mode, dials the hub with the agent's token, and pipes ACP frames between them. |
+| **user agent** | `main`, user `silo-user`: the default unprivileged coding agent every silo starts with, a child of root (§7.6). |
+| **page link** | A clickable link in the UI that an agent registers: its service on a port, served at `/p/<slug>/`, or an external URL (§6.5). |
 | **session** | An ACP session with an agent: a conversation with a transcript. Every scheduled run is a session too. |
 | **root agent** | The single bootstrapping agent, user `silo-root`. It is *not* uid 0. |
-| **child** | An agent spawned by another agent (its *parent*). Agents the root agent spawns are *children*; children's children are *grandchildren*. |
+| **child** | An agent registered by another agent (its *parent*). Agents the root agent registers are *children*; children's children are *grandchildren*. A parent may message its children; a child can never message its parent (§8.7). |
 | **batch** | A request to run something as root: one coherent change with a stated reason, made of steps and file writes. |
-| **approval** | The human's decision on a batch, spawn, schedule or request, bound to a content hash. |
+| **approval** | The human's decision on a batch, registration, schedule or request, bound to a content hash. |
 | **standing approval** | A scoped, expiring, logged pre-approval for a class of routine operations. |
 | **request** | Something an agent asks the human for (wake root, grant access, run something privileged). Requests go into the human's queue and never directly to the root agent. |
 | **template** | `/etc/silo/agents/<role>.md`: default parameters and instructions for a kind of child agent. |
@@ -134,24 +147,24 @@ Contents:
  │  │  • transcripts                │                         │     │      │
  │  └──────────────┬────────────────┘                         │     │      │
  │                 │ JSON-RPC, unix socket, SO_PEERCRED       │     │      │
- │                 │ (+ fd passing for agent stdio)           │     │      │
+ │                 │ (+ agent tokens from silo connect)       │     │      │
  │  ┌──────────────▼────────────────────────────────────┐     │     │      │
  │  │ silo-gatewayd  (root)                             │     │     │      │
- │  │  • users, units, cgroups      • approvals         │     │     │      │
+ │  │  • agent registry, tokens     • approvals         │     │     │      │
  │  │  • run_as_root executor       • standing approvals│     │     │      │
- │  │  • snapshots                  • schedules→timers  │     │     │      │
+ │  │  • messages, pages, secrets   • schedules→timers  │     │     │      │
  │  │  • audit log (hash-chained)   • nftables policy   │     │     │      │
  │  │  • credential proxy ──────────────────────────────┼─────┼─────┼──► model APIs,
  │  └──────────────┬────────────────────────────────────┘     │     │    cloud APIs
- │                 │ systemd D-Bus: transient units, timers   │     │      │
+ │                 │ register → token; silo connect dials in  │     │      │
  │                 ▼                                          │     │      │
- │  silo.slice                                                │     │      │
- │  ├─ silo-agent-root.service   user silo-root ──────────────┴─────┘      │
- │  │    (CLI + ACP adapter + silo-mcp; egress: proxy only)                │
- │  ├─ silo-agent-<id>.slice                                               │
- │  │   ├─ silo-agent-<id>.service   user silo-a-<name>  (child)           │
- │  │   └─ silo-agent-<id2>.slice …  (grandchildren nest under the parent) │
+ │  silo.slice   (every agent: silo connect ── CLI over ACP) ─┴─────┘      │
+ │  ├─ silo-agent@root.service   user silo-root  (egress: proxy only)      │
+ │  ├─ silo-agent@main.service   user silo-user  (child of root; open net) │
+ │  │   └─ children main registers: subprocess, rootless container, uVM … │
  │  └─ silo-batch-<id>.service   uid 0, only after approval                │
+ │  elsewhere: containers, microVMs, other hosts, dialling the bridge's    │
+ │  /connect endpoint with their token                                    │
  │                                                                         │
  │  nftables table inet silo: agent uids → no 169.254.169.254,             │
  │  root agent → loopback proxy only                                       │
@@ -164,9 +177,14 @@ Processes and trust:
 |---|---|---|---|
 | `silo-gatewayd` | root | `/run/silo/gateway.sock` (0660, group `silo-gw`), credential proxy on `/run/silo/proxy/<agent>.sock` and `127.0.0.1:7071` | everything |
 | `silo-bridge` | `silo` | `127.0.0.1:7070` on a local box, VM private IP `:7070` on GCP | transcripts and UI. It cannot approve anything on its own (§4.4). |
-| agent units | `silo-root`, `silo-a-*` | nothing by default | their own home, shared dirs they were given |
+| agents (`silo connect` + CLI) | `silo-root`, `silo-user`, `silo-a-*`, or whatever their location gives them | nothing by default; ports they publish as page links (§6.5) | their own home or location, shared dirs they were given, their own session token |
 | `silo-batch-*` | root | nothing | the approved steps, nothing else |
 | `silo-fire` (from timers) | `silo` | nothing | asks the gateway to start a scheduled run |
+
+Initial setup (`silo init`, §11; `silo up`, §12) always leaves two standing
+agents registered and connected: `root` and the default user agent `main`
+(§7.6). A human opening a fresh silo finds both in the agent tree, so they can
+start coding with `main` at once and keep `root` for changes to the system.
 
 The gateway has no network listener for humans. Everything human-facing goes
 through the bridge, and everything the bridge asks for that changes the box is
@@ -190,21 +208,27 @@ content-addressed batch staging directories.
 ### 4.1 Callers and identity
 
 The gateway speaks JSON-RPC 2.0 over the Unix socket `/run/silo/gateway.sock`,
-the same framing ACP and MCP use. It identifies every caller by `SO_PEERCRED`
-(uid, pid), and for agent processes it also checks the caller's cgroup, so a
-caller is one of:
+the same framing ACP and MCP use. Humans and silo's own components are
+identified by the kernel (`SO_PEERCRED`); agents, which may run anywhere, are
+identified by the token the hub gave them. A caller is one of:
 
-- **bridge**: uid `silo`;
-- **agent X**: a uid the gateway created, from inside that agent's unit. The
-  socket is not reachable from agent uids directly: agents reach the gateway
-  only through `silo-mcp`, which talks to the bridge, which tags the call with
-  the agent id it resolved from the MCP connection's peer credentials. The
-  gateway re-checks that the stated agent's unit contains the reported pid;
+- **bridge**: uid `silo`. Unrelayed, its calls are the human's (from the UI).
+  It may also relay a call `on_behalf_of` an agent whose ACP session it
+  carries, which is how MCP tool calls from agents dialling in remotely
+  arrive;
+- **agent X**: a caller presenting X's **session token** (`agent_token`).
+  `agent.connect` hands that token to X's `silo connect` wrapper when it
+  presents X's single-use registration token (§8.2); the wrapper keeps it in
+  memory and in a 0600 file beside `silo-mcp`, and the hub stores only its
+  sha256. A token identifies exactly one agent incarnation and dies when the
+  agent disconnects or is stopped;
 - **timer**: `silo-fire`, uid `silo`, carrying a schedule id;
-- **admin**: uid 0, from the `silo` CLI used by a human with sudo on the box.
+- **admin**: uid 0 or a configured admin uid, from the `silo` CLI used by a
+  human on the box.
 
-There are no bearer tokens between local components. Identity is always the
-kernel's.
+Any other peer may call only `agent.connect`. Human identity is always the
+kernel's (plus the passkey, §4.4); the only bearer tokens are the agents', and
+each is scoped to one agent and worth only that agent's authority.
 
 ### 4.2 API
 
@@ -212,11 +236,23 @@ All methods are JSON-RPC over the socket. Types are sketched in TypeScript
 notation. "Who" lists the callers allowed to use each method.
 
 ```ts
-// ---- agents ---------------------------------------------------------------
-spawn(req: SpawnRequest): SpawnResult           // who: bridge on behalf of human or agent; timer
-stop(agent: AgentId, mode: "graceful" | "kill"): void
-list(filter?: {parent?: AgentId, state?: State[]}): AgentInfo[]
-status(agent: AgentId): AgentInfo              // includes unit state, cgroup usage, budget used
+// ---- agents (§8) ------------------------------------------------------------
+agent.register(req: RegisterRequest): {agent, token, hub_url}  // who: human; agent with may_register (own children)
+agent.connect(token, host?, pid?): ConnectResult  // who: anyone holding the registration token; single use
+agent.heartbeat(): {state, stop?, inbox, secrets}  // who: the agent's own wrapper
+agent.disconnect(reason?): AgentInfo            // who: the agent's own wrapper
+agent.stop(agent, mode: "graceful" | "kill"): {stopped, tombstone, stop_cmds}  // human; ancestors
+agent.list(filter?: {parent?, state?, history?}): AgentInfo[]  // human: all; agent: self + descendants
+agent.status(agent): AgentInfo
+agent.message(agent, text): {seq, queued}       // human: any agent; agent: ONLY its own children (§8.7)
+agent.inbox(): Message[]                        // who: the agent's own wrapper
+
+// ---- page links (§6.5) and secret requests (§5.6) -------------------------
+page.register({slug, title, port, host?, expose_port?} | {slug, title, url}): Page
+page.unregister(slug) / page.list(all?): Page[]
+secret.request(name, reason, path?): SecretRequest   // who: agents
+secret.provide(id, path?) / secret.reject(id, note?) // who: human (bridge); never carries the value
+secret.list(pending?): SecretRequest[]
 
 // ---- privileged path ------------------------------------------------------
 run_as_root.submit(batch: Batch): {batch_id, hash, status: "pending" | "auto-approved"}
@@ -224,7 +260,7 @@ run_as_root.wait(batch_id, timeout_s): BatchStatus  // blocks; see §7.4 for how
 run_as_root.cancel(batch_id): void              // submitter or human
 
 // ---- human decisions (each needs a human signature, §4.4) -----------------
-approval.list(): PendingItem[]                  // batches, spawns, schedules, requests
+approval.list(): PendingItem[]                  // batches, registrations, schedules, requests
 approval.decide(item_id, decision: "approve" | "reject", comment?, sig: HumanSig): void
 standing.create(rule: StandingRule, sig: HumanSig): RuleId
 standing.revoke(rule_id, sig: HumanSig): void
@@ -251,42 +287,42 @@ capabilities(): {snapshot: "btrfs" | "zfs" | "lvm-thin" | "gce-pd" | "none",
                  gcp: {project, sa_email} | null, distro: {...}}
 ```
 
-`spawn` itself is specified in §8. Its essential effects:
+Registration and connection are specified in §8. The gateway itself never
+creates users or starts agent processes: it records agents, issues and checks
+their tokens, and enforces who may register, message and stop whom. Starting
+the agent's process is the registrar's business, in whatever location it
+chose (§8.1).
 
-1. Create the Unix user if needed (`useradd --system`-style but with a uid
-   from silo's range, default 61000–61999, a home at
-   `/var/lib/silo/home/<user>` with mode 0700, shell `/usr/sbin/nologin`, and no
-   password). Record it as silo-managed. The gateway never spawns as a user it
-   did not create, unless the human adopted that user explicitly in the UI.
-2. Create the shared groups and directories the request names (§8.1).
-3. Start a **transient systemd service** through D-Bus
-   (`StartTransientUnit`), placed in the parent's slice, with:
-   `User=`, `Group=`, `SupplementaryGroups=` (the granted shares only),
-   `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectSystem=full`,
-   `ProtectHome=tmpfs` plus `BindPaths=` for the agent's own home and its
-   granted shares (so other homes are not even visible), `ProtectKernelTunables=`,
-   `ProtectControlGroups=`, `RestrictSUIDSGID=`, `MemoryMax=`, `MemoryHigh=`,
-   `CPUQuota=`/`CPUWeight=`, `TasksMax=`, `IOWeight=`, and
-   `RuntimeMaxSec=` for the lifetime. The CLI's stdin and stdout are pipes
-   whose other ends the gateway hands to the bridge over the socket
-   (`SCM_RIGHTS`); the unit receives them through the transient unit's
-   `StandardInputFileDescriptor=`/`StandardOutputFileDescriptor=` properties,
-   the same way `systemd-run --pipe` does.
-4. Mint the agent's proxy identity (§4.6) and write an environment that points
-   each CLI at the proxy.
-5. Audit-log the spawn, with the full request and who approved it.
+**The systemd location.** On the box, the standard location is the template
+unit `silo-agent@<id>.service`, which runs `silo connect` as the agent's
+user. The standing agents use it (§7.6), and so does any agent the root
+agent or the human places on the box as a new Unix user (that needs a user
+created, so it is a `run_as_root` batch). The unit loads the agent's
+registration token with `LoadCredential=` from the root-only file the
+gateway writes, `/var/lib/silo/gateway/tokens/<id>`, and runs with:
+`User=`, `Group=`, `SupplementaryGroups=` (the granted shares only),
+`PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectSystem=full`,
+`ProtectHome=tmpfs` plus `BindPaths=` for the agent's own home and its
+granted shares (so other homes are not even visible), `ProtectKernelTunables=`,
+`ProtectControlGroups=`, `RestrictSUIDSGID=`, `MemoryMax=`, `MemoryHigh=`,
+`CPUQuota=`/`CPUWeight=`, `TasksMax=`, `IOWeight=`, and
+`InaccessiblePaths=` over silo's own state, secrets, logs and socket. User
+ids come from silo's range (default 61000–61999), with homes at
+`/var/lib/silo/home/<user>` (mode 0700), shell `/usr/sbin/nologin` and no
+password.
 
-> **Scope vs service.** The brief says "systemd scope". silo uses a
-> *transient service*, because systemd's sandboxing properties (`PrivateTmp=`,
+> **Service, not scope.** systemd's sandboxing properties (`PrivateTmp=`,
 > `ProtectHome=`, `NoNewPrivileges=`, `BindPaths=`) apply only to services,
-> not to scopes. Scopes only adopt processes that someone else already forked.
-> The cgroup placement and limits are the same either way. The slice tree is
-> what makes limits hierarchical: a child's unit lives in its parent's slice,
-> so the kernel caps the child and the parent together at the parent's limit.
+> not to scopes. The slice tree is what makes limits hierarchical: a child
+> placed on the box lives in its parent's slice, so the kernel caps the child
+> and the parent together at the parent's limit. Agents in other locations
+> carry their limits in that location (container cgroup, VM size), and the
+> hub records the limits they were registered with.
 
-`stop` sends SIGTERM through `StopUnit` (with `TimeoutStopSec=`) and, with
-`"kill"`, SIGKILL to the whole cgroup. Stopping a parent's slice stops every
-descendant in one step (§8.4).
+`agent.stop` marks the agent and every registered descendant stopped, revokes
+their tokens, and tells each live `silo connect` wrapper, on its next
+heartbeat, to `SIGTERM` its CLI's process group (and `SIGKILL` it after 30 s,
+or at once with `"kill"`) and close the ACP session (§8.4).
 
 ### 4.3 `run_as_root`: batches, hashing and execution
 
@@ -479,7 +515,7 @@ re-applies the table at startup and when agents change:
   are allowed; everything else, DNS included, is dropped. Its CLI reaches the
   model only through the proxy.
 - **Children**: the default is open egress, with metadata blocked. A template or
-  spawn may ask for `network: "proxy-only"`, or for an allowlist enforced by the
+  registration may ask for `network: "proxy-only"`, or for an allowlist enforced by the
   gateway's egress proxy (later milestone). If network namespaces are
   available, `network: "none"` gives the unit `PrivateNetwork=yes`.
 - Agents' units also get `IPAddressDeny=` for the metadata addresses as a
@@ -490,7 +526,7 @@ re-applies the table at startup and when agents change:
 `/var/log/silo/audit.jsonl` is append-only and independent of agent transcripts:
 
 - One JSON object per line: `seq`, `time`, `actor` (human email or credential
-  id, agent id, `gateway`, `timer`), `event` (`spawn`, `stop`, `batch.submit`,
+  id, agent id, `gateway`, `timer`), `event` (`agent.register`, `agent.connect`, `agent.stop`, `agent.message`, `page.register`, `secret.request`, `batch.submit`,
   `batch.decide`, `batch.exec.step`, `standing.create`, `standing.use`,
   `schedule.*`, `request.*`, `snapshot`, `policy.apply`, `gateway.start`), the
   payload (batch hash and full batch, not just a summary), and `prev` = sha256
@@ -511,8 +547,14 @@ re-applies the table at startup and when agents change:
 
 `silo-bridge` runs as user `silo` and is the ACP *client* for every agent:
 
-- On spawn it gets the CLI's stdio pipes from the gateway and runs the ACP
-  handshake (`initialize`, then `session/new`, or `session/load` when resuming).
+- When an agent's `silo connect` dials in (locally through the gateway's
+  socket, or from another location through the bridge's `/connect`
+  WebSocket, which relays `agent.connect` to the gateway), the bridge takes
+  the ACP stream `silo connect` pipes from the CLI's stdio and runs the ACP
+  handshake (`initialize`, then `session/new`, or `session/load` when
+  resuming).
+- It delivers queued parent → child messages (§8.7) into the child's session
+  and carries secret values from the UI to the agent's `silo connect` (§5.6).
 - It runs one ACP connection per agent process and multiplexes it to any number
   of UI viewers, with one writer at a time. Prompts from the human and from
   authorised agents are queued per session in order.
@@ -552,7 +594,7 @@ Three existing protocols are relevant, and each does a different job:
   adapters.
 - **MCP, the Model Context Protocol**: how an agent calls *tools*. All three
   CLIs can load MCP servers. This is how an agent should reach silo
-  capabilities (spawn, message, file a request).
+  capabilities (register an agent, message a child, file a request).
 - **A2A, Agent2Agent** (Linux Foundation): how opaque agents ask other agents to
   do *tasks* over HTTP, with agent cards. It was designed for agents of
   different vendors and organisations talking over the network. It has no
@@ -576,11 +618,12 @@ always means the Agent Client Protocol.
    are not sessions: agents, approvals, schedules, the audit log. These are
    plain CRUD, and squeezing them into ACP would be inventing a protocol.
 3. **Agent ↔ silo and agent ↔ agent = MCP tools** served by `silo-mcp` (§5.3).
-   An agent messaging another agent calls an MCP tool. The bridge turns the call
-   into an ACP prompt on the target's session, carrying the sender's identity
-   and labelled as agent-originated content.
+   An agent messaging one of its own children calls an MCP tool. The bridge
+   turns the call into an ACP prompt on the child's session, carrying the
+   sender's identity and labelled as agent-originated content. Messages only
+   ever flow from parent to child (§8.7).
 4. **A2A is optional and comes later**: an A2A façade (agent card plus
-   `message/send` mapped onto spawn and prompt) for programmatic clients off the
+   `message/send` mapped onto registration and prompt) for programmatic clients off the
    box. It is not needed for anything in v3's first milestones.
 
 Why not A2A for everything: inside one box, the UI needs ACP's fine-grained
@@ -592,23 +635,30 @@ it.
 
 ### 5.3 silo MCP tools (`silo-mcp`)
 
-`silo-mcp` is a stdio MCP server binary that the bridge registers in each
-agent's CLI configuration. It connects to the bridge's Unix socket
-`/run/silo/bridge.sock`, and the bridge identifies the agent by `SO_PEERCRED`.
-The tools offered depend on who the agent is:
+`silo-mcp` is a stdio MCP server binary that the agent's CLI loads. It sits
+beside `silo connect` in the agent's location and authenticates with the
+session token `silo connect` was given (§4.1), so it works the same in a
+systemd unit, a container or a microVM. The tools offered depend on who the
+agent is:
 
-| Tool | Root agent | Child | Notes |
+| Tool | Root agent | Other agents | Notes |
 |---|---|---|---|
 | `run_as_root(batch)` | ✔ | ✘ | §7.4 |
 | `batch_status(id)` | ✔ | ✘ | |
-| `spawn_agent(spec)` | ✔ | if `may_spawn` | §8 |
-| `list_agents()` | ✔ (all) | own children | |
-| `message_agent(id, text)` | own children | own children, granted peers | never to root |
+| `register_agent(spec)` | ✔ | if `may_register` | §8.1; returns the token for `silo connect` |
+| `list_agents()` | ✔ (all) | self and descendants | |
+| `send_message(id, text)` / `message_agent(id, text)` | own children only | own children only | §8.7: never up, never sideways |
 | `read_agent(id, since?)` | structured status only by default (§8.6) | own children: transcript | |
-| `stop_agent(id)` | own children | own children | |
+| `stop_agent(id)` | descendants | descendants | |
+| `register_page(slug, title, port \| url, …)` / `unregister_page(slug)` | ✔ | ✔ | §6.5 |
+| `request_secret(name, reason, path?)` | ✔ | ✔ | §5.6; the value never enters the agent's context |
 | `file_request(kind, summary, detail)` | ✘ | ✔ | goes to the human's queue |
 | `propose_schedule(def)` | ✔ | own user, own limits | needs human approval |
 | `report(status, summary)` | ✔ | ✔ | marks the session's outcome for the parent and the UI |
+
+The same operations are on the `silo` CLI inside an agent's location, for
+scripts: `silo agent register`, `silo msg <child> <text>`, `silo page
+register`, `silo secret request`.
 
 ### 5.4 The CLIs' own permission prompts
 
@@ -636,13 +686,21 @@ passkey login (§11.3). Routes that change something on the box need a
 
 ```
 GET    /api/v1/agents                         list (tree), state, usage, budget
-POST   /api/v1/agents                         human spawns an agent (HumanSig)
+POST   /api/v1/agents                         human registers an agent → token (HumanSig)
 GET    /api/v1/agents/:id
 POST   /api/v1/agents/:id/stop
+POST   /api/v1/agents/:id/messages            human messages any agent
+GET    /api/v1/pages                          page links (§6.5)
+DELETE /api/v1/pages/:slug
+GET    /api/v1/secrets                        secret requests (§5.6)
+POST   /api/v1/secrets/:id/provide            {value} → the agent's silo connect, never stored
+POST   /api/v1/secrets/:id/reject             {note}
+WS     /connect                               silo connect from other locations (agent token)
+ANY    /p/:slug/...                           page link proxy (§6.5)
 GET    /api/v1/sessions?agent=&schedule=      list sessions
 GET    /api/v1/sessions/:id/transcript        JSONL of ACP updates (paged)
 WS     /acp/v1/sessions/:id                   ACP: prompt, cancel, live updates
-GET    /api/v1/approvals                      pending batches/spawns/schedules/requests
+GET    /api/v1/approvals                      pending batches/registrations/schedules/requests
 GET    /api/v1/approvals/:id                  full presentation (§6.3)
 POST   /api/v1/approvals/:id/challenge        → nonce for WebAuthn
 POST   /api/v1/approvals/:id/decision         {decision, comment, HumanSig}
@@ -655,6 +713,29 @@ GET    /api/v1/system                         capabilities(), versions, health
 GET    /api/v1/instructions                   effective root.md and templates, with sources
 GET    /api/v1/events                         SSE: queue counts, agent state changes
 ```
+
+### 5.6 Secret requests
+
+An agent that needs a secret it should not see in its context (an API key, a
+deploy key) asks the human with `request_secret(name, reason, path?)` (MCP)
+or `silo secret request` (CLI). The gateway records the request
+(`secret.request`) and the UI shows it in the requests queue with the agent,
+the reason (marked untrusted) and the destination path.
+
+- When the human types the value and submits, the bridge sends it over the
+  agent's live `silo connect` session, outside ACP. `silo connect` writes it
+  atomically (temp file, `fsync`, rename) to the requested path, or by
+  default `~/.config/silo/secrets/<name>`, with mode `0600` inside the
+  agent's environment, and answers `{status: "stored", name, path}`. The
+  bridge then records `secret.provide` with that path. The MCP tool returns
+  only `{status: "stored", name, path}` to the agent.
+- The value is never written to the ACP transcript, the gateway's state, the
+  bridge's disk or the audit log: the gateway's methods do not accept a
+  value at all (their params are decoded strictly), and the audit entry
+  records only the request id, name and path.
+- The human may reject (`secret.reject`, with a note the agent sees). Pending
+  requests are cancelled when the agent stops. Paths must be absolute or
+  `~/…` and may not contain `..`.
 
 ---
 
@@ -670,7 +751,11 @@ GET    /api/v1/events                         SSE: queue counts, agent state cha
 - **GCP**: IAP has already authenticated the human, and the bridge checks the
   IAP JWT's email against the configured owner. The first visit enrols a
   passkey using the setup code that `silo up` printed (§12.4).
-- Sessions are short-lived cookies (`HttpOnly`, `Secure`, `SameSite=Strict`).
+- Sessions are short-lived cookies (`HttpOnly`, `Secure`, `SameSite=Strict`),
+  scoped to `Path=/api` and `Path=/acp` so they are never sent to `/p/<slug>/`
+  page links (§6.5). Every mutating request also needs a CSRF token header
+  the SPA reads from its own bootstrap response, which pages under `/p/`
+  cannot obtain.
   The UI sets a strict Content-Security-Policy (no inline scripts, no third-party
   origins) and renders all agent output as text or sanitised Markdown, never as
   raw HTML.
@@ -683,11 +768,14 @@ GET    /api/v1/events                         SSE: queue counts, agent state cha
   ACP transcript with tool calls, diffs and plans, plus a prompt box. The human
   can chat with any agent. Prompts from other agents appear labelled with their
   sender.
-- **Approval queue**: pending batches, spawns, agent-created schedules and
+- **Pages**: the page links agents have registered (§6.5), as a list and in
+  each agent's header.
+- **Approval queue**: pending batches, registrations, agent-created schedules and
   standing-approval uses, oldest first, with a badge count everywhere in the
   UI.
 - **Requests**: what agents have asked the human for. Each has three actions:
   *resolve* (with a note back to the agent), *forward to root*, or *dismiss*.
+  Secret requests (§5.6) have a password field and *provide* or *reject*.
 - **Schedules** (§10.5).
 - **Audit**: searchable log, with chain verification status.
 - **System**: detected capabilities, snapshot backend, versions, the effective
@@ -738,19 +826,49 @@ a schedule run that failed or was deferred past its deadline, a budget
 exhausted, or audit chain verification failing. Routine run completions are
 never notified.
 
+### 6.5 Page links and port exposure
+
+Agents run web servers, docs and dashboards. `page.register` (MCP
+`register_page`, CLI `silo page register`) puts a clickable link in the UI:
+
+- **Internal service**: `--slug <slug> --title <title> --port <port>
+  [--host <addr>] [--expose-port <listen_port>]`. The bridge serves it at
+  `/p/<slug>/`, reverse-proxying to `host:port` (default `127.0.0.1`) on the
+  box, or through the agent's `silo connect` tunnel when the agent runs
+  elsewhere. `--expose-port` additionally asks for the service on a port of
+  its own (1024–65535, unique across links), for clients that cannot live
+  under a path prefix; on GCP it is still reachable only through IAP.
+- **External link**: `--slug <slug> --title <title> --url <http(s)://…>`.
+  Only `http` and `https` URLs without credentials are accepted; the UI opens
+  them in a new tab with `rel="noopener noreferrer"`.
+
+Slugs are 1–32 lower-case letters, digits and inner dashes (`api`, `acp`,
+`static` and `login` are reserved), unique among active links. The owner, its
+ancestors and the human may remove a link; when the owner stops its links are
+greyed out (inactive) and their slugs become free.
+
+Content under `/p/<slug>/` is agent-controlled, so it is treated as hostile:
+Silo's session cookie is scoped to `/api` and `/acp` (§6.1) and never sent to
+`/p/`, mutating `/api/v1/*` calls need the CSRF header as well as the cookie,
+the proxy strips `Cookie` and `Authorization` before forwarding, and
+responses from `/p/` get their own CSP. JavaScript served by a page link
+therefore cannot read Silo's cookie or act through `/api/v1/*`.
+
 ---
 
 ## 7. Root agent
 
 ### 7.1 Role
 
-Exactly one root agent exists: user `silo-root`, agent id `root`, created by
-`silo init`. Its job is **bootstrapping**, meaning turning the human's
+Exactly one root agent exists: user `silo-root`, agent id `root`, seeded by
+the gateway on first start and connected by `silo init` (§11.2). Its job is **bootstrapping**, meaning turning the human's
 description of what this box is for into installed packages, configured services
-and spawned child agents with templates and schedules. After bootstrapping it
+and registered child agents with templates and schedules. After bootstrapping it
 stays **mostly dormant**: its unit keeps running so its session can be resumed,
-but it takes no turns until the human prompts it. The gateway refuses to create
-a second agent with the root role.
+but it takes no turns until the human prompts it. Only the gateway seeds the
+root role, and `agent.register` refuses the name `root` and the user
+`silo-root`. Day-to-day coding is not root's job: that is the default user
+agent's (§7.6).
 
 ### 7.2 Identity and sandbox
 
@@ -774,8 +892,9 @@ a second agent with the root role.
 ### 7.3 Input only from the human
 
 - The root agent's session takes prompts only from authenticated humans in the
-  UI. The bridge rejects `message_agent` aimed at `root`, and `silo-mcp` does
-  not even offer it.
+  UI. Root has no parent, and `agent.message` lets an agent message only its
+  own children (§8.7), so the gateway refuses every agent's message to `root`
+  (including `main`'s, though root registered it).
 - Children file **requests** (`file_request`) into the human's queue. The human
   may **forward to root**, which starts a root turn whose prompt is the
   human's note followed by the request in a block clearly marked *"Request from
@@ -786,9 +905,11 @@ a second agent with the root role.
 
 ### 7.4 Privileged operations
 
-Every privileged operation is a `run_as_root` batch, or a `spawn`, which is
-privileged because it creates a user. Both require approval unless a standing
-approval matches.
+Every privileged operation is a `run_as_root` batch, including placing a new
+agent on the box as a new Unix user (creating the user and its
+`silo-agent@` unit). Registering an agent in a location root can already use
+is not privileged in itself, but root's registrations still need approval
+unless a standing approval matches (§8.2).
 
 The `run_as_root` MCP tool submits the batch, then blocks for up to the CLI's
 tool timeout (configured high, default 10 min). If the human has not decided by
@@ -806,11 +927,11 @@ looks like this:
 
 ```toml
 id       = "sa-12"
-what     = "pkg.install"                 # typed operation, or "spawn"
+what     = "pkg.install"                 # typed operation, or "register"
 match    = { origin = "debian-archive" } # for pkg.install: only from distro archives
-# or, for spawn:
-# what = "spawn"; match = { template = ["web-dev", "tester"], new_user = true,
-#                           max_memory = "4G", may_spawn = false }
+# or, for registrations:
+# what = "register"; match = { template = ["web-dev", "tester"], new_user = true,
+#                              max_memory = "4G", may_register = false }
 who      = ["root"]                      # which agents may use it
 expires  = "2026-11-24T00:00:00Z"        # required; at most 90 days
 max_uses = 50
@@ -819,7 +940,7 @@ max_uses = 50
 Rules:
 
 - They match **typed operations** only (`pkg.install`, `pkg.remove`,
-  `unit.restart`, `spawn`), never raw argv patterns, because argv globbing is
+  `unit.restart`, `register`), never raw argv patterns, because argv globbing is
   too easy to slip past.
 - They never match a batch with any of the *edits silo or root's
   instructions*, sudoers, firewall, audit or gateway flags.
@@ -827,113 +948,176 @@ Rules:
   tab, with the rule id. The human can revoke a rule at any time.
 - Scheduled (unattended) sessions cannot use them (§10.6).
 
+### 7.6 The default user agent
+
+Root is deliberately hard to use for ordinary work: no egress, every change a
+batch. So initial setup also seeds a second standing agent, ready for the
+human the moment they first open the UI:
+
+| | `root` | `main` |
+|---|---|---|
+| Unix user | `silo-root` | `silo-user` |
+| Parent | none | `root` |
+| Privilege | `run_as_root` batches, human-gated | none: its own uid, home and workspace |
+| Network | credential proxy only | normal internet egress (metadata server still blocked) |
+| `may_register` | yes | yes: it may register and message its own children |
+| Typical use | change the system, bootstrap | write code, run servers, publish page links, fan out to child agents |
+
+`main` is root's child, so the authority goes the right way: root (and the
+human) may message `main`, and `main` can never message root or inject text
+into root's session (§8.7). Stopping root cascades to `main`; both are
+re-armed on the next gateway start. Its name and user can be changed in
+`gateway.toml` (`[user_agent]`), or it can be turned off.
+
+The gateway seeds both agents on first start, writes each one's registration
+token to `/var/lib/silo/gateway/tokens/<id>` (0600 root), and re-arms a
+standing agent with a fresh token whenever it disconnects, so systemd's
+restart of `silo-agent@<id>.service` reconnects it.
+
 ---
 
-## 8. Spawn contract
+## 8. Registration contract
 
-### 8.1 What the parent specifies
+An agent comes into being in two steps. Its creator (the human, or an agent
+with `may_register`) **registers** it with the hub, and gets back a
+single-use token. Then, inside whatever environment the agent should run in,
+`silo connect` presents that token, starts the CLI and joins the agent to
+the hub. The hub never forks the agent itself, so the same contract covers a
+systemd unit on the box, a rootless container, a Firecracker or Cloud
+Hypervisor microVM, a subprocess, or a machine elsewhere.
+
+### 8.1 Registration: what the creator specifies
+
+`agent.register` (MCP `register_agent`, CLI `silo agent register`):
 
 ```ts
-interface SpawnRequest {
-  parent: AgentId;                   // set by the bridge from the caller's identity, not trusted from input
-  user: {new: string} | {existing: string};  // "silo-a-<name>"; existing must be silo-managed and
-                                             // owned by this parent's subtree (or human-adopted)
+interface RegisterRequest {
+  name: AgentId;                     // 1-25 of [a-z0-9-]; "root" is reserved
+  parent?: AgentId;                  // human only; for an agent caller it is always the caller
+  user?: string;                     // the Unix user, if it runs on this box (never root or silo-root)
+  location?: {kind: "systemd" | "container" | "microvm" | "subprocess" | "remote" | "other",
+              detail?: string};      // e.g. "podman:web", "fc:vm-12"; recorded for the human
+  runtime?: "claude" | "codex" | "gemini" | string;  // the CLI silo connect will start
   template?: string;                 // /etc/silo/agents/<role>.md
-  cli: "claude" | "codex" | "gemini";
   model?: string;
-  brief: string;                     // the first prompt
+  brief?: string;                    // the first prompt
   shares?: {name: string, access: "rw" | "ro"}[];  // shared dirs/groups (below)
-  limits: {memory_max: string, cpu_quota: string, tasks_max?: number, disk_quota?: string};
-  budget: {tokens?: number, usd?: number};          // enforced by the credential proxy
-  lifetime: {kind: "until-done"} | {kind: "ttl", seconds: number} | {kind: "persistent"};
-  may_spawn?: {max_depth: 1, max_children: number}; // default: absent = may not spawn
-  peers?: AgentId[];                 // siblings it may message (§8.5)
+  limits?: {memory_max?, memory_high?, cpu_quota?, tasks_max?, disk_quota?};
+  budget_usd?: number;               // enforced by the credential proxy
+  may_register?: boolean;            // default false: may not create agents
+  stop_cmd?: string[];               // how to tear the location down (e.g. ["podman","rm","-f","web"])
   network?: "open" | "proxy-only" | "none";
-  on_parent_exit?: "stop" | "adopt";  // default "stop" (§8.4)
 }
+
+interface RegisterResult {
+  agent: AgentId;
+  token: string;    // SILO_AGENT_TOKEN: single use, shown once, stored only as a hash
+  hub_url: string;  // what silo connect dials: unix:///run/silo/gateway.sock on the box,
+                    // or the bridge's wss://…/connect from elsewhere
+}
+```
+
+The gateway records the agent (`registered`), audits the full request (never
+the token), and returns the token. The creator then starts the agent in the
+location it chose, passing `SILO_AGENT_TOKEN` (and `SILO_HUB_URL`) into it:
+
+```sh
+# on the box, as a unit (standing agents and new-user children):
+systemctl start silo-agent@web.service          # LoadCredential= reads the token file
+# a rootless container:
+podman run -d --name web -e SILO_AGENT_TOKEN -e SILO_HUB_URL img silo connect -- claude-code-acp
+# a microVM, a subprocess, another host: the same, with the token in its environment
+silo connect -- gemini --experimental-acp
 ```
 
 **Shared directories.** A share `name` is a group `silo-s-<name>` plus the
 directory `/srv/silo/shares/<name>`, mode 2770 (setgid, group-writable), with a
 default ACL that keeps new files group-writable. The parent may grant a child
 only shares it holds itself, with equal or lesser access. Only the root agent
-or the human can create new shares, and creating one is part of the spawn
-approval.
+or the human can create new shares, and creating one is a batch.
 
 **Attenuation.** The gateway checks, and the approval screen shows, that the
 request is no stronger than the parent:
 
-- limits are no more than what is left of the parent's own; the slice nesting
-  enforces this anyway;
+- limits are no more than what is left of the parent's own; on the box, the
+  slice nesting enforces this anyway;
 - the budget is carved out of the parent's budget, and the proxy charges child
   usage to the parent's account as well;
 - shares are a subset of the parent's; network is no more open than the
   parent's, except for the root agent, whose children may have open egress
   even though root has none: that is the point of delegating work to them;
-- `may_spawn.max_depth` is less than the parent's;
-- the user is new, or one the parent's subtree already owns. It can never be the
-  root agent's user, a human user, or a system user.
+- the depth stays within the cap (§8.3);
+- the user, if any, can never be root's user, a standing agent's user, a
+  human user, or a system user.
 
-### 8.2 What the parent gets back
+### 8.2 Connection: `silo connect`
 
-```ts
-interface SpawnResult {
-  agent: AgentId;       // stable id, e.g. "a-7k2m"
-  user: string;         // Unix user
-  session: SessionId;   // the initial ACP session
-  unit: string;         // silo-agent-a-7k2m.service
-}
-```
+`silo connect [--schedule <id>] -- <acp-cli> [args…]` runs inside the agent's
+location:
 
-The handle is the `agent` id. Only the parent (and humans) can use it, through
-`message_agent`, `read_agent`, `stop_agent` and `list_agents`. The bridge
-records the parent relation and checks it on every call. The handle is not a
-bearer secret, because the caller's identity comes from the kernel.
+1. It reads `SILO_AGENT_TOKEN` (or `$CREDENTIALS_DIRECTORY/token`) and
+   `SILO_HUB_URL`, dials the hub, and calls `agent.connect` with the token.
+   The token is used up; the gateway marks the agent `connected` and returns
+   a **session token**, the agent's parent, runtime and brief, and a
+   heartbeat interval. A token that is unknown, already used, or belongs to a
+   stopped agent is refused and audited.
+2. It starts the CLI in ACP stdio mode in its own process group, with
+   `silo-mcp` configured beside it (sharing the session token through a 0600
+   file), and pipes ACP JSON-RPC frames between the hub and the CLI's stdio.
+   The bridge runs the ACP handshake over that pipe (§5.1).
+3. It calls `agent.heartbeat` every interval. A heartbeat answers the agent's
+   state, how many messages wait in `agent.inbox`, how many secret requests
+   are pending, and, once the agent has been stopped, the stop mode.
+4. When the CLI exits it calls `agent.disconnect`. An agent that misses
+   heartbeats for `heartbeat_timeout_s` (default 90) is marked
+   `disconnected` by the gateway. Its session token is revoked either way.
 
-Approval: a spawn requested by the root agent needs human approval unless a
-standing `spawn` rule matches. A spawn by a child with `may_spawn` does not need
-approval, as long as it is within that child's attenuated authority (above): it
-cannot create anything the human did not already approve in the child's own
-spawn. Every spawn is audit-logged.
+States: `registered` → `connected` ⇄ `disconnected` → `stopped`. A
+non-standing agent that disconnects is re-registered by its creator if it
+should run again; a standing agent is re-armed by the gateway (§7.6).
+
+Approval: a registration by the root agent needs human approval unless a
+standing `register` rule matches. A registration by an agent with
+`may_register` does not need approval, as long as it is within that agent's
+attenuated authority (above): it cannot create anything the human did not
+already approve for the agent itself. Every registration, connection and
+disconnection is audit-logged.
 
 ### 8.3 Grandchildren
 
-A child may spawn only if its spawn request set `may_spawn`. The default depth
-is root → child → grandchild (`max_depth` of 1 for the child), and the
-system-wide cap in `gateway.toml` is 3 levels below root. Grandchildren are
-always new users, never get new shares, and cannot get `may_spawn` from a parent
-whose own `max_depth` is 1.
+An agent may register children only if its own registration set
+`may_register`. Both standing agents have it. The system-wide cap is 3 levels
+below root: root → `main` → child → grandchild.
 
-### 8.4 When the parent dies
+### 8.4 Stopping
 
-- **Root agent.** Dormant does not mean dead. The root unit stays up, and its
-  children keep running. If the root agent's process crashes, the gateway
-  restarts its unit (resuming the session with ACP `session/load`), and its
-  children are not touched.
-- **Other parents.** When a parent's unit stops (it finishes, its TTL ends, the
-  human stops it, or it crashes beyond the restart policy), the gateway applies
-  each child's `on_parent_exit`:
-  - `stop` (default): the child is stopped, which happens anyway when the
-    parent's slice is stopped. This applies recursively.
-  - `adopt`: allowed only with `lifetime: persistent`, and only if the spawn was
-    human-approved. The gateway moves the child's unit to the human's top-level
-    slice; the child appears in the UI as "orphaned, adopted by human", and the
-    human can stop it or keep it.
-- Unix users and homes are **not** deleted when agents stop. They are kept for
-  inspection. The UI lists stopped agents' users, and `silo gc` (or the UI)
-  removes them after `home_retention` (default 30 days), with the human's
-  confirmation.
+`agent.stop(agent, mode)` may be called by the human or by any ancestor of
+the agent. It:
+
+1. marks the agent and every registered descendant `stopped`, with a
+   tombstone saying who stopped it (or "parent X stopped");
+2. revokes their registration tokens and drops their undelivered messages;
+   their session tokens now answer only `agent.heartbeat` (and
+   `agent.disconnect`);
+3. greys out (inactivates) their page links and cancels their pending secret
+   requests;
+4. tells each live `silo connect` wrapper, on its next heartbeat, to
+   `SIGTERM` the CLI's process group (`SIGKILL` after 30 s; at once with
+   `"kill"`) and close the ACP session;
+5. returns the registrars' `stop_cmd`s, which `silo stop` runs as the caller
+   (never by the gateway as root) for locations whose wrapper is gone, such
+   as removing a container or destroying a microVM.
+
+Stopping root stops `main` too; the gateway re-arms both standing agents on
+its next start. Unix users and homes are **not** deleted when agents stop.
+They are kept for inspection, and `silo gc` (or the UI) removes them after
+`home_retention` (default 30 days), with the human's confirmation.
 
 ### 8.5 Sibling rules
 
-- Siblings cannot message each other by default. Only a parent may grant
-  `peers` at spawn time, or later through a re-approved update, and only
-  between its own children.
-- Siblings can always share data through shares the parent granted to both.
-  This is the preferred route: files are inspectable and auditable.
+- Siblings cannot message each other. Siblings can share data through shares
+  the parent granted to both; files are inspectable and auditable.
 - Nobody messages root. Children reach the human through `file_request`.
-- Every agent-to-agent message is recorded in both transcripts, with sender and
-  receiver, and is delivered as a prompt labelled as coming from that agent.
 
 ### 8.6 Root reading its children
 
@@ -944,6 +1128,32 @@ used, and the files changed in shares. That keeps child-written prose out of
 root's context. The human can read any transcript and forward what matters
 (§7.3). Whether root should be able to read full child transcripts is listed in
 §15.
+
+### 8.7 Parent → child messages
+
+`agent.message(agent, text)` (MCP `send_message` / `message_agent`, CLI
+`silo msg <agent> <text>`) is **strictly downward**:
+
+- **The rule.** An agent may message only agents whose `parent` is the
+  caller, that is, agents it registered itself through the hub. The human
+  may message any agent.
+- **Never up, never sideways.** A child can never message its parent, root,
+  a sibling, a grandparent's other children, or its own grandchildren (they
+  are its children's to message). The gateway refuses and audits every such
+  attempt. A prompt-injected child therefore has no channel to push
+  instructions into its parent or into root. If a child needs privileged
+  action or the human's help, it uses `file_request`, which goes to the
+  human's queue.
+- **Delivery.** The gateway queues the message on the child (in order, at
+  most 100 waiting, 64 KiB each) and audits it with its text. The bridge
+  delivers it into the child's ACP session as a prompt tagged
+  `from_agent: <parent>`: immediately if the child is idle, or after the
+  current turn if it is mid-turn. A child that is registered but not yet
+  connected gets its messages when it connects (`agent.inbox`). Both
+  transcripts record the message.
+- **Replies.** A child answers its parent by finishing its turn and calling
+  `report`; the parent reads that with `read_agent`. No reply travels as a
+  prompt into the parent's session.
 
 ---
 
@@ -956,7 +1166,7 @@ root's context. The human can read any transcript and forward what matters
 | `/usr/share/silo/root.md` | package | Shipped defaults (Appendix A). Replaced on upgrade. |
 | `/etc/silo/root.md` | human | If present, **replaces** the shipped file as the base. |
 | `/etc/silo/root.d/*.md` | human | Appended in lexical order after the base. Later files win where guidance conflicts, and the assembled text says so. |
-| `/etc/silo/agents/<role>.md` | human or root, via approved batch | Child templates: YAML front matter (default `cli`, `model`, `limits`, `budget`, `network`, `permissions`, `lifetime`, `may_spawn`, `shares`) followed by instructions. |
+| `/etc/silo/agents/<role>.md` | human or root, via approved batch | Child templates: YAML front matter (default `cli`, `model`, `limits`, `budget`, `network`, `permissions`, `location`, `may_register`, `shares`) followed by instructions. |
 | `/usr/share/silo/agents/*.md` | package | Shipped example templates; `/etc/silo/agents/` overrides by name. |
 
 The effective root instructions are assembled when a root session starts:
@@ -980,7 +1190,7 @@ human can merge them by hand.
   attenuation, and approval bound to content hashes all hold against an agent
   that ignores every line of `root.md`. Front-matter values in templates are
   defaults that the gateway checks against the parent's authority like any
-  other spawn request.
+  other registration request.
 - **Edits to root's own instructions are flagged specially.** Any batch writing
   under `/etc/silo/root.md`, `/etc/silo/root.d/` or `/usr/share/silo/` gets the
   red *edits root's own instructions* flag. Such a batch never matches a
@@ -999,13 +1209,14 @@ human can merge them by hand.
 ```ts
 interface ScheduleDef {
   id?: string;
-  agent: {template: string} | {agent: AgentId};   // fresh agent from a template, or an existing persistent agent
-  user: string;                                   // silo-managed user to run as
+  agent: {template: string} | {agent: AgentId};   // ephemeral agent from a template, or a standing connected agent
+  location?: RegisterRequest["location"];         // where an ephemeral run executes (default: systemd on the box)
+  user?: string;                                  // silo-managed user, for runs on the box
   prompt: string;
   cron: string;                                   // 5-field cron, translated to OnCalendar=
   timezone?: string;                              // default: box timezone
-  limits: SpawnRequest["limits"];
-  budget: SpawnRequest["budget"];                 // per run
+  limits: RegisterRequest["limits"];
+  budget_usd: number;                             // per run
   overlap: "skip" | "queue" | "replace";
   missed: "catch-up-once" | "skip";
   session: "fresh" | "resume";                    // resume = same long-lived session each run
@@ -1038,11 +1249,28 @@ User=silo
 ExecStart=/usr/lib/silo/silo-fire <id>
 ```
 
-`silo-fire` calls `schedule.fire(id)` on the gateway and exits. The gateway does
-the actual spawn (or prompts the existing agent), so the limits, attenuation,
-audit and credential proxy are exactly the same as for any other spawn.
-`Persistent=` coalesces any number of missed firings into one, which is
-precisely *catch up once*.
+`silo-fire` calls `schedule.fire(id)` on the gateway and exits. What the
+gateway does depends on the schedule's agent:
+
+- **A standing connected agent** (`{agent: "main"}`, say): the gateway queues
+  the schedule's prompt for it, and the bridge delivers it over the agent's
+  existing `silo connect` session as a new turn tagged with the schedule, in
+  a fresh ACP session or the resumed one per `session`. Nothing is started.
+- **An ephemeral cron agent** (`{template: …}`): the gateway registers a
+  fresh agent for the run (name `sched-<id>-<n>`, parent the schedule's
+  owner, the schedule's limits and budget) and issues its token. Whatever
+  runs the job then executes `silo connect --schedule <id> -- <acp-cli>`
+  with that token, from any location: on the box the gateway starts
+  `silo-agent@sched-<id>-<n>.service`; a schedule placed elsewhere is fired
+  by that location's own timer (a container's cron, a microVM's systemd
+  timer, a CI job) calling `silo connect --schedule <id>`, which registers
+  and connects in one step using the schedule's connect credential.
+  `--schedule` marks the session as scheduled (§10.6) and the agent is
+  stopped when the run reports or its CLI exits.
+
+Either way the limits, attenuation, audit and credential proxy are exactly
+the same as for any other agent. `Persistent=` coalesces any number of missed
+firings into one, which is precisely *catch up once*.
 
 ### 10.3 Overlap
 
@@ -1092,7 +1320,7 @@ A deferral notifies the human only if it passes the deadline.
     plain words and the limits and budget per run *and per month*;
   - a child may only propose schedules for its own user, with limits and budget
     within its own, and with `agent` set to itself or to a template its own
-    spawn already allowed;
+    registration already allowed;
   - the root agent's proposals likewise need approval, and must name a non-root
     user. The root agent itself is never scheduled.
 - Disabling a schedule needs no approval; it only removes authority.
@@ -1107,6 +1335,8 @@ the same `fire` path:
   limited. In GCP mode it is reachable only through IAP unless the human opens a
   separate unauthenticated route, which is a flagged decision;
 - `agent-finished`: fired by the gateway when a named agent's session reports.
+- `remote`: a location's own scheduler calling `silo connect --schedule`,
+  as in §10.2; the hub records and bounds the run the same way.
 
 ---
 
@@ -1128,8 +1358,9 @@ sudo silo init                            # interactive, idempotent
 ```
 
 The package installs binaries in `/usr/lib/silo/` and `/usr/bin/silo`, units
-(`silo-gatewayd.service`, `silo-bridge.service`), `/usr/share/silo/`, and the
-users `silo` and `silo-root` (through `systemd-sysusers`).
+(`silo-gatewayd.service`, `silo-bridge.service`, the template
+`silo-agent@.service`), `/usr/share/silo/`, and the users `silo`, `silo-root`
+and `silo-user` (through `systemd-sysusers`).
 
 `silo init`:
 
@@ -1143,17 +1374,26 @@ users `silo` and `silo-root` (through `systemd-sysusers`).
    proxy.
 4. Writes `/etc/silo/gateway.toml` (limits, budgets, uid range, owner, snapshot
    preferences, root `InaccessiblePaths=` additions).
-5. Applies the nftables table, starts the gateway and the bridge, and spawns the
-   root agent, which waits for its first prompt.
+5. Applies the nftables table and starts the gateway and the bridge. On its
+   first start the gateway seeds the **two standing agents**, `root`
+   (`silo-root`) and the default user agent `main` (`silo-user`, a child of
+   root, with egress and `may_register`; §7.6), and writes their
+   registration tokens. `silo init` then enables and starts
+   `silo-agent@root.service` and `silo-agent@main.service`, whose
+   `silo connect` connects each agent with its token. It checks that both
+   reach `connected`, and both wait for their first prompt.
 6. Prints the URL (`http://127.0.0.1:7070` plus the `ssh -L` hint) and a
    one-time setup code valid for 1 hour.
 
 ### 11.3 First login and bootstrap
 
-The human opens the URL, enters the setup code and enrols a passkey. The root
-agent's chat is open, with a suggested first prompt ("Describe what this
-machine is for"). The root agent proposes batches and spawns, which the human
-approves, and then goes dormant.
+The human opens the URL, enters the setup code and enrols a passkey. The agent
+tree already shows both standing agents, connected. `main`'s chat is open, so
+the human can start coding, run a server and open it through a page link, or
+have `main` register and message child agents, straight away. Root's chat
+offers a suggested first prompt ("Describe what this machine is for"); the
+root agent proposes batches and registrations, which the human approves, and
+then goes dormant.
 
 ### 11.4 Uninstall
 
@@ -1215,7 +1455,8 @@ what `silo up` created (resources are labelled `silo=v3`).
       and Claude) and Secret Manager for a Codex key, sets the bridge to listen
       on the VM's private IP `:7070` with IAP JWT verification required,
       applies the nftables table (metadata blocked for agent uids), and starts
-      the gateway, the bridge and the root agent.
+      the gateway, the bridge and both standing agents, `root` and `main`
+      (§11.2 step 5), so the VM is ready to use on first login.
 5. **Cloud Run proxy** `silo-proxy`: a tiny stateless reverse proxy container
    (built from `v3/deploy/proxy`, published to a public registry, pinned by
    digest) that forwards every request, WebSockets included, to the VM's
@@ -1266,7 +1507,8 @@ Alice opens the URL. IAP signs her in with Google and checks the IAP role. The
 bridge verifies the JWT and her email. silo then asks for the setup code that
 `silo up` printed, checks it against `silo-setup-hash` in metadata (which only
 root on the VM can read, since agents are blocked from the metadata server), and
-enrols her passkey. From then on, decisions need both IAP and the passkey
+enrols her passkey. As on a local box (§11.3), she finds `root` and `main`
+already connected. From then on, decisions need both IAP and the passkey
 (§4.4).
 
 ### 12.5 Security requirements, and where they are met
@@ -1307,8 +1549,8 @@ agent; anyone on the network; a compromised bridge process.
 
 | # | Threat | Mitigations | Residual risk |
 |---|---|---|---|
-| T1 | **Prompt injection reaches the root agent** and steers it into a harmful batch. | Root takes prompts only from the human (§7.3); children cannot message it; forwarded requests are marked untrusted; root has no browsing and no egress except the model proxy (§4.7); it reads only structured child status by default (§8.6); and, above all, every privileged effect needs a human-approved batch whose exact content is shown (§6.3). | Root can still *read files* that agents wrote (with `CAP_DAC_READ_SEARCH`), and could be injected that way during diagnosis. In that case the attack must get past the approval screen, which is why the screen puts computed facts and risk flags before the agent's explanation. |
-| T2 | **Root agent exfiltrates what it can read** (secrets, user data). | No egress; silo's own secrets are hidden with `InaccessiblePaths=` (§7.2); the human may hide more. | Root can still write into a share or send a message to a child that has egress. `root.md` forbids it, but that is guidance only. Spawn and message events are audited. A future option is to deny root writing to shares used by children with open egress. |
+| T1 | **Prompt injection reaches the root agent** and steers it into a harmful batch. | Root takes prompts only from the human (§7.3); messages go strictly parent → child, so no agent (not even `main`, root's own child) can message it (§8.7); forwarded requests are marked untrusted; root has no browsing and no egress except the model proxy (§4.7); it reads only structured child status by default (§8.6); and, above all, every privileged effect needs a human-approved batch whose exact content is shown (§6.3). | Root can still *read files* that agents wrote (with `CAP_DAC_READ_SEARCH`), and could be injected that way during diagnosis. In that case the attack must get past the approval screen, which is why the screen puts computed facts and risk flags before the agent's explanation. |
+| T2 | **Root agent exfiltrates what it can read** (secrets, user data). | No egress; silo's own secrets are hidden with `InaccessiblePaths=` (§7.2); the human may hide more. | Root can still write into a share or send a message to a child that has egress. `root.md` forbids it, but that is guidance only. Registration and message events are audited. A future option is to deny root writing to shares used by children with open egress. |
 | T3 | **Child steals credentials**: model keys, the SA token through the metadata server, other agents' files. | Keys live only in the gateway; agents get placeholder tokens bound to their uid (§4.6). Metadata is blocked by nftables *and* `IPAddressDeny=` (§4.7). `ProtectHome=tmpfs` hides other homes; homes are 0700; `NoNewPrivileges`. | A kernel local privilege escalation from an agent uid beats all of this. Keep the box patched (the root agent's routine `pkg.install` standing approval helps); stronger isolation backends are future work. |
 | T4 | **Approval fatigue**: the human rubber-stamps. | Batches are coherent changes, not per-command prompts. The CLIs' own permission prompts inside the sandbox are off by default (§5.4). Typed operations plus scoped, expiring standing approvals cover routine work (§7.5). There is no approve-all. Risk flags, typed-hash confirmation for the worst cases, and forced paging of long batches. Scheduled runs never ask for root. Notifications only when attention is needed. | The UI tracks the median time to approve and approvals per day, and shows them to the human as a nudge. |
 | T5 | **Time-of-check/time-of-use swap** between approval and execution. | Staging into root-owned storage, content hash over everything executed or written, executables hashed, agent-writable paths refused, and a re-hash at execution (§4.3); WebAuthn signature over the hash (§4.4). | Typed operations that fetch from the network (apt) rely on the distribution's signature chain, which is acceptable. |
@@ -1318,6 +1560,10 @@ agent; anyone on the network; a compromised bridge process.
 | T9 | **Audit log tampering**. | Hash chain, `chattr +a`, journald and Cloud Logging copies, and hidden from root (§4.8). | Real root (an approved batch) can rewrite the local file, but not the off-box copy. |
 | T10 | **Schedules as persistence**: an agent installs standing authority. | Agent-created schedules need approval; they are limited to the agent's own user and limits; no `run_as_root` in scheduled runs (§10.6). | |
 | T11 | **Gateway bugs**: it is the only root component. | Small surface: Unix socket only, no network listener for humans; JSON-RPC with strict schemas; written in Go; fuzzed batch canonicalisation; `silo-gatewayd.service` itself sandboxed as far as root allows (`ProtectHome=read-only` except silo paths, `MemoryDenyWriteExecute=`). | The core trust assumption. |
+| T13 | **Injection flows upward between agents**: a child reads hostile content and tries to steer its parent. | `agent.message` accepts only parent → child; every refused attempt is audited (§8.7). Children reach the human only through `file_request`. | The parent still reads its child's `report` and, for non-root parents, transcript (§8.6); the parent must treat both as untrusted. |
+| T14 | **Stolen agent token**. | Registration tokens are single use; session tokens are stored only as hashes, scoped to one agent, and revoked on disconnect or stop; standing agents' token files are 0600 root, read by systemd. | A token stolen from a live wrapper is worth that agent's authority until it disconnects. |
+| T15 | **Hostile page link** script attacks the UI. | Silo's cookie is scoped to `/api` and `/acp`; mutations need a CSRF header; the proxy strips credentials; separate CSP for `/p/` (§6.5). | A page can still phish the human with look-alike content; the UI frames page links with their owner's name. |
+| T16 | **Secret leaks into an agent's context or logs**. | The value goes UI → bridge → `silo connect` → a 0600 file; the gateway's methods cannot carry it, and it is never in the transcript or audit log (§5.6). | The agent can read the file it asked for; that is the point. |
 | T12 | **Resource exhaustion** by an agent. | cgroup memory, CPU and tasks limits; nested slices; proxy budgets; disk quota where the filesystem supports per-user quotas (detected). | Disk fill on filesystems without quota support. |
 
 ---
@@ -1407,7 +1653,7 @@ v3/
   cmd/silo-bridge/
   cmd/silo-mcp/
   cmd/silo-fire/
-  gateway/                    spawn, units (D-Bus), batches, hashing, approvals,
+  gateway/                    agent registry, tokens, messages, pages, secrets, batches, hashing, approvals,
                               standing rules, snapshots, nftables, audit, proxy
   bridge/                     ACP client, session mux, transcripts, HTTP/WS API, MCP server
   acp/                        ACP types and JSON-RPC transport (or a vendored SDK)
@@ -1423,8 +1669,12 @@ v3/
 `v3/gateway`, `v3/bridge`, `v3/ui`, `v3/packaging`, `v3/instructions`.
 - `.deb` package; `silo init` (requirement checks, pinned CLIs into
   `/opt/silo/cli`, API keys, setup code).
-- Gateway: user creation, transient units with the limits and sandbox
-  properties of §4.2, the slice tree, `list`, `stop`, the full `run_as_root`
+- Gateway (M1a, done): agent registration with single-use tokens,
+  `agent.connect` / heartbeat / disconnect, `agent.list`, `agent.status`,
+  cascading `agent.stop`, the two seeded standing agents (`root` and `main`,
+  §7.6), parent-only `agent.message`, page links and secret requests.
+- Gateway (M1b): the `silo-agent@.service` template with the limits and sandbox
+  properties of §4.2, `silo connect`, the full `run_as_root`
   path with staging, hashing, re-hash, and execution (with snapshot reporting,
   even if the only backend is `none`), the audit log with hash chain, and the
   metadata block plus root egress lock.
@@ -1432,21 +1682,25 @@ v3/
   tokens.
 - Bridge: ACP to Claude Code (adapter) and Gemini CLI (native); Codex can wait
   for M2 if its adapter is not ready. Transcripts; ACP over WebSocket; silo MCP
-  tools `run_as_root`, `spawn_agent`, `message_agent`, `read_agent`, `report`.
+  tools `run_as_root`, `register_agent`, `send_message`, `read_agent`,
+  `register_page`, `request_secret`, `report`; the `/p/<slug>/` proxy.
 - UI: passkey login, agents and sessions, chat, approval screen per §6.3 with
   WebAuthn-signed decisions, requests queue.
 - `root.md` (Appendix A) and one example template.
 - **Exit test** (in `v3/test`, on a fresh Debian VM): install, `silo init`, log
   in, ask root to set the box up for a small web project; root proposes a
-  batch (`pkg.install`), which the human approves and which runs; root spawns
-  one child (approved); the human chats with root and with the child in the UI.
+  batch (`pkg.install`), which the human approves and which runs; `main` is
+  already connected and the human codes with it, publishes a page link and
+  provides a secret it asked for; `main` registers one child in a rootless
+  container and messages it, and the child's attempt to message `main` or
+  root is refused.
   A tampered staged file and a replaced executable both cause the batch to be
   refused at execution. A child cannot reach `169.254.169.254` or read root's
   home.
 
 **M2: hardening and routine work.** Standing approvals and typed operations;
 the btrfs, ZFS and LVM-thin snapshot backends; budgets and metering; shares;
-`may_spawn` and grandchildren, `on_parent_exit`, peers; `file_request` and
+microVM locations; budgets per subtree; `file_request` and
 forward-to-root; Codex over ACP; `InaccessiblePaths=` configuration; the
 approval fatigue metrics.
 
@@ -1464,7 +1718,7 @@ approval flow for agent-proposed schedules.
 
 **M5: beyond Debian and beyond cron.** Fedora and openSUSE packaging and typed
 operations; event triggers (path, webhook, agent-finished); egress allowlists
-for children; the A2A façade; optional stronger isolation backends for `spawn`.
+for children; the A2A façade; agents on other hosts dialling `/connect`.
 
 ---
 
@@ -1526,18 +1780,18 @@ Everything that needs root goes through the `run_as_root` tool as a *batch*:
 - Leave existing configuration you did not write alone unless the human asked
   you to change it.
 
-## Spawning child agents: least privilege
+## Registering child agents: least privilege
 - Prefer a template from `/etc/silo/agents/`. If none fits, propose a new one
   (that is a batch).
-- One agent per job, as a new user, with the smallest limits, budget, shares
-  and lifetime that do the job. Use `until-done` or a TTL rather than
-  `persistent` unless the human wants a standing agent.
-- Grant `may_spawn` only when the job really needs sub-agents. Grant `peers`
-  only when siblings must talk, and prefer a shared directory to messages.
+- One agent per job, in the most isolated location that does the job (a new
+  user, a container or a microVM), with the smallest limits, budget and
+  shares. Stop it when it is done. For everyday coding, the human has `main`.
+- Grant `may_register` only when the job really needs sub-agents. Siblings
+  cannot message each other; give them a shared directory instead.
 - Give each child a self-contained brief: goal, constraints, what "done" means,
   and to use `report` when finished and `file_request` when it needs something.
-- Children cannot talk to you. If one needs something privileged, it asks the
-  human, who decides whether to involve you.
+- You can message your children; they can never message you. If one needs
+  something privileged, it asks the human, who decides whether to involve you.
 - Do not use children to get around your own restrictions. Do not ask them to
   fetch things for you from the internet, and do not pass them data you read
   from protected files.
@@ -1581,9 +1835,12 @@ question costs the human seconds; a wrong batch can cost a machine.
 /etc/silo/agents/<role>.md             child templates
 /etc/silo/secrets/                     model API keys (0700 root; hidden from root agent)
 /etc/systemd/system/silo-sched-*.{timer,service}   rendered schedules
-/var/lib/silo/gateway/                 SQLite state, batch staging (0700 root)
+/usr/lib/systemd/system/silo-agent@.service        the systemd location: silo connect as the agent's user
+/var/lib/silo/gateway/                 state, batch staging (0700 root)
+/var/lib/silo/gateway/tokens/<id>      standing agents' registration tokens (0600 root, LoadCredential=)
 /var/lib/silo/sessions/<id>/           transcripts (owner silo)
-/var/lib/silo/home/<user>/             agent homes (0700, owned by the agent user)
+/var/lib/silo/home/<user>/             agent homes (0700, owned by the agent user): silo-root, silo-user, …
+~/.config/silo/secrets/<name>          secrets the human provided to that agent (0600, §5.6)
 /srv/silo/shares/<name>/               shared directories (2770, group silo-s-<name>)
 /var/log/silo/audit.jsonl              audit log (0600 root, chattr +a)
 /run/silo/gateway.sock                 gateway JSON-RPC (0660 root:silo-gw)

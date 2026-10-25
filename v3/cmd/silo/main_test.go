@@ -44,17 +44,17 @@ func TestCall(t *testing.T) {
 		json.NewEncoder(c).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": []string{"root"}})
 	}()
 	var out bytes.Buffer
-	if err := run([]string{"call", "-socket", sock, "list", `{"state":["running"]}`}, &out, &out); err != nil {
+	if err := run([]string{"call", "-socket", sock, "agent.list", `{"state":["connected"]}`}, &out, &out); err != nil {
 		t.Fatal(err)
 	}
 	req := <-got
-	if req["method"] != "list" || req["jsonrpc"] != "2.0" {
+	if req["method"] != "agent.list" || req["jsonrpc"] != "2.0" {
 		t.Fatalf("request %v", req)
 	}
 	if !strings.Contains(out.String(), `"root"`) {
 		t.Fatalf("output %q", out.String())
 	}
-	if err := run([]string{"call", "-socket", sock, "list", "{bad"}, &out, &out); err == nil {
+	if err := run([]string{"call", "-socket", sock, "agent.list", "{bad"}, &out, &out); err == nil {
 		t.Fatal("bad params accepted")
 	}
 }

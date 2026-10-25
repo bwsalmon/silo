@@ -3,11 +3,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -17,241 +15,22 @@ type fakeClock struct{ t time.Time }
 func (c *fakeClock) Now() time.Time          { return c.t }
 func (c *fakeClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
-type fakeUnit struct {
-	spec  UnitSpec
-	props []Property // set-property calls
-	state string     // active, failed, inactive
-	pid   int
-}
+// The callers tests use. The bridge is uid 999.
+var (
+	adminCred    = PeerCred{UID: 0, PID: 1}
+	bridgeCred   = PeerCred{UID: 999, PID: 2}
+	strangerCred = PeerCred{UID: 4321, PID: 3}
+)
 
-// fakeSystemd keeps units in memory. Stopping a slice stops every unit in it
-// and in the slices below it.
-type fakeSystemd struct {
-	mu         sync.Mutex
-	units      map[string]*fakeUnit
-	calls      []string
-	nextPID    int
-	failNext   map[string]error // method -> error, consumed once
-	ignoreStop bool             // units survive Stop
-}
-
-func newFakeSystemd() *fakeSystemd {
-	return &fakeSystemd{units: map[string]*fakeUnit{}, nextPID: 1000, failNext: map[string]error{}}
-}
-
-func (f *fakeSystemd) fail(method string) error {
-	if err, ok := f.failNext[method]; ok {
-		delete(f.failNext, method)
-		return err
-	}
-	return nil
-}
-
-func (f *fakeSystemd) StartService(_ context.Context, spec UnitSpec) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "start "+spec.Name)
-	if err := f.fail("start"); err != nil {
-		return err
-	}
-	if u := f.units[spec.Name]; u != nil && u.state == "active" {
-		return fmt.Errorf("unit %s already exists", spec.Name)
-	}
-	f.nextPID++
-	f.units[spec.Name] = &fakeUnit{spec: spec, state: "active", pid: f.nextPID}
-	return nil
-}
-
-func (f *fakeSystemd) SetProperties(_ context.Context, unit string, props []Property) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "set-property "+unit)
-	if err := f.fail("set-property"); err != nil {
-		return err
-	}
-	u := f.units[unit]
-	if u == nil {
-		u = &fakeUnit{state: "active"}
-		f.units[unit] = u
-	}
-	u.props = append(u.props, props...)
-	return nil
-}
-
-// inSlice reports whether a unit placed in unitSlice lies under slice.
-func inSlice(unitSlice, slice string) bool {
-	return unitSlice == slice || strings.HasPrefix(unitSlice, strings.TrimSuffix(slice, ".slice")+"-")
-}
-
-func (f *fakeSystemd) Stop(_ context.Context, unit string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "stop "+unit)
-	if f.ignoreStop {
-		return nil
-	}
-	if strings.HasSuffix(unit, ".slice") {
-		for name, u := range f.units {
-			if strings.HasSuffix(name, ".service") && inSlice(u.spec.Slice, unit) {
-				delete(f.units, name)
-			}
-		}
-		delete(f.units, unit)
-		return nil
-	}
-	if f.units[unit] == nil {
-		return fmt.Errorf("unit %s not loaded", unit)
-	}
-	delete(f.units, unit)
-	return nil
-}
-
-func (f *fakeSystemd) Kill(_ context.Context, unit string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "kill "+unit)
-	return nil
-}
-
-func (f *fakeSystemd) ResetFailed(_ context.Context, unit string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "reset-failed "+unit)
-	if u := f.units[unit]; u != nil && u.state == "failed" {
-		delete(f.units, unit)
-	}
-	return nil
-}
-
-func (f *fakeSystemd) Status(_ context.Context, unit string) (UnitStatus, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.fail("status"); err != nil {
-		return UnitStatus{}, err
-	}
-	u := f.units[unit]
-	if u == nil {
-		return UnitStatus{}, nil
-	}
-	st := UnitStatus{Exists: true, ActiveState: u.state, SubState: "running", MainPID: u.pid}
-	if u.state == "failed" {
-		st.SubState, st.Result, st.ExecMainStatus, st.MainPID = "failed", "exit-code", 3, 0
-	}
-	return st, nil
-}
-
-// exit makes a unit's process end with state ("failed" keeps the unit
-// loaded, "gone" removes it like a transient unit that exited cleanly).
-func (f *fakeSystemd) exit(unit, state string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if state == "gone" {
-		delete(f.units, unit)
-		return
-	}
-	f.units[unit].state = state
-}
-
-func (f *fakeSystemd) unit(name string) *fakeUnit {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.units[name]
-}
-
-func (f *fakeSystemd) prop(unit, key string) (string, bool) {
-	u := f.unit(unit)
-	if u == nil {
-		return "", false
-	}
-	for _, p := range append(append([]Property{}, u.spec.Properties...), u.props...) {
-		if p.Key == key {
-			return p.Value, true
-		}
-	}
-	return "", false
-}
-
-type fakeUsers struct {
-	mu     sync.Mutex
-	users  map[string]*UserInfo
-	groups map[string]int
-}
-
-func newFakeUsers() *fakeUsers {
-	return &fakeUsers{
-		users: map[string]*UserInfo{
-			"root": {Name: "root", UID: 0, GID: 0, Home: "/root"},
-			"silo": {Name: "silo", UID: 998, GID: 998, Home: "/var/lib/silo"},
-		},
-		groups: map[string]int{},
-	}
-}
-
-func (u *fakeUsers) Lookup(name string) (*UserInfo, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if v := u.users[name]; v != nil {
-		c := *v
-		return &c, nil
-	}
-	return nil, nil
-}
-
-func (u *fakeUsers) UIDTaken(uid int) (bool, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	for _, v := range u.users {
-		if v.UID == uid {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (u *fakeUsers) Create(name string, uid int, home string) (*UserInfo, error) {
-	u.mu.Lock()
-	if u.users[name] != nil {
-		u.mu.Unlock()
-		return nil, fmt.Errorf("useradd: user %s exists", name)
-	}
-	u.users[name] = &UserInfo{Name: name, UID: uid, GID: uid, Home: home}
-	u.mu.Unlock()
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return nil, err
-	}
-	return u.Lookup(name)
-}
-
-func (u *fakeUsers) EnsureGroup(name string) (int, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if gid, ok := u.groups[name]; ok {
-		return gid, nil
-	}
-	u.groups[name] = 900 + len(u.groups)
-	return u.groups[name], nil
-}
-
-type fakeProcs map[int]string
-
-func (p fakeProcs) Cgroup(pid int) (string, error) {
-	if cg, ok := p[pid]; ok {
-		return cg, nil
-	}
-	return "", fmt.Errorf("no such process %d", pid)
-}
-
-// env is a gateway wired to fakes in a temp dir.
+// env is a gateway in a temp dir, called the way the socket would call it.
 type env struct {
 	t     *testing.T
 	dir   string
 	cfg   *Config
-	sd    *fakeSystemd
-	users *fakeUsers
-	procs fakeProcs
 	clock *fakeClock
 	audit *AuditLog
 	g     *Gateway
+	srv   *Server
 }
 
 func newEnv(t *testing.T, mutate ...func(*Config)) *env {
@@ -259,10 +38,8 @@ func newEnv(t *testing.T, mutate ...func(*Config)) *env {
 	dir := t.TempDir()
 	cfg := &Config{
 		StateDir:   filepath.Join(dir, "state"),
-		HomeRoot:   filepath.Join(dir, "home"),
 		AuditLog:   filepath.Join(dir, "log", "audit.jsonl"),
 		SocketPath: filepath.Join(dir, "gateway.sock"),
-		CLIsDir:    filepath.Join(dir, "clis.d"),
 		AdminUIDs:  []int{1000},
 	}
 	for _, m := range mutate {
@@ -272,14 +49,13 @@ func newEnv(t *testing.T, mutate ...func(*Config)) *env {
 	if err := cfg.validate(); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, dir: dir, cfg: cfg, sd: newFakeSystemd(), users: newFakeUsers(), procs: fakeProcs{},
-		clock: &fakeClock{t: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}}
+	e := &env{t: t, dir: dir, cfg: cfg, clock: &fakeClock{t: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}}
 	e.restart()
 	return e
 }
 
-// restart builds a fresh Gateway on the same state, audit log and host, as
-// a gateway restart would, and starts it.
+// restart builds a fresh Gateway on the same state and audit log, as a
+// gateway restart would, and starts it.
 func (e *env) restart() {
 	e.t.Helper()
 	if e.audit != nil {
@@ -291,12 +67,14 @@ func (e *env) restart() {
 	}
 	e.audit = a
 	e.t.Cleanup(func() { a.Close() })
-	clis := BuiltinCLIs()
-	clis["claude"] = CLIDef{Name: "claude", Command: []string{"/opt/silo/cli/claude", "--print", "{brief}"}, Env: map[string]string{"X": "1"}}
 	g, err := New(e.cfg, Deps{
-		Systemd: e.sd, Users: e.users, Procs: e.procs, Clock: e.clock,
-		Launcher: &CLILauncher{CLIs: clis}, Audit: a, Store: Store{Dir: e.cfg.StateDir},
-		Logf: e.t.Logf,
+		Clock: e.clock, Audit: a, Store: Store{Dir: e.cfg.StateDir}, Logf: e.t.Logf,
+		LookupUID: func(name string) (int, error) {
+			if name == e.cfg.BridgeUser {
+				return bridgeCred.UID, nil
+			}
+			return -1, nil
+		},
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -304,25 +82,93 @@ func (e *env) restart() {
 	if err := g.Start(context.Background()); err != nil {
 		e.t.Fatal(err)
 	}
-	e.g = g
+	e.g, e.srv = g, &Server{G: g}
 }
 
-var admin = Caller{UID: 0, PID: 1, Role: RoleAdmin}
-
-func (e *env) asAgent(id string) Caller {
-	return Caller{UID: e.g.st.Agents[id].UID, Role: RoleAgent, Agent: id}
-}
-
-func (e *env) spawn(c Caller, p SpawnParams) *SpawnResult {
+// call makes one API call as cred, through JSON as the socket would.
+func (e *env) call(cred PeerCred, method string, params, result any) error {
 	e.t.Helper()
-	if p.CLI == "" {
-		p.CLI = "claude"
-	}
-	r, err := e.g.Spawn(context.Background(), c, p)
+	raw, err := json.Marshal(params)
 	if err != nil {
-		e.t.Fatalf("spawn %s: %v", p.Name, err)
+		e.t.Fatal(err)
 	}
-	return r
+	if params == nil {
+		raw = nil
+	}
+	res, err := e.srv.dispatch(context.Background(), cred, method, raw)
+	if err != nil {
+		return err
+	}
+	if result != nil {
+		b, err := json.Marshal(res)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, result); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+	return nil
+}
+
+func (e *env) mustCall(cred PeerCred, method string, params, result any) {
+	e.t.Helper()
+	if err := e.call(cred, method, params, result); err != nil {
+		e.t.Fatalf("%s: %v", method, err)
+	}
+}
+
+// with adds an agent token to params.
+func with(tok string, params map[string]any) map[string]any {
+	if params == nil {
+		params = map[string]any{}
+	}
+	params["agent_token"] = tok
+	return params
+}
+
+// register registers an agent as cred (with tok, if an agent registers it)
+// and returns its registration token.
+func (e *env) register(cred PeerCred, tok string, params map[string]any) string {
+	e.t.Helper()
+	if tok != "" {
+		params = with(tok, params)
+	}
+	var r RegisterResult
+	e.mustCall(cred, "agent.register", params, &r)
+	if r.Token == "" || r.HubURL == "" {
+		e.t.Fatalf("register result %+v", r)
+	}
+	return r.Token
+}
+
+// connect connects with a registration token and returns the session token.
+func (e *env) connect(reg string) string {
+	e.t.Helper()
+	var r ConnectResult
+	e.mustCall(strangerCred, "agent.connect", map[string]any{"token": reg, "host": "h", "pid": 42}, &r)
+	return r.SessionToken
+}
+
+// spawn registers and connects an agent, returning its session token.
+func (e *env) spawn(cred PeerCred, tok string, params map[string]any) string {
+	e.t.Helper()
+	return e.connect(e.register(cred, tok, params))
+}
+
+// standing connects a standing agent with the token from its token file.
+func (e *env) standing(id string) string {
+	e.t.Helper()
+	return e.connect(e.tokenFile(id))
+}
+
+func (e *env) tokenFile(id string) string {
+	e.t.Helper()
+	b, err := readFile(filepath.Join(e.cfg.TokenDir(), id))
+	if err != nil {
+		e.t.Fatalf("token file for %s: %v", id, err)
+	}
+	return string(b[:len(b)-1])
 }
 
 func (e *env) auditEvents() []AuditEntry {
@@ -350,3 +196,13 @@ func (e *env) lastEvent(event string) map[string]any {
 	e.t.Fatalf("no %s event in the audit log", event)
 	return nil
 }
+
+func codeOf(err error) int {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	return 0
+}
+
+func readFile(path string) ([]byte, error) { return os.ReadFile(path) }

@@ -1,14 +1,12 @@
 package gateway
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/bwsalmon/silo/v3/internal/tomlite"
@@ -19,9 +17,19 @@ const (
 	DefaultConfigPath = "/etc/silo/gateway.toml"
 	DefaultSocketPath = "/run/silo/gateway.sock"
 	DefaultStateDir   = "/var/lib/silo/gateway"
-	DefaultHomeRoot   = "/var/lib/silo/home"
 	DefaultAuditLog   = "/var/log/silo/audit.jsonl"
-	DefaultCLIsDir    = "/etc/silo/clis.d"
+)
+
+// The standing agents' defaults (design §7, §8.8).
+const (
+	RootAgentID     = "root"
+	RootUser        = "silo-root"
+	UserAgentID     = "main"
+	UserAgentUser   = "silo-user"
+	tokensSubdir    = "tokens"
+	defaultRuntime  = "claude"
+	defaultTimeout  = 90
+	defaultInterval = 15
 )
 
 // Config is /etc/silo/gateway.toml. Every field is optional.
@@ -29,9 +37,12 @@ type Config struct {
 	SocketPath  string `json:"socket"`
 	SocketGroup string `json:"socket_group"`
 	StateDir    string `json:"state_dir"`
-	HomeRoot    string `json:"home_root"`
 	AuditLog    string `json:"audit_log"`
-	CLIsDir     string `json:"clis_dir"`
+
+	// HubURL is the endpoint `agent.register` tells new agents to dial.
+	// Agents on this host dial the socket; remote ones the bridge's
+	// /connect endpoint, which relays to it.
+	HubURL string `json:"hub_url"`
 
 	// AdminUIDs are the humans' uids. uid 0 is always an admin.
 	AdminUIDs []int `json:"admin_uids"`
@@ -39,37 +50,43 @@ type Config struct {
 	// the human's, unless it relays a call on behalf of an agent.
 	BridgeUser string `json:"bridge_user"`
 
-	// UIDMin and UIDMax bound the uids silo allocates for agent users.
-	UIDMin int `json:"uid_min"`
-	UIDMax int `json:"uid_max"`
-
-	// ReconcileIntervalSec is how often the gateway polls agent units for
-	// exits.
+	// HeartbeatTimeoutSec is how long a connected agent may go without a
+	// heartbeat before it is marked disconnected; ReconcileIntervalSec is
+	// how often that is checked.
+	HeartbeatTimeoutSec  int `json:"heartbeat_timeout_s"`
 	ReconcileIntervalSec int `json:"reconcile_interval_s"`
 
-	// DefaultLimits apply to spawns that leave a limit unset.
+	// DefaultLimits apply to registrations that leave a limit unset.
 	DefaultLimits Limits `json:"default_limits"`
 
-	RootAgent RootAgentConfig `json:"root_agent"`
-
-	// ExtraInaccessiblePaths are hidden from every agent in addition to
-	// silo's own state, logs, secrets and socket (design §7.2).
-	ExtraInaccessiblePaths []string `json:"inaccessible_paths"`
+	RootAgent StandingAgentConfig `json:"root_agent"`
+	UserAgent StandingAgentConfig `json:"user_agent"`
 }
 
-// RootAgentConfig configures the root agent (design §7).
-type RootAgentConfig struct {
-	// Enabled defaults to true. Turning it off is for tests.
+// StandingAgentConfig configures one of the two agents the gateway seeds
+// on first start: the root agent (design §7) and the default user agent.
+type StandingAgentConfig struct {
+	// Enabled defaults to true. Turning it off is for tests and for boxes
+	// that want no default user agent.
 	Enabled *bool `json:"enabled"`
-	// CLI defaults to "idle" in M1a, which keeps the unit up without
-	// running a model; M1b replaces this with the ACP session.
-	CLI    string `json:"cli"`
-	Brief  string `json:"brief"`
-	Limits Limits `json:"limits"`
+	// Name is the agent id; only the user agent's may be changed.
+	Name    string `json:"name"`
+	User    string `json:"user"`
+	Runtime string `json:"runtime"`
+	Brief   string `json:"brief"`
+	Limits  Limits `json:"limits"`
 }
 
 // RootEnabled reports whether the gateway should keep a root agent.
 func (c *Config) RootEnabled() bool { return c.RootAgent.Enabled == nil || *c.RootAgent.Enabled }
+
+// UserAgentEnabled reports whether the gateway should keep the default
+// user agent.
+func (c *Config) UserAgentEnabled() bool { return c.UserAgent.Enabled == nil || *c.UserAgent.Enabled }
+
+// TokenDir is where standing agents' registration tokens are written, one
+// root-only file per agent, for their units to load with LoadCredential=.
+func (c *Config) TokenDir() string { return filepath.Join(c.StateDir, tokensSubdir) }
 
 // LoadConfig reads the config file at path. A missing file is not an error:
 // the defaults apply.
@@ -101,38 +118,57 @@ func (c *Config) setDefaults() {
 	def(&c.SocketPath, DefaultSocketPath)
 	def(&c.SocketGroup, "silo-gw")
 	def(&c.StateDir, DefaultStateDir)
-	def(&c.HomeRoot, DefaultHomeRoot)
 	def(&c.AuditLog, DefaultAuditLog)
-	def(&c.CLIsDir, DefaultCLIsDir)
+	def(&c.HubURL, "unix://"+c.SocketPath)
 	def(&c.BridgeUser, "silo")
-	def(&c.RootAgent.CLI, "idle")
-	if c.UIDMin == 0 {
-		c.UIDMin = 61000
-	}
-	if c.UIDMax == 0 {
-		c.UIDMax = 61999
+	def(&c.RootAgent.Name, RootAgentID)
+	def(&c.RootAgent.User, RootUser)
+	def(&c.RootAgent.Runtime, defaultRuntime)
+	def(&c.UserAgent.Name, UserAgentID)
+	def(&c.UserAgent.User, UserAgentUser)
+	def(&c.UserAgent.Runtime, defaultRuntime)
+	if c.HeartbeatTimeoutSec == 0 {
+		c.HeartbeatTimeoutSec = defaultTimeout
 	}
 	if c.ReconcileIntervalSec == 0 {
-		c.ReconcileIntervalSec = 5
+		c.ReconcileIntervalSec = defaultInterval
 	}
 	c.DefaultLimits = c.DefaultLimits.withDefaults(Limits{MemoryMax: "2G", CPUQuota: "100%", TasksMax: 512})
 	c.RootAgent.Limits = c.RootAgent.Limits.withDefaults(Limits{MemoryMax: "4G", CPUQuota: "200%", TasksMax: 1024})
+	c.UserAgent.Limits = c.UserAgent.Limits.withDefaults(Limits{MemoryMax: "4G", CPUQuota: "200%", TasksMax: 1024})
 }
 
 func (c *Config) validate() error {
-	if c.UIDMin < 1000 || c.UIDMax < c.UIDMin {
-		return fmt.Errorf("uid range %d-%d: must be at least 1000 and non-empty", c.UIDMin, c.UIDMax)
-	}
-	for _, p := range append([]string{c.StateDir, c.HomeRoot, c.AuditLog, c.SocketPath, c.CLIsDir}, c.ExtraInaccessiblePaths...) {
+	for _, p := range []string{c.StateDir, c.AuditLog, c.SocketPath} {
 		if !filepath.IsAbs(p) || strings.ContainsAny(p, " \t\n\"'\\") {
 			return fmt.Errorf("path %q: must be absolute with no spaces, quotes or backslashes", p)
 		}
+	}
+	if c.HeartbeatTimeoutSec < 0 || c.ReconcileIntervalSec < 0 {
+		return errors.New("heartbeat_timeout_s and reconcile_interval_s must not be negative")
+	}
+	if c.RootAgent.Name != RootAgentID {
+		return fmt.Errorf("root_agent.name: the root agent is always %q", RootAgentID)
+	}
+	if !agentIDRe.MatchString(c.UserAgent.Name) || c.UserAgent.Name == RootAgentID {
+		return fmt.Errorf("user_agent.name %q: want 1-25 lower-case letters, digits and inner dashes, not %q", c.UserAgent.Name, RootAgentID)
+	}
+	for _, u := range []string{c.RootAgent.User, c.UserAgent.User} {
+		if !unixUserRe.MatchString(u) || u == "root" {
+			return fmt.Errorf("user %q: want a Unix user name other than root", u)
+		}
+	}
+	if c.UserAgent.User == c.RootAgent.User {
+		return fmt.Errorf("user_agent.user %q: must differ from the root agent's", c.UserAgent.User)
 	}
 	if err := c.DefaultLimits.Validate(); err != nil {
 		return fmt.Errorf("default_limits: %w", err)
 	}
 	if err := c.RootAgent.Limits.Validate(); err != nil {
 		return fmt.Errorf("root_agent.limits: %w", err)
+	}
+	if err := c.UserAgent.Limits.Validate(); err != nil {
+		return fmt.Errorf("user_agent.limits: %w", err)
 	}
 	return nil
 }
@@ -144,7 +180,7 @@ type Limits struct {
 	MemoryHigh string `json:"memory_high,omitempty"`
 	CPUQuota   string `json:"cpu_quota,omitempty"`
 	TasksMax   int    `json:"tasks_max,omitempty"`
-	// DiskQuota is in the design's SpawnRequest but not implemented yet;
+	// DiskQuota is in the design's registration request but not enforced yet;
 	// setting it is refused rather than ignored.
 	DiskQuota string `json:"disk_quota,omitempty"`
 }
@@ -187,102 +223,6 @@ func (l Limits) Validate() error {
 	}
 	if l.DiskQuota != "" {
 		return errors.New("disk_quota is not supported yet")
-	}
-	return nil
-}
-
-// CLIDef is one file in /etc/silo/clis.d: how to start a coding-agent CLI.
-//
-//	name = "claude"                       # defaults to the file's base name
-//	command = ["/opt/silo/cli/claude", "--print", "{brief}"]
-//	[env]
-//	DISABLE_AUTOUPDATER = "1"
-//
-// In command, {brief}, {agent} and {home} are replaced by the spawn's
-// brief, the agent id and the agent's home directory.
-type CLIDef struct {
-	Name    string            `json:"name"`
-	Command []string          `json:"command"`
-	Env     map[string]string `json:"env"`
-}
-
-// BuiltinCLIs are available without any clis.d file. A file of the same
-// name replaces them.
-func BuiltinCLIs() map[string]CLIDef {
-	return map[string]CLIDef{
-		// idle keeps an agent's unit up without running anything; it is the
-		// root agent's default until the ACP launcher lands (M1b).
-		"idle": {Name: "idle", Command: []string{"/bin/sleep", "infinity"}},
-	}
-}
-
-var cliNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
-var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// LoadCLIs reads every *.toml and *.json file in dir on top of the
-// built-in definitions. A missing directory yields only the built-ins.
-func LoadCLIs(dir string) (map[string]CLIDef, error) {
-	out := BuiltinCLIs()
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return out, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	sort.Strings(names)
-	seen := map[string]string{}
-	for _, n := range names {
-		ext := filepath.Ext(n)
-		if ext != ".toml" && ext != ".json" {
-			continue
-		}
-		path := filepath.Join(dir, n)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		var d CLIDef
-		if ext == ".toml" {
-			err = tomlite.Unmarshal(data, &d)
-		} else {
-			dec := json.NewDecoder(strings.NewReader(string(data)))
-			dec.DisallowUnknownFields()
-			err = dec.Decode(&d)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if d.Name == "" {
-			d.Name = strings.TrimSuffix(n, ext)
-		}
-		if err := d.validate(); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if prev, dup := seen[d.Name]; dup {
-			return nil, fmt.Errorf("%s: cli %q is already defined in %s", path, d.Name, prev)
-		}
-		seen[d.Name] = path
-		out[d.Name] = d
-	}
-	return out, nil
-}
-
-func (d CLIDef) validate() error {
-	if !cliNameRe.MatchString(d.Name) {
-		return fmt.Errorf("cli name %q: want lower-case letters, digits, - and _", d.Name)
-	}
-	if len(d.Command) == 0 || !filepath.IsAbs(d.Command[0]) {
-		return errors.New("command: must be non-empty and start with an absolute path")
-	}
-	for k := range d.Env {
-		if !envNameRe.MatchString(k) {
-			return fmt.Errorf("env: bad variable name %q", k)
-		}
 	}
 	return nil
 }

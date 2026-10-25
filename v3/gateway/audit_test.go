@@ -17,7 +17,7 @@ func TestAuditChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	e1, _ := a.Append("gateway", EvGatewayStart, nil)
-	e2, _ := a.Append("admin:uid=0", EvSpawn, map[string]any{"agent": "x"})
+	e2, _ := a.Append("admin:uid=0", EvRegister, map[string]any{"agent": "x"})
 	if e1.Seq != 1 || e1.Prev != "" || e2.Seq != 2 || e2.Prev == "" {
 		t.Fatalf("entries %+v %+v", e1, e2)
 	}

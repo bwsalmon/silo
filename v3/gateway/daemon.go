@@ -8,7 +8,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 )
 
 // Listen creates the API socket at path, mode 0660 and group gid (root's
@@ -75,10 +77,6 @@ func Main(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	clis, err := LoadCLIs(cfg.CLIsDir)
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return err
 	}
@@ -90,20 +88,16 @@ func Main(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer audit.Close()
-	users := NewShadowUsers()
 	g, err := New(cfg, Deps{
-		Systemd:  NewSystemdRun(),
-		Users:    users,
-		Procs:    ProcFS{},
-		Clock:    SystemClock{},
-		Launcher: &CLILauncher{CLIs: clis},
-		Audit:    audit,
-		Store:    Store{Dir: cfg.StateDir},
+		Clock:     SystemClock{},
+		Audit:     audit,
+		Store:     Store{Dir: cfg.StateDir},
+		LookupUID: lookupUID,
 	})
 	if err != nil {
 		return err
 	}
-	gid, err := users.EnsureGroup(cfg.SocketGroup)
+	gid, err := NewGroups().EnsureGroup(cfg.SocketGroup)
 	if err != nil {
 		return fmt.Errorf("socket group %s: %w", cfg.SocketGroup, err)
 	}
@@ -124,7 +118,20 @@ func Main(ctx context.Context, configPath string) error {
 		log.Printf("sd_notify: %v", err)
 	}
 	log.Printf("silo gateway listening on %s", cfg.SocketPath)
-	// Agents are separate units, so they keep running when the gateway
-	// exits; the next start re-adopts them.
+	// Agents run outside the gateway, so they keep running when it exits;
+	// their wrappers reconnect with the tokens it re-arms on start.
 	return srv.Serve(ctx, l)
+}
+
+// lookupUID returns the uid of user name, or -1 if there is no such user.
+func lookupUID(name string) (int, error) {
+	u, err := user.Lookup(name)
+	var unknown user.UnknownUserError
+	if errors.As(err, &unknown) {
+		return -1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(u.Uid)
 }

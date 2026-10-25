@@ -42,33 +42,52 @@ func dial(t *testing.T, path string) *Client {
 
 func TestRPCEndToEnd(t *testing.T) {
 	e := newEnv(t)
-	sock := serve(t, e, PeerCred{UID: 1000, PID: 7}, PeerCred{UID: 4321, PID: 8})
+	sock := serve(t, e, PeerCred{UID: 1000, PID: 7}, PeerCred{UID: 4321, PID: 8}, PeerCred{UID: 4321, PID: 9})
 	fi, err := os.Stat(sock)
 	if err != nil || fi.Mode().Perm() != 0o660 || fi.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("socket mode %v %v", fi.Mode(), err)
 	}
 
 	c := dial(t, sock)
-	var res SpawnResult
-	if err := c.Call("spawn", map[string]any{"name": "w", "cli": "claude", "brief": "hi", "limits": map[string]any{"memory_max": "1G"}}, &res); err != nil {
+	var reg RegisterResult
+	if err := c.Call("agent.register", map[string]any{"name": "w", "runtime": "claude", "brief": "hi", "limits": map[string]any{"memory_max": "1G"}}, &reg); err != nil {
 		t.Fatal(err)
 	}
-	if res.Unit != "silo-agent-w.service" {
-		t.Fatalf("spawn result %+v", res)
-	}
-	if ev := e.lastEvent(EvSpawn); ev["_actor"] != "admin:uid=1000" {
+	if ev := e.lastEvent(EvRegister); ev["_actor"] != "admin:uid=1000" {
 		t.Fatalf("actor %v", ev["_actor"])
 	}
 	var list []AgentInfo
-	if err := c.Call("list", nil, &list); err != nil || len(list) != 2 {
+	if err := c.Call("agent.list", nil, &list); err != nil || len(list) != 3 {
 		t.Fatalf("list %v %v", list, err)
 	}
+
+	// The second connection is a stranger: it may connect with the token
+	// and, as the agent, list itself; with no token it is denied, audited.
+	c2 := dial(t, sock)
+	var cr ConnectResult
+	if err := c2.Call("agent.connect", map[string]any{"token": reg.Token}, &cr); err != nil {
+		t.Fatal(err)
+	}
+	if err := c2.Call("agent.list", map[string]any{"agent_token": cr.SessionToken}, &list); err != nil || len(list) != 1 {
+		t.Fatalf("agent list %v %v", list, err)
+	}
+	if err := c2.Call("audit.read", map[string]any{"agent_token": cr.SessionToken}, nil); codeOf(err) != CodeForbidden {
+		t.Fatalf("agent audit.read: %v", err)
+	}
+	c3 := dial(t, sock)
+	if err := c3.Call("agent.list", nil, nil); codeOf(err) != CodeForbidden {
+		t.Fatalf("stranger: %v", err)
+	}
+	if ev := e.lastEvent(EvAuthDeny); ev["uid"] != float64(4321) || ev["method"] != "agent.list" {
+		t.Fatalf("deny audit %v", ev)
+	}
+
 	var st AgentInfo
-	if err := c.Call("status", map[string]any{"agent": "w"}, &st); err != nil || st.Brief != "hi" {
+	if err := c.Call("agent.status", map[string]any{"agent": "w"}, &st); err != nil || st.Brief != "hi" || st.State != StateConnected {
 		t.Fatalf("status %+v %v", st, err)
 	}
 	var stop StopResult
-	if err := c.Call("stop", map[string]any{"agent": "w", "mode": "graceful"}, &stop); err != nil || stop.Tombstone == nil {
+	if err := c.Call("agent.stop", map[string]any{"agent": "w", "mode": "graceful"}, &stop); err != nil || stop.Tombstone == nil {
 		t.Fatalf("stop %+v %v", stop, err)
 	}
 	var vr VerifyResult
@@ -79,40 +98,14 @@ func TestRPCEndToEnd(t *testing.T) {
 	if err := c.Call("audit.read", map[string]any{"after": 0, "limit": 2}, &entries); err != nil || len(entries) != 2 {
 		t.Fatalf("audit.read %v %v", entries, err)
 	}
-	for method, code := range map[string]int{"nope": CodeMethodNotFound} {
-		if err := c.Call(method, nil, nil); codeOf(err) != code {
-			t.Errorf("%s: %v", method, err)
-		}
+	if err := c.Call("nope", nil, nil); codeOf(err) != CodeMethodNotFound {
+		t.Errorf("nope: %v", err)
 	}
-	if err := c.Call("spawn", map[string]any{"name": "w", "bogus": 1}, nil); codeOf(err) != CodeInvalidParams {
+	if err := c.Call("spawn", map[string]any{"name": "w"}, nil); codeOf(err) != CodeMethodNotFound {
+		t.Errorf("spawn is gone: %v", err)
+	}
+	if err := c.Call("agent.register", map[string]any{"name": "w", "bogus": 1}, nil); codeOf(err) != CodeInvalidParams {
 		t.Errorf("unknown param: %v", err)
-	}
-
-	// The second connection is a stranger: denied, and the denial audited.
-	c2 := dial(t, sock)
-	if err := c2.Call("list", nil, nil); codeOf(err) != CodeForbidden {
-		t.Fatalf("stranger: %v", err)
-	}
-	if ev := e.lastEvent(EvAuthDeny); ev["uid"] != float64(4321) || ev["method"] != "list" {
-		t.Fatalf("deny audit %v", ev)
-	}
-}
-
-func TestRPCAgentCannotReadAudit(t *testing.T) {
-	e := newEnv(t)
-	root := e.g.st.Agents[RootAgentID]
-	e.procs[55] = "/silo.slice/" + root.Unit
-	sock := serve(t, e, PeerCred{UID: root.UID, PID: 55})
-	c := dial(t, sock)
-	if err := c.Call("audit.read", nil, nil); codeOf(err) != CodeForbidden {
-		t.Fatalf("audit.read by root agent: %v", err)
-	}
-	var res SpawnResult
-	if err := c.Call("spawn", map[string]any{"name": "kid", "cli": "claude", "brief": "x"}, &res); err != nil {
-		t.Fatalf("root agent spawn: %v", err)
-	}
-	if e.g.st.Agents["kid"].Parent != RootAgentID {
-		t.Fatal("parent not taken from the caller")
 	}
 }
 
@@ -146,11 +139,11 @@ func TestRPCFraming(t *testing.T) {
 	if m := send("{not json"); errCode(m) != CodeParseError {
 		t.Errorf("parse error: %v", m)
 	}
-	if m := send(`{"id":1,"method":"list"}`); errCode(m) != CodeInvalidRequest || m["id"] != float64(1) {
+	if m := send(`{"id":1,"method":"agent.list"}`); errCode(m) != CodeInvalidRequest || m["id"] != float64(1) {
 		t.Errorf("missing jsonrpc: %v", m)
 	}
 	// A notification gets no reply, so the next reply is for id "x".
-	if m := send(`{"jsonrpc":"2.0","method":"list"}` + "\n" + `{"jsonrpc":"2.0","id":"x","method":"list"}`); m["id"] != "x" || m["result"] == nil {
+	if m := send(`{"jsonrpc":"2.0","method":"agent.list"}` + "\n" + `{"jsonrpc":"2.0","id":"x","method":"agent.list"}`); m["id"] != "x" || m["result"] == nil {
 		t.Errorf("after notification: %v", m)
 	}
 }

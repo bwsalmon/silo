@@ -27,8 +27,9 @@ const usage = `usage: silo <command> [flags]
 commands:
   gateway   run the gateway daemon (as root)
   call      make one call to the gateway API, e.g.
-            silo call list
-            silo call spawn '{"name":"web","cli":"claude","brief":"..."}'
+            silo call agent.list
+            silo call agent.register '{"name":"web","runtime":"claude","location":{"kind":"container"}}'
+            silo call agent.message '{"agent":"main","text":"..."}'
 `
 
 func main() {
