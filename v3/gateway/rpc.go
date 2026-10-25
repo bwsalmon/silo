@@ -11,6 +11,8 @@ import (
 	"net"
 	"sync"
 	"syscall"
+
+	"github.com/bwsalmon/silo/v3/gateway/approval"
 )
 
 // The socket speaks JSON-RPC 2.0 (design §4.1), one JSON object per line in
@@ -58,6 +60,9 @@ type Server struct {
 	G *Gateway
 	// Cred returns the peer of a connection; PeerCredOf by default.
 	Cred func(net.Conn) (PeerCred, error)
+	// Approvals answers run_as_root.* and approval.* (design §4.3); nil
+	// leaves those methods out.
+	Approvals *approval.Service
 
 	wg sync.WaitGroup
 }
@@ -202,7 +207,10 @@ var agentOnly = map[string]bool{
 	"agent.heartbeat": true, "agent.disconnect": true, "agent.inbox": true, "secret.request": true,
 }
 
-func (s *Server) dispatch(_ context.Context, cred PeerCred, method string, raw json.RawMessage) (any, error) {
+func (s *Server) dispatch(ctx context.Context, cred PeerCred, method string, raw json.RawMessage) (any, error) {
+	if s.Approvals != nil && approval.Methods[method] {
+		return s.dispatchApproval(ctx, cred, method, raw)
+	}
 	g := s.G
 	var params authed
 	switch method {
