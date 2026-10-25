@@ -174,6 +174,30 @@ func MCPTools() []MCPTool {
 				"required": []string{"summary"},
 			},
 		},
+		{
+			Name:        "run_as_root",
+			Description: "Submit a batch of root commands and/or file writes for human approval and execution (root agent only).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"summary": map[string]any{"type": "string", "description": "One-line explanation shown to the human."},
+					"reason":  map[string]any{"type": "string", "description": "Longer justification shown after computed facts."},
+					"steps":   map[string]any{"type": "array", "description": "Ordered exec or write_file steps."},
+				},
+				"required": []string{"summary", "reason", "steps"},
+			},
+		},
+		{
+			Name:        "batch_status",
+			Description: "Poll the status of a previously submitted run_as_root batch by ID.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "string", "description": "Batch ID."},
+				},
+				"required": []string{"id"},
+			},
+		},
 	}
 }
 
@@ -369,6 +393,10 @@ func callMCPTool(ctx context.Context, client *Client, token string, name string,
 		rpcMethod = "request.file"
 	case "report":
 		rpcMethod = "agent.report"
+	case "run_as_root":
+		rpcMethod = "run_as_root.submit"
+	case "batch_status":
+		rpcMethod = "run_as_root.status"
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}

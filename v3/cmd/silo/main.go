@@ -2,6 +2,8 @@
 //
 //	silo gateway [-config /etc/silo/gateway.toml]
 //	silo bridge [-gateway-socket PATH] [-socket PATH] [-http ADDR] [-sessions-dir DIR]
+//	silo ui [serve] [-http 127.0.0.1:7070] [-token-file PATH]
+//	silo ui token [-file /var/lib/silo/ui-token.sha256]
 //	silo connect [--socket PATH | --url ws://...] [--token TOKEN] -- <acp-cli-cmd...>
 //	silo mcp [--socket PATH] [--token TOKEN]
 //	silo page <add|rm|list> [flags]
@@ -36,6 +38,7 @@ const usage = `usage: silo <command> [flags]
 commands:
   gateway   run the root gateway daemon
   bridge    run the session bridge and HTTP/WebSocket hub
+  ui        serve the web UI and bridge HTTP/WebSocket server (or 'silo ui token')
   connect   attach a coding-agent CLI (ACP stdio) to the session bridge
   mcp       run the stdio MCP server (silo-mcp) for a coding agent
   page      manage clickable UI page links (add, rm, list)
@@ -87,7 +90,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 		brSock := fs.String("socket", bridge.DefaultSocketPath(), "bridge Unix socket")
 		httpAddr := fs.String("http", bridge.DefaultHTTPAddr, "HTTP/WebSocket listen address")
 		sessDir := fs.String("sessions-dir", bridge.DefaultSessionsDir, "session transcripts directory")
+		tokenFile := fs.String("token-file", bridge.DefaultUITokenFile, "UI login token SHA-256 hash file")
+		rawToken := fs.String("token", os.Getenv("SILO_UI_TOKEN"), "raw UI login token")
 		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		auth, err := buildUIAuthenticator(*rawToken, *tokenFile, false, "")
+		if err != nil {
 			return err
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -97,7 +106,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 			BridgeSocket:  *brSock,
 			HTTPAddr:      *httpAddr,
 			SessionsDir:   *sessDir,
+			Auth:          auth,
 		})
+
+	case "ui":
+		return runUICmd(args[1:], stdout, stderr)
 
 	case "connect":
 		return runConnectCmd(args[1:], stderr)

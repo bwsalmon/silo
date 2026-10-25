@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/silo/v3/gateway"
+	"github.com/bwsalmon/silo/v3/gateway/approval"
 )
 
 var (
@@ -57,6 +58,7 @@ type testEnv struct {
 	brSock     string
 	sessDir    string
 	gw         *gateway.Gateway
+	approvals  *approval.Service
 	br         *Bridge
 	httpServer *httptest.Server
 	ctx        context.Context
@@ -113,8 +115,24 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("gateway.Listen: %v", err)
 	}
 
+	gwCfg.RunAsRoot.Snapshots = "off"
+	approvals, err := approval.New(gwCfg.RunAsRoot, approval.Deps{
+		Dir:       gwCfg.StateDir,
+		RootAgent: gateway.RootAgentID,
+		Logf:      t.Logf,
+		Steps:     approval.DirectRunner{},
+		Chown:     func(path, owner, group string) error { return nil },
+		Audit: func(actor, event string, payload any) {
+			_, _ = audit.Append(actor, event, payload)
+		},
+	})
+	if err != nil {
+		t.Fatalf("approval.New: %v", err)
+	}
+
 	gwSrv := &gateway.Server{
-		G: gw,
+		G:         gw,
+		Approvals: approvals,
 		Cred: func(net.Conn) (gateway.PeerCred, error) {
 			return gateway.PeerCred{UID: testBridgeUID, PID: os.Getpid()}, nil
 		},
@@ -168,6 +186,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		brSock:     brSock,
 		sessDir:    sessDir,
 		gw:         gw,
+		approvals:  approvals,
 		br:         br,
 		httpServer: hs,
 		ctx:        ctx,

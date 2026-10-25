@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,31 +15,187 @@ import (
 	"github.com/bwsalmon/silo/v3/acp"
 	"github.com/bwsalmon/silo/v3/gateway"
 	"github.com/bwsalmon/silo/v3/instructions"
+	"github.com/bwsalmon/silo/v3/ui"
 )
 
-// Handler returns an http.Handler serving the bridge's HTTP/WebSocket API,
-// `/connect` WebSocket for `silo connect`, `/acp/v1/sessions/:id` WebSocket,
-// and `/p/:slug/...` page link reverse proxy.
+// Handler returns an http.Handler serving the embedded web UI, the bridge's
+// HTTP/WebSocket API, `/connect` WebSocket for `silo connect`,
+// `/acp/v1/sessions/:id` WebSocket, and `/p/:slug/...` page link reverse proxy.
 func (b *Bridge) Handler() http.Handler {
 	mux := http.NewServeMux()
+	uiHandler := ui.Handler()
+
 	mux.HandleFunc("/connect", b.handleWSConnect)
 	mux.HandleFunc("/p/", b.servePageProxy)
-	mux.HandleFunc("/acp/v1/sessions/", b.handleACPSessionWS)
-	mux.HandleFunc("/api/v1/agents", b.handleAgents)
-	mux.HandleFunc("/api/v1/agents/", b.handleAgentByID)
-	mux.HandleFunc("/api/v1/pages", b.handlePages)
-	mux.HandleFunc("/api/v1/pages/", b.handlePageBySlug)
-	mux.HandleFunc("/api/v1/secrets", b.handleSecrets)
-	mux.HandleFunc("/api/v1/secrets/", b.handleSecretByID)
-	mux.HandleFunc("/api/v1/sessions", b.handleSessions)
-	mux.HandleFunc("/api/v1/sessions/", b.handleSessionByID)
-	mux.HandleFunc("/api/v1/permissions", b.handlePermissions)
-	mux.HandleFunc("/api/v1/permissions/", b.handlePermissionByID)
-	mux.HandleFunc("/api/v1/requests", b.handleRequests)
-	mux.HandleFunc("/api/v1/requests/", b.handleRequestByID)
-	mux.HandleFunc("/api/v1/audit", b.handleAudit)
-	mux.HandleFunc("/api/v1/instructions", b.handleInstructions)
+	mux.HandleFunc("/acp/v1/sessions/", b.wrapAPI(b.handleACPSessionWS, false))
+
+	mux.HandleFunc("/api/v1/auth/login", b.handleAuthLogin)
+	mux.HandleFunc("/api/v1/auth/logout", b.wrapAPI(b.handleAuthLogout, false))
+	mux.HandleFunc("/api/v1/auth/session", b.handleAuthSession)
+
+	mux.HandleFunc("/api/v1/agents", b.wrapAPI(b.handleAgents, true))
+	mux.HandleFunc("/api/v1/agents/", b.wrapAPI(b.handleAgentByID, true))
+	mux.HandleFunc("/api/v1/pages", b.wrapAPI(b.handlePages, true))
+	mux.HandleFunc("/api/v1/pages/", b.wrapAPI(b.handlePageBySlug, true))
+	mux.HandleFunc("/api/v1/secrets", b.wrapAPI(b.handleSecrets, true))
+	mux.HandleFunc("/api/v1/secrets/", b.wrapAPI(b.handleSecretByID, false))
+	mux.HandleFunc("/api/v1/sessions", b.wrapAPI(b.handleSessions, false))
+	mux.HandleFunc("/api/v1/sessions/", b.wrapAPI(b.handleSessionByID, false))
+	mux.HandleFunc("/api/v1/permissions", b.wrapAPI(b.handlePermissions, false))
+	mux.HandleFunc("/api/v1/permissions/", b.wrapAPI(b.handlePermissionByID, false))
+	mux.HandleFunc("/api/v1/requests", b.wrapAPI(b.handleRequests, true))
+	mux.HandleFunc("/api/v1/requests/", b.wrapAPI(b.handleRequestByID, false))
+	mux.HandleFunc("/api/v1/approvals", b.wrapAPI(b.handleApprovals, false))
+	mux.HandleFunc("/api/v1/approvals/", b.wrapAPI(b.handleApprovalByID, false))
+	mux.HandleFunc("/api/v1/audit", b.wrapAPI(b.handleAudit, false))
+	mux.HandleFunc("/api/v1/audit/verify", b.wrapAPI(b.handleAuditVerify, false))
+	mux.HandleFunc("/api/v1/instructions", b.wrapAPI(b.handleInstructions, false))
+	mux.HandleFunc("/api/v1/system", b.wrapAPI(b.handleSystem, false))
+
+	mux.Handle("/static/", uiHandler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/acp/") {
+			http.NotFound(w, r)
+			return
+		}
+		uiHandler.ServeHTTP(w, r)
+	})
 	return mux
+}
+
+func (b *Bridge) wrapAPI(next http.HandlerFunc, allowAgentToken bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Isolate `/api/*` and `/acp/*` from proxied apps served under `/p/<slug>/`.
+		if isFromProxiedPage(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "requests originating from proxied /p/ pages are forbidden",
+			})
+			return
+		}
+		if allowAgentToken && extractAuth(r).AgentToken != "" {
+			next(w, r)
+			return
+		}
+		if b.cfg.Auth != nil {
+			p, err := b.cfg.Auth.Authenticate(r)
+			if err != nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{
+					"error": "authentication required",
+				})
+				return
+			}
+			if isMutatingMethod(r.Method) && b.cfg.Auth.RequireCSRF(p) {
+				if !verifyCSRFToken(r, p.CSRFToken) {
+					writeJSON(w, http.StatusForbidden, map[string]any{
+						"error": "missing or invalid X-Silo-CSRF token",
+					})
+					return
+				}
+			}
+		} else if isMutatingMethod(r.Method) {
+			got := readCSRFHeader(r)
+			if readSessionCookie(r) != "" && got == "" {
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error": "missing X-Silo-CSRF token on cookie-authenticated mutation",
+				})
+				return
+			}
+			if got != "" && b.defaultCSRF != "" && subtle.ConstantTimeCompare([]byte(got), []byte(b.defaultCSRF)) != 1 {
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error": "invalid X-Silo-CSRF token",
+				})
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+func (b *Bridge) handleAuthSession(w http.ResponseWriter, r *http.Request) {
+	if isFromProxiedPage(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden from /p/"})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b.cfg.Auth == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"authenticated": true,
+			"user":          "local",
+			"subject":       "local",
+			"mode":          "none",
+			"csrf_token":    b.defaultCSRF,
+		})
+		return
+	}
+	p, err := b.cfg.Auth.Authenticate(r)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"authenticated": false,
+			"mode":          "token",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"user":          p.Subject,
+		"subject":       p.Subject,
+		"mode":          p.Method,
+		"csrf_token":    p.CSRFToken,
+	})
+}
+
+func (b *Bridge) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if isFromProxiedPage(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden from /p/"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, &gateway.Error{Code: gateway.CodeInvalidParams, Message: err.Error()})
+		return
+	}
+	if b.cfg.Auth == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"authenticated": true,
+			"user":          "local",
+			"subject":       "local",
+			"mode":          "none",
+			"csrf_token":    b.defaultCSRF,
+		})
+		return
+	}
+	p, err := b.cfg.Auth.Login(w, r, body.Token)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"user":          p.Subject,
+		"subject":       p.Subject,
+		"mode":          p.Method,
+		"csrf_token":    p.CSRFToken,
+	})
+}
+
+func (b *Bridge) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b.cfg.Auth != nil {
+		_ = b.cfg.Auth.Logout(w, r)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 }
 
 func extractAuth(r *http.Request) gateway.Auth {
@@ -610,6 +767,14 @@ func (b *Bridge) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, &gateway.Error{Code: gateway.CodeInvalidParams, Message: err.Error()})
 		return
 	}
+	switch body.Resolution {
+	case "resolve":
+		body.Resolution = gateway.RequestResolved
+	case "dismiss", "dismissed", "reject":
+		body.Resolution = gateway.RequestRejected
+	case "forward":
+		body.Resolution = gateway.RequestForwarded
+	}
 	var req gateway.AgentRequest
 	if err := b.gwCall(r.Context(), "request.resolve", map[string]any{
 		"id":         id,
@@ -619,7 +784,109 @@ func (b *Bridge) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if req.State == gateway.RequestForwarded {
+		b.ForwardRequestToRoot(r.Context(), req, body.Note)
+	}
 	writeJSON(w, http.StatusOK, req)
+}
+
+func (b *Bridge) handleApprovals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	all := r.URL.Query().Get("all") == "true" || r.URL.Query().Get("all") == "1"
+	var out json.RawMessage
+	if err := b.gwCall(r.Context(), "approval.list", map[string]any{"all": all}, &out); err != nil {
+		var ge *gateway.Error
+		if errors.As(err, &ge) && ge.Code == gateway.CodeMethodNotFound {
+			writeJSON(w, http.StatusOK, []any{})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (b *Bridge) handleApprovalByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/approvals/")
+	id, action, _ := strings.Cut(rest, "/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch action {
+	case "":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var out json.RawMessage
+		if err := b.gwCall(r.Context(), "approval.show", map[string]any{"batch_id": id}, &out); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	case "decision", "decide":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Decision    string `json:"decision"`
+			Approved    *bool  `json:"approved"`
+			Comment     string `json:"comment"`
+			Confirm     string `json:"confirm"`
+			ConfirmHash string `json:"confirm_hash"`
+			WaitSec     *int   `json:"wait_s"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeErr(w, &gateway.Error{Code: gateway.CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		decision := body.Decision
+		if decision == "" && body.Approved != nil {
+			if *body.Approved {
+				decision = "approve"
+			} else {
+				decision = "reject"
+			}
+		}
+		confirm := body.Confirm
+		if confirm == "" {
+			confirm = body.ConfirmHash
+		}
+		var out json.RawMessage
+		if err := b.gwCall(r.Context(), "approval.decide", map[string]any{
+			"batch_id": id,
+			"decision": decision,
+			"comment":  body.Comment,
+			"confirm":  confirm,
+		}, &out); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if decision == "approve" || decision == "approved" {
+			waitSec := 2
+			if body.WaitSec != nil {
+				waitSec = *body.WaitSec
+			}
+			if waitSec > 0 {
+				_ = b.gwCall(r.Context(), "run_as_root.wait", map[string]any{
+					"batch_id":  id,
+					"timeout_s": waitSec,
+				}, nil)
+			}
+		}
+		var detail json.RawMessage
+		if err := b.gwCall(r.Context(), "approval.show", map[string]any{"batch_id": id}, &detail); err == nil {
+			out = detail
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func (b *Bridge) handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -635,6 +902,40 @@ func (b *Bridge) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, entries)
+}
+
+func (b *Bridge) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var res gateway.VerifyResult
+	if err := b.gwCall(r.Context(), "audit.verify", map[string]any{}, &res); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (b *Bridge) handleSystem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	authMode := "none"
+	if b.cfg.Auth != nil {
+		if p, err := b.cfg.Auth.Authenticate(r); err == nil && p != nil && p.Method != "" {
+			authMode = p.Method
+		} else {
+			authMode = "token"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"snapshot_available": false,
+		"snapshot_banner":    "no snapshot available — not undoable",
+		"http_addr":          b.cfg.HTTPAddr,
+		"auth_mode":          authMode,
+	})
 }
 
 func (b *Bridge) handleInstructions(w http.ResponseWriter, r *http.Request) {
