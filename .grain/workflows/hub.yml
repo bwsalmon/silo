@@ -1,14 +1,13 @@
-# The hub's CI, run by grain (.grain/workflows) on every push and pull
-# request: it formats, builds, vets and race-tests the root module,
+# The hub's CI, run by grain (.grain/workflows) when dispatched by hand
+# (see below): it formats, builds, vets and race-tests the root module,
 # github.com/bwsalmon/silo (README.md). The root module's ./... stops at
 # old/go.mod, so the retired runner in old/ is not built here
 # (.grain/workflows/old.yml tests it, only when run by hand).
 name: hub
 
+# v2: manual only (workflow_dispatch, e.g. `grain ci run`), so it is not
+# in the merge gate. The default CI is v3.yml.
 on:
-  push:
-    branches: ["**"]
-  pull_request:
   workflow_dispatch:
 
 env:

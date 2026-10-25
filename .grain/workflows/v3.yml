@@ -1,0 +1,41 @@
+# The v3 CI (v3/README.md), run by grain on every push and pull request:
+# it formats, builds, vets and race-tests the v3 module,
+# github.com/bwsalmon/silo/v3. This is the default CI gate; the v2
+# workflows (hub.yml, ui.yml, deploy.yml, grain-interop.yml,
+# grainfiles.yml, hub-nightly.yml) run only when dispatched by hand.
+name: v3
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Deliberately not -mod=mod: a sandbox that cannot reach the network
+  # should fail saying the module is missing rather than hanging on a
+  # proxy it will never reach.
+  GOFLAGS: -mod=readonly
+  GOTOOLCHAIN: auto
+
+jobs:
+  v3:
+    name: v3
+    timeout-minutes: 15
+    steps:
+      - name: Format
+        run: |
+          unformatted="$(cd v3 && gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: cd v3 && go build ./...
+
+      - name: Vet
+        run: cd v3 && go vet ./...
+
+      - name: Test
+        run: cd v3 && go test -race -timeout 10m ./...
