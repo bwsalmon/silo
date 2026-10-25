@@ -8,10 +8,9 @@
 # pushed or applied to GCP.
 name: deploy
 
+# v2: manual only (workflow_dispatch, e.g. `grain ci run`), so it is not
+# in the merge gate. The default CI is v3.yml.
 on:
-  push:
-    branches: ["**"]
-  pull_request:
   workflow_dispatch:
 
 jobs:

@@ -10,9 +10,9 @@
 # the checkout, and everything talks over 127.0.0.1.
 name: hub-nightly
 
+# v2: manual only (workflow_dispatch, e.g. `grain ci run`); the nightly
+# schedule is off. The default CI is v3.yml.
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 env:

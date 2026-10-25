@@ -17,10 +17,9 @@
 # TODO(task 4236): run the conformance kit against this grain too.
 name: grain-interop
 
+# v2: manual only (workflow_dispatch, e.g. `grain ci run`), so it is not
+# in the merge gate. The default CI is v3.yml.
 on:
-  push:
-    branches: ["**"]
-  pull_request:
   workflow_dispatch:
 
 jobs:
