@@ -1,5 +1,5 @@
-# The hub's web UI (ui/, docs/ui.md), run by grain on every push and
-# pull request: the frontend is type-checked, built into
+# The hub's web UI (ui/, docs/ui.md), run by grain when dispatched by
+# hand (see below): the frontend is type-checked, built into
 # hub/ui/static/app, and unit-tested with vitest, the trust-boundary
 # tests among them (no service worker, no storage, the view-through
 # uncached); then hub/ui and hub/server are tested with that bundle
@@ -7,10 +7,9 @@
 # committed; hub.yml's Go build embeds the placeholder in its place.
 name: ui
 
+# v2: manual only (workflow_dispatch, e.g. `grain ci run`), so it is not
+# in the merge gate. The default CI is v3.yml.
 on:
-  push:
-    branches: ["**"]
-  pull_request:
   workflow_dispatch:
 
 env:
