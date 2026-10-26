@@ -176,15 +176,25 @@ func MCPTools() []MCPTool {
 		},
 		{
 			Name:        "run_as_root",
-			Description: "Submit a batch of root commands and/or file writes for human approval and execution (root agent only).",
+			Description: "Submit a batch of root commands and/or file writes for human approval and execution (root agent only). Returns the batch id; poll batch_status for the outcome.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"summary": map[string]any{"type": "string", "description": "One-line explanation shown to the human."},
-					"reason":  map[string]any{"type": "string", "description": "Longer justification shown after computed facts."},
-					"steps":   map[string]any{"type": "array", "description": "Ordered exec or write_file steps."},
+					"batch": map[string]any{
+						"type":        "object",
+						"description": "The batch (design §4.3): title, reason, files to write, steps to run as root.",
+						"properties": map[string]any{
+							"title":  map[string]any{"type": "string", "description": "One-line summary shown to the human."},
+							"reason": map[string]any{"type": "string", "description": "Why this change is needed."},
+							"files": map[string]any{"type": "array", "description": "File writes: {path, mode, owner, group, content_b64} or {path, delete: true}.",
+								"items": map[string]any{"type": "object"}},
+							"steps": map[string]any{"type": "array", "description": "Ordered commands: {argv: [...]} or a typed op such as {op: \"pkg.install\", names: [...]}.",
+								"items": map[string]any{"type": "object"}},
+						},
+						"required": []string{"title", "reason"},
+					},
 				},
-				"required": []string{"summary", "reason", "steps"},
+				"required": []string{"batch"},
 			},
 		},
 		{
