@@ -184,14 +184,30 @@ install_silo() {
 
 # ---- Node.js and the CLIs ------------------------------------------------
 
+# node_major NODE: the major version of the node binary NODE, or 0.
 node_major() {
-	command -v node >/dev/null 2>&1 || { echo 0; return; }
-	node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+	[ -n "$1" ] && [ -x "$1" ] || { echo 0; return; }
+	"$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+}
+
+# find_node sets node_dir to the directory of a node >= NODE_MAJOR, the
+# distribution's (/usr/bin) first, or leaves it empty.
+node_dir=""
+find_node() {
+	local n
+	node_dir=""
+	for n in /usr/bin/node "$(command -v node 2>/dev/null || true)"; do
+		if [ "$(node_major "$n")" -ge "$NODE_MAJOR" ]; then
+			node_dir="$(dirname "$n")"
+			return
+		fi
+	done
 }
 
 install_node() {
-	if [ "$(node_major)" -ge "$NODE_MAJOR" ]; then
-		log "Node.js $(node --version) is new enough"
+	find_node
+	if [ -n "$node_dir" ]; then
+		log "Node.js $("$node_dir/node" --version) in $node_dir is new enough"
 		return
 	fi
 	local cand
@@ -199,17 +215,19 @@ install_node() {
 	cand="$(apt-cache policy nodejs 2>/dev/null | awk '/Candidate:/ {print $2}' | sed 's/^[0-9]*://; s/\..*//')"
 	if [ -n "$cand" ] && [ "$cand" != "(none)" ] && [ "$cand" -ge "$NODE_MAJOR" ] 2>/dev/null; then
 		apt_install nodejs npm
-		return
+	else
+		log "adding the NodeSource repository for Node.js $NODE_MAJOR"
+		install -d -m 0755 /etc/apt/keyrings
+		curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
+			gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+		echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_$NODE_MAJOR.x nodistro main" \
+			>/etc/apt/sources.list.d/nodesource.list
+		DEBIAN_FRONTEND=noninteractive apt-get update -qq
+		DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
 	fi
-	log "adding the NodeSource repository for Node.js $NODE_MAJOR"
-	install -d -m 0755 /etc/apt/keyrings
-	curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
-		gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
-	echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_$NODE_MAJOR.x nodistro main" \
-		>/etc/apt/sources.list.d/nodesource.list
-	DEBIAN_FRONTEND=noninteractive apt-get update -qq
-	DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
-	[ "$(node_major)" -ge "$NODE_MAJOR" ] || die "Node.js $NODE_MAJOR did not install"
+	find_node
+	[ -n "$node_dir" ] || die "Node.js $NODE_MAJOR did not install"
+	log "using Node.js $("$node_dir/node" --version) in $node_dir"
 }
 
 install_clis() {
@@ -219,7 +237,7 @@ install_clis() {
 	# A private prefix with an exact lockfile-free install: --save-exact keeps
 	# package.json honest about what is pinned.
 	[ -f "$CLI_DIR/package.json" ] || echo '{"name":"silo-cli","private":true}' >"$CLI_DIR/package.json"
-	npm install --prefix "$CLI_DIR" --save-exact --no-fund --no-audit --loglevel=error \
+	PATH="$node_dir:$PATH" "$node_dir/npm" install --prefix "$CLI_DIR" --save-exact --no-fund --no-audit --loglevel=error \
 		"$CLAUDE_CODE_PKG" "$CLAUDE_ACP_PKG" "$CODEX_PKG" "$CODEX_ACP_PKG" "$GEMINI_CLI_PKG"
 	chown -R root:root "$CLI_DIR"
 	chmod -R go-w "$CLI_DIR"
@@ -334,7 +352,7 @@ Type=simple
 User=$user
 Group=$user
 Environment=HOME=$STATE/home/$user
-Environment=PATH=$CLI_DIR/node_modules/.bin:$PREFIX_BIN:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$CLI_DIR/node_modules/.bin:${node_dir:+$node_dir:}$PREFIX_BIN:/usr/bin:/bin
 Environment=SILO_HUB_URL=unix://$RUNDIR/bridge.sock
 WorkingDirectory=$STATE/home/$user
 # The gateway writes this agent's single-use registration token here;
@@ -445,13 +463,10 @@ start_units() {
 	# Their tokens are re-armed when the old connection drops; Restart=
 	# retries until they are there.
 	systemctl restart silo-root.service silo-user.service || true
-	local i ok=0
-	for i in $(seq 1 30); do
-		if "$PREFIX_BIN/silo" call agent.list 2>/dev/null | grep -q '"state": "connected"'; then
-			local n
-			n="$("$PREFIX_BIN/silo" call agent.list | grep -c '"state": "connected"' || true)"
-			if [ "$n" -ge 2 ]; then ok=1; break; fi
-		fi
+	local n ok=0
+	for _ in $(seq 1 30); do
+		n="$("$PREFIX_BIN/silo" call agent.list '{"state":["connected"]}' 2>/dev/null | grep -c '"standing": true' || true)"
+		if [ "$n" -ge 2 ]; then ok=1; break; fi
 		sleep 1
 	done
 	if [ "$ok" -eq 1 ]; then
@@ -490,8 +505,10 @@ EOF
 	if [ "$with_cli" -eq 1 ]; then
 		cat <<EOF
 
-  Model credentials: the agents' CLIs need them before they can answer.
-  Put keys in $ETC/secrets/ (root, 0600) or log each CLI in as its agent user.
+  Model credentials: the agents' CLIs need them before they can answer, and
+  silo's credential proxy is not built yet. Until it is, give each agent's
+  unit a root-only EnvironmentFile= drop-in with the key (for example
+  GEMINI_API_KEY=...): systemctl edit silo-user.service
 EOF
 	fi
 }
@@ -501,7 +518,7 @@ check_system
 apt_install ca-certificates passwd
 install_silo
 setup_users_and_dirs
-if [ "$with_cli" -eq 1 ]; then install_clis; fi
+if [ "$with_cli" -eq 1 ]; then install_clis; else find_node; fi
 install_units
 ui_token
 if [ "$start" -eq 1 ]; then
