@@ -11,6 +11,7 @@
 //	silo call [-socket PATH] METHOD [PARAMS-JSON]
 //	silo root propose BATCH.json                    the root agent proposes a batch
 //	silo approvals list|show|approve|reject         the human's approval queue
+//	silo instructions                               print the shipped default root.md
 //
 // Invoked as silo-gatewayd, silo-bridge, or silo-mcp (for example via a
 // symlink), it dispatches to gateway, bridge, or mcp respectively.
@@ -31,6 +32,7 @@ import (
 	"github.com/bwsalmon/silo/v3/acp"
 	"github.com/bwsalmon/silo/v3/bridge"
 	"github.com/bwsalmon/silo/v3/gateway"
+	"github.com/bwsalmon/silo/v3/instructions"
 )
 
 const usage = `usage: silo <command> [flags]
@@ -48,6 +50,8 @@ commands:
             silo call agent.register '{"name":"web","runtime":"claude","location":{"kind":"container"}}'
   root      the root agent's run_as_root: silo root propose BATCH.json
   approvals the approval queue: silo approvals list|show|approve|reject
+  instructions
+            print the shipped default root agent instructions (root.md)
 `
 
 func main() {
@@ -176,6 +180,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runRoot(args[1:], stdout, stderr)
 	case "approvals":
 		return runApprovals(args[1:], stdout, stderr)
+	case "instructions":
+		_, err := io.WriteString(stdout, instructions.DefaultRootMD)
+		return err
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return nil

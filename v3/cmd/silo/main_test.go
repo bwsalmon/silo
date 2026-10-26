@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bwsalmon/silo/v3/instructions"
 )
 
 func TestUsage(t *testing.T) {
@@ -23,6 +25,10 @@ func TestUsage(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "agent.message") {
 		t.Fatalf("usage should not mention removed agent.message: %q", out.String())
+	}
+	out.Reset()
+	if err := run([]string{"instructions"}, &out, &errOut); err != nil || out.String() != instructions.DefaultRootMD {
+		t.Fatalf("instructions: %v, %d bytes", err, out.Len())
 	}
 	if err := run(nil, &out, &errOut); err == nil {
 		t.Fatal("no command accepted")
