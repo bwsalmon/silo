@@ -15,7 +15,10 @@
 // Every reply is streamed as session/update agent_message_chunk
 // notifications before the session/prompt response ends the turn.
 //
-// The silo binary is $SILO_BIN, or `silo` on PATH.
+// It reaches silo's MCP tools the way a real CLI does: through the "silo"
+// MCP server the bridge hands it in session/new (falling back to `silo
+// mcp`, with $SILO_BIN or silo on PATH), and starts children with that
+// same silo binary.
 package main
 
 import (
@@ -70,7 +73,57 @@ func chunk(sid, text string) {
 	})
 }
 
+// mcpServer is the "silo" MCP server from session/new.
+var (
+	mcpMu  sync.Mutex
+	mcpCmd []string
+	mcpEnv []string
+)
+
+func setMCP(params json.RawMessage) {
+	var p struct {
+		MCPServers []struct {
+			Name    string   `json:"name"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+			Env     []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			} `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return
+	}
+	for _, s := range p.MCPServers {
+		if s.Name != "silo" || s.Command == "" {
+			continue
+		}
+		mcpMu.Lock()
+		mcpCmd = append([]string{s.Command}, s.Args...)
+		mcpEnv = nil
+		for _, e := range s.Env {
+			mcpEnv = append(mcpEnv, e.Name+"="+e.Value)
+		}
+		mcpMu.Unlock()
+	}
+}
+
+func mcpCommand() ([]string, []string) {
+	mcpMu.Lock()
+	defer mcpMu.Unlock()
+	if len(mcpCmd) > 0 {
+		return mcpCmd, mcpEnv
+	}
+	return []string{siloBin(), "mcp"}, nil
+}
+
 func siloBin() string {
+	mcpMu.Lock()
+	defer mcpMu.Unlock()
+	if len(mcpCmd) > 0 {
+		return mcpCmd[0]
+	}
 	if b := os.Getenv("SILO_BIN"); b != "" {
 		return b
 	}
@@ -98,6 +151,7 @@ func main() {
 				"agentInfo":       map[string]any{"name": "fakeagent", "version": "1"},
 			}})
 		case "session/new", "session/load":
+			setMCP(m.Params)
 			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"sessionId": sid}})
 		case "session/prompt":
 			go prompt(sid, m)
@@ -169,7 +223,9 @@ func callTool(tool, args string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, siloBin(), "mcp")
+	argv, env := mcpCommand()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stderr = os.Stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {

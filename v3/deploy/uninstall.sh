@@ -10,6 +10,7 @@
 # kept unless --purge is given. Node.js (and the NodeSource repository, if
 # install.sh added it) stay installed either way.
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 purge=0
 case "${1:-}" in
@@ -49,6 +50,10 @@ if [ "$purge" -eq 1 ]; then
 		fi
 	done
 	getent group silo-gw >/dev/null && groupdel silo-gw || true
+	# The gateway makes the audit log append-only (chattr +a) where it can.
+	if [ -d /var/log/silo ] && command -v chattr >/dev/null 2>&1; then
+		chattr -R -a /var/log/silo 2>/dev/null || true
+	fi
 	rm -rf /etc/silo /var/lib/silo /var/log/silo /opt/silo
 else
 	cat <<EOF

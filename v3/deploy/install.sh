@@ -32,6 +32,7 @@
 #   users silo (bridge/UI), silo-root (the root agent), silo-user (the default user agent)
 #   silo-gateway.service  silo-ui.service  silo-root.service  silo-user.service
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
