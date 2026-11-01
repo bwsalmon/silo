@@ -4,7 +4,7 @@ Silo v4 provides single-tenant virtual machine isolation for autonomous coding a
 
 ## Process and Execution Model
 
-Silo adheres to a strict one-process-per-VM topology. The host-side `silo` daemon runs with host root privileges, initializes host networking interfaces, and supervises a child `cloud-hypervisor` process via its UNIX management socket. Inside the guest, a dedicated supervisor process (`silo-supervisor`) runs as root and manages exactly one instance of the configured agent CLI. If the agent process terminates with any exit code, `silo-supervisor` automatically restarts it with clean stdio streams, maintaining an always-on agent lifecycle.
+Silo adheres to a strict one-process-per-VM topology. The host-side `silo` daemon runs with host root privileges, initializes host networking interfaces, and supervises a child `cloud-hypervisor` process via its UNIX management socket. Inside the guest, a dedicated supervisor process (`silo-supervisor`) runs as root and manages exactly one instance of the configured agent CLI. If the agent process terminates with any exit code (including after an in-place CLI upgrade or version bump), `silo-supervisor` automatically restarts it with clean stdio streams, maintaining an always-on agent lifecycle.
 
 To support future platform expansion, hypervisor operations are encapsulated behind a Go `Hypervisor` interface. The primary implementation targets Cloud Hypervisor on Linux with KVM (`/dev/kvm`). The abstraction decouples VM lifecycle commands, CPU/memory resource sizing, and device attachments from underlying hypervisor specifics, providing a clean seam for an eventual macOS implementation backed by Apple's `Virtualization.framework`.
 
@@ -52,11 +52,11 @@ The architecture establishes a direct evolutionary path toward host-managed cred
 
 ## Guest Management API and One-Time Approval Flow
 
-Coding agents frequently require dynamic environment changes, such as installing dependencies from new package repositories, communicating with external database staging instances, exposing local web servers for testing, reformatting or configuring filesystems, or upgrading the host Silo daemon. Silo exposes an HTTP REST management API accessible exclusively to the guest over vsock or the point-to-point link, authenticated via a provisioned bearer token.
+Coding agents frequently require dynamic environment changes, such as installing dependencies from new package repositories, communicating with external database staging instances, exposing local web servers for testing, upgrading the agent CLI version itself, reformatting or configuring filesystems, or upgrading the host Silo daemon. Silo exposes an HTTP REST management API accessible exclusively to the guest over vsock or the point-to-point link, authenticated via a provisioned bearer token.
 
 To prevent autonomous agent escape or unauthorized resource access, all mutating management operations require explicit human approval via an out-of-band One-Time Password (OTP) workflow:
 
-1. The agent submits a mutation request (e.g., adding an egress rule, exposing a port, or reformatting a filesystem) to the management API.
+1. The agent submits a mutation request (e.g., adding an egress rule, exposing a port, upgrading the agent CLI version, or reformatting a filesystem) to the management API.
 2. Silo creates a pending change record, calculates a canonical SHA-256 fingerprint of the request payload, generates a cryptographically secure 6-to-8 digit numeric OTP, and starts a 15-minute expiration timer.
 3. Silo formats a human-readable unified diff of the requested configuration change and transmits the diff alongside the OTP to the operator's configured Gmail address.
 4. The operator inspects the diff in their email client and provides the numeric OTP to the agent via their active ACP chat session.

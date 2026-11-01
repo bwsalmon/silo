@@ -601,6 +601,25 @@ If you need to access external resources (new package registries, GitHub reposit
 Awaiting instructions from the user over ACP.
 ```
 
+### 9.3 Agent CLI Version Management and Upgrades
+
+Silo explicitly supports upgrading the coding agent CLI inside the virtual machine through two complementary mechanisms:
+
+1. **In-Guest Self-Upgrade**:
+   Because the agent runs as root, it can execute native package update commands directly inside the guest whenever network egress to the corresponding package repository is permitted by policy:
+   - Claude Code: `npm install -g @anthropic-ai/claude-code@latest`
+   - Codex: `npm install -g @openai/codex@latest` or binary replacement
+   - Gemini CLI: `npm install -g @google/gemini-cli@latest` or Go install
+   
+   When the package update finishes, the CLI process exits or issues `kill(getpid(), SIGTERM)`. `silo-supervisor` traps process termination and immediately relaunches the updated CLI executable, picking up the new version without requiring a VM reboot.
+
+2. **Host-Managed CLI Upgrade (`POST /v1/agent/upgrade`)**:
+   The agent can also request Silo to manage and pin its CLI version in `silo.yaml`:
+   - The agent calls `POST /v1/agent/upgrade` with the target `version` string (e.g. `"1.3.0"` or `"latest"`).
+   - Silo formats a unified diff of `silo.yaml` (`vm.agent.version`) and dispatches an OTP approval email to the operator.
+   - Upon operator approval via `POST /v1/mgmt/approve`, Silo signals `silo-supervisor` over vsock to execute the package installation, verify the binary invocation via `<cli> --version`, update `silo.yaml` on the host, terminate the active CLI PID, and relaunch the agent on the new version.
+   - If the new binary fails validation or crashes upon launch, `silo-supervisor` automatically rolls back to the previous package version.
+
 ---
 
 ## 10. LLM Credential Handling
@@ -748,7 +767,29 @@ Requests explicitly reformatting a guest partition (e.g. converting or re-initia
 }
 ```
 
-#### 9. `POST /v1/silo/upgrade`
+#### 9. `POST /v1/agent/upgrade`
+Requests upgrading the coding agent CLI version in the guest and pinning it in `silo.yaml`.
+
+**Request**:
+```json
+{
+  "version": "1.3.0",
+  "revert_on_failure": true
+}
+```
+
+**Response (202 Accepted)**:
+```json
+{
+  "change_id": "chg_7c1d3e8f",
+  "status": "PENDING_APPROVAL",
+  "diff": "--- silo.yaml (vm.agent)\n+++ silo.yaml (vm.agent)\n- version: 1.2.0\n+ version: 1.3.0\n",
+  "expires_in_seconds": 900,
+  "message": "Agent CLI upgrade approval code sent to operator email. Await operator code and call /v1/mgmt/approve."
+}
+```
+
+#### 10. `POST /v1/silo/upgrade`
 Requests self-upgrade of the host Silo daemon.
 
 **Request**:
@@ -758,7 +799,7 @@ Requests self-upgrade of the host Silo daemon.
 }
 ```
 
-#### 10. `POST /v1/mgmt/approve`
+#### 11. `POST /v1/mgmt/approve`
 Submits the human operator's OTP code to execute the pending mutation.
 
 **Request**:
@@ -778,7 +819,7 @@ Submits the human operator's OTP code to execute the pending mutation.
 }
 ```
 
-#### 11. `POST /v1/mgmt/cancel`
+#### 12. `POST /v1/mgmt/cancel`
 Cancels a pending change request.
 
 ### 11.2 Standard Error Response Schema
@@ -986,6 +1027,7 @@ All operational and security events are written to a structured JSON audit log l
 
 - `VM_START`, `VM_STOP`, `VM_CRASH`, `VM_RESIZE`
 - `AGENT_START`, `AGENT_EXIT`, `AGENT_RESTART`
+- `AGENT_UPGRADE_REQUESTED`, `AGENT_UPGRADE_SUCCESS`, `AGENT_UPGRADE_FAILED`
 - `POLICY_CHANGE_REQUESTED`, `POLICY_CHANGE_CANCELLED`
 - `STORAGE_FORMAT_REQUESTED`, `STORAGE_FORMAT_SUCCESS`, `STORAGE_FORMAT_LOCKED`
 - `OTP_ISSUED`, `OTP_ATTEMPT_FAILED`, `OTP_LOCKOUT`, `APPROVAL_SUCCESS`
