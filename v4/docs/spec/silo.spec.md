@@ -180,9 +180,13 @@ vm:
     type: "raw"           # Enum: "raw" (sparse file) | "block" (block device)
     path: "/var/lib/silo/disks/worker-01.img"
     size_gb: 64           # Required if type="raw"
+    partition_layout: "two_partition_gpt" # 2-partition GPT layout (p1: boot, p2: root)
+    root_filesystem: "xfs" # Primary root filesystem ("xfs" with reflink=1 | "ext4" | "btrfs")
+    boot_filesystem: "ext4" # Dedicated boot filesystem ("ext4")
+    init_mode: "format_if_empty" # Enum: "format_if_empty" (format only if zeroed/unpartitioned) | "manual" (require explicit initialization)
     base_image: "/var/lib/silo/images/debian-12-base.ext4"
     kernel: "/var/lib/silo/kernel/vmlinux"
-    cmdline: "console=ttyS0 root=/dev/vda rw quiet panic=-1"
+    cmdline: "console=ttyS0 root=/dev/vda2 rw quiet panic=-1"
 
   agent:
     cli: "claude"         # Enum: "claude" | "codex" | "gemini"
@@ -244,31 +248,65 @@ email:
 2. `vm.memory_mb`: Integer, `1024 <= memory_mb <= host_available_memory`.
 3. `vm.storage.type`: MUST be either `"raw"` or `"block"`.
 4. `vm.storage.path`: MUST be an absolute path. If `type="block"`, it MUST identify an existing block device node (`S_ISBLK`).
-5. `vm.agent.cli`: MUST be one of `"claude"`, `"codex"`, `"gemini"`.
-6. `approval.otp_length`: MUST be either `6` or `8`.
-7. `approval.otp_ttl_minutes`: MUST be between `1` and `60` (default `15`).
+5. `vm.storage.root_filesystem`: MUST be a supported filesystem identifier (`"xfs"`, `"ext4"`, `"btrfs"`). Defaults to `"xfs"`.
+6. `vm.storage.init_mode`: MUST be either `"format_if_empty"` or `"manual"`.
+7. `vm.agent.cli`: MUST be one of `"claude"`, `"codex"`, `"gemini"`.
+8. `approval.otp_length`: MUST be either `6` or `8`.
+9. `approval.otp_ttl_minutes`: MUST be between `1` and `60` (default `15`).
 
 ---
 
 ## 5. Storage and Rootfs Lifecycle
 
-### 5.1 Disk Persistence Model
+### 5.1 Disk Persistence and In-Guest Filesystem Flexibility
 
-The virtual machine operates on a persistent root disk. All writes inside the guest OS—including `/etc`, `/usr`, `/var`, `/home`, and `/root`—are committed directly to the backing storage. File changes, package installations, and repository checkouts persist across VM reboots, crashes, and host daemon restarts.
+The virtual machine operates on a persistent root disk. All writes inside the guest OS—including package installations, workspace checkouts, build artifacts, container storage, and toolchains—persist across VM reboots, crashes, and host daemon restarts.
 
-### 5.2 Backing Storage Types
+The agent executes with root privileges inside the guest. Crucially, the agent MUST have the capability to reformat partitions, adjust mount options, or switch filesystems (e.g. migrating data volumes to XFS or btrfs) to suit its development and testing needs. The guest kernel (`vmlinux`) includes built-in driver support for `ext4` (`CONFIG_EXT4_FS=y`), `xfs` (`CONFIG_XFS_FS=y`), and `btrfs` (`CONFIG_BTRFS_FS=y`), and the guest image includes userland utilities (`e2fsprogs`, `xfsprogs`, `btrfs-progs`).
 
-1. **Raw File (`type: raw`)**:
-   - Backed by a sparse Linux file created with `truncate(2)` or `fallocate(2)`.
-   - Formatted directly as an `ext4` filesystem with `dir_index`, `has_journal`, and `ext_attr` enabled.
-   - Attached to Cloud Hypervisor via `--disk path=/var/lib/silo/disks/worker-01.img,direct=on`.
-2. **Block Partition (`type: block`)**:
-   - Backed by an existing host raw disk partition (e.g. `/dev/nvme0n1p4` or `/dev/sdb1`).
-   - Attached with direct I/O enabled (`direct=on`) to bypass host page cache overhead and eliminate double-caching.
+### 5.2 Two-Partition GPT Disk Architecture
 
-### 5.3 First-Start Initialization Sequence
+Silo standardizes on a **two-partition GUID Partition Table (GPT)** layout. Partition 2 is formatted with **XFS** as the default primary root filesystem.
 
-When `silo` launches, it executes the following initialization state machine:
+```
++-----------------------------------------------------------------------------------------+
+| GPT Disk Backing (Raw Sparse File or Block Partition: 64+ GiB)                          |
+|                                                                                         |
+|  +-----------------------------+  +--------------------------------------------------+  |
+|  | Partition 1: /dev/vda1      |  | Partition 2: /dev/vda2                           |  |
+|  | Label: silo-boot            |  | Label: silo-root                                 |  |
+|  | Size: 1 GiB                 |  | Size: Remainder of storage (e.g. 63 GiB)          |  |
+|  | Filesystem: ext4            |  | Filesystem: XFS (reflink=1, crc=1, ftype=1)      |  |
+|  | Mount: /boot                |  | Mount: / (Root Filesystem & Workspace)           |  |
+|  | - Kernel & modules          |  | - Guest OS hierarchy (/etc, /usr, /var)          |  |
+|  | - Initramfs & boot configs  |  | - Agent workspace (/root/workspace)              |  |
+|  | - Safe fallback rescue root |  | - Nested virt storage (/var/lib/docker, containerd|
+|  +-----------------------------+  +--------------------------------------------------+  |
++-----------------------------------------------------------------------------------------+
+```
+
+#### Rationale for Two Partitions and Default XFS:
+1. **Nested Virtualization and Container Cleanliness**: Autonomous coding agents frequently run container engines (Docker, Podman, containerd) and nested microVMs (Cloud Hypervisor / QEMU over `/dev/kvm`) to build containers, run test matrices, and execute untrusted code. Modern container storage drivers (`overlay2`) and VM disk managers require **reflink / Copy-on-Write (CoW)** block allocation (`mkfs.xfs -m reflink=1,crc=1`). Reflink enables instantaneous, zero-copy cloning of container layers and virtual machine images, eliminates physical disk bloat during builds, and prevents known overlayfs inode exhaustion bugs.
+2. **Boot Partition Separation**: Direct kernel boot and hypervisor init artifacts reside on Partition 1 (`/boot`, 1 GiB, ext4). Separating `/boot` on ext4 guarantees universal bootloader and direct-boot kernel compatibility, preventing conflicts with advanced XFS filesystem features (such as 64-bit inodes, sparse inobt, and bigtime timestamps).
+
+### 5.3 Filesystem-Agnostic Probing and Explicit Format Safety Protocol
+
+#### The Silent Overwrite Hazard
+If Silo performed naive, single-filesystem probing (e.g. checking only whether an ext4 superblock exists), any guest that reformatted its root partition to XFS would be misdiagnosed upon daemon restart as "unformatted storage". Silo would then execute `mkfs` and extract the base image, catastrophically destroying the user's running system.
+
+#### Mandatory Probing Algorithm
+On daemon startup, Silo MUST probe the backing storage using filesystem-agnostic signature detection (`libblkid` or scanning standard magic offsets):
+1. **GPT Partition Table Probe**: Check for GPT signature (`"EFI PART"` at LBA 1).
+2. **Partition 1 Superblock Probe**: Probe `/dev/vda1` (or offset `2048 * 512`) for ext4 magic (`0xEF53`).
+3. **Partition 2 Superblock Probe**: Probe `/dev/vda2` for recognized superblocks:
+   - XFS: Magic `"XFSB"` (`0x58465342`) at offset 0.
+   - ext4: Magic `0xEF53` at offset 1024.
+   - btrfs: Magic `"_B5HRfS_M"` at offset 65536.
+   - swap, f2fs, and other recognized Linux filesystem signatures.
+
+**Safety Rule**: If ANY recognized partition table or filesystem superblock is detected, Silo MUST treat the disk as initialized and boot directly without modifying, repartitioning, or formatting the storage.
+
+#### Explicit First-Start Initialization State Machine
 
 ```
 +-------------------------------------------------------------+
@@ -276,17 +314,23 @@ When `silo` launches, it executes the following initialization state machine:
 +------------------------------+------------------------------+
                                |
             +------------------v------------------+
-            | Does valid ext4 filesystem exist?   |
+            | Does ANY valid filesystem or GPT    |
+            | partition signature exist? (blkid)  |
             +-------+---------------------+-------+
-                    | Yes                 | No
+                    | Yes                 | No (Empty / Zeroed)
                     |                     |
 +-------------------v---------------+   +-v-----------------------------------------+
-| Mount/Verify partition integrity  |   | 1. Create sparse file (if raw) or wipe blk|
-| Skip base image copy              |   | 2. Format with mkfs.ext4 -F -L "silo-root"|
-+-------------------+---------------+   | 3. Stream base image payload into rootfs  |
-                    |                   | 4. Inject /etc/silo/mgmt.token            |
-                    |                   | 5. Inject agent CLI default configuration |
-                    |                   | 6. Flush buffers (fsync)                  |
+| Keep existing partitions intact.  |   | Check vm.storage.init_mode:               |
+| NEVER format or overwrite!        |   | - If "manual": Abort with error.          |
+| Proceed to boot VM kernel.        |   | - If "format_if_empty":                   |
++-------------------+---------------+   |   1. Create sparse file (if type="raw")   |
+                    |                   |   2. Write GPT table (p1: 1G, p2: rest)   |
+                    |                   |   3. mkfs.ext4 -L "silo-boot" /dev/vda1   |
+                    |                   |   4. mkfs.xfs -m reflink=1 /dev/vda2      |
+                    |                   |   5. Extract Debian base image to vda2    |
+                    |                   |   6. Populate /boot on vda1               |
+                    |                   |   7. Inject /etc/silo/mgmt.token          |
+                    |                   |   8. Sync & flush buffers                 |
                     |                   +---------------------+---------------------+
                     |                                         |
                     +-------------------+---------------------+
@@ -296,42 +340,60 @@ When `silo` launches, it executes the following initialization state machine:
                          +-----------------------------+
 ```
 
-### 5.4 Base Image Construction
+### 5.4 In-Guest Explicit Storage Formatting (`POST /v1/storage/format`)
+
+When an agent needs to reformat its root or data volume (e.g. switching between XFS and btrfs, or wiping temporary build partitions), formatting is exposed as an **explicit, OTP-gated management operation**:
+
+1. The agent calls `POST /v1/storage/format` specifying `target: "root"`, desired `filesystem: "xfs"`, and `mkfs_options: ["-m", "reflink=1"]`.
+2. Silo creates a pending change record and generates an email alert with a destructive warning diff.
+3. The operator reviews the diff and provides the single-use OTP code to the agent.
+4. The agent submits the code to `POST /v1/mgmt/approve`.
+5. Upon approval, Silo pauses the VM, unmounts the partition, runs `mkfs`, optionally re-seeds the base image if requested, and resumes/reboots the VM.
+
+### 5.5 Base Image Construction
 
 The default base image is a reproducible Debian 12 (Bookworm) minimal rootfs derived from Granule's `deploy/guest-image/` build pipeline:
 1. `debootstrap --variant=minbase --components=main bookworm /target http://deb.debian.org/debian`
-2. Install minimal packages: `systemd-sysv`, `iproute2`, `kmod`, `acpid`, `udev`, `e2fsprogs`, `ca-certificates`, `curl`, `git`, `build-essential`.
+2. Install packages: `systemd-sysv`, `iproute2`, `kmod`, `acpid`, `udev`, `e2fsprogs`, `xfsprogs`, `btrfs-progs`, `ca-certificates`, `curl`, `git`, `build-essential`.
 3. Overlay Silo components:
    - `/usr/local/bin/silo-supervisor`: Supervisor daemon and vsock bridge.
    - `/etc/systemd/system/silo-supervisor.service`: Autostart unit.
    - Node.js / Python / Go runtimes required by Claude Code, Codex, and Gemini CLI.
-4. The kernel is a custom or distro-packaged direct-boot kernel (`vmlinux`) compiled with `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, `CONFIG_VIRTIO_NET=y`, and `CONFIG_VHOST_VSOCK=y`.
+4. Direct-boot kernel (`vmlinux`) compiled with `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_BLK=y`, `CONFIG_VIRTIO_NET=y`, `CONFIG_VHOST_VSOCK=y`, `CONFIG_XFS_FS=y`, and `CONFIG_EXT4_FS=y`.
 
 ---
 
 ## 6. Network Topology and Enforcement
 
-### 6.1 Point-to-Point Addressing
+### 6.1 Point-to-Point Addressing (Dual-Stack)
 
-- **Host Interface (`silo-tap0`)**: `192.168.127.1/30`
-- **Guest Interface (`eth0`)**: `192.168.127.2/30`
-- **Broadcast**: `192.168.127.3`
-- **Subnet**: `192.168.127.0/30`
+Silo provisions a dual-stack point-to-point network between the host TAP device and the guest virtual machine:
+
+- **IPv4 Point-to-Point Link**:
+  - Host Interface (`silo-tap0`): `192.168.127.1/30`
+  - Guest Interface (`eth0`): `192.168.127.2/30`
+  - Broadcast: `192.168.127.3`
+  - Subnet: `192.168.127.0/30`
+
+- **IPv6 Point-to-Point Link (ULA)**:
+  - Host Interface (`silo-tap0`): `fd00:silo::1/126`
+  - Guest Interface (`eth0`): `fd00:silo::2/126`
+  - Subnet: `fd00:silo::/126`
 
 ### 6.2 Host nftables Ruleset
 
-Silo dynamically provisions an isolated `nftables` table named `silo_vm` upon startup. The ruleset guarantees that guest traffic can NEVER bypass Silo:
+Silo dynamically provisions an isolated `nftables` table named `silo_vm` in the `inet` address family upon startup. Because the `inet` family inspects both IPv4 and IPv6 packets simultaneously, the ruleset guarantees that guest traffic can NEVER bypass Silo:
 
 ```nftables
 table inet silo_vm {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
 
-        # Redirect all guest DNS queries to Silo internal DNS proxy
+        # Redirect all guest DNS queries (IPv4 and IPv6) to Silo internal DNS proxy
         iifname "silo-tap0" udp dport 53 redirect to :5353
         iifname "silo-tap0" tcp dport 53 redirect to :5353
 
-        # Redirect all guest TCP traffic to Silo transparent forward proxy
+        # Redirect all guest TCP traffic (IPv4 and IPv6) to Silo transparent forward proxy
         iifname "silo-tap0" tcp dport != { 53, 5001 } redirect to :8443
     }
 
@@ -339,7 +401,7 @@ table inet silo_vm {
         type filter hook forward priority filter; policy drop;
 
         # Strictly drop all forward frames originating from the tap interface.
-        # No guest traffic is permitted to route directly onto host interfaces!
+        # No guest traffic (IPv4 or IPv6) is permitted to route directly onto host interfaces!
         iifname "silo-tap0" drop
     }
 
@@ -349,10 +411,18 @@ table inet silo_vm {
         # Allow established connections from proxy
         ct state established,related accept
 
-        # Allow guest to communicate with Silo transparent proxy and DNS
+        # Allow IPv4 guest to communicate with Silo transparent proxy and DNS
         iifname "silo-tap0" ip saddr 192.168.127.2 ip daddr 192.168.127.1 tcp dport { 8443, 9090 } accept
         iifname "silo-tap0" ip saddr 192.168.127.2 ip daddr 192.168.127.1 udp dport 5353 accept
         iifname "silo-tap0" ip saddr 192.168.127.2 icmp type echo-request accept
+
+        # Allow IPv6 guest to communicate with Silo transparent proxy and DNS
+        iifname "silo-tap0" ip6 saddr fd00:silo::2 ip6 daddr fd00:silo::1 tcp dport { 8443, 9090 } accept
+        iifname "silo-tap0" ip6 saddr fd00:silo::2 ip6 daddr fd00:silo::1 udp dport 5353 accept
+        iifname "silo-tap0" ip6 saddr fd00:silo::2 icmpv6 type echo-request accept
+
+        # Allow IPv6 Neighbor Discovery for point-to-point link operation
+        iifname "silo-tap0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
 
         # Drop everything else from the TAP
         iifname "silo-tap0" drop
@@ -364,13 +434,25 @@ table inet silo_vm {
 }
 ```
 
-### 6.3 Leak Prevention and Hardening
+### 6.3 Leak Prevention and Enforcement Proof
 
-1. **IPv6 Disabling**: IPv6 is completely disabled on both the TAP interface and the guest kernel via `sysctl net.ipv6.conf.silo-tap0.disable_ipv6=1` and kernel parameter `ipv6.disable=1`.
-2. **Metadata Protection**: Host-level drops reject any traffic targeting `169.254.169.254` (cloud metadata) or link-local ranges `169.254.0.0/16`.
-3. **Host LAN Isolation**: Traffic to RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` excluding the point-to-point link) is rejected by default.
-4. **Raw Socket / Protocol Dropping**: Non-TCP/UDP protocols (e.g. GRE, SCTP, raw IP tunneling) are dropped at the `input` and `prerouting` chains.
-5. **No Routing**: `net.ipv4.ip_forward` is NOT enabled on the host TAP interface. Silo acts as an application-layer proxy, not an IP router.
+This section demonstrates why a process running with root privileges inside the guest virtual machine cannot circumvent Silo's enforcement under any vector:
+
+1. **IPv6 Mediation (Why IPv6 Is Supported and Cannot Bypass Silo)**:
+   - Modern development tools, package registries (PyPI, npm, GitHub, Debian mirrors), and enterprise cloud VPCs routinely operate dual-stack. Disabling IPv6 causes artificial Happy Eyeballs connection timeouts (RFC 8305 delay penalties while waiting for IPv6 connection drops) or complete network failure in IPv6-only environments.
+   - Silo handles IPv6 with the exact same zero-bypass security posture as IPv4:
+     - The `table inet` rules apply to IPv4 and IPv6 packets without distinction.
+     - All outbound IPv6 TCP SYN packets are redirected by nftables (`redirect to :8443`) into Silo's dual-stack transparent forward proxy listener bound to `[::]:8443`.
+     - Kernel packet forwarding is disabled on the host TAP device, and the `forward` chain drops all frames originating from `silo-tap0` (`iifname "silo-tap0" drop`).
+     - IPv6 Router Advertisements (RA) and SLAAC are disabled on the host TAP (`net.ipv6.conf.silo-tap0.accept_ra=0`, `net.ipv6.conf.silo-tap0.forwarding=0`), preventing rogue default gateway spoofing.
+2. **Metadata Protection**:
+   - Host nftables rules reject all traffic targeting IPv4 cloud metadata (`169.254.169.254`), IPv4 link-local (`169.254.0.0/16`), and IPv6 cloud metadata (`fd00:ec2::254`, `[fe80::169:254:169:254]`).
+3. **Host LAN and Intranet Isolation**:
+   - Outbound attempts targeting RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), host loopback (`127.0.0.0/8`), or IPv6 ULA/site-local ranges outside the point-to-point link are blocked by default unless explicitly allowed by an approved policy rule.
+4. **Raw Sockets and Non-TCP/UDP Protocols**:
+   - Even if guest root creates raw sockets (`SOCK_RAW`) to craft raw IP, GRE, SCTP, or ICMP tunneling frames, the host kernel NEVER routes them: `net.ipv4.ip_forward` is not enabled for the TAP, the `forward` chain drops all frames, and the `input` chain drops any non-TCP/UDP packet not matching point-to-point ICMP echo.
+5. **Vsock Isolation**:
+   - Virtio-vsock is an isolated host-guest hypervisor channel (`VMADDR_CID_HOST` = 2, `VMADDR_CID_LOCAL` = 3). Vsock carries no IP routing and cannot pivot to external host network devices. Only ports explicitly opened by Silo (ACP 5000, Management API 5001) listen for connections.
 
 ### 6.4 DNS Proxy and Domain Resolution
 
@@ -642,7 +724,31 @@ Requests dynamically resizing CPU or memory allocations.
 #### 7. `POST /v1/vm/restart`
 Requests a clean ACPI restart of the virtual machine. Triggers email OTP approval.
 
-#### 8. `POST /v1/silo/upgrade`
+#### 8. `POST /v1/storage/format`
+Requests explicitly reformatting a guest partition (e.g. converting or re-initializing the root partition as XFS, ext4, or btrfs).
+
+**Request**:
+```json
+{
+  "partition": "root",
+  "filesystem": "xfs",
+  "mkfs_options": ["-m", "reflink=1", "-b", "size=4096"],
+  "reapply_base_image": false
+}
+```
+
+**Response (202 Accepted)**:
+```json
+{
+  "change_id": "chg_4e8a1c90",
+  "status": "PENDING_APPROVAL",
+  "diff": "--- storage.status\n+++ storage.status\n- /dev/vda2: ext4 (63GB)\n+ /dev/vda2: xfs [reflink=1] (63GB) [DESTRUCTIVE REFORMAT]\n",
+  "expires_in_seconds": 900,
+  "message": "Destructive format approval code sent to operator email. Await operator code and call /v1/mgmt/approve."
+}
+```
+
+#### 9. `POST /v1/silo/upgrade`
 Requests self-upgrade of the host Silo daemon.
 
 **Request**:
@@ -652,7 +758,7 @@ Requests self-upgrade of the host Silo daemon.
 }
 ```
 
-#### 9. `POST /v1/mgmt/approve`
+#### 10. `POST /v1/mgmt/approve`
 Submits the human operator's OTP code to execute the pending mutation.
 
 **Request**:
@@ -672,7 +778,7 @@ Submits the human operator's OTP code to execute the pending mutation.
 }
 ```
 
-#### 10. `POST /v1/mgmt/cancel`
+#### 11. `POST /v1/mgmt/cancel`
 Cancels a pending change request.
 
 ### 11.2 Standard Error Response Schema
@@ -881,6 +987,7 @@ All operational and security events are written to a structured JSON audit log l
 - `VM_START`, `VM_STOP`, `VM_CRASH`, `VM_RESIZE`
 - `AGENT_START`, `AGENT_EXIT`, `AGENT_RESTART`
 - `POLICY_CHANGE_REQUESTED`, `POLICY_CHANGE_CANCELLED`
+- `STORAGE_FORMAT_REQUESTED`, `STORAGE_FORMAT_SUCCESS`, `STORAGE_FORMAT_LOCKED`
 - `OTP_ISSUED`, `OTP_ATTEMPT_FAILED`, `OTP_LOCKOUT`, `APPROVAL_SUCCESS`
 - `PROXY_EGRESS_BLOCKED`, `DNS_LOOKUP_BLOCKED`
 - `PORT_EXPOSED`, `PORT_UNEXPOSED`
@@ -920,6 +1027,12 @@ All operational and security events are written to a structured JSON audit log l
   - All port 53 UDP/TCP queries are forcibly redirected to Silo's internal DNS proxy.
   - External DNS servers cannot be contacted directly.
   - Non-whitelisted domains receive `NXDOMAIN` without upstream query forwarding.
+
+### 16.5 Threat 5: Accidental or Unauthorized Storage Overwrite
+- **Vector**: A host daemon restart misidentifies a guest customized with XFS as unformatted and wipes the root partition, or a rogue script inside the guest commands Silo to reformat the storage.
+- **Mitigations**:
+  - Silo performs filesystem-agnostic signature probing (`blkid`) detecting GPT, XFS (`XFSB`), ext4, and btrfs superblocks before considering any format action. If any valid filesystem or partition is detected, formatting is strictly prevented.
+  - In-guest reformatting requests via `POST /v1/storage/format` require out-of-band operator email OTP verification with explicit destructive warning diffs.
 
 ---
 
