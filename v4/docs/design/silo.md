@@ -13,6 +13,7 @@ The root agent is provisioned with the following MCP tools:
 1. **`gcloud` MCP Tool**: A local instance of Google's official `@google-cloud/gcloud-mcp` server. This exposes structured tools that translate natural language and structured calls into `gcloud` CLI invocations against Google Cloud APIs.
 2. **`subagents` MCP Tool**: Silo's native sub-agent management server. This enables the agent to dynamically spawn, supervise, query, message, and terminate child workers to execute specialized or parallel tasks.
 3. **`memory` MCP Tool**: An agent-scoped key-value and document memory store. This enables the agent to record notes, state machines, discovered resource identifiers, and architectural decisions without requiring host filesystem access.
+4. **`vm` MCP Tool**: A dedicated GCE VM operational bridge. This exposes standard execution and file manipulation tools (`vm_exec`, `vm_read_file`, `vm_write_file`, `vm_edit_file`, `vm_list_directory`) executed against target GCE instances via Google Cloud SSH and Identity-Aware Proxy (IAP) tunneling.
 
 Because the agent possesses neither a shell execution tool (`bash`), an arbitrary HTTP networking tool, nor a host filesystem write tool, its blast radius is strictly confined to Google Cloud APIs mediated by its assigned Service Account.
 
@@ -51,6 +52,17 @@ Every agent operates with a defined prompt context and an isolated, editable mem
    - The user can configure a Git repository (`repo.url` or `--repo`) that Silo clones and mounts read-only into the root agent's memory workspace.
    - The agent inspects code, Terraform modules, Helm charts, or configuration files via read-only memory tools (`read_repo_file`, `list_repo_files`). The repository is strictly immutable—the agent cannot modify files directly, preserving repository integrity while allowing the agent to reference infrastructure declarations.
    - When spawning a child agent, the creator can selectively grant read access to this repository workspace (`share_repo: true`) or keep the child agent isolated without repository access (`share_repo: false`).
+
+## Ephemeral VM Sandboxing via GCE SSH
+
+While the agent lacks shell execution capabilities on the host where Silo runs, many software engineering tasks require a real Linux execution environment to compile binaries, build container images, run test suites, or verify daemon behavior.
+
+To satisfy this without compromising host security:
+
+1. **On-Demand Sandbox VMs**: The agent uses its `gcloud` tool to provision an ephemeral GCE virtual machine in the target project (`gcloud compute instances create sandbox-01 ...`).
+2. **First-Class VM Tools**: Silo equips the agent with dedicated `vm` tools (`vm_exec`, `vm_read_file`, `vm_write_file`, `vm_edit_file`, `vm_list_directory`). Rather than requiring the agent to synthesize brittle shell scripts or escape nested quotes inside raw `gcloud compute ssh` strings, Silo provides structured, ergonomic primitives.
+3. **Secure IAP Transport**: Silo drives the underlying `gcloud compute ssh` and `gcloud compute scp` transports automatically using Identity-Aware Proxy (IAP) tunneling (`--tunnel-through-iap`). Target sandbox VMs do not require public IP addresses or firewall ingress holes.
+4. **Clean Blast Radius**: The execution occurs entirely inside the remote GCE VM in the user's cloud project. If untrusted code runs or crashes, only the ephemeral sandbox VM is affected; the host running Silo remains untouched.
 
 ## Creation-Time Quotas and Budget Accounting
 
