@@ -70,11 +70,13 @@ Silo adheres to a single-tenant model: exactly one host `silo` daemon process ma
    - Exposes a UNIX domain socket (`chv-api.sock`) exclusively to `silo`.
 3. **Guest Supervisor (`silo-supervisor`)**:
    - Runs as PID 1 or early systemd unit (`silo-supervisor.service`) inside the guest.
-   - Connects to host `silo` over virtio-vsock to bridge ACP control streams.
-   - Supervises the selected coding agent CLI process. If the agent process terminates with any exit code, `silo-supervisor` MUST restart it within 100 milliseconds with an exponential backoff capped at 5 seconds.
+   - Operates the autonomous **Git convergence engine**: continuously drives the agent CLI in an execution loop (plan -> implement -> build -> test -> verify against `SYSTEM.md`), inspecting workspace state, running compilers, and executing test suites until the target system is green.
+   - Monitors the target Git repository refs (`refs/heads/main`) for incoming user commits and feeds structured diffs to the agent.
+   - Manages clarification question lifecycle (`.silo/questions/`) and bridges observational ACP control streams over virtio-vsock.
+   - If the agent process terminates with any exit code, `silo-supervisor` automatically restarts it within 100 milliseconds with an exponential backoff capped at 5 seconds.
 4. **Agent CLI (`claude` / `codex` / `gemini`)**:
    - Runs as root inside the VM to permit arbitrary workspace tool execution, container orchestration inside VM, and OS package updates.
-   - Communicates with the model control plane exclusively via ACP bridged through `silo-supervisor`.
+   - Operates autonomously as a systems engineer, committing progress to the target repository and requesting clarification when ambiguities arise.
 
 ### 2.2 IPC Channels
 
@@ -176,6 +178,15 @@ vm:
   vcpus: 4
   memory_mb: 8192
   
+  # Target system Git repository objective
+  target:
+    repo: "https://github.com/my-org/my-system.git" # Target Git repository URL or local directory
+    branch: "main"                                   # Source-of-truth branch to track
+    spec_path: "SYSTEM.md"                           # Target architecture & requirements specification
+    test_command: "make test"                        # Acceptance verification command
+    poll_interval_seconds: 2                         # Git ref poll interval for user updates
+    output_branch: "silo/convergence"                # Branch where agent commits incremental progress
+  
   storage:
     type: "raw"           # Enum: "raw" (sparse file) | "block" (block device)
     path: "/var/lib/silo/disks/worker-01.img"
@@ -246,13 +257,16 @@ email:
 
 1. `vm.vcpus`: Integer, `1 <= vcpus <= host_logical_cores`.
 2. `vm.memory_mb`: Integer, `1024 <= memory_mb <= host_available_memory`.
-3. `vm.storage.type`: MUST be either `"raw"` or `"block"`.
-4. `vm.storage.path`: MUST be an absolute path. If `type="block"`, it MUST identify an existing block device node (`S_ISBLK`).
-5. `vm.storage.root_filesystem`: MUST be a supported filesystem identifier (`"xfs"`, `"ext4"`, `"btrfs"`). Defaults to `"xfs"`.
-6. `vm.storage.init_mode`: MUST be either `"format_if_empty"` or `"manual"`.
-7. `vm.agent.cli`: MUST be one of `"claude"`, `"codex"`, `"gemini"`.
-8. `approval.otp_length`: MUST be either `6` or `8`.
-9. `approval.otp_ttl_minutes`: MUST be between `1` and `60` (default `15`).
+3. `vm.target.repo`: MUST be a non-empty Git URL or existing local filesystem repository path.
+4. `vm.target.branch`: MUST be a valid Git ref name (defaults to `"main"`).
+5. `vm.target.spec_path`: MUST be a relative path within the repository (defaults to `"SYSTEM.md"`).
+6. `vm.storage.type`: MUST be either `"raw"` or `"block"`.
+7. `vm.storage.path`: MUST be an absolute path. If `type="block"`, it MUST identify an existing block device node (`S_ISBLK`).
+8. `vm.storage.root_filesystem`: MUST be a supported filesystem identifier (`"xfs"`, `"ext4"`, `"btrfs"`). Defaults to `"xfs"`.
+9. `vm.storage.init_mode`: MUST be either `"format_if_empty"` or `"manual"`.
+10. `vm.agent.cli`: MUST be one of `"claude"`, `"codex"`, `"gemini"`.
+11. `approval.otp_length`: MUST be either `6` or `8`.
+12. `approval.otp_ttl_minutes`: MUST be between `1` and `60` (default `15`).
 
 ---
 
@@ -523,41 +537,98 @@ port_forwards:
 
 ---
 
-## 8. Agent Client Protocol (ACP) and Control Plane
+## 8. Git Objective, Change Discovery, and Clarification Q&A
 
-### 8.1 Host Listener
+### 8.1 Target Git Repository Architecture and Workspace Mapping
 
-Silo opens a TCP listener on the host at `acp.listen_address:acp.port` (e.g. `0.0.0.0:9000`). All incoming connections MUST present the bearer token configured in `acp.auth_token` via the initial ACP connection handshake or HTTP/WebSocket upgrade header:
+Silo organizes its development objective around a Git repository configured in `silo.yaml` under `vm.target`:
+1. **Workspace Mapping**: The repository is cloned into the guest filesystem at `/root/workspace` (located on the high-performance XFS Partition 2).
+2. **Branching Model**:
+   - **User Branch (`vm.target.branch`, default `main`)**: Serves as the authoritative source of truth. The human operator pushes architecture specifications (`SYSTEM.md`), test criteria, and external code changes to this branch.
+   - **Agent Progress Branch (`vm.target.output_branch`, default `silo/convergence`)**: The agent commits its incremental implementation progress, passing test suites, and feature additions to this branch. Once the target system is fully built and green, the agent merges or opens a pull request against `main`.
 
-```http
-Authorization: Bearer <acp.auth_token>
-```
+### 8.2 Change Discovery and Reactive Adaptation Protocol
 
-Connections lacking a valid token MUST be terminated immediately.
+To allow the agent to react to operator modifications with minimal latency, Silo employs an atomic, Git-driven change discovery engine:
+1. **Ref Monitoring**: Host `silo` and `silo-supervisor` monitor the target tracking branch (`refs/heads/main` or remote tracking ref) using periodic ref polling (`poll_interval_seconds: 2`) and inotify triggers on `.git/refs/`.
+2. **Delta Extraction**: When a new commit SHA is pushed by the user:
+   - Silo computes the exact commit range: `git log -1 --pretty=format:"%h - %an: %s"` and `git diff <last_converged_sha>..<new_sha>`.
+   - Silo generates a structured delta payload containing the modified files, author intent, and unified diff.
+3. **Context Injection**:
+   - If the agent is idle, `silo-supervisor` invokes a new convergence cycle, injecting the diff:
+     ```
+     [SYSTEM UPDATE DETECTED]
+     Commit: a3f89e2 by Operator: "Update SYSTEM.md: switch authentication from basic auth to JWT"
+     Diff:
+     --- a/SYSTEM.md
+     +++ b/SYSTEM.md
+     @@ -12,2 +12,2 @@
+     -Authentication: Basic auth over TLS
+     +Authentication: Signed JWT with 15m expiration and RS256
+     
+     Adapt the implementation to satisfy the updated requirements.
+     ```
+   - If the agent is actively executing a build task, `silo-supervisor` delivers a change event across its control channel, allowing the agent to gracefully abort obsolete compile/test runs and pivot to the new specification.
 
-### 8.2 Vsock Bridging Architecture
+### 8.3 In-Repo Clarification Q&A Protocol
 
-Silo bridges host ACP streams into the guest over virtio-vsock port `5000`:
-1. Host caller dials `host_ip:acp_port`.
-2. Silo validates the bearer token.
-3. Silo dials the guest vsock endpoint (`cid=3, port=5000`).
-4. In-guest `silo-supervisor` accepts the vsock connection and connects it to the agent CLI's ACP stdio pipes or local loopback listener.
-5. Bidirectional byte streaming is executed using zero-copy splicing (`splice(2)` or Go `io.Copy`).
+When the agent encounters architectural ambiguities, missing requirements, or conflicting instructions, it initiates a structured clarification workflow:
 
-### 8.3 Remote Control Seam
+1. **Question Recording in Git**:
+   - The agent creates a markdown file in `.silo/questions/<id>.md`:
+     ```markdown
+     ---
+     id: "q-001"
+     status: "WAITING_FOR_RESPONSE"
+     created_at: "2026-11-01T05:15:00Z"
+     title: "Database Engine Selection"
+     ---
+     # Question: Database Engine Selection
+     
+     SYSTEM.md requires persistent storage for user sessions but does not specify the engine.
+     
+     ### Options:
+     - [ ] PostgreSQL (containerized service)
+     - [ ] SQLite WAL mode (embedded single-file)
+     - [ ] In-memory Redis store
+     
+     ### Context:
+     Target write throughput is estimated at 50 ops/sec. SQLite WAL would suffice, but PostgreSQL enables multi-process scaling.
+     ```
+   - The agent commits this file to the repository: `git commit -m "chore(silo): request clarification on database engine [q-001]"`.
 
-To accommodate future Claude Code and OpenAI Codex "remote control" architectures (where external web sessions or cloud coordination hubs orchestrate the agent), Silo defines the `ControlMode` interface:
+2. **Operator Notification**:
+   - The agent calls `POST /v1/agent/question` on the Silo Management API with the question payload.
+   - The agent transitions to `WAITING_FOR_CLARIFICATION`.
+   - Silo transmits an email alert to the operator's configured Gmail address:
+     - Subject: `[Silo Clarification] Question q-001: Database Engine Selection`
+     - Body: Contains the question, choices, context diff, and instructions to answer.
 
-```go
-type ControlMode interface {
-	// Name returns the identifier of the control mode (e.g., "acp", "claude-remote").
-	Name() string
-	// Start initiates the control channel listeners.
-	Start(ctx context.Context, vsockDialer VsockDialer) error
-	// Stop tears down control channels.
-	Stop() error
-}
-```
+3. **Operator Response Options**:
+   - **Path A (Host CLI)**: The operator executes:
+     ```bash
+     silo answer q-001 "PostgreSQL"
+     ```
+     Silo updates `.silo/questions/q-001.md` with the response, commits the change as the operator, and notifies `silo-supervisor`.
+   - **Path B (Direct Git Commit)**: The operator edits `.silo/questions/q-001.md`, sets `status: "ANSWERED"`, fills in the selected option or commentary, and pushes to `main`. The change discovery engine detects the commit and resumes the agent.
+
+4. **Agent Resumes**:
+   - The agent ingests the answer from the git commit history, updates its internal task graph, and resumes the convergence build loop.
+
+### 8.4 Observational Control Seam (ACP Bridge & Console)
+
+While the autonomous Git convergence engine is the primary driver, Silo maintains an Agent Client Protocol (ACP) bridge over virtio-vsock port `5000` to support interactive observation:
+1. Host caller dials `host_ip:acp_port` presenting `acp.auth_token`.
+2. Silo bridges the stream across vsock to `silo-supervisor`.
+3. The operator can attach to the running VM using `silo attach` or `silo console` to watch live compilation, inspect container logs, or trigger manual overrides without interfering with autonomous progress.
+4. An explicit `ControlMode` interface accommodates future Claude Code and Codex remote-control adapters:
+   ```go
+   type ControlMode interface {
+       Name() string
+       Start(ctx context.Context, vsockDialer VsockDialer) error
+       Stop() error
+   }
+   ```
 
 ---
 
@@ -565,43 +636,89 @@ type ControlMode interface {
 
 ### 9.1 Supported Agent CLIs
 
-| Agent CLI | Binary Name | Default ACP Command / Invocation |
-|-----------|-------------|----------------------------------|
-| Claude Code | `claude` | `claude --acp --non-interactive` |
-| OpenAI Codex | `codex` | `codex server --acp` |
-| Gemini CLI | `gemini` | `gemini-cli --acp-mode` |
+| Agent CLI | Binary Name | Convergence Invocation Mode |
+|-----------|-------------|-----------------------------|
+| Claude Code | `claude` | `claude --non-interactive` |
+| OpenAI Codex | `codex` | `codex exec` |
+| Gemini CLI | `gemini` | `gemini-cli --non-interactive` |
 
-### 9.2 In-Guest Prompt Template
+### 9.2 Autonomous Convergence Engine Loop
 
-The supervisor initializes the agent session with the following normative prompt template:
+Inside the guest, `silo-supervisor` executes a continuous convergence state machine:
 
 ```
-You are executing inside an isolated, single-tenant Linux virtual machine managed by Silo v4.
-Your process runs with root privileges inside this guest environment.
-
-ENVIRONMENT CONSTRAINTS:
-1. All network egress is transparently mediated by the host Silo daemon.
-2. Direct network connections outside your assigned policy are blocked.
-3. Currently active egress endpoints:
-{{range .ActiveRules}}
-   - {{.Name}}: {{.Description}} ({{.Spec}})
-{{end}}
-
-MANAGEMENT & RECONFIGURATION:
-You have access to the Silo Management REST API at: http://192.168.127.1:9090
-Management Token: {{.ManagementToken}}
-
-If you need to access external resources (new package registries, GitHub repositories, databases, web APIs) or expose local ports to the user:
-1. Submit an egress or port-forward request to POST /v1/policy/rules or POST /v1/ports/expose.
-2. Silo will email a human-readable diff and a single-use One-Time Password (OTP) to the operator.
-3. Inform the operator that you have requested this access, and ask them for the approval code.
-4. When the operator provides the code, submit it to POST /v1/mgmt/approve.
-5. Do not attempt to bypass network restrictions directly.
-
-Awaiting instructions from the user over ACP.
+                   +-------------------------------+
+                   | 1. Read Spec (SYSTEM.md)      |
+                   |    and Inspect Workspace      |
+                   +---------------+---------------+
+                                   |
+                   +---------------v---------------+
+                   | 2. Run Verification Suite     |
+                   |    (vm.target.test_command)   |
+                   +---------------+---------------+
+                                   |
+                     All criteria  |
+                     met and green?|
+                    +--------------+--------------+
+                    | Yes                         | No (Deltas remain)
+                    v                             v
+       +-------------------------+   +------------------------------------+
+       | 3. Target System BUILT  |   | 4. Autonomous Implementation Turn  |
+       | - Commit clean state    |   | - Generate & modify code files     |
+       | - Push to output_branch |   | - Compile binaries & build images  |
+       | - Enter Watch State     |   | - Execute targeted fix iterations  |
+       +------------+------------+   +-----------------+------------------+
+                    |                                  |
+                    | User pushes new commits          | Loop until green
+                    +----------------------------------+
 ```
 
-### 9.3 Agent CLI Version Management and Upgrades
+1. **Phase 1: Ingest & Inspect**: Parse `SYSTEM.md`, review current Git status, inspect running processes, and analyze recent commit diffs.
+2. **Phase 2: Verification**: Execute `vm.target.test_command` (e.g. `make test`, `pytest`, `npm test`).
+3. **Phase 3: Autonomous Implementation**: If tests fail or requirements in `SYSTEM.md` are unfulfilled:
+   - Formulate incremental implementation step.
+   - Edit files, compile code, manage container dependencies.
+   - Run localized tests to verify step.
+   - Commit incremental progress to `vm.target.output_branch`.
+4. **Phase 4: System Green**: When all acceptance tests pass and `SYSTEM.md` requirements are fully realized, the agent pushes its branch and sleeps, waking immediately when ref monitoring signals a new operator commit.
+
+### 9.3 In-Guest Prompt Template
+
+The supervisor initializes the agent with the following normative prompt template:
+
+```
+You are an autonomous systems engineering agent running inside an isolated Linux virtual machine managed by Silo v4.
+Your working directory is a clone of the target Git repository: {{.TargetRepo}} (branch: {{.TargetBranch}}).
+
+PRIMARY OBJECTIVE:
+Your goal is to build, verify, and maintain the system described in {{.SpecPath}}.
+You do not wait for conversational chat instructions; you continuously execute an autonomous build and convergence loop:
+1. Read {{.SpecPath}} and inspect the repository code and running services.
+2. Run the verification test suite: {{.TestCommand}}.
+3. Identify discrepancies, write code, build containers, fix errors, and run tests.
+4. Commit incremental progress with clear git commit messages to branch: {{.OutputBranch}}.
+5. Continue until all acceptance tests pass and the target system is fully built and operational.
+
+CHANGE DISCOVERY:
+The human operator updates the system by pushing commits to branch '{{.TargetBranch}}'.
+When commits are detected, Silo will inject the commit message and unified diff. You must re-read the changes and adapt the implementation.
+
+CLARIFICATION PROTOCOL:
+If you encounter missing requirements or an ambiguity that blocks progress:
+1. Create a question file at .silo/questions/<id>.md describing the decision and available options.
+2. Commit the file to git.
+3. Call the Silo Management API: POST /v1/agent/question.
+4. You will enter WAITING_FOR_CLARIFICATION. Once the operator answers via host CLI or Git commit, you will be notified to resume building.
+
+MANAGEMENT REST API:
+Endpoint: http://192.168.127.1:9090
+Token: {{.ManagementToken}}
+Use this API to request network egress (POST /v1/policy/rules), expose host ports (POST /v1/ports/expose), or upgrade CLI/storage.
+
+Begin by reading {{.SpecPath}} and running {{.TestCommand}}.
+```
+
+### 9.4 Agent CLI Version Management and Upgrades
 
 Silo explicitly supports upgrading the coding agent CLI inside the virtual machine through two complementary mechanisms:
 
@@ -620,7 +737,7 @@ Silo explicitly supports upgrading the coding agent CLI inside the virtual machi
    - Upon operator approval via `POST /v1/mgmt/approve`, Silo signals `silo-supervisor` over vsock to execute the package installation, verify the binary invocation via `<cli> --version`, update `silo.yaml` on the host, terminate the active CLI PID, and relaunch the agent on the new version.
    - If the new binary fails validation or crashes upon launch, `silo-supervisor` automatically rolls back to the previous package version.
 
-### 9.4 In-Guest Supervisor (`silo-supervisor`) Upgrade Architecture
+### 9.5 In-Guest Supervisor (`silo-supervisor`) Upgrade Architecture
 
 The in-guest `silo-supervisor` component is responsible for process supervision, vsock bridging, and local system management. To maintain protocol alignment with the host daemon while upholding zero-trust network principles, `silo-supervisor` is upgraded via an out-of-band host-to-guest transport:
 
@@ -882,6 +999,72 @@ Submits the human operator's OTP code to execute the pending mutation.
 #### 13. `POST /v1/mgmt/cancel`
 Cancels a pending change request.
 
+#### 14. `POST /v1/agent/question`
+Registers a clarification question requiring operator intervention. Transitions the agent convergence engine into `WAITING_FOR_CLARIFICATION` and triggers an urgent operator email notification.
+
+**Request**:
+```json
+{
+  "question_id": "q-001",
+  "title": "OAuth Provider Callback Strategy",
+  "file_path": ".silo/questions/q-001.md",
+  "question": "Should GitHub OAuth or Google OAuth be the primary provider?",
+  "options": [
+    "GitHub OAuth only",
+    "Google OAuth only",
+    "Both with dual-stack account linking"
+  ]
+}
+```
+
+**Response (200 OK)**:
+```json
+{
+  "question_id": "q-001",
+  "status": "AWAITING_ANSWER",
+  "created_at": "2026-11-01T04:20:00Z",
+  "message": "Question dispatched to operator email. Awaiting response via CLI or git push."
+}
+```
+
+#### 15. `GET /v1/agent/questions`
+Lists all clarification questions and their resolution status.
+
+**Response (200 OK)**:
+```json
+{
+  "questions": [
+    {
+      "question_id": "q-001",
+      "title": "OAuth Provider Callback Strategy",
+      "status": "ANSWERED",
+      "answer": "Both with dual-stack account linking",
+      "answered_at": "2026-11-01T04:32:00Z"
+    }
+  ]
+}
+```
+
+#### 16. `POST /v1/agent/answer`
+Used by the host CLI (`silo answer <id> "<answer>"`) or internal webhook to submit an operator's answer to a pending question, which unpauses the convergence engine and writes the answer to `.silo/questions/<id>.md`.
+
+**Request**:
+```json
+{
+  "question_id": "q-001",
+  "answer": "Both with dual-stack account linking"
+}
+```
+
+**Response (200 OK)**:
+```json
+{
+  "question_id": "q-001",
+  "status": "RESOLVED",
+  "agent_status": "CONVERGING"
+}
+```
+
 ### 11.2 Standard Error Response Schema
 
 ```json
@@ -998,7 +1181,8 @@ APPROVAL CODE (Valid for 15 minutes):
              839201
 ========================================
 
-To approve this change, copy the 6-digit code above and provide it to your agent in your active ACP chat session.
+To approve this change, copy the 6-digit code above and provide it to your agent in your active chat session or run:
+  silo approve chg_9a8b7c6d 839201
 If you did not authorize this change, ignore this email or cancel the change in the CLI.
 
 --boundary-silo-01
@@ -1030,10 +1214,44 @@ Content-Type: text/html; charset="utf-8"
     <div style="font-size: 12px; color: #047857;">Expires in 15 minutes &bull; Single-use only</div>
   </div>
 
-  <p style="font-size: 13px; color: #6b7280;">Provide this code to the agent in your active ACP chat session to apply the change.</p>
+  <p style="font-size: 13px; color: #6b7280;">Provide this code to the agent in your active chat session or run <code>silo approve chg_9a8b7c6d 839201</code> on the host.</p>
 </body>
 </html>
 --boundary-silo-01--
+```
+
+### 13.3 Clarification Question Email Template
+
+```email
+Subject: [Silo Clarification] Question q-001: OAuth Provider Callback Strategy on silo-worker-01
+To: operator@example.com
+From: "Silo VM Agent" <alerts@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+The coding agent in VM 'silo-worker-01' has encountered an ambiguity in SYSTEM.md and requires operator clarification to continue convergence.
+
+QUESTION ID: q-001
+TITLE: OAuth Provider Callback Strategy
+STATUS: Awaiting Answer
+
+QUESTION:
+Should GitHub OAuth or Google OAuth be the primary provider?
+
+OPTIONS:
+1. GitHub OAuth only
+2. Google OAuth only
+3. Both with dual-stack account linking
+
+RELEVANT COMMIT / CODE CONTEXT:
+File: .silo/questions/q-001.md
+Target Branch: main (commit 98f12a4)
+
+HOW TO ANSWER:
+Option A (Host CLI):
+  silo answer q-001 "Both with dual-stack account linking"
+
+Option B (Git Repository):
+  Edit .silo/questions/q-001.md in your local checkout, fill in the ## Answer section, commit, and push to main. Silo will detect the commit and resume convergence automatically.
 ```
 
 ---
@@ -1103,6 +1321,8 @@ All operational and security events are written to a structured JSON audit log l
 - `AGENT_START`, `AGENT_EXIT`, `AGENT_RESTART`
 - `AGENT_UPGRADE_REQUESTED`, `AGENT_UPGRADE_SUCCESS`, `AGENT_UPGRADE_FAILED`
 - `SUPERVISOR_UPGRADE_REQUESTED`, `SUPERVISOR_UPGRADE_SUCCESS`, `SUPERVISOR_UPGRADE_ROLLBACK`
+- `GIT_COMMIT_DISCOVERED`, `CONVERGENCE_CYCLE_STARTED`, `CONVERGENCE_CYCLE_COMPLETED`, `CONVERGENCE_TESTS_FAILED`
+- `QUESTION_CREATED`, `QUESTION_ANSWERED`, `QUESTION_ANSWER_REJECTED`
 - `POLICY_CHANGE_REQUESTED`, `POLICY_CHANGE_CANCELLED`
 - `STORAGE_FORMAT_REQUESTED`, `STORAGE_FORMAT_SUCCESS`, `STORAGE_FORMAT_LOCKED`
 - `OTP_ISSUED`, `OTP_ATTEMPT_FAILED`, `OTP_LOCKOUT`, `APPROVAL_SUCCESS`
@@ -1194,10 +1414,13 @@ Executed on Linux CI runners with `/dev/kvm` hardware virtualization enabled:
    - Adapt `granule/deploy/guest-image/` to build reproducible minimal Debian Bookworm rootfs with direct kernel boot.
    - Implement `v4/cmd/silo-supervisor` and vsock communication listeners.
    - Implement rootfs partition formatting and first-start image unpacking.
-4. **Phase 4: ACP Control Plane & Agent Supervision**
-   - Implement host ACP TCP listener with bearer token authentication.
-   - Implement vsock bridging between host ACP listener and guest `silo-supervisor`.
-   - Implement agent process supervision loop with automatic crash restart.
+4. **Phase 4: Git-Backed Objective, Autonomous Convergence Loop & In-Repo Q&A**
+   - Implement Git tracking ref watcher in `silo-supervisor` (`git fetch` / ref comparison loop).
+   - Implement change diff extractor (`git diff`) and context injection into agent prompt.
+   - Implement autonomous convergence engine state machine (Plan -> Implement -> Build -> Test -> Verify against `SYSTEM.md`).
+   - Implement clarification question handler (`.silo/questions/<id>.md`, `POST /v1/agent/question`, `POST /v1/agent/answer`).
+   - Implement host `silo answer` CLI and email notification dispatch for operator Q&A.
+   - Implement host ACP TCP listener with bearer token authentication for optional interactive troubleshooting sessions.
 5. **Phase 5: Management REST API & OTP Approval Workflow**
    - Implement in-guest management REST API handlers on host proxy listener.
    - Implement cryptographic OTP generator and state machine with attempt tracking.

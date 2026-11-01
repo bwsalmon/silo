@@ -4,9 +4,21 @@ Silo v4 provides single-tenant virtual machine isolation for autonomous coding a
 
 ## Process and Execution Model
 
-Silo adheres to a strict one-process-per-VM topology. The host-side `silo` daemon runs with host root privileges, initializes host networking interfaces, and supervises a child `cloud-hypervisor` process via its UNIX management socket. Inside the guest, a dedicated supervisor process (`silo-supervisor`) runs as root and manages exactly one instance of the configured agent CLI. If the agent process terminates with any exit code (including after an in-place CLI upgrade or version bump), `silo-supervisor` automatically restarts it with clean stdio streams, maintaining an always-on agent lifecycle.
+Silo adheres to a strict one-process-per-VM topology. The host-side `silo` daemon runs with host root privileges, initializes host networking interfaces, and supervises a child `cloud-hypervisor` process via its UNIX management socket. Inside the guest, a dedicated supervisor process (`silo-supervisor`) runs as root and manages exactly one instance of the configured agent CLI. 
+
+Rather than sitting idle on a conversational chat listener waiting for turn-by-turn user input, the agent is driven as an **autonomous convergence engine**. The VM is configured with a target Git repository containing a declarative system specification (`SYSTEM.md`). `silo-supervisor` continuously drives the agent CLI in an execution loop: inspecting the target specification, planning implementation steps, writing code, compiling artifacts, launching services, and running automated test suites. The agent continues building and refining until the targeted system is fully operational and satisfies all acceptance criteria. Once green, the supervisor transitions the agent to a watch state, monitoring the Git repository for incoming user modifications. If the agent process terminates with any exit code (including after an in-place CLI upgrade or version bump), `silo-supervisor` automatically restarts it with clean stdio streams, maintaining an always-on lifecycle.
 
 To support future platform expansion, hypervisor operations are encapsulated behind a Go `Hypervisor` interface. The primary implementation targets Cloud Hypervisor on Linux with KVM (`/dev/kvm`). The abstraction decouples VM lifecycle commands, CPU/memory resource sizing, and device attachments from underlying hypervisor specifics, providing a clean seam for an eventual macOS implementation backed by Apple's `Virtualization.framework`.
+
+## Git Objective, Change Discovery, and Clarification Workflow
+
+The target system to be built is represented by a Git repository. This repository acts as the single source of truth, housing the architectural specification (`SYSTEM.md`), source code, infrastructure declarations (Dockerfiles, compose files), and automated verification suites.
+
+Silo provides a seamless, low-friction mechanism for the agent to discover user changes and ask clarification questions:
+
+1. **Change Discovery and Reactive Adaptation**: When the operator modifies the target system—such as adding a requirement to `SYSTEM.md`, refactoring code, or updating tests—the operator pushes commits to the repository's tracking branch (`main`). Silo monitors the target Git branch via ref watching. Upon detecting a new commit SHA, Silo extracts the commit message and calculates the exact unified diff (`git diff <last_converged>..<head>`). Silo injects this structured delta directly into the agent's context, prompting it to re-evaluate the system state and adapt the implementation to satisfy the updated requirements.
+2. **Clarification Q&A Workflow**: When the agent encounters ambiguity or requires an architectural decision (e.g. choosing between database engines or authentication providers), it records a structured question file in the repository at `.silo/questions/<id>.md` and notifies Silo via `POST /v1/agent/question`. The agent transitions to `WAITING_FOR_CLARIFICATION`. Silo immediately transmits an email notification containing the question, options, and contextual diff to the operator's configured Gmail address. The operator can answer either by executing a fast host command (`silo answer <id> "<response>"`) or by editing and committing the question file directly in Git. Once the answer is committed or submitted, Silo alerts the agent, which incorporates the decision into its project history and resumes building.
+3. **Observational Control Seam**: While autonomous Git convergence serves as the primary execution driver, Silo maintains an Agent Client Protocol (ACP) bridge over virtio-vsock. This allows the operator to attach to the running VM via `silo attach` or `silo console` for live observation, interactive debugging, or remote session control without interrupting the autonomous build loop.
 
 ## Storage and Rootfs Lifecycle
 
@@ -36,14 +48,6 @@ To support agent-driven network expansion without proprietary policy dialects, t
 
 Silo v4 recommends and adopts the *Cilium-style declarative egress policy schema*. This format provides clear, structured semantics for both IP and FQDN filtering, maps directly to strongly-typed Go structs, generates intuitive human-readable unified diffs for email approval, and accommodates both egress whitelisting and host port-forward bindings within a unified document. Active policies persist in `policy.yaml` on the host, surviving Silo restarts and VM reboots.
 
-## Agent Control Plane and ACP Bridging
-
-User interaction with the in-guest coding agent occurs via the Agent Client Protocol (ACP). Silo exposes an ACP TCP endpoint on the host bound to a configured port, authenticated by a high-entropy bearer token. To preserve network isolation and eliminate dependency on guest IP routing, Silo bridges ACP traffic into the VM over virtio-vsock (using port forward streaming patterns adapted from Granule's `pkg/forward` and `pkg/guestforward`).
-
-The design incorporates an explicit `ControlMode` seam. While v1 bridges ACP directly to the guest agent's stdio or vsock listener, the abstraction accommodates future Claude and Codex remote control modes where external orchestration tunnels or browser-based session control can replace or run concurrently with the standard ACP listener.
-
-Upon agent startup, the supervisor injects a standardized system prompt. The prompt explicitly informs the model of its virtualized environment, confirms that Silo mediates all network egress, details the guest management REST API, explains the email OTP approval requirement for environmental mutations, and instructs the agent to await user instructions over ACP.
-
 ## LLM Credential Handling
 
 In v1, LLM provider API keys are injected directly into the virtual machine environment via the guest supervisor at initialization time. This enables immediate interoperability with existing CLI binaries without modifying authentication logic or re-signing TLS requests.
@@ -59,7 +63,7 @@ To prevent autonomous agent escape or unauthorized resource access, all mutating
 1. The agent submits a mutation request (e.g., adding an egress rule, exposing a port, upgrading the agent CLI version, or reformatting a filesystem) to the management API.
 2. Silo creates a pending change record, calculates a canonical SHA-256 fingerprint of the request payload, generates a cryptographically secure 6-to-8 digit numeric OTP, and starts a 15-minute expiration timer.
 3. Silo formats a human-readable unified diff of the requested configuration change and transmits the diff alongside the OTP to the operator's configured Gmail address.
-4. The operator inspects the diff in their email client and provides the numeric OTP to the agent via their active ACP chat session.
+4. The operator inspects the diff in their email client and provides the numeric OTP to the agent via their active ACP chat session or host CLI (`silo approve <change_id> <code>`).
 5. The agent submits the OTP to `POST /v1/mgmt/approve`. Silo verifies the code, ensures the pending change hash has not been altered, commits the change to `policy.yaml`, updates runtime nftables and proxy filters, and returns a success response.
 
 To protect against credential brute-forcing, Silo limits verification attempts to 3 failures per request before permanently revoking the OTP, and enforces a global rate limit of 3 OTP generation requests per 15-minute window.
