@@ -4,7 +4,7 @@ Silo v4 Project Edition provides single-project or multi-project autonomous agen
 
 ## Process and Execution Model
 
-Silo operates as a lightweight host daemon and process supervisor. It launches a primary root agent process (using Claude Code, Codex, or Gemini CLI) and manages its execution lifecycle. Rather than granting the agent raw terminal access, shell tools, or host filesystem primitives, Silo connects the agent exclusively to structured Model Context Protocol (MCP) servers via local `stdio` communication channels.
+Silo operates as a lightweight host daemon and process supervisor. It launches a primary root agent process (using Claude Code, Codex, Gemini, or Jetski CLI via configurable `agent.cli_path`) and manages its execution lifecycle. Rather than granting the agent raw terminal access, shell tools, or host filesystem primitives, Silo connects the agent exclusively to structured Model Context Protocol (MCP) servers via local `stdio` communication channels.
 
 Each agent (the root agent and all sub-agents) is launched with a structured **system and objective prompt** and an isolated, persistent **editable memory area**.
 

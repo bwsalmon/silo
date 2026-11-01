@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -58,6 +61,8 @@ func runRoot(args []string) {
 	maxDepth := fs.Int("max-depth", 2, "Maximum delegation nesting depth (-1 for unlimited)")
 	unlimitedSub := fs.Bool("unlimited-subagents", false, "Remove all quota limits for root agent")
 	prompt := fs.String("prompt", "", "Initial task prompt for the root agent")
+	cliType := fs.String("cli", "", "Agent CLI type: 'jetski', 'claude', 'codex', or 'custom'")
+	cliPath := fs.String("cli-path", "", "Explicit path to the agent CLI binary")
 	baseDir := fs.String("base-dir", "/var/lib/silo", "Directory for agent workspaces, memory, and state")
 	auditLogPath := fs.String("audit-log", "/var/log/silo/audit.log", "Path for structured JSON audit logs")
 	mockAuth := fs.Bool("mock-auth", false, "Use mock token provider for local testing")
@@ -91,6 +96,12 @@ func runRoot(args []string) {
 	}
 	if *prompt != "" {
 		cfg.Agent.Prompt = *prompt
+	}
+	if *cliType != "" {
+		cfg.Agent.CLI = *cliType
+	}
+	if *cliPath != "" {
+		cfg.Agent.CLIPath = *cliPath
 	}
 
 	if *unlimitedSub {
@@ -197,6 +208,16 @@ func runRoot(args []string) {
 	}
 	fmt.Printf("[silo] Audit logging active at: %s\n", effectiveAuditLog)
 
+	// 7. Launch Root Agent CLI if prompt is provided
+	if cfg.Agent.Prompt != "" {
+		go func() {
+			if err := launchAgentCLI(cfg, effectiveBaseDir, repoDir, logger); err != nil {
+				fmt.Fprintf(os.Stderr, "[silo] Agent execution failed: %v\n", err)
+			}
+		}()
+	}
+
+	// 8. Handle Signal Interrupts for Cascading Shutdown
 	// Await termination signal
 	sig := <-sigChan
 	fmt.Printf("\n[silo] Received signal %v; executing cascading teardown...\n", sig)
@@ -207,6 +228,131 @@ func runRoot(args []string) {
 
 	sup.Shutdown()
 	fmt.Println("[silo] Shutdown complete.")
+}
+
+func resolveCLIPath(cliType, configuredPath string) (string, error) {
+	if configuredPath != "" {
+		if _, err := os.Stat(configuredPath); err == nil {
+			return configuredPath, nil
+		}
+		if path, err := exec.LookPath(configuredPath); err == nil {
+			return path, nil
+		}
+		return "", fmt.Errorf("configured CLI path %q not found", configuredPath)
+	}
+
+	switch cliType {
+	case "jetski":
+		if path, err := exec.LookPath("agentapi"); err == nil {
+			return path, nil
+		}
+		jetskiPath := filepath.Join(os.Getenv("HOME"), ".gemini/jetski/bin/agentapi")
+		if _, err := os.Stat(jetskiPath); err == nil {
+			return jetskiPath, nil
+		}
+		if path, err := exec.LookPath("jetski"); err == nil {
+			return path, nil
+		}
+		return "", errors.New("neither 'agentapi' nor 'jetski' found in PATH or ~/.gemini/jetski/bin")
+
+	case "claude":
+		if path, err := exec.LookPath("claude"); err == nil {
+			return path, nil
+		}
+		claudePath := filepath.Join(os.Getenv("HOME"), ".local/bin/claude")
+		if _, err := os.Stat(claudePath); err == nil {
+			return claudePath, nil
+		}
+		return "", errors.New("'claude' CLI not found in PATH or ~/.local/bin/claude")
+
+	case "codex":
+		if path, err := exec.LookPath("codex"); err == nil {
+			return path, nil
+		}
+		return "", errors.New("'codex' CLI not found in PATH")
+
+	default:
+		if path, err := exec.LookPath(cliType); err == nil {
+			return path, nil
+		}
+		return "", fmt.Errorf("unknown CLI type %q", cliType)
+	}
+}
+
+func launchAgentCLI(cfg *config.Config, baseDir, repoDir string, logger audit.Logger) error {
+	cliType := cfg.Agent.CLI
+	if cliType == "" {
+		cliType = "jetski"
+	}
+
+	cliPath, err := resolveCLIPath(cliType, cfg.Agent.CLIPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("[silo] Spawning %s root agent (CLI: %s)...\n", cliType, cliPath)
+	_ = logger.Log("AGENT_CLI_LAUNCHED", map[string]interface{}{
+		"cli":      cliType,
+		"cli_path": cliPath,
+		"prompt":   cfg.Agent.Prompt,
+	})
+
+	var cmd *exec.Cmd
+	switch cliType {
+	case "jetski":
+		args := []string{"new-conversation", "--title=Silo Root Agent"}
+		if cfg.Agent.Model != "" {
+			args = append(args, fmt.Sprintf("--model=%s", cfg.Agent.Model))
+		}
+		args = append(args, cfg.Agent.Prompt)
+		cmd = exec.Command(cliPath, args...)
+		cmd.Env = cleanEnv(os.Environ(), "ANTIGRAVITY_SOURCE_METADATA")
+
+	case "claude":
+		mcpPath := filepath.Join(baseDir, "mcp.json")
+		siloBin, _ := os.Executable()
+		if siloBin == "" {
+			siloBin = "silo"
+		}
+		mcpConfig := map[string]interface{}{
+			"mcpServers": map[string]interface{}{
+				"silo": map[string]interface{}{
+					"command": siloBin,
+					"args": []string{
+						"mcp",
+						"--agent-id=root",
+						fmt.Sprintf("--project=%s", cfg.Project.ID),
+						fmt.Sprintf("--base-dir=%s", baseDir),
+						fmt.Sprintf("--repo-dir=%s", repoDir),
+						"--allow-vm=true",
+						"--allow-subagents=true",
+					},
+				},
+			},
+		}
+		bytes, _ := json.MarshalIndent(mcpConfig, "", "  ")
+		_ = os.WriteFile(mcpPath, bytes, 0644)
+
+		cmd = exec.Command(cliPath, "--mcp-config", mcpPath, "--tools", "", "--dangerously-skip-permissions", "-p", cfg.Agent.Prompt)
+
+	default:
+		cmd = exec.Command(cliPath, cfg.Agent.Prompt)
+	}
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func cleanEnv(env []string, removeKey string) []string {
+	var cleaned []string
+	prefix := removeKey + "="
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			cleaned = append(cleaned, e)
+		}
+	}
+	return cleaned
 }
 
 func resolveRepository(urlOrPath, baseDir string) (string, error) {
@@ -235,33 +381,37 @@ func resolveRepository(urlOrPath, baseDir string) (string, error) {
 func runMCPServer(args []string) {
 	fs := flag.NewFlagSet("silo mcp", flag.ExitOnError)
 	agentID := fs.String("agent-id", "root", "Agent identifier")
-	parentID := fs.String("parent-id", "", "Parent agent identifier")
+	projectID := fs.String("project", "", "Target GCP project ID")
 	baseDir := fs.String("base-dir", "/tmp/silo", "Base agents directory")
 	repoDir := fs.String("repo-dir", "", "Mounted repository directory")
 	allowVM := fs.Bool("allow-vm", true, "Enable VM tools")
+	allowSub := fs.Bool("allow-subagents", true, "Enable sub-agent tools")
 
 	_ = fs.Parse(args)
 
 	server := protocol.NewServer(fmt.Sprintf("silo-agent-%s", *agentID), Version)
 
+	agentsDir := filepath.Join(*baseDir, "agents")
+	_ = os.MkdirAll(agentsDir, 0755)
+
 	// Register memory tools
-	memStore, err := memory.NewMemoryStore(*agentID, filepath.Join(*baseDir, "agents"), *repoDir)
+	memStore, err := memory.NewMemoryStore(*agentID, agentsDir, *repoDir)
 	if err == nil {
 		memStore.RegisterTools(server)
 	}
 
 	// Register VM tools if permitted
 	if *allowVM {
-		vmRunner := vm.NewGCloudRunner("")
+		vmRunner := vm.NewGCloudRunner(*projectID)
 		vmServer := vm.NewVMServer(vmRunner)
 		vmServer.RegisterTools(server)
 	}
 
-	// If subagent management allowed
-	if *parentID != "" {
-		ledger := quota.NewLedger(*agentID, 0, 0, 0, false)
-		sup := supervisor.NewSupervisor(ledger, &auth.MockTokenProvider{}, *baseDir, *repoDir)
-		subMgr := subagents.NewManager(*agentID, ledger, sup, &auth.MockTokenProvider{}, *baseDir, *repoDir, nil)
+	// Register subagent management tools if permitted
+	if *allowSub {
+		ledger := quota.NewLedger(*agentID, 20, 5, 2, true)
+		sup := supervisor.NewSupervisor(ledger, &auth.MockTokenProvider{}, agentsDir, *repoDir)
+		subMgr := subagents.NewManager(*agentID, ledger, sup, &auth.MockTokenProvider{}, agentsDir, *repoDir, nil)
 		subMgr.RegisterTools(server)
 	}
 

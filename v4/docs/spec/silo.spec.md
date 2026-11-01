@@ -103,7 +103,8 @@ repo:
   ref: "main"                                   # Optional branch, tag, or commit SHA
 
 agent:
-  cli: "gemini"                             # Enum: "claude" | "codex" | "gemini"
+  cli: "jetski"                             # Enum: "claude" | "codex" | "gemini" | "jetski" | "custom"
+  cli_path: "/usr/local/bin/agentapi"       # Optional explicit path to the agent CLI binary
   model: "gemini-2.5-pro"                   # Optional: model override
   prompt_path: "SYSTEM.md"                  # Path to objective specification prompt
 
@@ -127,11 +128,13 @@ logging:
 Any configuration field MAY be supplied or overridden via CLI flags at creation time.
 
 ```bash
-# Bounded root agent with read-only repository:
+# Bounded root agent with read-only repository and explicit CLI binary path:
 silo run --mode=project \
   --project=my-gcp-project \
   --service-account=root-agent@my-gcp-project.iam.gserviceaccount.com \
   --repo="https://github.com/my-org/my-infra.git" \
+  --cli=jetski \
+  --cli-path=/usr/local/google/home/bsalmon/.gemini/jetski/bin/agentapi \
   --max-subagents=20 \
   --max-concurrent=5 \
   --max-depth=3

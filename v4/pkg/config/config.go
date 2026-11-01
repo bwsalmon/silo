@@ -40,7 +40,8 @@ type RepoConfig struct {
 
 // AgentConfig defines the root agent execution profile.
 type AgentConfig struct {
-	CLI        string         `yaml:"cli"` // claude | codex | gemini
+	CLI        string         `yaml:"cli"` // claude | codex | gemini | jetski | custom
+	CLIPath    string         `yaml:"cli_path"`
 	Model      string         `yaml:"model"`
 	PromptPath string         `yaml:"prompt_path"`
 	Prompt     string         `yaml:"prompt"`
