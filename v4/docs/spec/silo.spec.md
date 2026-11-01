@@ -94,6 +94,11 @@ project:
   service_account: "root-agent@my-gcp-project.iam.gserviceaccount.com"
   downscope_credentials: true               # Apply Credential Access Boundaries
 
+# Optional read-only repository pulled into the root agent's memory space
+repo:
+  url: "https://github.com/my-org/my-infra.git" # Git repository URL or local path
+  ref: "main"                                   # Optional branch, tag, or commit SHA
+
 agent:
   cli: "gemini"                             # Enum: "claude" | "codex" | "gemini"
   model: "gemini-2.5-pro"                   # Optional: model override
@@ -119,10 +124,11 @@ logging:
 Any configuration field MAY be supplied or overridden via CLI flags at creation time.
 
 ```bash
-# Bounded root agent:
+# Bounded root agent with read-only repository:
 silo run --mode=project \
   --project=my-gcp-project \
   --service-account=root-agent@my-gcp-project.iam.gserviceaccount.com \
+  --repo="https://github.com/my-org/my-infra.git" \
   --max-subagents=20 \
   --max-concurrent=5 \
   --max-depth=3
@@ -131,6 +137,7 @@ silo run --mode=project \
 silo run --mode=project \
   --project=my-gcp-project \
   --service-account=root-agent@my-gcp-project.iam.gserviceaccount.com \
+  --repo="https://github.com/my-org/my-infra.git" \
   --unlimited-subagents
 ```
 
@@ -199,6 +206,22 @@ The agent's entire operational interface is defined by its registered MCP server
    - `CLOUDSDK_CORE_DISABLE_PROMPTS=1`
    - `GOOGLE_APPLICATION_CREDENTIALS=""` (unset to prevent fallback to host files)
 3. Stdio streams (`stdin`, `stdout`) are piped directly between the agent client and `gcloud-mcp`.
+
+### 5.3 GCE VM Operational Scope & In-Guest File Execution Boundary
+
+The official `@google-cloud/gcloud-mcp` server operates strictly at the Google Cloud control plane via `run_gcloud_command`. It does **not** provide standard IDE in-guest file editing or interactive shell execution tools (`read_file`, `edit_file`, interactive TTY bash) against a specific GCE virtual machine.
+
+1. **Supported GCE VM Operations**:
+   - Instance lifecycle management (`gcloud compute instances create/delete/start/stop/reset/describe`).
+   - Disk and snapshot management (`gcloud compute disks/snapshots ...`).
+   - Guest metadata and startup scripts (`gcloud compute instances add-metadata ...`).
+   - Non-interactive batch command execution via `gcloud compute ssh <instance> --command="..."` (subject to IAM OS Login permissions, though interactive terminal sessions are blocked by default).
+   - In-guest file transfer via `gcloud compute scp <local> <instance>:<dest>` (if guest SSH is configured).
+2. **Unsupported Operations**:
+   - Interactive terminal sessions requiring a TTY (`gcloud compute ssh` without `--command`).
+   - Direct interactive file editing on remote guest filesystems.
+3. **Operational Model**:
+   - Agents manipulate VMs at the infrastructure level. If an agent must inspect or modify files within a GCE VM, it executes non-interactive commands (`gcloud compute ssh --command="..."`), stages files via `gcloud compute scp`, or drives provisioning via startup scripts and Cloud-init.
 
 ---
 
@@ -281,6 +304,41 @@ The `memory` MCP server provides four core tools:
 4. **Lifecycle Cleanup**:
    - When a `one_shot` agent finishes, its memory remains available for parent inspection until the sub-agent is explicitly reaped via `stop_subagent` or parent exit.
 
+### 6.3 Read-Only Repository Workspace Tools
+
+When a repository is configured (`repo.url`), Silo clones the repository to `/var/lib/silo/repos/<repo_hash>` and exposes it read-only to authorized agents via the `memory` MCP server.
+
+The `memory` MCP server provides three read-only repository tools:
+
+1. **`read_repo_file`**:
+   - Reads the textual or code contents of a file within the mounted repository.
+   - **Input Schema**:
+     ```json
+     {
+       "path": "string (required, relative path within repository, e.g. 'terraform/main.tf')"
+     }
+     ```
+   - **Security Invariant**: Path traversal sequences (`../`) or absolute paths that resolve outside the repository root directory MUST be rejected with error `PATH_TRAVERSAL_DENIED`.
+2. **`list_repo_files`**:
+   - Lists files and subdirectories at a given repository path.
+   - **Input Schema**:
+     ```json
+     {
+       "directory": "string (optional, defaults to repository root)"
+     }
+     ```
+3. **`search_repo`**:
+   - Performs a textual or regular expression search across all non-ignored files in the repository.
+   - **Input Schema**:
+     ```json
+     {
+       "query": "string (required, regex or substring)"
+     }
+     ```
+
+#### 6.3.1 Immutability Invariant
+The mounted repository is strictly **read-only**. The agent possesses no tools to mutate, edit, or commit changes to the repository files. All agent synthesis, plans, and output notes MUST be recorded to its editable memory area (`write_memory`).
+
 ---
 
 ## 7. Sub-Agent Management MCP Server (`subagents-mcp`)
@@ -298,6 +356,7 @@ Creates and starts a new sub-agent.
   "description": "string (brief functional summary)",
   "prompt": "string (required, the objective task prompt)",
   "lifecycle": "string (enum: 'one_shot' | 'persistent', default: 'one_shot')",
+  "share_repo": "boolean (optional, default: false, grants child read-only access to repository workspace)",
   "initial_memory": {
     "key": "value (optional map of initial memory entries or markdown seeded to the child)"
   },

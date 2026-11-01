@@ -47,6 +47,10 @@ Every agent operates with a defined prompt context and an isolated, editable mem
    - The memory area acts as an editable scratchpad where agents record discovered resource IDs, architectural decisions, deployment state, and task checklists.
    - For **persistent agents**, memory persists across process restarts and crashes, allowing resumed execution with full state continuity.
    - When spawning a child agent, the parent can seed initial memory entries. Parents can also inspect a child agent's memory to review working notes or extracted cloud telemetry.
+3. **Read-Only Repository Workspace and Selective Sharing**:
+   - The user can configure a Git repository (`repo.url` or `--repo`) that Silo clones and mounts read-only into the root agent's memory workspace.
+   - The agent inspects code, Terraform modules, Helm charts, or configuration files via read-only memory tools (`read_repo_file`, `list_repo_files`). The repository is strictly immutable—the agent cannot modify files directly, preserving repository integrity while allowing the agent to reference infrastructure declarations.
+   - When spawning a child agent, the creator can selectively grant read access to this repository workspace (`share_repo: true`) or keep the child agent isolated without repository access (`share_repo: false`).
 
 ## Creation-Time Quotas and Budget Accounting
 
