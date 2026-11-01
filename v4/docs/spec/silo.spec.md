@@ -72,6 +72,9 @@ Silo implements process-level supervision and tool-boundary isolation on the hos
 4. **Silo `subagents-mcp` Server**:
    - Built into Silo; served over `stdio` to agents authorized to manage child workers.
    - Enforces hierarchical quota validation and dispatches process management commands to the supervisor.
+5. **Silo `memory-mcp` Server**:
+   - Built into Silo; served over `stdio` to all active agent processes (both root and sub-agents).
+   - Manages an isolated, persistent key-value and document memory store per agent, enabling state tracking, task notes, and discovered resource logging without requiring host filesystem access.
 
 ---
 
@@ -199,11 +202,92 @@ The agent's entire operational interface is defined by its registered MCP server
 
 ---
 
-## 6. Sub-Agent Management MCP Server (`subagents-mcp`)
+## 6. Agent Prompts and Editable Memory Area (`memory-mcp`)
 
-Silo provides a native MCP server exposing five core tools for hierarchical sub-agent orchestration.
+Every agent operates with a dedicated system prompt context and an isolated, persistent memory area that it can dynamically inspect and edit.
 
-### 6.1 `spawn_subagent`
+### 6.1 Prompt Architecture
+
+1. **System Prompt**:
+   - Injected by Silo at agent initialization.
+   - Declares the agent's role, operational boundaries, assigned GCP project identifier, and available MCP tools.
+   - Instructs the agent on how to manage its memory and delegate to child sub-agents.
+2. **Objective Prompt**:
+   - For the **Root Agent**: Loaded from `agent.prompt_path` (e.g. `SYSTEM.md`) or passed inline via CLI `--prompt="..."`. Defines the target system architecture and primary deliverables.
+   - For **Sub-Agents**: Supplied by the creator in the `spawn_subagent` invocation (`prompt: "..."`). Defines the sub-task, acceptance criteria, or monitoring directive.
+
+### 6.2 Editable Memory Architecture
+
+Because agents possess no host filesystem write capabilities, Silo provides a dedicated, structured memory area exposed through the `memory` MCP toolset.
+
+#### 6.2.1 Memory Operations
+
+The `memory` MCP server provides four core tools:
+
+1. **`read_memory`**:
+   - Reads an existing memory entry by key, or returns the entire memory index if `key` is omitted.
+   - **Input Schema**:
+     ```json
+     {
+       "key": "string (optional, e.g. 'discovered_resources' or 'checklist')"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "key": "discovered_resources",
+       "value": {
+         "vpc_network": "vpc-prod",
+         "subnets": ["subnet-us-east1-a", "subnet-us-east1-b"],
+         "db_instance": "pg-main-01"
+       },
+       "updated_at": "2026-11-01T05:35:10Z"
+     }
+     ```
+
+2. **`write_memory`**:
+   - Creates or overwrites a memory entry with a structured JSON object or raw markdown string.
+   - **Input Schema**:
+     ```json
+     {
+       "key": "string (required)",
+       "content": "string or object (required, value to store)"
+     }
+     ```
+   - **Response**: `{"status": "SAVED", "key": "checklist"}`
+
+3. **`append_memory`**:
+   - Appends an item to a list or appends text to an ongoing log/markdown section under `key`.
+   - **Input Schema**:
+     ```json
+     {
+       "key": "string (required)",
+       "content": "string or object (required, entry to append)"
+     }
+     ```
+   - **Response**: `{"status": "APPENDED", "key": "deployment_log"}`
+
+4. **`list_memory`**:
+   - Lists all keys currently stored in the agent's memory area with metadata (size in bytes, last modified timestamp).
+
+#### 6.2.2 Storage & Persistence
+
+1. **Storage Location**:
+   - Each agent's memory is stored on the host under `/var/lib/silo/agents/{agent_id}/memory/` (or structured SQLite/JSON state store).
+2. **Isolation Guarantee**:
+   - Memory is strictly partitioned by `agent_id`. An agent can only read and write its own memory store.
+3. **Persistence Across Restarts**:
+   - For **persistent agents**, the memory area survives process crashes, unexpected exits, and supervisor restarts. When a persistent agent restarts, its memory remains intact, ensuring continuous operational state.
+4. **Lifecycle Cleanup**:
+   - When a `one_shot` agent finishes, its memory remains available for parent inspection until the sub-agent is explicitly reaped via `stop_subagent` or parent exit.
+
+---
+
+## 7. Sub-Agent Management MCP Server (`subagents-mcp`)
+
+Silo provides a native MCP server exposing tools for hierarchical sub-agent orchestration.
+
+### 7.1 `spawn_subagent`
 
 Creates and starts a new sub-agent.
 
@@ -214,6 +298,9 @@ Creates and starts a new sub-agent.
   "description": "string (brief functional summary)",
   "prompt": "string (required, the objective task prompt)",
   "lifecycle": "string (enum: 'one_shot' | 'persistent', default: 'one_shot')",
+  "initial_memory": {
+    "key": "value (optional map of initial memory entries or markdown seeded to the child)"
+  },
   "service_account": {
     "mode": "string (enum: 'inherit' | 'downscoped' | 'specific', default: 'inherit')",
     "email": "string (required if mode == 'specific')",
@@ -249,7 +336,7 @@ Creates and starts a new sub-agent.
 - `DELEGATION_NOT_PERMITTED`: Creator attempts to set `can_spawn_subagents: true` without holding delegation rights.
 - `INVALID_SERVICE_ACCOUNT`: Requested service account is not permitted by IAM `actAs` or CAB narrowing rules.
 
-### 6.2 `list_subagents`
+### 7.2 `list_subagents`
 
 Returns all active and completed child sub-agents owned by the calling agent.
 
@@ -277,7 +364,7 @@ Returns all active and completed child sub-agents owned by the calling agent.
 }
 ```
 
-### 6.3 `get_subagent_output`
+### 7.3 `get_subagent_output`
 
 Retrieves the execution logs, tool call trace, and final output report of a completed `one_shot` sub-agent.
 
@@ -299,7 +386,30 @@ Retrieves the execution logs, tool call trace, and final output report of a comp
 }
 ```
 
-### 6.4 `send_subagent_message`
+### 7.4 `get_subagent_memory`
+
+Allows a parent agent to inspect the working memory area of a child sub-agent.
+
+**Input Schema**:
+```json
+{
+  "agent_id": "string (required)",
+  "key": "string (optional, reads specific key or all keys if omitted)"
+}
+```
+
+**Response**:
+```json
+{
+  "agent_id": "subagent-018f4a2b",
+  "memory": {
+    "checklist": ["inspect subnets [DONE]", "audit firewalls [DONE]"],
+    "target_vpc": "vpc-main"
+  }
+}
+```
+
+### 7.5 `send_subagent_message`
 
 Dispatches an instruction or query to an active `persistent` sub-agent.
 
@@ -319,7 +429,7 @@ Dispatches an instruction or query to an active `persistent` sub-agent.
 }
 ```
 
-### 6.5 `stop_subagent`
+### 7.6 `stop_subagent`
 
 Explicitly terminates a sub-agent and cascades termination to all descendants in its subtree.
 
@@ -341,9 +451,9 @@ Explicitly terminates a sub-agent and cascades termination to all descendants in
 
 ---
 
-## 7. Hierarchical Delegation and Quota Engine
+## 8. Hierarchical Delegation and Quota Engine
 
-### 7.1 Quota Accounting Model
+### 8.1 Quota Accounting Model
 
 Silo maintains a hierarchical tree of quota allocations:
 
@@ -376,9 +486,9 @@ Silo maintains a hierarchical tree of quota allocations:
 
 ---
 
-## 8. Sub-Agent Lifecycle Management
+## 9. Sub-Agent Lifecycle Management
 
-### 8.1 One-Shot Sub-Agent Lifecycle
+### 9.1 One-Shot Sub-Agent Lifecycle
 
 ```
 [SPAWN] --> PENDING --> RUNNING --> [Agent Emits Final Output] --> COMPLETED
@@ -392,7 +502,7 @@ Silo maintains a hierarchical tree of quota allocations:
 - Silo captures the final output in its local state store and places the process in `COMPLETED`.
 - Silo MUST NOT restart a completed or failed `one_shot` agent.
 
-### 8.2 Persistent Sub-Agent Supervision
+### 9.2 Persistent Sub-Agent Supervision
 
 - Persistent sub-agents run continuous watch or reconciliation loops.
 - If a `persistent` agent process terminates for any reason:
@@ -400,7 +510,7 @@ Silo maintains a hierarchical tree of quota allocations:
   2. Silo applies exponential backoff restart delay ($100\text{ms}, 200\text{ms}, 400\text{ms}, \dots, \max 10\text{s}$).
   3. Silo restarts the agent with fresh stdio pipes while preserving its ID and message queue.
 
-### 8.3 Cascading Teardown
+### 9.3 Cascading Teardown
 
 1. When a sub-agent is stopped (via `stop_subagent`, timeout, or parent exit), Silo queries the quota tree for all descendants.
 2. Silo issues `SIGTERM` to the entire process group (`-pgid`).
@@ -408,7 +518,7 @@ Silo maintains a hierarchical tree of quota allocations:
 
 ---
 
-## 9. Structured Audit Logging
+## 10. Structured Audit Logging
 
 All system events are recorded to `/var/log/silo/audit.log` in structured JSON format.
 
@@ -432,35 +542,37 @@ All system events are recorded to `/var/log/silo/audit.log` in structured JSON f
 - `SUBAGENT_STOP_REQUESTED`, `SUBAGENT_CASCADE_REAPED`
 - `QUOTA_EXCEEDED_REJECTED`, `CONCURRENCY_LIMIT_REJECTED`
 - `TOKEN_MINTED`, `TOKEN_REFRESHED`
+- `MEMORY_READ`, `MEMORY_WRITTEN`, `MEMORY_APPENDED`
 - `TOOL_INVOCATION`
 
 ---
 
-## 10. Threat Model and Security Analysis
+## 11. Threat Model and Security Analysis
 
-### 10.1 Threat 1: Prompt Injection / Rogue Host Execution
+### 11.1 Threat 1: Prompt Injection / Rogue Host Execution
 - **Vector**: An agent reads untrusted cloud data (e.g. storage bucket object or log line) containing malicious instructions directing it to execute local shell commands or dump host secrets.
 - **Mitigation**: The agent is provided **zero shell tools**. It does not possess `bash`, `sh`, or raw file execution tools. It can only call structured `gcloud-mcp` tools. Prompt injections cannot break out into arbitrary host shell execution.
 
-### 10.2 Threat 2: Cross-Project Data Exfiltration
+### 11.2 Threat 2: Cross-Project Data Exfiltration
 - **Vector**: A compromised agent attempts to use its credentials to access another GCP project or exfiltrate data to an external bucket.
 - **Mitigation**: Credential Access Boundaries (CAB) enforce that the issued OAuth2 token is cryptographically bound to the declared project numbers. Google API gateways drop any request targeting unlisted projects.
 
-### 10.3 Threat 3: Recursive Fork Bomb / Spawning Sprawl
+### 11.3 Threat 3: Recursive Fork Bomb / Spawning Sprawl
 - **Vector**: A buggy or malicious sub-agent recursively spawns hundreds of child agents, exhausting host memory and API quota.
 - **Mitigation**: Strict monotonic quota accounting. The root creation-time quota sets an absolute ceiling. Depth limiting ensures spawning stops at `max_depth`. Children cannot exceed the remaining budget of their ancestors.
 
 ---
 
-## 11. Implementation Tasks and Phased Roadmap
+## 12. Implementation Tasks and Phased Roadmap
 
 1. **Phase 1: Module Scaffolding & gcloud-mcp Bridge**
    - Initialize Go module `github.com/bwsalmon/silo/v4` under `v4/`.
    - Implement process supervisor for local `@google-cloud/gcloud-mcp` stdio management.
    - Implement GCP IAM impersonation token minter and CAB downscoping.
-2. **Phase 2: Sub-Agent Management MCP Server (`subagents-mcp`)**
+2. **Phase 2: Sub-Agent & Memory MCP Servers (`subagents-mcp`, `memory-mcp`)**
    - Implement JSON-RPC 2.0 MCP server over stdio for Silo supervisor.
-   - Implement `spawn_subagent`, `list_subagents`, `get_subagent_output`, `send_subagent_message`, `stop_subagent`.
+   - Implement `memory-mcp` primitives: `read_memory`, `write_memory`, `append_memory`, `list_memory`.
+   - Implement `subagents-mcp` tools: `spawn_subagent`, `list_subagents`, `get_subagent_output`, `get_subagent_memory`, `send_subagent_message`, `stop_subagent`.
 3. **Phase 3: Hierarchical Quota Engine & Budget Accounting**
    - Implement thread-safe tree quota ledger with monotonic carve-out.
    - Implement concurrency limits and depth-based delegation enforcement.

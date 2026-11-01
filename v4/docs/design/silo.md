@@ -6,10 +6,13 @@ Silo v4 Project Edition provides single-project or multi-project autonomous agen
 
 Silo operates as a lightweight host daemon and process supervisor. It launches a primary root agent process (using Claude Code, Codex, or Gemini CLI) and manages its execution lifecycle. Rather than granting the agent raw terminal access, shell tools, or host filesystem primitives, Silo connects the agent exclusively to structured Model Context Protocol (MCP) servers via local `stdio` communication channels.
 
-The root agent is provisioned with exactly two MCP tools:
+Each agent (the root agent and all sub-agents) is launched with a structured **system and objective prompt** and an isolated, persistent **editable memory area**.
+
+The root agent is provisioned with the following MCP tools:
 
 1. **`gcloud` MCP Tool**: A local instance of Google's official `@google-cloud/gcloud-mcp` server. This exposes structured tools that translate natural language and structured calls into `gcloud` CLI invocations against Google Cloud APIs.
 2. **`subagents` MCP Tool**: Silo's native sub-agent management server. This enables the agent to dynamically spawn, supervise, query, message, and terminate child workers to execute specialized or parallel tasks.
+3. **`memory` MCP Tool**: An agent-scoped key-value and document memory store. This enables the agent to record notes, state machines, discovered resource identifiers, and architectural decisions without requiring host filesystem access.
 
 Because the agent possesses neither a shell execution tool (`bash`), an arbitrary HTTP networking tool, nor a host filesystem write tool, its blast radius is strictly confined to Google Cloud APIs mediated by its assigned Service Account.
 
@@ -31,6 +34,19 @@ Sub-agents support two distinct operational lifecycles:
 - **Persistent Agents**: Continuous background daemons. Like the root agent, persistent sub-agents are actively supervised by Silo: if the process exits, fails, or crashes, Silo restarts it with exponential backoff. Persistent agents communicate asynchronously with their parent via message queues.
 
 When creating a sub-agent, the creator can delegate the ability to spawn sub-agents (`can_spawn_subagents: true`), allowing the creation of manager-worker trees.
+
+## Agent Prompts and Editable Memory
+
+Every agent operates with a defined prompt context and an isolated, editable memory store:
+
+1. **System and Objective Prompts**:
+   - The root agent's prompt is specified via configuration (`SYSTEM.md` or CLI flag), declaring its operational parameters, cloud project boundary, and high-level mission.
+   - When a parent spawns a sub-agent, it injects a targeted objective prompt describing the specific deliverable or monitoring directive.
+2. **Editable Agent Memory**:
+   - Because agents lack host filesystem access, Silo provisions an agent-scoped memory store accessible via the `memory` MCP tool (`read_memory`, `write_memory`, `append_memory`, `list_memory`).
+   - The memory area acts as an editable scratchpad where agents record discovered resource IDs, architectural decisions, deployment state, and task checklists.
+   - For **persistent agents**, memory persists across process restarts and crashes, allowing resumed execution with full state continuity.
+   - When spawning a child agent, the parent can seed initial memory entries. Parents can also inspect a child agent's memory to review working notes or extracted cloud telemetry.
 
 ## Creation-Time Quotas and Budget Accounting
 
