@@ -620,6 +620,44 @@ Silo explicitly supports upgrading the coding agent CLI inside the virtual machi
    - Upon operator approval via `POST /v1/mgmt/approve`, Silo signals `silo-supervisor` over vsock to execute the package installation, verify the binary invocation via `<cli> --version`, update `silo.yaml` on the host, terminate the active CLI PID, and relaunch the agent on the new version.
    - If the new binary fails validation or crashes upon launch, `silo-supervisor` automatically rolls back to the previous package version.
 
+### 9.4 In-Guest Supervisor (`silo-supervisor`) Upgrade Architecture
+
+The in-guest `silo-supervisor` component is responsible for process supervision, vsock bridging, and local system management. To maintain protocol alignment with the host daemon while upholding zero-trust network principles, `silo-supervisor` is upgraded via an out-of-band host-to-guest transport:
+
+1. **Zero-Egress Distribution via Vsock**:
+   - The guest virtual machine DOES NOT reach out to external package repositories or GitHub to fetch supervisor binaries. This guarantees upgradeability even under strict egress-isolated policies.
+   - When an upgrade is initiated, host `silo` streams the compiled, SHA-256 verified `silo-supervisor` binary payload across virtio-vsock to the guest supervisor on control port `5001`.
+
+2. **In-Guest Atomic Binary Rotation**:
+   - `silo-supervisor` receives the payload and writes it to `/usr/local/bin/silo-supervisor.new` with permissions `0755`.
+   - It computes the SHA-256 digest of the written file and validates it against the expected hash transmitted in the vsock stream metadata.
+   - It performs an atomic rotation using POSIX `rename(2)`:
+     ```bash
+     mv /usr/local/bin/silo-supervisor /usr/local/bin/silo-supervisor.old
+     mv /usr/local/bin/silo-supervisor.new /usr/local/bin/silo-supervisor
+     ```
+
+3. **Seamless Process Re-Exec and Child Agent Adoption**:
+   - To prevent dropping the developer's active chat session or terminating running code tasks, `silo-supervisor` serializes its runtime state into `/run/silo-supervisor.state`:
+     ```json
+     {
+       "version": "v4.1.0",
+       "agent_pid": 284,
+       "agent_cli": "claude",
+       "acp_vsock_port": 5000,
+       "mgmt_vsock_port": 5001
+     }
+     ```
+   - The supervisor marks child process descriptors as non-close-on-exec or prepares to adopt the existing PID via standard Unix process hierarchy inspection (`/proc/284`).
+   - The supervisor calls `syscall.Exec("/usr/local/bin/silo-supervisor", os.Args, os.Environ())`.
+   - The newly executed `silo-supervisor` reads `/run/silo-supervisor.state`, discovers the running child agent process (`PID 284`), re-attaches to its stdio logging streams and monitoring channels, and re-establishes the vsock bridge without terminating or interrupting the agent CLI!
+
+4. **Watchdog Verification and Automated Rollback**:
+   - Immediately following re-exec, the new supervisor issues a `SUPERVISOR_READY` handshake message to host `silo` containing its upgraded semantic version.
+   - If the new binary crashes, faults, or fails to emit the ready signal within 10 seconds:
+     - The host daemon detects vsock heartbeat timeout and alerts the operator.
+     - The guest systemd service definition (`Restart=always`, `WatchdogSec=15s`) invokes a rollback wrapper that swaps `/usr/local/bin/silo-supervisor.old` back to `/usr/local/bin/silo-supervisor` and re-launches the proven binary.
+
 ---
 
 ## 10. LLM Credential Handling
@@ -790,7 +828,18 @@ Requests upgrading the coding agent CLI version in the guest and pinning it in `
 ```
 
 #### 10. `POST /v1/silo/upgrade`
-Requests self-upgrade of the host Silo daemon.
+Requests coordinated self-upgrade of the host Silo daemon and (optionally) the in-guest supervisor.
+
+**Request**:
+```json
+{
+  "release_tag": "v4.1.0",
+  "upgrade_guest_supervisor": true
+}
+```
+
+#### 11. `POST /v1/supervisor/upgrade`
+Requests upgrading the in-guest supervisor component (`silo-supervisor`) independently via host vsock streaming without upgrading the host daemon.
 
 **Request**:
 ```json
@@ -799,7 +848,18 @@ Requests self-upgrade of the host Silo daemon.
 }
 ```
 
-#### 11. `POST /v1/mgmt/approve`
+**Response (202 Accepted)**:
+```json
+{
+  "change_id": "chg_3b9f8a12",
+  "status": "PENDING_APPROVAL",
+  "diff": "--- silo-supervisor (in-guest)\n+++ silo-supervisor (in-guest)\n- version: v4.0.0\n+ version: v4.1.0 (streamed over vsock)\n",
+  "expires_in_seconds": 900,
+  "message": "Supervisor upgrade approval code sent to operator email. Await operator code and call /v1/mgmt/approve."
+}
+```
+
+#### 12. `POST /v1/mgmt/approve`
 Submits the human operator's OTP code to execute the pending mutation.
 
 **Request**:
@@ -819,7 +879,7 @@ Submits the human operator's OTP code to execute the pending mutation.
 }
 ```
 
-#### 12. `POST /v1/mgmt/cancel`
+#### 13. `POST /v1/mgmt/cancel`
 Cancels a pending change request.
 
 ### 11.2 Standard Error Response Schema
@@ -978,9 +1038,9 @@ Content-Type: text/html; charset="utf-8"
 
 ---
 
-## 14. Daemon Lifecycle and Self-Upgrade
+## 14. Daemon and In-Guest Supervisor Upgrade Lifecycle
 
-### 14.1 Upgrade Execution Sequence
+### 14.1 Host Daemon Upgrade Execution Sequence
 
 1. **Request & Verification**:
    - The agent or operator requests an upgrade via `POST /v1/silo/upgrade` with `release_tag`.
@@ -998,6 +1058,20 @@ Content-Type: text/html; charset="utf-8"
 5. **Health Check & Auto-Rollback**:
    - Upon restart, the new Silo process checks communication with Cloud Hypervisor and verifies the management API.
    - If health checks do not pass within 30 seconds, a watchdog script restores `/usr/local/bin/silo.old` and re-executes the previous binary.
+
+### 14.2 In-Guest Supervisor (`silo-supervisor`) Upgrade Sequence
+
+1. **Vsock Distribution (Zero-Egress Required)**:
+   - Host `silo` extracts or downloads `silo-supervisor-linux-amd64` matching the target release tag and verifies its SHA-256 checksum on the host.
+   - Host `silo` establishes a control stream over virtio-vsock port `5001` and transmits the binary stream alongside its expected cryptographic hash directly to `silo-supervisor`.
+2. **Atomic Swap & Child Adoption**:
+   - In-guest `silo-supervisor` writes the binary to `/usr/local/bin/silo-supervisor.new` (mode `0755`) and checks the SHA-256 checksum.
+   - It performs atomic rotation: `silo-supervisor` -> `silo-supervisor.old`, `silo-supervisor.new` -> `silo-supervisor`.
+   - It serializes its active child agent CLI state (`PID`, `CLI type`, active sockets) to `/run/silo-supervisor.state`.
+   - It invokes `syscall.Exec("/usr/local/bin/silo-supervisor", os.Args, os.Environ())`.
+3. **Re-Attachment & Watchdog Handshake**:
+   - The newly executed supervisor reads `/run/silo-supervisor.state`, resumes monitoring of the existing child agent PID without restarting the agent CLI, and transmits a `SUPERVISOR_READY` frame with its new version string over vsock.
+   - If the new supervisor binary fails to report ready within 10 seconds, the guest watchdog restores `silo-supervisor.old` and re-execs the previous version.
 
 ---
 
@@ -1028,6 +1102,7 @@ All operational and security events are written to a structured JSON audit log l
 - `VM_START`, `VM_STOP`, `VM_CRASH`, `VM_RESIZE`
 - `AGENT_START`, `AGENT_EXIT`, `AGENT_RESTART`
 - `AGENT_UPGRADE_REQUESTED`, `AGENT_UPGRADE_SUCCESS`, `AGENT_UPGRADE_FAILED`
+- `SUPERVISOR_UPGRADE_REQUESTED`, `SUPERVISOR_UPGRADE_SUCCESS`, `SUPERVISOR_UPGRADE_ROLLBACK`
 - `POLICY_CHANGE_REQUESTED`, `POLICY_CHANGE_CANCELLED`
 - `STORAGE_FORMAT_REQUESTED`, `STORAGE_FORMAT_SUCCESS`, `STORAGE_FORMAT_LOCKED`
 - `OTP_ISSUED`, `OTP_ATTEMPT_FAILED`, `OTP_LOCKOUT`, `APPROVAL_SUCCESS`

@@ -66,11 +66,13 @@ To protect against credential brute-forcing, Silo limits verification attempts t
 
 For email delivery, Silo supports both standard SMTP over TLS (using a dedicated Gmail App Password) and the Google Workspace Gmail REST API (using OAuth 2.0). Silo recommends SMTP with an App Password as the default deployment mechanism, eliminating the need to provision Google Cloud projects, manage service accounts, or handle OAuth refresh token rotations on headless developer hosts.
 
-## Daemon Lifecycle and Self-Upgrade
+## Daemon Lifecycle, In-Guest Component Upgrades, and Self-Upgrade
 
-Silo supports automated self-upgrades initiated by the agent or operator. Upon receiving an approved upgrade request specifying a GitHub release tag (`bwsalmon/silo`), Silo downloads the target binary from the release assets, validates its cryptographic checksum against the published manifest, writes the binary to `silo.new`, and swaps the executable via an atomic file rename.
+Silo supports coordinated, automated upgrades for both the host daemon and the in-guest supervisor (`silo-supervisor`). Both components share synchronized release tags under `bwsalmon/silo` to maintain wire protocol and ABI compatibility.
 
-During self-upgrade, Silo re-executes itself (`syscall.Exec`) while preserving the running virtual machine. Cloud Hypervisor operates as an independent child process; Silo transfers or re-attaches to the existing Cloud Hypervisor UNIX API and vsock sockets across the re-exec boundary without terminating guest execution. If post-upgrade health checks fail, Silo automatically rolls back to the backup binary (`silo.old`) and restores previous runtime state.
+Upgrading the in-guest supervisor requires zero external network egress from the guest. The host daemon downloads the release bundle, verifies the cryptographic SHA-256 checksums from the signed manifest, and streams the verified `silo-supervisor` binary directly into the guest over virtio-vsock. Inside the guest, the supervisor writes the payload to `/usr/local/bin/silo-supervisor.new`, performs an atomic file rotation (`rename`), and re-executes itself via `syscall.Exec`. To prevent disruptions to active developer conversations, `silo-supervisor` serializes its child agent state to `/run/silo-supervisor.state` and adopts the running agent process across the re-exec boundary without restarting the agent CLI. If the updated supervisor fails its post-upgrade vsock handshake within 10 seconds, it automatically reverts to `silo-supervisor.old`.
+
+For host daemon self-upgrades, Silo follows an identical atomic rename and re-exec pattern (`syscall.Exec`) while preserving the running virtual machine. Cloud Hypervisor operates as an independent child process; Silo transfers or re-attaches to the existing Cloud Hypervisor UNIX API and vsock sockets across the re-exec boundary without terminating guest execution. If post-upgrade health checks fail, Silo automatically rolls back to the backup binary (`silo.old`) and restores previous runtime state.
 
 ## Code Reuse and Component Provenance
 
