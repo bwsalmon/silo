@@ -75,6 +75,9 @@ Silo implements process-level supervision and tool-boundary isolation on the hos
 5. **Silo `memory-mcp` Server**:
    - Built into Silo; served over `stdio` to all active agent processes (both root and sub-agents).
    - Manages an isolated, persistent key-value and document memory store per agent, enabling state tracking, task notes, and discovered resource logging without requiring host filesystem access.
+6. **Silo `vm-mcp` Server**:
+   - Built into Silo; served over `stdio` to authorized agent processes.
+   - Provides high-level execution and file manipulation tools (`vm_exec`, `vm_read_file`, `vm_write_file`, `vm_edit_file`, `vm_list_directory`) operating against target GCE virtual machines via Cloud IAP-tunneled SSH.
 
 ---
 
@@ -93,6 +96,11 @@ project:
   number: "123456789012"                    # GCP Project Number (used for CAB resource matching)
   service_account: "root-agent@my-gcp-project.iam.gserviceaccount.com"
   downscope_credentials: true               # Apply Credential Access Boundaries
+
+# Optional read-only repository pulled into the root agent's memory space
+repo:
+  url: "https://github.com/my-org/my-infra.git" # Git repository URL or local path
+  ref: "main"                                   # Optional branch, tag, or commit SHA
 
 agent:
   cli: "gemini"                             # Enum: "claude" | "codex" | "gemini"
@@ -119,10 +127,11 @@ logging:
 Any configuration field MAY be supplied or overridden via CLI flags at creation time.
 
 ```bash
-# Bounded root agent:
+# Bounded root agent with read-only repository:
 silo run --mode=project \
   --project=my-gcp-project \
   --service-account=root-agent@my-gcp-project.iam.gserviceaccount.com \
+  --repo="https://github.com/my-org/my-infra.git" \
   --max-subagents=20 \
   --max-concurrent=5 \
   --max-depth=3
@@ -131,6 +140,7 @@ silo run --mode=project \
 silo run --mode=project \
   --project=my-gcp-project \
   --service-account=root-agent@my-gcp-project.iam.gserviceaccount.com \
+  --repo="https://github.com/my-org/my-infra.git" \
   --unlimited-subagents
 ```
 
@@ -199,6 +209,22 @@ The agent's entire operational interface is defined by its registered MCP server
    - `CLOUDSDK_CORE_DISABLE_PROMPTS=1`
    - `GOOGLE_APPLICATION_CREDENTIALS=""` (unset to prevent fallback to host files)
 3. Stdio streams (`stdin`, `stdout`) are piped directly between the agent client and `gcloud-mcp`.
+
+### 5.3 GCE VM Operational Scope & In-Guest File Execution Boundary
+
+The official `@google-cloud/gcloud-mcp` server operates strictly at the Google Cloud control plane via `run_gcloud_command`. It does **not** provide standard IDE in-guest file editing or interactive shell execution tools (`read_file`, `edit_file`, interactive TTY bash) against a specific GCE virtual machine.
+
+1. **Supported GCE VM Operations**:
+   - Instance lifecycle management (`gcloud compute instances create/delete/start/stop/reset/describe`).
+   - Disk and snapshot management (`gcloud compute disks/snapshots ...`).
+   - Guest metadata and startup scripts (`gcloud compute instances add-metadata ...`).
+   - Non-interactive batch command execution via `gcloud compute ssh <instance> --command="..."` (subject to IAM OS Login permissions, though interactive terminal sessions are blocked by default).
+   - In-guest file transfer via `gcloud compute scp <local> <instance>:<dest>` (if guest SSH is configured).
+2. **Unsupported Operations**:
+   - Interactive terminal sessions requiring a TTY (`gcloud compute ssh` without `--command`).
+   - Direct interactive file editing on remote guest filesystems.
+3. **Operational Model**:
+   - Agents manipulate VMs at the infrastructure level. If an agent must inspect or modify files within a GCE VM, it executes non-interactive commands (`gcloud compute ssh --command="..."`), stages files via `gcloud compute scp`, or drives provisioning via startup scripts and Cloud-init.
 
 ---
 
@@ -281,13 +307,176 @@ The `memory` MCP server provides four core tools:
 4. **Lifecycle Cleanup**:
    - When a `one_shot` agent finishes, its memory remains available for parent inspection until the sub-agent is explicitly reaped via `stop_subagent` or parent exit.
 
+### 6.3 Read-Only Repository Workspace Tools
+
+When a repository is configured (`repo.url`), Silo clones the repository to `/var/lib/silo/repos/<repo_hash>` and exposes it read-only to authorized agents via the `memory` MCP server.
+
+The `memory` MCP server provides three read-only repository tools:
+
+1. **`read_repo_file`**:
+   - Reads the textual or code contents of a file within the mounted repository.
+   - **Input Schema**:
+     ```json
+     {
+       "path": "string (required, relative path within repository, e.g. 'terraform/main.tf')"
+     }
+     ```
+   - **Security Invariant**: Path traversal sequences (`../`) or absolute paths that resolve outside the repository root directory MUST be rejected with error `PATH_TRAVERSAL_DENIED`.
+2. **`list_repo_files`**:
+   - Lists files and subdirectories at a given repository path.
+   - **Input Schema**:
+     ```json
+     {
+       "directory": "string (optional, defaults to repository root)"
+     }
+     ```
+3. **`search_repo`**:
+   - Performs a textual or regular expression search across all non-ignored files in the repository.
+   - **Input Schema**:
+     ```json
+     {
+       "query": "string (required, regex or substring)"
+     }
+     ```
+
+#### 6.3.1 Immutability Invariant
+The mounted repository is strictly **read-only**. The agent possesses no tools to mutate, edit, or commit changes to the repository files. All agent synthesis, plans, and output notes MUST be recorded to its editable memory area (`write_memory`).
+
 ---
 
-## 7. Sub-Agent Management MCP Server (`subagents-mcp`)
+## 7. VM Execution and File Tools (`vm-mcp`)
+
+To enable agents to compile software, build containers, run test suites, and edit configuration files in a real Linux environment without compromising host security, Silo provides the `vm-mcp` server. This server exposes high-level execution and file manipulation tools operating against target GCE virtual machines created by the agent in its project.
+
+### 7.1 Tool Operations
+
+1. **`vm_exec`**:
+   - Executes a non-interactive shell command on a target GCE instance.
+   - **Input Schema**:
+     ```json
+     {
+       "instance_name": "string (required, target GCE instance name)",
+       "command": "string (required, bash shell command string to execute)",
+       "zone": "string (optional, defaults to project default zone or auto-resolved)",
+       "working_dir": "string (optional, directory to cd into before executing)",
+       "user": "string (optional, SSH user, defaults to service account username)",
+       "timeout_seconds": "integer (optional, default: 300)"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "exit_code": 0,
+       "stdout": "Linux sandbox-01 6.1.0-21-cloud-amd64 #1 SMP PREEMPT_DYNAMIC Debian\n",
+       "stderr": "",
+       "duration_ms": 420
+     }
+     ```
+
+2. **`vm_read_file`**:
+   - Reads the textual content of a file on the target GCE instance.
+   - **Input Schema**:
+     ```json
+     {
+       "instance_name": "string (required)",
+       "path": "string (required, absolute file path on VM)",
+       "zone": "string (optional)",
+       "user": "string (optional)"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "path": "/etc/hosts",
+       "content": "127.0.0.1 localhost\n::1 localhost\n",
+       "bytes_read": 35
+     }
+     ```
+
+3. **`vm_write_file`**:
+   - Writes or overwrites a file on the target GCE instance.
+   - **Input Schema**:
+     ```json
+     {
+       "instance_name": "string (required)",
+       "path": "string (required, absolute file path on VM)",
+       "content": "string (required, full file content to write)",
+       "overwrite": "boolean (optional, default: true)",
+       "zone": "string (optional)",
+       "user": "string (optional)"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "path": "/root/app/config.json",
+       "bytes_written": 142,
+       "status": "WRITTEN"
+     }
+     ```
+
+4. **`vm_edit_file`**:
+   - Performs an exact search-and-replace on a file on the target GCE instance.
+   - **Input Schema**:
+     ```json
+     {
+       "instance_name": "string (required)",
+       "path": "string (required, absolute file path on VM)",
+       "target": "string (required, exact string to be replaced)",
+       "replacement": "string (required, replacement text)",
+       "zone": "string (optional)",
+       "user": "string (optional)"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "path": "/root/app/server.go",
+       "replacements_made": 1,
+       "status": "MODIFIED"
+     }
+     ```
+
+5. **`vm_list_directory`**:
+   - Lists the directory contents on the target GCE instance.
+   - **Input Schema**:
+     ```json
+     {
+       "instance_name": "string (required)",
+       "path": "string (required, absolute directory path on VM)",
+       "zone": "string (optional)",
+       "user": "string (optional)"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "path": "/var/log",
+       "entries": [
+         { "name": "syslog", "type": "file", "size_bytes": 1048576, "permissions": "-rw-r-----" },
+         { "name": "nginx", "type": "directory", "size_bytes": 4096, "permissions": "drwxr-xr-x" }
+       ]
+     }
+     ```
+
+### 7.2 Transport and Tunneling Architecture
+
+1. **Identity-Aware Proxy (IAP) Tunneling**:
+   - Silo executes VM operations using `gcloud compute ssh` and `gcloud compute scp` configured with `--tunnel-through-iap`.
+   - Sandbox VMs DO NOT require public external IP addresses and MUST NOT have ingress port 22 exposed to the public internet.
+2. **OS Login Authentication**:
+   - Authentication is performed automatically using the agent's Service Account via Google Cloud OS Login (`roles/compute.osAdminLogin` or `roles/compute.osLogin`).
+3. **Safety and Stdio Buffering**:
+   - Silo streams content into remote processes using base64 or temporary file staging via `scp` to prevent shell injection, escaping bugs, or terminal control sequence corruption.
+   - All executions are bound to an explicit timeout (default: 300s).
+
+---
+
+## 8. Sub-Agent Management MCP Server (`subagents-mcp`)
 
 Silo provides a native MCP server exposing tools for hierarchical sub-agent orchestration.
 
-### 7.1 `spawn_subagent`
+### 8.1 `spawn_subagent`
 
 Creates and starts a new sub-agent.
 
@@ -298,6 +487,8 @@ Creates and starts a new sub-agent.
   "description": "string (brief functional summary)",
   "prompt": "string (required, the objective task prompt)",
   "lifecycle": "string (enum: 'one_shot' | 'persistent', default: 'one_shot')",
+  "share_repo": "boolean (optional, default: false, grants child read-only access to repository workspace)",
+  "allow_vm_tools": "boolean (optional, default: true, grants child access to vm-mcp tools)",
   "initial_memory": {
     "key": "value (optional map of initial memory entries or markdown seeded to the child)"
   },
@@ -451,9 +642,9 @@ Explicitly terminates a sub-agent and cascades termination to all descendants in
 
 ---
 
-## 8. Hierarchical Delegation and Quota Engine
+## 9. Hierarchical Delegation and Quota Engine
 
-### 8.1 Quota Accounting Model
+### 9.1 Quota Accounting Model
 
 Silo maintains a hierarchical tree of quota allocations:
 
@@ -486,9 +677,9 @@ Silo maintains a hierarchical tree of quota allocations:
 
 ---
 
-## 9. Sub-Agent Lifecycle Management
+## 10. Sub-Agent Lifecycle Management
 
-### 9.1 One-Shot Sub-Agent Lifecycle
+### 10.1 One-Shot Sub-Agent Lifecycle
 
 ```
 [SPAWN] --> PENDING --> RUNNING --> [Agent Emits Final Output] --> COMPLETED
@@ -502,7 +693,7 @@ Silo maintains a hierarchical tree of quota allocations:
 - Silo captures the final output in its local state store and places the process in `COMPLETED`.
 - Silo MUST NOT restart a completed or failed `one_shot` agent.
 
-### 9.2 Persistent Sub-Agent Supervision
+### 10.2 Persistent Sub-Agent Supervision
 
 - Persistent sub-agents run continuous watch or reconciliation loops.
 - If a `persistent` agent process terminates for any reason:
@@ -510,7 +701,7 @@ Silo maintains a hierarchical tree of quota allocations:
   2. Silo applies exponential backoff restart delay ($100\text{ms}, 200\text{ms}, 400\text{ms}, \dots, \max 10\text{s}$).
   3. Silo restarts the agent with fresh stdio pipes while preserving its ID and message queue.
 
-### 9.3 Cascading Teardown
+### 10.3 Cascading Teardown
 
 1. When a sub-agent is stopped (via `stop_subagent`, timeout, or parent exit), Silo queries the quota tree for all descendants.
 2. Silo issues `SIGTERM` to the entire process group (`-pgid`).
@@ -518,7 +709,7 @@ Silo maintains a hierarchical tree of quota allocations:
 
 ---
 
-## 10. Structured Audit Logging
+## 11. Structured Audit Logging
 
 All system events are recorded to `/var/log/silo/audit.log` in structured JSON format.
 
@@ -543,35 +734,37 @@ All system events are recorded to `/var/log/silo/audit.log` in structured JSON f
 - `QUOTA_EXCEEDED_REJECTED`, `CONCURRENCY_LIMIT_REJECTED`
 - `TOKEN_MINTED`, `TOKEN_REFRESHED`
 - `MEMORY_READ`, `MEMORY_WRITTEN`, `MEMORY_APPENDED`
+- `VM_EXEC_INVOKED`, `VM_FILE_READ`, `VM_FILE_WRITTEN`, `VM_FILE_EDITED`
 - `TOOL_INVOCATION`
 
 ---
 
-## 11. Threat Model and Security Analysis
+## 12. Threat Model and Security Analysis
 
-### 11.1 Threat 1: Prompt Injection / Rogue Host Execution
+### 12.1 Threat 1: Prompt Injection / Rogue Host Execution
 - **Vector**: An agent reads untrusted cloud data (e.g. storage bucket object or log line) containing malicious instructions directing it to execute local shell commands or dump host secrets.
 - **Mitigation**: The agent is provided **zero shell tools**. It does not possess `bash`, `sh`, or raw file execution tools. It can only call structured `gcloud-mcp` tools. Prompt injections cannot break out into arbitrary host shell execution.
 
-### 11.2 Threat 2: Cross-Project Data Exfiltration
+### 12.2 Threat 2: Cross-Project Data Exfiltration
 - **Vector**: A compromised agent attempts to use its credentials to access another GCP project or exfiltrate data to an external bucket.
 - **Mitigation**: Credential Access Boundaries (CAB) enforce that the issued OAuth2 token is cryptographically bound to the declared project numbers. Google API gateways drop any request targeting unlisted projects.
 
-### 11.3 Threat 3: Recursive Fork Bomb / Spawning Sprawl
+### 12.3 Threat 3: Recursive Fork Bomb / Spawning Sprawl
 - **Vector**: A buggy or malicious sub-agent recursively spawns hundreds of child agents, exhausting host memory and API quota.
 - **Mitigation**: Strict monotonic quota accounting. The root creation-time quota sets an absolute ceiling. Depth limiting ensures spawning stops at `max_depth`. Children cannot exceed the remaining budget of their ancestors.
 
 ---
 
-## 12. Implementation Tasks and Phased Roadmap
+## 13. Implementation Tasks and Phased Roadmap
 
 1. **Phase 1: Module Scaffolding & gcloud-mcp Bridge**
    - Initialize Go module `github.com/bwsalmon/silo/v4` under `v4/`.
    - Implement process supervisor for local `@google-cloud/gcloud-mcp` stdio management.
    - Implement GCP IAM impersonation token minter and CAB downscoping.
-2. **Phase 2: Sub-Agent & Memory MCP Servers (`subagents-mcp`, `memory-mcp`)**
+2. **Phase 2: Sub-Agent, Memory & VM MCP Servers (`subagents-mcp`, `memory-mcp`, `vm-mcp`)**
    - Implement JSON-RPC 2.0 MCP server over stdio for Silo supervisor.
-   - Implement `memory-mcp` primitives: `read_memory`, `write_memory`, `append_memory`, `list_memory`.
+   - Implement `memory-mcp` primitives: `read_memory`, `write_memory`, `append_memory`, `list_memory`, and read-only repository tools (`read_repo_file`, `list_repo_files`, `search_repo`).
+   - Implement `vm-mcp` tools: `vm_exec`, `vm_read_file`, `vm_write_file`, `vm_edit_file`, `vm_list_directory` backed by IAP-tunneled `gcloud compute ssh/scp`.
    - Implement `subagents-mcp` tools: `spawn_subagent`, `list_subagents`, `get_subagent_output`, `get_subagent_memory`, `send_subagent_message`, `stop_subagent`.
 3. **Phase 3: Hierarchical Quota Engine & Budget Accounting**
    - Implement thread-safe tree quota ledger with monotonic carve-out.
@@ -580,5 +773,5 @@ All system events are recorded to `/var/log/silo/audit.log` in structured JSON f
    - Implement one-shot completion tracking and result caching.
    - Implement persistent agent crash detection, backoff restart loop, and cascading SIGTERM/SIGKILL tree reaper.
 5. **Phase 5: CLI, Validation & End-to-End Testing**
-   - Implement `silo run --mode=project` with creation-time quota flags.
-   - Author multi-agent orchestration integration test suite verifying least privilege and quota enforcement.
+   - Implement `silo run --mode=project` with creation-time quota flags and `--repo` mounting.
+   - Author multi-agent orchestration integration test suite verifying least privilege, VM sandboxing, and quota enforcement.
