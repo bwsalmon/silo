@@ -27,15 +27,16 @@ push:
   disabled: false           # true: commit locally, never push
 
 toolsets:
-  disabled: [slow-tool]     # repo tool sets not to load (escape hatch)
+  disabled: [slow-tool]     # repo tool sets not to load (escape hatch);
+                            # <alias>.<set> or <alias> for vendored ones
 
 sessions_dir: ~/.silo/sessions   # default
 ```
 
 ## Repositories
 
-`silo run <repo>` takes a name relative to `repos.root`, such as
-`team/payments-context`. Names may contain only letters, digits, `.`,
+`silo run <repo>` and `silo vendor <repo>` take a name relative to
+`repos.root`, such as `team/payments-context`. Names may contain only letters, digits, `.`,
 `_`, `-` and `/`, and may not contain `..`.
 
 - **With `git_base`**, silo clones `<git_base><repo>` into
@@ -68,14 +69,16 @@ Each session gets a directory `<sessions_dir>/<session-id>/` with:
 
 - `audit.jsonl`: one JSON object per event (`session_start`,
   `tool_call`, `approval_requested`, `approved`, `rejected`, `commit`,
-  `pushed`, `push_failed`, `toolset_build`, `toolset_loaded`,
+  `pushed`, `push_failed`, `toolset_started`, `toolset_exited`, `toolset_loaded`,
   `toolset_unloaded`, `tools_list_changed`, `refresh`, `session_end`).
   It is kept after the session ends.
 - `router.sock`: the router's Unix socket. A path too long for a socket
   falls back to `router.sock` in a private (0700) directory under `$TMPDIR`.
 - `tools/`: one-off (scratch) tool sets. Deleted at the end.
-- `build/`: tool-set build output (`${BUILD_DIR}`). Deleted at the end.
-- `logs/<toolset>.stderr`: each tool-set server's stderr.
+- `state/<toolset>/`: each tool set's `$SILO_STATE_DIR`, for build output
+  and the like. Deleted at the end.
+- `logs/<toolset>.log`: what each tool set's processes print to stdout
+  and stderr.
 - The adapter's generated files (`claude-mcp.json`, `gemini/`).
 
 ## Adapters

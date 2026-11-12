@@ -490,3 +490,76 @@ func TestFallbackCall(t *testing.T) {
 		t.Errorf("call = %q", got)
 	}
 }
+
+func TestVendorInSession(t *testing.T) {
+	f := newFixture(t, nil)
+	base := strings.TrimSuffix(f.cfg.Repos.GitBase, "/")
+	upFiles := testutil.Prefixed(".silo/tools/echo", testutil.EchoToolset(t, "up1"))
+	upFiles[".silo/tools/vendor/far/x/start.sh"] = "exit 0\n"
+	up := testutil.Remote(t, base, "shared", upFiles)
+	head := strings.TrimSpace(testutil.Git(t, up, "rev-parse", "main"))
+	args := map[string]any{"repo": "shared.git", "alias": "acme"}
+
+	approveNext(f, no("read it first"))
+	res := f.call("silo.vendor", args)
+	if !res.IsError || !strings.Contains(res.AllText(), "read it first") {
+		t.Fatalf("rejected vendor = %q", res.AllText())
+	}
+	req := f.fake.Requests[0]
+	for _, want := range []string{
+		"Vendor echo from shared.git@main (commit " + head[:12] + ") as acme",
+		"+++ b/.silo/tools/vendor/acme/echo/start.sh",
+		"+exec ", // the vendored code itself
+		"+++ b/.silo/tools/vendor/acme/echo/toolset.yaml",
+		"+  ECHO_PREFIX: up1",
+		"+++ b/.silo/tools/vendor/acme/VENDOR.lock",
+		"+commit: " + head,
+	} {
+		if req.Kind != "commit" || !strings.Contains(req.Title+req.Body, want) {
+			t.Errorf("approval lacks %q:\n%s\n%s", want, req.Title, req.Body)
+		}
+	}
+	if strings.Contains(req.Body, "vendor/far") {
+		t.Error("the upstream's own vendored sets were included")
+	}
+	if !strings.Contains(res.AllText(), "not transitive") {
+		t.Errorf("no transitivity warning: %q", res.AllText())
+	}
+	if _, err := os.Stat(filepath.Join(f.co.Dir, ".silo/tools/vendor")); !os.IsNotExist(err) {
+		t.Fatal("written despite rejection")
+	}
+
+	approveNext(f, yes())
+	got := f.ok("silo.vendor", args)
+	if !strings.Contains(got, "loaded acme.echo (tools: acme.echo.crash, acme.echo.echo,") {
+		t.Fatalf("vendor = %q", got)
+	}
+	if got := f.ok("acme.echo.echo", map[string]any{"text": "x"}); got != "up1:x" {
+		t.Errorf("acme.echo.echo = %q", got)
+	}
+	if out := testutil.Git(t, f.bare, "show", branch+":.silo/tools/vendor/acme/VENDOR.lock"); !strings.Contains(out, "commit: "+head) || !strings.Contains(out, "repo: shared.git") {
+		t.Errorf("pushed lock = %q", out)
+	}
+	if mode := testutil.Git(t, f.co.Dir, "ls-files", "-s", ".silo/tools/vendor/acme/echo/start.sh"); !strings.HasPrefix(mode, "100644") {
+		t.Errorf("mode = %q", mode)
+	}
+
+	// Without update, the alias is taken.
+	if res := f.call("silo.vendor", args); !res.IsError || !strings.Contains(res.AllText(), "already vendored") {
+		t.Errorf("second vendor = %q", res.AllText())
+	}
+	// An update brings the new upstream code, after approval, and
+	// restarts the set.
+	testutil.PushFiles(t, up, "main", testutil.Prefixed(".silo/tools/echo", testutil.EchoToolset(t, "up2")))
+	approveNext(f, yes())
+	got = f.ok("silo.vendor", map[string]any{"alias": "acme", "update": true})
+	if !strings.Contains(got, "reloaded acme.echo") {
+		t.Errorf("update = %q", got)
+	}
+	if body := f.fake.Requests[0].Body; !strings.Contains(body, "-  ECHO_PREFIX: up1") || !strings.Contains(body, "+  ECHO_PREFIX: up2") {
+		t.Errorf("update diff = %s", body)
+	}
+	if got := f.ok("acme.echo.echo", map[string]any{"text": "x"}); got != "up2:x" {
+		t.Errorf("after update = %q", got)
+	}
+}

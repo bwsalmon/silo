@@ -10,9 +10,12 @@ Copy this directory into a git repository of its own to try it:
 
 - `.silo/prompt.md`: what the session is for.
 - `.silo/context/`: background the agent gets with its prompt.
-- `.silo/tools/runbooks/`: a tool set written in Python (standard library
-  only) that searches `runbooks/`.
-- `.silo/tools/clock/`: a tool set written in Go, built when the session
-  starts.
+- `.silo/tools/runbooks/`: a tool set in Python, started by `start.py`,
+  that searches `runbooks/`. It uses the official Python MCP SDK's
+  Streamable HTTP server, and installs the SDK into a cached virtualenv
+  (`~/.cache/silo/runbooks-venv`) the first time if `python3` can't
+  import it.
+- `.silo/tools/clock/`: a tool set in Go, started by `start.sh`, which
+  builds the server into `$SILO_STATE_DIR` and `exec`s it.
 - `.silo/config.yaml`: repository defaults.
 - `runbooks/`: the content the agent maintains.

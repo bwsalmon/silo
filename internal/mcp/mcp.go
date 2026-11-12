@@ -1,8 +1,9 @@
 // Package mcp is the small slice of the Model Context Protocol silo
 // needs: newline-delimited JSON-RPC 2.0 over a byte stream, in both
-// directions. The router uses it to serve the agent CLI and to drive the
-// tool sets' child servers; a tool set written in Go can use Serve to be
-// one.
+// directions, which the router serves the agent CLI with; and the
+// Streamable HTTP transport, whose client (HTTPClient) the router drives
+// tool sets' servers with and whose server side (Server.ServeHTTP) the
+// tests' fake tool sets use.
 //
 // Adapted from silo v4's pkg/mcp/protocol.
 package mcp
