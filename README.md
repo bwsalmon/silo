@@ -53,7 +53,7 @@ named `<toolset>.<tool>`:
 
 | Tool set | Tools | Notes |
 |---|---|---|
-| `repo-read` | `list_files`, `read_file`, `grep`, `git_log`, `git_diff`, `git_show` | Read-only, confined to the checkout (no `..`, symlinks out, or `.git`). |
+| `repo-read` | `list_files`, `read_file`, `grep`, `git_log`, `git_diff`, `git_show` | Read-only, confined to the checkout (no `..`, symlinks out or into `.git`, dangling symlinks, or `.git`). |
 | `repo-write` | `propose_change` | File edits plus a commit message. You approve the full diff; only then does silo write, commit as your configured identity, and push to `silo/<session-id>` (or the configured branch). |
 | `scratch` | `define`, `remove`, `list`, `promote` | One-off tool sets for this session, written under `~/.silo/sessions/<id>/tools/`. Creating or changing one shows you its full code for approval. Deleted when the session ends. `promote` commits one to `.silo/tools/` through a normal `repo-write` approval. |
 | `silo` | `refresh` (+ `list_tools`, `call` for CLIs that ignore `tools/list_changed`) | `refresh` fetches and fast-forwards the checkout, then reloads the tool sets that changed. |
@@ -87,7 +87,9 @@ What silo does guarantee is that approvals come from you. The CLI runs on
 a pseudo-terminal that silo owns. While a prompt is up, silo stops
 passing your keystrokes and the CLI's output through, and reads your
 answer from your terminal itself. Nothing the agent or the CLI does can
-type the answer.
+type the answer. Keys you type in the first half-second after a prompt
+appears are thrown away, so a reply you were typing to the CLI cannot
+answer it by accident.
 
 Every tool call, approval, rejection, commit, push and tool-set reload is
 logged to `~/.silo/sessions/<id>/audit.jsonl`.

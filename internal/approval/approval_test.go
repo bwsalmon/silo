@@ -36,6 +36,26 @@ func TestPrompterApprove(t *testing.T) {
 	}
 }
 
+// TestPrompterIgnoresTypeahead: keystrokes the person was already typing
+// when the prompt appeared must not answer it.
+func TestPrompterIgnoresTypeahead(t *testing.T) {
+	keys := make(chan []byte, 4)
+	keys <- []byte("y\r")
+	var out bytes.Buffer
+	p := &prompter{out: &out, keys: keys, settle: 100 * time.Millisecond}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		keys <- []byte("y\r") // still within the settle window
+		time.Sleep(250 * time.Millisecond)
+		keys <- []byte("n\r\r")
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if d := p.ask(ctx, Request{Kind: "commit", Title: "Commit X", Body: "+x\n"}); d.Approved {
+		t.Fatalf("typeahead approved the request: %q", out.String())
+	}
+}
+
 func TestPrompterShowsControlCharactersInsteadOfActingOnThem(t *testing.T) {
 	keys := make(chan []byte, 2)
 	keys <- []byte("y")

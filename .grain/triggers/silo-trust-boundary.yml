@@ -5,7 +5,9 @@
 # (router/host.go), what repo-read and repo-write let a path reach, where
 # an approved commit is pushed and which tool sets config turns off
 # (gitrepo, config), the MCP protocol layer every call passes through
-# (mcp), and the entry point that wires these together (cmd/silo).
+# (mcp), the audit log every call and approval is recorded in (audit),
+# the module's third-party dependencies (go.mod, go.sum), and the entry
+# point that wires these together (cmd/silo).
 #
 # `sensitive: true` files grain's security review on every pull request
 # that touches these paths and withdraws its auto-merge. `human:
@@ -21,6 +23,9 @@ paths:
   - internal/gitrepo/**
   - internal/config/**
   - internal/mcp/**
+  - internal/audit/**
+  - go.mod
+  - go.sum
   - cmd/silo/**
 gate: true
 human: on-findings

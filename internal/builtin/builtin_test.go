@@ -117,6 +117,11 @@ func TestRepoRead(t *testing.T) {
 	}
 
 	os.Symlink("/etc", filepath.Join(f.co.Dir, "escape"))
+	os.Symlink(".git", filepath.Join(f.co.Dir, "gitlink"))
+	os.Symlink(".git/hooks", filepath.Join(f.co.Dir, "hooklink"))
+	os.Symlink(".git/hooks/post-commit", filepath.Join(f.co.Dir, "dangling-hook"))
+	planted := filepath.Join(t.TempDir(), "planted")
+	os.Symlink(planted, filepath.Join(f.co.Dir, "dangling-out"))
 	// On a case-sensitive file system .GIT is an ordinary directory, so
 	// make one: the refusal must not depend on it being missing.
 	os.MkdirAll(filepath.Join(f.co.Dir, ".GIT"), 0o755)
@@ -128,10 +133,32 @@ func TestRepoRead(t *testing.T) {
 		{"path": ".GIT/config"},
 		{"path": "sub/.Git/config"},
 		{"path": "escape/passwd"},
+		{"path": "gitlink/config"},
+		{"path": "hooklink"},
 	} {
 		if res := f.call("repo-read.read_file", args); !res.IsError {
 			t.Errorf("read_file %v allowed: %s", args, res.AllText())
 		}
+	}
+	// Nor may repo-write plant a hook, or a file outside the repository,
+	// through a symlink, dangling or not.
+	for _, p := range []string{"hooklink/pre-commit", "gitlink/hooks/pre-commit", "dangling-hook", "dangling-out"} {
+		approveNext(f, yes())
+		res := f.call("repo-write.propose_change", map[string]any{
+			"message": "Add a hook",
+			"edits":   []map[string]any{{"path": p, "content": "#!/bin/sh\n"}},
+		})
+		if !res.IsError || f.fake.Asked() != 0 {
+			t.Errorf("propose_change to %s: %v %q (asked %d)", p, res.IsError, res.AllText(), f.fake.Asked())
+		}
+	}
+	for _, p := range []string{".git/hooks/pre-commit", ".git/hooks/post-commit"} {
+		if _, err := os.Stat(filepath.Join(f.co.Dir, p)); err == nil {
+			t.Errorf("%s written through a symlink", p)
+		}
+	}
+	if _, err := os.Lstat(planted); err == nil {
+		t.Error("file planted outside the repository")
 	}
 	if res := f.call("repo-read.git_log", map[string]any{"ref": "--output=/tmp/x"}); !res.IsError {
 		t.Error("option-like ref allowed")

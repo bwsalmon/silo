@@ -97,10 +97,24 @@ func resolvePath(root, rel string) (string, error) {
 			if real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
 				return "", fmt.Errorf("path %q leaves the repository through a symlink", rel)
 			}
+			// A symlink inside the repository may still point into .git
+			// (link -> .git), which would let repo-write plant a hook or
+			// config that git then runs.
+			inside, _ := filepath.Rel(realRoot, real)
+			for _, seg := range strings.Split(inside, string(filepath.Separator)) {
+				if strings.EqualFold(seg, ".git") {
+					return "", fmt.Errorf("path %q reaches .git through a symlink", rel)
+				}
+			}
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", err
+		}
+		// A dangling symlink resolves nowhere yet, but writing to it
+		// creates its target, wherever that is.
+		if fi, err := os.Lstat(probe); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("path %q goes through a symlink whose target does not exist", rel)
 		}
 		parent := filepath.Dir(probe)
 		if parent == probe {

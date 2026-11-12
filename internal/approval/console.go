@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
@@ -140,7 +141,7 @@ func (c *Console) Approve(ctx context.Context, req Request) Decision {
 		c.outMu.Unlock()
 		redraw(ptmx)
 	}()
-	p := &prompter{out: c.out, keys: keys}
+	p := &prompter{out: c.out, keys: keys, settle: Settle}
 	return p.ask(ctx, req)
 }
 
@@ -157,11 +158,18 @@ func redraw(ptmx *os.File) {
 	pty.Setsize(ptmx, sz)
 }
 
+// Settle is how long a prompt ignores keystrokes after it is shown, so
+// that what the person was already typing to the CLI when it appeared
+// (a "y" and Enter meant for something else) cannot answer it.
+var Settle = 500 * time.Millisecond
+
 // prompter renders a request and reads the answer from raw keystrokes.
 type prompter struct {
 	out  io.Writer
 	keys <-chan []byte
 	rest []byte
+	// settle discards keystrokes for this long once the request is shown.
+	settle time.Duration
 }
 
 func (p *prompter) ask(ctx context.Context, req Request) Decision {
@@ -171,6 +179,10 @@ func (p *prompter) ask(ctx context.Context, req Request) Decision {
 	p.print("\x1b[1m" + Sanitize(req.Title) + "\x1b[0m\r\n\r\n")
 	p.print(Render(req.Body))
 	p.print("\r\n")
+	if err := p.discardTypeahead(ctx); err != nil {
+		p.print("\r\nrejected\r\n")
+		return Decision{Reason: "the person cancelled the prompt"}
+	}
 	for {
 		ans, err := p.line(ctx, "\x1b[1;33mApprove? [y/n]: \x1b[0m")
 		if err != nil {
@@ -193,6 +205,26 @@ func (p *prompter) ask(ctx context.Context, req Request) Decision {
 }
 
 var errCancelled = errors.New("cancelled")
+
+// discardTypeahead drops every keystroke that arrives before settle has
+// passed, and any already queued.
+func (p *prompter) discardTypeahead(ctx context.Context) error {
+	p.rest = nil
+	if p.settle <= 0 {
+		return nil
+	}
+	t := time.NewTimer(p.settle)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-p.keys:
+		case <-t.C:
+			return nil
+		}
+	}
+}
 
 // line reads one line, echoing it, with backspace; Ctrl-C or Ctrl-D
 // cancels.
