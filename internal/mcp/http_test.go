@@ -34,12 +34,18 @@ func TestHTTPClientSSE(t *testing.T) {
 		if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") || !strings.Contains(r.Header.Get("Accept"), "application/json") {
 			problems = append(problems, msg.Method+": Accept "+r.Header.Get("Accept"))
 		}
-		if msg.Method != "initialize" && (r.Header.Get(SessionHeader) != "s-1" || r.Header.Get(ProtocolHeader) != "2025-03-26") {
+		// The answer to the ping in initialize's stream may go before the
+		// protocol version is known; the session id is known by then.
+		wantProtocol := msg.Method != "" || string(msg.ID) != `"srv-ping"`
+		if msg.Method != "initialize" && (r.Header.Get(SessionHeader) != "s-1" || (wantProtocol && r.Header.Get(ProtocolHeader) != "2025-03-26")) {
 			problems = append(problems, fmt.Sprintf("%s/%s: headers %v", msg.Method, msg.ID, r.Header))
 		}
 		mu.Unlock()
 		if msg.Method == "" && string(msg.ID) == `"srv-ping"` { // our answer to the ping
-			pinged <- struct{}{}
+			select {
+			case pinged <- struct{}{}:
+			default: // every stream pings; one answer is enough
+			}
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
