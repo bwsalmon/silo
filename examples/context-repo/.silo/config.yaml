@@ -1,0 +1,6 @@
+# Repository defaults for silo sessions (docs/repo-layout.md).
+# Approved commits go to this branch instead of silo/<session-id>.
+# push_branch: runbook-updates
+context:
+  mode: inline
+  max_inline_bytes: 65536

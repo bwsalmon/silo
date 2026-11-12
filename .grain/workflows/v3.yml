@@ -1,8 +1,11 @@
-# The v3 CI (v3/README.md), run by grain on every push and pull request:
-# it formats, builds, vets and race-tests the v3 module,
-# github.com/bwsalmon/silo/v3. This is the default CI gate; the v2
-# workflows (hub.yml, ui.yml, deploy.yml, grain-interop.yml,
-# grainfiles.yml, hub-nightly.yml) run only when dispatched by hand.
+# silo's CI, run by grain on every push and pull request: it formats,
+# builds, vets and race-tests the module (cmd/silo and internal/...),
+# including the end-to-end session test with a fake agent CLI.
+#
+# The file and job keep the name "v3" because the default branch's merge
+# gate requires a job .grain/workflows/v3.yml:v3, and a branch cannot
+# change its own gate. Rename both to "silo" in a follow-up change once
+# this one has merged.
 name: v3
 
 on:
@@ -25,17 +28,17 @@ jobs:
     steps:
       - name: Format
         run: |
-          unformatted="$(cd v3 && gofmt -l .)"
+          unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
             echo "gofmt needed on:"; echo "$unformatted"
             exit 1
           fi
 
       - name: Build
-        run: cd v3 && go build ./...
+        run: go build ./...
 
       - name: Vet
-        run: cd v3 && go vet ./...
+        run: go vet ./...
 
       - name: Test
-        run: cd v3 && go test -race -timeout 10m ./...
+        run: go test -race -timeout 10m ./...

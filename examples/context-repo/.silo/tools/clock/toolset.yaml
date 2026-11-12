@@ -1,0 +1,7 @@
+name: clock
+description: The current time, in any time zone.
+# Built once when the session starts (and again whenever a commit
+# changes this directory). The binary goes to ${BUILD_DIR}, outside the
+# checkout, so the build leaves the working tree clean.
+build: [go, build, -o, "${BUILD_DIR}/clock", .]
+run: ["${BUILD_DIR}/clock"]
