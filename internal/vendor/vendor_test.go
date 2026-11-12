@@ -200,3 +200,16 @@ func TestParseSpec(t *testing.T) {
 		t.Errorf("got %q %q", r, ref)
 	}
 }
+
+func TestCheckPath(t *testing.T) {
+	for _, p := range []string{"start.sh", "lib/a.py", ".hidden/x"} {
+		if err := checkPath(p); err != nil {
+			t.Errorf("%q: %v", p, err)
+		}
+	}
+	for _, p := range []string{"../x", "a/../../x", "a//b", "./x", ".git/hooks/pre-commit", "a/.GIT/x", `a\..\x`, "a\x00b"} {
+		if checkPath(p) == nil {
+			t.Errorf("%q accepted", p)
+		}
+	}
+}

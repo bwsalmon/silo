@@ -184,6 +184,9 @@ func Build(ctx context.Context, up *gitrepo.Checkout, req Request) (*Plan, error
 		top := map[string]bool{}
 		var manifest *string
 		for _, e := range ents {
+			if err := checkPath(e.rest); err != nil {
+				return nil, fmt.Errorf("%s/%s/%s: %v", config.ToolsDir, set, e.rest, err)
+			}
 			if e.typ != "blob" {
 				return nil, fmt.Errorf("%s/%s/%s is a %s; only plain files can be vendored", config.ToolsDir, set, e.rest, e.typ)
 			}
@@ -223,6 +226,18 @@ func Build(ctx context.Context, up *gitrepo.Checkout, req Request) (*Plan, error
 	p.Files = append(p.Files, File{Path: Dir(req.Alias) + "/" + config.VendorLock, Content: p.Lock.Render(req.Alias), Mode: 0o644})
 	sort.Slice(p.Files, func(i, j int) bool { return p.Files[i].Path < p.Files[j].Path })
 	return p, nil
+}
+
+// checkPath refuses a path from the upstream's tree that could land
+// outside the tool set's directory, or in a .git, when written out. git
+// itself never makes such a tree, but a crafted one could.
+func checkPath(p string) error {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.EqualFold(seg, ".git") || strings.ContainsAny(seg, "\\\x00") {
+			return errors.New("unsafe path in the upstream tree")
+		}
+	}
+	return nil
 }
 
 // Render is the lock file's contents.

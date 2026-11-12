@@ -106,9 +106,6 @@ func (h *Host) ExitedRepoSets() []string {
 
 func (h *Host) loadRepoSet(ctx context.Context, key string) (string, error) {
 	name := config.ToolsetName(key)
-	if err := config.ValidToolsetKey(key); err != nil {
-		return "", err
-	}
 	dir := filepath.Join(h.Checkout, config.ToolsDir, filepath.FromSlash(key))
 	// A directory a deletion left empty is as good as gone: git does
 	// not keep empty directories.
@@ -119,6 +116,9 @@ func (h *Host) loadRepoSet(ctx context.Context, key string) (string, error) {
 		}
 		return "nothing to load for " + name, nil
 	} else if err != nil {
+		return "", err
+	}
+	if err := config.ValidToolsetKey(key); err != nil {
 		return "", err
 	}
 	alias, _, vendored := config.VendoredKey(key)
