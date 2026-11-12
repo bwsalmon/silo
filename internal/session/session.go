@@ -60,7 +60,10 @@ type Session struct {
 	opts     Options
 	audit    *audit.File
 	listener net.Listener
-	cancel   context.CancelFunc
+	// socketDir is the private temporary directory holding Socket when
+	// the session directory's path is too long for one.
+	socketDir string
+	cancel    context.CancelFunc
 }
 
 // NewID returns a session id: a UTC timestamp and a random suffix.
@@ -186,7 +189,14 @@ func Start(ctx context.Context, opts Options) (*Session, error) {
 func (s *Session) listen() error {
 	s.Socket = filepath.Join(s.Dir, "router.sock")
 	if len(s.Socket) > 100 { // sun_path is 104-108 bytes
-		s.Socket = filepath.Join(os.TempDir(), "silo-"+s.ID+".sock")
+		// A directory only this user can enter, so nobody else can
+		// connect in the moment before the chmod below.
+		dir, err := os.MkdirTemp("", "silo-")
+		if err != nil {
+			return err
+		}
+		s.socketDir = dir
+		s.Socket = filepath.Join(dir, "router.sock")
 	}
 	l, err := net.Listen("unix", s.Socket)
 	if err != nil {
@@ -240,6 +250,9 @@ func (s *Session) Close() {
 	if s.listener != nil {
 		s.listener.Close()
 		os.Remove(s.Socket)
+	}
+	if s.socketDir != "" {
+		os.RemoveAll(s.socketDir)
 	}
 	if s.cancel != nil {
 		s.cancel()

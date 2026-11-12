@@ -72,7 +72,7 @@ Each session gets a directory `<sessions_dir>/<session-id>/` with:
   `toolset_unloaded`, `tools_list_changed`, `refresh`, `session_end`).
   It is kept after the session ends.
 - `router.sock`: the router's Unix socket. A path too long for a socket
-  falls back to `$TMPDIR/silo-<id>.sock`.
+  falls back to `router.sock` in a private (0700) directory under `$TMPDIR`.
 - `tools/`: one-off (scratch) tool sets. Deleted at the end.
 - `build/`: tool-set build output (`${BUILD_DIR}`). Deleted at the end.
 - `logs/<toolset>.stderr`: each tool-set server's stderr.

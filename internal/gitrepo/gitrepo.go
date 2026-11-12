@@ -30,8 +30,11 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	// Never prompt on the person's terminal for credentials: silo owns
-	// that terminal, and a prompt there would hang the session.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "LC_ALL=C")
+	// that terminal, and a prompt there would hang the session. Paths
+	// after "--" come from the agent, so they are file names, never
+	// pathspec magic (":(glob)**" or ":/" would make `git add` stage
+	// files the person was not shown).
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

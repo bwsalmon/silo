@@ -225,6 +225,41 @@ func TestProposeApprovedCommitsAndPushes(t *testing.T) {
 	}
 }
 
+// An edit's path is a file name, never a git pathspec: ":(glob)**" must
+// not make the commit sweep up files the person was not shown.
+func TestProposeCommitsOnlyTheShownFiles(t *testing.T) {
+	f := newFixture(t, map[string]string{"README.md": "# context\n"})
+	if err := os.WriteFile(filepath.Join(f.co.Dir, "unshown.txt"), []byte("not in the diff\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	approveNext(f, yes())
+	f.ok("repo-write.propose_change", map[string]any{
+		"message": "Add a file",
+		"edits":   []map[string]any{{"path": ":(glob)**", "content": "x\n"}},
+	})
+	files := testutil.Git(t, f.bare, "show", "--name-only", "--format=", branch)
+	if strings.TrimSpace(files) != ":(glob)**" {
+		t.Errorf("pushed commit touches %q, want only the proposed file", files)
+	}
+}
+
+// Editing a symlink would write its target while the person is shown,
+// and git commits, the link's path; such an edit is refused.
+func TestProposeRefusesEditThroughSymlinkedFile(t *testing.T) {
+	f := newFixture(t, map[string]string{"README.md": "# context\n"})
+	os.Symlink("README.md", filepath.Join(f.co.Dir, "alias.md"))
+	res := f.call("repo-write.propose_change", map[string]any{
+		"message": "m",
+		"edits":   []map[string]any{{"path": "alias.md", "content": "changed\n"}},
+	})
+	if !res.IsError {
+		t.Errorf("edit through a symlink accepted: %s", res.AllText())
+	}
+	if f.fake.Asked() != 0 {
+		t.Errorf("asked %d times for a refused proposal", f.fake.Asked())
+	}
+}
+
 func TestProposeInvalidEditNeverAsks(t *testing.T) {
 	f := newFixture(t, nil)
 	for _, edits := range [][]map[string]any{

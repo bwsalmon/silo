@@ -153,8 +153,9 @@ func (w *Writer) Propose(ctx context.Context, message string, edits []Edit, afte
 	if _, err := w.Repo.Git(ctx, append([]string{"add", "-A", "--"}, paths...)...); err != nil {
 		return w.rollback(ctx, err)
 	}
-	if _, err := w.Repo.Git(ctx, "-c", "user.name="+w.Identity.Name, "-c", "user.email="+w.Identity.Email,
-		"commit", "-q", "-m", message); err != nil {
+	// Only the proposed paths are committed, whatever else is staged.
+	commit := []string{"-c", "user.name=" + w.Identity.Name, "-c", "user.email=" + w.Identity.Email, "commit", "-q", "-m", message, "--"}
+	if _, err := w.Repo.Git(ctx, append(commit, paths...)...); err != nil {
 		return w.rollback(ctx, err)
 	}
 	sha, _ := w.Repo.Head(ctx)
@@ -219,6 +220,11 @@ func (w *Writer) plan(edits []Edit) ([]*change, error) {
 		rel = filepath.ToSlash(rel)
 		if rel == "." {
 			return nil, fmt.Errorf("edit %d: a file path is required", i+1)
+		}
+		// Writing a symlink writes its target, while the diff shows (and
+		// git commits) the link's path.
+		if fi, err := os.Lstat(abs); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("edit %d: %s is a symlink; edit the file it points to instead", i+1, rel)
 		}
 		c := byPath[rel]
 		if c == nil {
