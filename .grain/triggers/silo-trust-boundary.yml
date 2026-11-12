@@ -2,7 +2,10 @@
 # effect (the approval prompt and the terminal it reads from), which tools
 # the agent CLI gets and which of its own are turned off (the adapters),
 # what the router lets through, what a tool set's child process runs with
-# (router/host.go), and what repo-read and repo-write let a path reach.
+# (router/host.go), what repo-read and repo-write let a path reach, where
+# an approved commit is pushed and which tool sets config turns off
+# (gitrepo, config), the MCP protocol layer every call passes through
+# (mcp), and the entry point that wires these together (cmd/silo).
 #
 # `sensitive: true` files grain's security review on every pull request
 # that touches these paths and withdraws its auto-merge. `human:
@@ -15,6 +18,10 @@ paths:
   - internal/router/**
   - internal/builtin/**
   - internal/session/**
+  - internal/gitrepo/**
+  - internal/config/**
+  - internal/mcp/**
+  - cmd/silo/**
 gate: true
 human: on-findings
 sensitive: true

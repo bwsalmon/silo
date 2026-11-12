@@ -78,7 +78,9 @@ func resolvePath(root, rel string) (string, error) {
 		return "", fmt.Errorf("path %q leaves the repository", rel)
 	}
 	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
-		if seg == ".git" {
+		// Case-insensitively: on macOS's and Windows' default file
+		// systems .GIT is the same directory as .git.
+		if strings.EqualFold(seg, ".git") {
 			return "", fmt.Errorf("path %q is inside .git", rel)
 		}
 	}

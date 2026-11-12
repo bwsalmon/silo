@@ -165,8 +165,10 @@ type prompter struct {
 }
 
 func (p *prompter) ask(ctx context.Context, req Request) Decision {
-	p.print("\r\n\x1b[1;33m─── silo: approval needed ───\x1b[0m\r\n")
-	p.print("\x1b[1m" + req.Title + "\x1b[0m\r\n\r\n")
+	// The leading reset clears any colour or concealment the CLI's output
+	// left set, so the request is shown as written.
+	p.print("\x1b[0m\r\n\x1b[1;33m─── silo: approval needed ───\x1b[0m\r\n")
+	p.print("\x1b[1m" + Sanitize(req.Title) + "\x1b[0m\r\n\r\n")
 	p.print(Render(req.Body))
 	p.print("\r\n")
 	for {
@@ -232,11 +234,38 @@ func (p *prompter) line(ctx context.Context, prompt string) (string, error) {
 
 func (p *prompter) print(s string) { io.WriteString(p.out, s) }
 
+// Sanitize makes agent-written text safe to print on the person's
+// terminal: every control character but newline and tab (escape
+// sequences, carriage returns, backspaces), every C1 control and every
+// bidirectional override is shown as a visible \x.. or \u.... escape
+// instead of being acted on, and invalid UTF-8 as U+FFFD. Without this a
+// commit message or file could move the cursor or clear the screen and
+// show the person a different change from the one they approve.
+func Sanitize(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, "�") {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, "\\x%02x", r)
+		case r >= 0x80 && r <= 0x9f,
+			r >= 0x202a && r <= 0x202e,
+			r >= 0x2066 && r <= 0x2069,
+			r == 0x200e || r == 0x200f || r == 0x061c:
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // Render formats a request body for a raw-mode terminal, colouring diff
-// lines.
+// lines. The body is sanitized first (Sanitize).
 func Render(body string) string {
 	var b bytes.Buffer
-	for _, l := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+	for _, l := range strings.Split(strings.TrimRight(Sanitize(body), "\n"), "\n") {
 		switch {
 		case strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"):
 			fmt.Fprintf(&b, "\x1b[1m%s\x1b[0m\r\n", l)

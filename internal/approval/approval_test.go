@@ -36,6 +36,32 @@ func TestPrompterApprove(t *testing.T) {
 	}
 }
 
+func TestPrompterShowsControlCharactersInsteadOfActingOnThem(t *testing.T) {
+	keys := make(chan []byte, 2)
+	keys <- []byte("y")
+	keys <- []byte("\r")
+	var out bytes.Buffer
+	p := &prompter{out: &out, keys: keys}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	p.ask(ctx, Request{
+		Kind:  "commit",
+		Title: "Fix typo\x1b[2J\rhidden",
+		Body:  "+ok\n+evil\x1b[1A\x1b[2K\b\u202e\u009b\n",
+	})
+	got := out.String()
+	for _, bad := range []string{"\x1b[2J", "\x1b[1A", "\x1b[2K", "\b", "\u202e", "\u009b", "\rhidden"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("output contains %q unescaped: %q", bad, got)
+		}
+	}
+	for _, want := range []string{`Fix typo\x1b[2J\x0dhidden`, `+evil\x1b[1A\x1b[2K\x08\u202e\u009b`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output lacks %q: %q", want, got)
+		}
+	}
+}
+
 func TestPrompterRejectWithReason(t *testing.T) {
 	d, _ := ask(t, "n\rwrong fill\x7f\x7fle\r")
 	if d.Approved || d.Reason != "wrong file" {

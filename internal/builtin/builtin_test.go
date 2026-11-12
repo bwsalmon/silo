@@ -117,10 +117,16 @@ func TestRepoRead(t *testing.T) {
 	}
 
 	os.Symlink("/etc", filepath.Join(f.co.Dir, "escape"))
+	// On a case-sensitive file system .GIT is an ordinary directory, so
+	// make one: the refusal must not depend on it being missing.
+	os.MkdirAll(filepath.Join(f.co.Dir, ".GIT"), 0o755)
+	os.WriteFile(filepath.Join(f.co.Dir, ".GIT", "config"), []byte("x\n"), 0o644)
 	for _, args := range []map[string]any{
 		{"path": "../outside"},
 		{"path": "/etc/passwd"},
 		{"path": ".git/config"},
+		{"path": ".GIT/config"},
+		{"path": "sub/.Git/config"},
 		{"path": "escape/passwd"},
 	} {
 		if res := f.call("repo-read.read_file", args); !res.IsError {
