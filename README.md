@@ -1,199 +1,127 @@
-# Grain Hub
+# silo
 
-**Grain Hub** (formerly **Silo**; the repository and Go module remain
-`github.com/bwsalmon/silo` until code migration tasks run) is the
-**multi-tenant coordination plane that links standalone Grain
-deployments together**. The design is [`docs/hub.md`](docs/hub.md).
+silo runs an agent CLI (Claude Code, Codex or Gemini CLI) in your
+terminal against a **context repository**: a git repository that holds
+the session's prompt, its context documents and its tools. The agent gets
+no shell and no file-editing tools of its own. It works only through the
+MCP tools silo grants. Every change it wants to make to the repository is
+shown to you as a diff, and nothing is written until you approve it.
 
-A **Grain deployment** (a **node** as the hub sees it) is a standalone,
-single-tenant execution engine on a workstation, Cloudtop, or VM. It
-owns its own backlog, git checkouts, sandboxes, agent sessions, and
-merge queue, and is complete on its own. Each Grain deployment is the
-Policy Enforcement Point for its own runs: it enforces its own local
-policy on which repository and folder sources it trusts and what
-capabilities or network access a task may use.
-
-**Grain Hub** sits above single-tenant Grain deployments and is defined
-around two core responsibilities:
-
-1. **Multi-tenant UI and reachability across Grain deployments:**
-   - **Outbound node reachability (`hub/rendezvous`, `hub/registry`):**
-     Each single-tenant Grain deployment dials outbound to the hub over
-     WebSocket (`wss://<hub>/v1/nodes/connect`, subprotocol
-     `silo-node.v1`), so nodes behind NAT or corporate firewalls need no
-     inbound ports.
-   - **Human sign-on and access control (`hub/identity`,
-     `hub/directory`):** Humans authenticate via Google Cloud IAP or
-     OIDC; the team directory governs which users and teams can see and
-     interact with which Grain deployments.
-   - **Multi-tenant UI, live event mirroring, and view-through
-     (`hub/ui`, `hub/live`, `hub/nodeui`):** The hub serves a
-     multi-tenant overview UI across all Grain deployments the signed-in
-     user can access, mirroring task and process lifecycle and
-     conversation events streamed from the nodes (`hub/live`). Diffs,
-     tool logs, and each node's own full UI
-     (`<node>.nodes.<hub-domain>`, `hub/nodeui`) are streamed on demand
-     over the reverse tunnel (`Server.Open` `view` and `http` streams).
-     Interactive actions from the UI (chat messages, approvals,
-     cancellations) are routed over the tunnel to the Grain deployment
-     that owns the task.
-2. **Discovery and subscription for `.task.md` and `.process.md`
-   Grainfiles:**
-   - **Git is the source of truth for cross-repo tasks and processes:**
-     Rather than the hub maintaining a parallel task-submission backlog,
-     imperative task dispatcher (`offer`/`accept`/`refuse`/`resume`,
-     lost-task requeueing), and PDP JWT claim-signing, cross-repository
-     tasks and standing processes are authored in git as `.task.md` and
-     `.process.md` files ([`docs/grainfiles.md`](docs/grainfiles.md),
-     [`docs/grainfiles-spec.md`](docs/grainfiles-spec.md)).
-   - **Source authority:** As defined in
-     [`docs/grainfiles-spec.md`](docs/grainfiles-spec.md), the
-     authoritative source of a `.task.md` or `.process.md` is the URL of
-     the git repository and folder where the file lives, and `recipient`
-     (a plain `https://` URL or repo-local path) names the deployment
-     intended to execute it. Each Grain deployment enforces its own
-     local policy on which repository and folder sources it trusts.
-   - **Subscriptions (`recipient` + watched repos/processes):** A Grain
-     deployment registers and updates its subscriptions with the hub:
-     its own `recipient` deployment URL(s), plus any repositories,
-     folder paths, or shared `.process.md` / `.task.md` URLs it
-     subscribes to.
-   - **Indexing and webhook/event notification:** Because Grain
-     deployments run behind NAT/firewalls and should not poll every
-     repository in an organization, the hub receives forge webhooks
-     (`push`, `pull_request`, `merge`) and indexes Grainfile metadata
-     across connected repositories (file `https://` URL, commit/ref, and
-     parsed front matter: `title`, `recipient`, `requestor`, `draft`,
-     `not_before`, `created_at`, `references`, `depends_on`,
-     `trigger_with`, `on`, `gate` — metadata only, no source code at
-     rest). When a non-draft `.task.md` or `.process.md` matching a
-     deployment's `recipient` or subscriptions is added or updated, or
-     when a forge event (`push`, `pull_request`, `merge`) matches a
-     subscribed `.process.md` trigger, the hub notifies the subscribed
-     Grain deployment over its connection (and answers catch-up queries
-     on connect/reconnect) so the node can fetch the Grainfile from git
-     and execute it directly. When `.task.md` or `.process.md` files
-     declare cross-deployment `depends_on` or `trigger_with` references,
-     the hub routes completion and trigger notices between the
-     subscribed deployments based on the task and process lifecycle
-     events nodes report.
-
-Grain Hub **holds no source code at rest, runs no sandboxes, and makes
-no git checkouts**. Repository checkouts, diffs, and sandbox logs stay
-on the Grain deployment that owns the run; the hub indexes only
-Grainfile front-matter metadata and mirrors lifecycle and conversation
-events ([`docs/hub.md`](docs/hub.md) §1, §7.2).
-
-## Layout
-
-The repository root is one Go module, `github.com/bwsalmon/silo`
-(code identifiers such as `cmd/silo`, `SILO_HUB_*`, and `silo-node.v1`
-reflect the current build so `grain-interop` and existing tests remain
-unbroken until code migration tasks run).
-
-| Path | What it is |
-| --- | --- |
-| `hub/registry` | The in-memory node directory (hub.md §3): registration, ownership of node IDs, status, subscriptions, and (in the current build) slot claims. |
-| `hub/rendezvous` | The node's outbound WebSocket to the hub and its reverse tunnel (hub.md §4): authentication bound to a node ID, admission, heartbeats, streams both ways, and the per-caller filtered directory. |
-| `hub/identity` | Human sign-on (hub.md §5.1): IAP assertion and OIDC ID-token verification against the issuer's JWKS, and the OIDC relying party (code flow with PKCE, signed session cookie). |
-| `hub/directory` | The team directory in PostgreSQL (SQLite in development and tests; hub.md §5.2, §5.3): teams, members and owning teams, node tokens stored as hashes, `Admit`, per-team visibility, and its HTTP API. |
-| `hub/live` | Live events and view-through (hub.md §7): the event streams nodes open per task/process run, classification by schema (lifecycle and conversation stored, the token stream in an in-memory ring, node-only events kept as references), fan-out over SSE and WebSocket from a cursor, and on-demand view-through to a node's diffs and tool logs. |
-| `hub/nodeui` | Per-node UI view-through (`<node>.nodes.<hub-domain>`, hub.md §11): streams a node's own full web UI to authorized viewers over `Server.Open` `http` streams. |
-| `hub/ui`, `ui/` | The hub's multi-tenant web UI ([`docs/ui.md`](docs/ui.md)): its React source in `ui/`, built into `hub/ui/static/app` and embedded by `hub/ui`, which serves it at `/`. Without a built bundle the hub embeds a placeholder page. |
-| `hub/notify` | The hub's wake-ups and event notices between its pods (hub.md §2.2.4): PostgreSQL `NOTIFY silo_hub`, listened for on a connection of each pod's own. |
-| `hub/server` | Grain Hub as one HTTP server over one database (hub.md §2.1): every part above wired together, `/healthz` and `/readyz`, and a graceful shutdown that says goodbye to nodes. |
-| `hub/tasks`, `hub/claims` | Legacy imperative task backlog, dispatcher (`offer`/`accept`/`refuse`/`resume`, lost-task requeueing), and JWT claim-signing in the current build (hub.md §6.6), retained alongside `hub/conformance` until the Grainfile subscription migration tasks run. Also carries interactive UI action routing (cancellations, approvals, session messages). |
-| `hub/conformance` | The node-interface conformance kit ([`docs/conformance.md`](docs/conformance.md)): it runs a hub, drives a Grain under test through scripted scenarios over the hub's API, and reports a verdict per scenario. Its conformance workloads are in `hub/conformance/workload`, and `hub/conformance/refgrain` is the reference fake Grain that passes it. |
-| `cmd/silo` | The `silo` command: `silo hub serve`, `silo hub migrate` (create the tables as the schema's owner and grant the role the hub serves as its rows), `silo hub team` and `silo hub token` to bootstrap a hub's database, and `silo conformance` and `silo conformance grain`, the conformance kit and the reference Grain. |
-| `Dockerfile`, `deploy/` | The hub's image, its GKE manifests (`deploy/kubernetes/hub`) and terraform (`deploy/terraform/hub`), for GKE behind IAP: the runbook is [`docs/deploy.md`](docs/deploy.md). |
-| `events` | The schema of the events a node streams to the hub for each run (hub.md §7.1), copied from the retired runner's `old/events`. |
-| `internal/tunnel/mux` | The stream multiplexer the rendezvous carries, copied from grain's `pkg/tunnel/mux`. |
-| `internal/pgtest` | Throwaway PostgreSQL servers for tests. |
-| `internal/fakeoidc`, `scripts/` | The `grain-interop` CI job (below): `scripts/grain-interop.sh` runs this hub against a real grain, with a fake OIDC provider and a fake GitHub API. |
-| [`docs/hub.md`](docs/hub.md) | Grain Hub's architecture and design around multi-tenant UI/reachability and `.task.md` / `.process.md` Grainfile discovery and subscriptions, plus its implementation stages (§9). |
-| [`docs/hub-interface.md`](docs/hub-interface.md) | The Grain Hub node interface: the messages a Grain deployment speaks to the hub over the rendezvous tunnel (registration, Grainfile subscriptions, webhook/trigger notifications and catch-up, cross-deployment completion notices, interactive UI actions, event streaming, and `view` / `http` streams). |
-| [`docs/grainfiles.md`](docs/grainfiles.md), [`docs/grainfiles-spec.md`](docs/grainfiles-spec.md) | Grainfiles: discrete tasks (`.task.md`) and standing processes (`.process.md`) kept as Markdown with YAML front matter in git and executed directly by deployments. The design, and **The Grainfile Format**, its normative spec, with the schemas in `schemas/grainfiles/`, the `grainlint` validator in `tools/grainfiles/` (the `grainfiles` CI job) and the worked example in `examples/grainfiles/`. |
-| [`docs/deploy.md`](docs/deploy.md) | How to deploy Grain Hub on GKE behind IAP, in `bsalmon-gke-dev`. |
-| [`docs/conformance.md`](docs/conformance.md) | The conformance kit: how to check that a Grain speaks the hub interface, the scenarios, and the report. |
-| [`docs/ui.md`](docs/ui.md) | The hub's human web UI (hub.md §9, stage 2.6): the options, the chosen one, its stages, and how to run it locally (§7.1). |
-| [`docs/threat-model.md`](docs/threat-model.md) | The threat model of the Grain + Grain Hub system: assets, actors, trust boundaries, threats, the numbered security invariants (`INV-`) that audits and security tests cite, and the audit plan. |
-| `old/` | Retired code, not part of the hub: the former single-run runner, kept for porting into bwsalmon/grain ([`old/README.md`](old/README.md)). It is a separate Go module, and neither imports the other. |
-
-## Building and testing
+## Quick start
 
 ```sh
-gofmt -l cmd hub internal events
-go build ./... && go vet ./... && go test -race ./...
-python3 tools/grainfiles/grainlint.py --self-test
-python3 tools/grainfiles/grainlint.py examples/grainfiles
+go install github.com/bwsalmon/silo/cmd/silo@latest
+
+mkdir -p ~/.silo
+cat > ~/.silo/config.yaml <<'EOF'
+cli:
+  name: claude            # or codex, gemini
+repos:
+  root: ~/context         # where checkouts live
+  git_base: "git@github.com:"   # optional: clone <git_base><repo> if missing
+identity:
+  name: Your Name
+  email: you@example.com
+EOF
+
+silo run team/payments-context            # the repo's default branch
+silo run --branch staging team/payments-context
 ```
 
-grain CI runs the Go suite in `.grain/workflows/hub.yml` and the
-Grainfile linter checks in `.grain/workflows/grainfiles.yml`. The hub's
-store is PostgreSQL on Cloud SQL in every deployment
-([`docs/deploy.md`](docs/deploy.md)); SQLite is for local development
-and tests only. The stores' tests (`hub/directory`, `hub/tasks`,
-`hub/live`, `hub/registry`, `hub/lease`, `hub/notify`, `hub/server`)
-run against a throwaway PostgreSQL (`internal/pgtest`) as well as
-SQLite where PostgreSQL's server binaries are installed; CI installs
-them and sets `SILO_REQUIRE_POSTGRES=1`, which turns a missing server
-into a failure rather than a skip.
+`silo run <repo>` then:
 
-`.grain/workflows/ui.yml` builds and tests the web UI (`ui/`, Node 20.19
-or later) and the TypeScript SDK (`sdk/ts`): `npm ci`, `npm run build`
-(tsc and Vite), `npm test` (vitest), and then `hub/ui`'s and
-`hub/server`'s tests with the bundle embedded. The Go build above needs
-no Node: without the bundle it embeds a placeholder page.
-[`docs/ui.md`](docs/ui.md) §7.1 says how to run the UI locally.
+1. clones `<git_base><repo>` into `<root>/<repo>` (or uses the repository
+   already there), fetches it, and checks out a session branch
+   `silo/<session-id>` from the base branch;
+2. starts silo's MCP router with the built-in tool sets and every tool
+   set the repository defines in `.silo/tools/`;
+3. starts the CLI in the checkout, with `.silo/prompt.md` and
+   `.silo/context/` loaded into its system prompt, its own shell and
+   edit tools turned off, and silo's router as its only MCP server.
 
-`.grain/workflows/deploy.yml` builds the image (the UI's bundle
-included), validates the manifests on a kind cluster
-(`deploy/kubernetes/hub/validate.sh`) and runs `terraform validate` and
-`terraform test` (mock providers) in `deploy/terraform/hub`. Nothing is
-applied anywhere.
+You chat with the CLI as usual. When the agent proposes a commit or a
+one-off tool, silo pauses the CLI, shows you the full diff or code, and
+asks `Approve? [y/n]`. A rejection's reason goes back to the agent.
 
-`.grain/workflows/grain-interop.yml` tests this commit's hub against
-**real grain**, which the fake Grains in `hub/*`'s own tests can't
-stand in for. The job reads bwsalmon/grain through the git proxy
-(`capabilities: ["repo-read:bwsalmon/grain"]`) and builds grain's
-`main` twice: once as it is, with the client it pins, and once against
-this commit's hub packages. It runs on every push and pull request, and
-takes about two and a half minutes. `scripts/grain-interop.sh` does the
-work. It starts `silo hub serve -dev` on SQLite, signing a test user in
-through a fake OIDC provider (`internal/fakeoidc`), and starts a grain
-daemon pointed at it. The daemon runs with a local policy and a fake
-GitHub API (`scripts/fake-github.py`), and with no sandboxes and no CI,
-so no agent or model runs. It then checks the current build's node
-interface ([`docs/hub-interface.md`](docs/hub-interface.md)) as far as
-grain supports it:
+To try it on the example repository, see
+[examples/context-repo](examples/context-repo/README.md).
 
-- grain builds, and its hub tests pass, against this commit;
-- `grain hub login` mints the node token;
-- grain shows `online` in `GET /v1/nodes`;
-- a task filed through `POST /v1/tasks` is accepted;
-- a task for a repository outside grain's policy is refused;
-- a cancel on the hub closes the task on grain;
-- a task ended on grain reaches the hub as its result.
+## What the agent gets
 
-Stages grain doesn't support yet (events, view-through, merge) are
-skipped, and the log says so. A red job is a real mismatch. On a
-failure the script reruns the same check against the repository's base
-commit, and its last lines say which side changed, by both commits'
-short SHAs. To run it by hand:
-`GRAIN_SRC=/path/to/grain scripts/grain-interop.sh`.
+The CLI connects to exactly one MCP server: silo's router. Tools are
+named `<toolset>.<tool>`:
 
-The retired runner in `old/` is not tested by default: its workflow,
-`.grain/workflows/old.yml`, runs only when dispatched by hand
-(`workflow_dispatch`), and nothing on a push or pull request builds it
-([`old/README.md`](old/README.md)).
+| Tool set | Tools | Notes |
+|---|---|---|
+| `repo-read` | `list_files`, `read_file`, `grep`, `git_log`, `git_diff`, `git_show` | Read-only, confined to the checkout (no `..`, symlinks out, or `.git`). |
+| `repo-write` | `propose_change` | File edits plus a commit message. You approve the full diff; only then does silo write, commit as your configured identity, and push to `silo/<session-id>` (or the configured branch). |
+| `scratch` | `define`, `remove`, `list`, `promote` | One-off tool sets for this session, written under `~/.silo/sessions/<id>/tools/`. Creating or changing one shows you its full code for approval. Deleted when the session ends. `promote` commits one to `.silo/tools/` through a normal `repo-write` approval. |
+| `silo` | `refresh` (+ `list_tools`, `call` for CLIs that ignore `tools/list_changed`) | `refresh` fetches and fast-forwards the checkout, then reloads the tool sets that changed. |
+| `<name>` | whatever `.silo/tools/<name>/` serves | Every tool set committed to the repository is enabled. |
 
-To run a hub locally, on SQLite and signing callers in from a header
-(both refused outside local development, and always on Kubernetes):
+**Hot loading.** When an approved commit, a `silo.refresh` or an approved
+one-off tool changes a tool set, the router rebuilds and restarts that
+tool set's server and sends `notifications/tools/list_changed`. You don't
+need to restart the session. A failed build goes back to the agent as a
+tool error with the build output, and the previous version keeps running.
+
+## Not a sandbox
+
+silo is a convenience wrapper, not a security boundary. It limits which
+tools the agent CLI offers its model, and it gates commits and one-off
+tools on your approval. It does not isolate anything:
+
+- The CLI runs as you, with your credentials and network access. silo
+  turns off the CLI's own shell and edit tools with the CLI's own flags
+  (see [docs/config.md](docs/config.md#adapters)). A CLI bug, or a CLI
+  version that ignores those flags, gets around them. Codex's shell can
+  only be restricted, not always removed.
+- Repository tool sets run as you, on your machine. silo starts every set
+  committed to the repository without asking, so a context repository is
+  as trusted as code you run. Their environment is cut down to what
+  their manifests declare, but they are not otherwise confined.
+- Approved one-off tools run as you, too. Read their code before you
+  approve.
+
+What silo does guarantee is that approvals come from you. The CLI runs on
+a pseudo-terminal that silo owns. While a prompt is up, silo stops
+passing your keystrokes and the CLI's output through, and reads your
+answer from your terminal itself. Nothing the agent or the CLI does can
+type the answer.
+
+Every tool call, approval, rejection, commit, push and tool-set reload is
+logged to `~/.silo/sessions/<id>/audit.jsonl`.
+
+## Documentation
+
+- [docs/config.md](docs/config.md): silo's config file, and what each
+  CLI adapter does.
+- [docs/repo-layout.md](docs/repo-layout.md): the context repository
+  layout, the tool-set manifest, and how to write a tool set.
+
+## Development
 
 ```sh
-go run ./cmd/silo hub serve -database sqlite:/tmp/hub.db -dev-user-header X-User -admins user:me@example.com
+go build ./...
+go vet ./...
+go test -race ./...
 ```
 
-`silo hub serve` takes a `sqlite:` database only with `-dev`
-(`SILO_HUB_DEV`) or the development header; anything else needs
-`-database postgres://...`.
+`internal/session`'s end-to-end test drives a whole session with a fake
+CLI that speaks MCP through the real bridge and router.
+
+| Package | Role |
+|---|---|
+| `cmd/silo` | The command: `silo run`, `silo mcp-bridge`. |
+| `internal/config` | silo's config, `.silo/config.yaml`, `toolset.yaml`. |
+| `internal/session` | Wires a session together, composes the prompt, and serves the router on a Unix socket that `silo mcp-bridge` connects the CLI to. |
+| `internal/adapter` | The claude, codex and gemini adapters. |
+| `internal/router` | The MCP router, plus the host that builds, starts and hot-reloads child tool-set servers. |
+| `internal/builtin` | `repo-read`, `repo-write`, `scratch`, `silo`. |
+| `internal/approval` | The approval prompt and the terminal console it runs on. |
+| `internal/mcp` | JSON-RPC/MCP over stdio (adapted from silo v4). |
+| `internal/audit` | The JSONL audit log (adapted from silo v4). |
+| `internal/gitrepo` | Checkout preparation and git helpers. |
+
+The earlier silo code (Grain Hub, v3, v4) was removed in favour of this
+tool. It is still in git history.
