@@ -69,6 +69,31 @@ func (c *Checkout) StartPoint() string {
 // and fetches it. base is the branch to start from; "" means the
 // repository's default branch.
 func Prepare(ctx context.Context, cfg *config.Config, name, base string) (*Checkout, error) {
+	c, err := Open(ctx, cfg, name)
+	if err != nil {
+		return nil, err
+	}
+	if status, err := c.Git(ctx, "status", "--porcelain"); err != nil {
+		return nil, err
+	} else if strings.TrimSpace(status) != "" {
+		return nil, fmt.Errorf("%s has uncommitted changes; commit or stash them first:\n%s", c.Dir, status)
+	}
+	if base == "" {
+		var err error
+		if base, err = c.DefaultBranch(ctx); err != nil {
+			return nil, err
+		}
+	}
+	c.Base = base
+	if _, err := c.Git(ctx, "rev-parse", "--verify", "--quiet", c.StartPoint()+"^{commit}"); err != nil {
+		return nil, fmt.Errorf("no branch %s in %s", c.StartPoint(), name)
+	}
+	return c, nil
+}
+
+// Open finds or clones the repository name under the configured root
+// and fetches it, without touching its working tree otherwise.
+func Open(ctx context.Context, cfg *config.Config, name string) (*Checkout, error) {
 	if err := config.ValidateRepoName(name); err != nil {
 		return nil, err
 	}
@@ -91,31 +116,44 @@ func Prepare(ctx context.Context, cfg *config.Config, name, base string) (*Check
 	if _, err := c.Git(ctx, "rev-parse", "--git-dir"); err != nil {
 		return nil, fmt.Errorf("%s is not a git repository", dir)
 	}
-	if status, err := c.Git(ctx, "status", "--porcelain"); err != nil {
-		return nil, err
-	} else if strings.TrimSpace(status) != "" {
-		return nil, fmt.Errorf("%s has uncommitted changes; commit or stash them first:\n%s", dir, status)
-	}
 	if _, err := c.Git(ctx, "remote", "get-url", remote); err == nil {
 		c.Remote = remote
-		if _, err := c.Git(ctx, "fetch", "--prune", remote); err != nil {
+		if _, err := c.Git(ctx, "fetch", "--prune", "--tags", remote); err != nil {
 			return nil, err
 		}
-	}
-	if base == "" {
-		var err error
-		if base, err = c.defaultBranch(ctx); err != nil {
-			return nil, err
-		}
-	}
-	c.Base = base
-	if _, err := c.Git(ctx, "rev-parse", "--verify", "--quiet", c.StartPoint()+"^{commit}"); err != nil {
-		return nil, fmt.Errorf("no branch %s in %s", c.StartPoint(), name)
 	}
 	return c, nil
 }
 
-func (c *Checkout) defaultBranch(ctx context.Context) (string, error) {
+// ResolveRef resolves a branch, tag or commit to a commit id, preferring
+// the remote's copy of a branch to a local one. "" is the default
+// branch.
+func (c *Checkout) ResolveRef(ctx context.Context, ref string) (string, error) {
+	if strings.HasPrefix(ref, "-") {
+		return "", fmt.Errorf("revision %q may not start with '-'", ref)
+	}
+	if ref == "" {
+		var err error
+		if ref, err = c.DefaultBranch(ctx); err != nil {
+			return "", err
+		}
+	}
+	var candidates []string
+	if c.Remote != "" {
+		candidates = append(candidates, "refs/remotes/"+c.Remote+"/"+ref)
+	}
+	candidates = append(candidates, "refs/tags/"+ref, ref)
+	for _, cand := range candidates {
+		if out, err := c.Git(ctx, "rev-parse", "--verify", "--quiet", cand+"^{commit}"); err == nil {
+			return strings.TrimSpace(out), nil
+		}
+	}
+	return "", fmt.Errorf("no branch, tag or commit %q in %s", ref, c.Dir)
+}
+
+// DefaultBranch is the remote's default branch, or the local HEAD's
+// branch in a repository without a remote.
+func (c *Checkout) DefaultBranch(ctx context.Context) (string, error) {
 	if c.Remote != "" {
 		ref := "refs/remotes/" + c.Remote + "/HEAD"
 		out, err := c.Git(ctx, "symbolic-ref", "--short", ref)

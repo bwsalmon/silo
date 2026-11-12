@@ -41,15 +41,17 @@ type Scratch struct {
 func NewScratch(s *Scratch) *set {
 	t := &set{}
 	t.add("define",
-		"Create or change a one-off tool set for this session only: a toolset.yaml manifest plus the MCP server's code, "+
-			"in the same format as .silo/tools/<set>/ (see the repository layout docs). The person sees the full code and must approve it, "+
+		"Create or change a one-off tool set for this session only, in the same format as .silo/tools/<set>/: exactly one entry point, "+
+			"start.sh (run as `bash start.sh <port>`) or start.py (run as `python3 start.py <port>`), that serves MCP over Streamable HTTP "+
+			"at http://127.0.0.1:<port>/mcp, plus any other files it needs and an optional toolset.yaml (description, env, pass_env, tools, requires_approval). "+
+			"The person sees the full code and must approve it, "+
 			"because it runs on their machine. Once approved it is loaded and its tools appear as scratch.<name>.<tool>. "+
 			"It is deleted when the session ends; use scratch.promote to commit it to the repository.",
 		mcp.Schema(map[string]any{
 			"name":     str("Tool-set name: lowercase letters, digits, '-' and '_'."),
-			"manifest": str("The toolset.yaml contents; its name must equal name."),
-			"files":    map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "The server's files: relative path -> contents."},
-		}, "name", "manifest", "files"), s.define)
+			"manifest": str("Optional toolset.yaml contents; a name in it must equal name."),
+			"files":    map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "The tool set's files, start.sh or start.py among them: relative path -> contents."},
+		}, "name", "files"), s.define)
 	t.add("remove", "Stop and delete a one-off tool set.",
 		mcp.Schema(map[string]any{"name": str("Tool-set name.")}, "name"), s.remove)
 	t.add("list", "List this session's one-off tool sets.", mcp.Schema(map[string]any{}), s.list)
@@ -77,21 +79,29 @@ func (s *Scratch) define(ctx context.Context, args json.RawMessage) *mcp.ToolRes
 	if err := config.ValidToolsetName(a.Name); err != nil {
 		return mcp.Errorf("%v", err)
 	}
-	if _, err := config.ParseManifest([]byte(a.Manifest), a.Name); err != nil {
-		return mcp.Errorf("manifest: %v", err)
+	files := map[string]string{}
+	if a.Manifest != "" {
+		files[config.Manifest] = a.Manifest
 	}
-	files := map[string]string{config.Manifest: a.Manifest}
 	total := len(a.Manifest)
 	for p, c := range a.Files {
 		clean := filepath.ToSlash(filepath.Clean(p))
 		if filepath.IsAbs(p) || clean == ".." || strings.HasPrefix(clean, "../") || clean == "." {
 			return mcp.Errorf("file path %q must be relative and inside the tool set", p)
 		}
-		if clean == config.Manifest {
-			return mcp.Errorf("pass toolset.yaml as manifest, not in files")
+		if clean == config.Manifest && a.Manifest != "" {
+			return mcp.Errorf("pass toolset.yaml as manifest or in files, not both")
 		}
 		files[clean] = c
 		total += len(c)
+	}
+	if m, ok := files[config.Manifest]; ok {
+		if _, err := config.ParseManifest([]byte(m), a.Name); err != nil {
+			return mcp.Errorf("toolset.yaml: %v", err)
+		}
+	}
+	if _, err := config.Entrypoint(func(n string) bool { _, ok := files[n]; return ok }); err != nil {
+		return mcp.Errorf("one-off tool set %s %v", a.Name, err)
 	}
 	if total > maxScratchBytes {
 		return mcp.Errorf("one-off tool set is %d bytes; the limit is %d", total, maxScratchBytes)

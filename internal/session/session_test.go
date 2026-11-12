@@ -124,10 +124,11 @@ func fakeCLI() error {
 	tr.ToolsBefore = names()
 	tr.Read = call("repo-read.read_file", map[string]any{"path": "README.md"})
 	self, _ := os.Executable()
-	tr.Propose = call("repo-write.propose_change", map[string]any{
-		"message": "Add the echo tool set",
-		"edits":   []map[string]any{{"path": ".silo/tools/echo/toolset.yaml", "content": testutil.EchoManifestFor(self, "echo", "e2e")}},
-	})
+	var edits []map[string]any
+	for p, c := range testutil.Prefixed(".silo/tools/echo", testutil.EchoToolsetFor(self, "e2e")) {
+		edits = append(edits, map[string]any{"path": p, "content": c})
+	}
+	tr.Propose = call("repo-write.propose_change", map[string]any{"message": "Add the echo tool set", "edits": edits})
 	select {
 	case <-changed:
 		tr.ListChanged = true

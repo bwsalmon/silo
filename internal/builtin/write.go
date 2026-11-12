@@ -24,7 +24,8 @@ import (
 // Host is what the built-ins need from the tool-set host: hot reloading
 // after a commit or a pull, and loading one-off tools.
 type Host interface {
-	ReloadRepoSets(ctx context.Context, names []string) (string, bool)
+	ReloadRepoSets(ctx context.Context, keys []string) (string, bool)
+	ExitedRepoSets() []string
 	LoadScratch(ctx context.Context, name, dir string) (string, error)
 	UnloadScratch(name string) bool
 }
@@ -39,6 +40,9 @@ type Edit struct {
 	NewString string `json:"new_string,omitempty"`
 	// Delete removes the file.
 	Delete bool `json:"delete,omitempty"`
+	// Mode, if set with Content, is the file's permission bits. Only
+	// silo sets it (for vendored files); the agent's edits cannot.
+	Mode os.FileMode `json:"-"`
 }
 
 // Writer commits approved changes to the checkout and pushes them.
@@ -137,6 +141,13 @@ func (w *Writer) Propose(ctx context.Context, message string, edits []Edit, afte
 			if err := os.Remove(c.abs); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return w.rollback(ctx, err)
 			}
+			// Prune the directories this left empty, as a checkout of
+			// the commit would not have them.
+			for d := filepath.Dir(c.abs); d != w.Repo.Dir && strings.HasPrefix(d, w.Repo.Dir+string(filepath.Separator)); d = filepath.Dir(d) {
+				if os.Remove(d) != nil {
+					break
+				}
+			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(c.abs), 0o755); err != nil {
@@ -146,8 +157,16 @@ func (w *Writer) Propose(ctx context.Context, message string, edits []Edit, afte
 		if fi, err := os.Stat(c.abs); err == nil {
 			mode = fi.Mode().Perm()
 		}
+		if c.mode != 0 {
+			mode = c.mode
+		}
 		if err := os.WriteFile(c.abs, []byte(c.after), mode); err != nil {
 			return w.rollback(ctx, err)
+		}
+		if c.mode != 0 {
+			if err := os.Chmod(c.abs, c.mode); err != nil {
+				return w.rollback(ctx, err)
+			}
 		}
 	}
 	if _, err := w.Repo.Git(ctx, append([]string{"add", "-A", "--"}, paths...)...); err != nil {
@@ -206,6 +225,7 @@ type change struct {
 	before, after string
 	existed       bool
 	delete        bool
+	mode          os.FileMode
 }
 
 func (w *Writer) plan(edits []Edit) ([]*change, error) {
@@ -261,7 +281,7 @@ func (w *Writer) plan(edits []Edit) ([]*change, error) {
 			}
 			c.delete, c.after = true, ""
 		case e.Content != nil:
-			c.delete, c.after = false, *e.Content
+			c.delete, c.after, c.mode = false, *e.Content, e.Mode.Perm()
 		default:
 			if n := strings.Count(c.after, e.OldString); n != 1 {
 				return nil, fmt.Errorf("edit %d: old_string occurs %d times in %s; it must occur exactly once", i+1, n, rel)

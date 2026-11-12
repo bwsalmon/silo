@@ -1,10 +1,7 @@
-name: runbooks
+# Optional metadata. The server itself starts from start.py.
 description: Search the team's runbooks.
-# No build step: Python runs the server straight from this directory.
-# It runs in the checkout, with only PATH, SILO_* and the env below.
-run: [python3, "${TOOLSET_DIR}/server.py"]
 env:
-  RUNBOOK_DIR: runbooks
+  RUNBOOK_DIR: ${CHECKOUT}/runbooks
 tools:
   - name: search
   - name: list
