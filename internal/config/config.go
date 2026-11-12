@@ -1,5 +1,5 @@
 // Package config reads silo's own config file, a context repository's
-// .silo/config.yaml, and tool-set manifests (.silo/tools/<set>/toolset.yaml).
+// .silo/config.yaml, and tool-set metadata (.silo/tools/<set>/toolset.yaml).
 // docs/config.md and docs/repo-layout.md describe the formats.
 package config
 

@@ -153,7 +153,7 @@ func Start(ctx context.Context, opts Options) (*Session, error) {
 		{"repo-read", builtin.NewRepoRead(&co.Repo)},
 		{"repo-write", builtin.NewRepoWrite(writer)},
 		{"scratch", builtin.NewScratch(s.Scratch)},
-		{"silo", builtin.NewSilo(refresher, s.Router, !listChanged)},
+		{"silo", builtin.NewSilo(refresher, s.Router, !listChanged, &builtin.Vendorer{Config: cfg, Checkout: co.Dir, Writer: writer})},
 	} {
 		if err := s.Router.Add(ctx, b.name, b.set, router.Options{Origin: router.Builtin}); err != nil {
 			s.Close()
@@ -263,7 +263,7 @@ func (s *Session) Close() {
 	if s.Scratch != nil {
 		s.Scratch.Cleanup()
 	}
-	os.RemoveAll(filepath.Join(s.Dir, "build"))
+	os.RemoveAll(filepath.Join(s.Dir, "state"))
 	if s.audit != nil {
 		s.audit.Log("session_end", map[string]any{"session": s.ID})
 		s.audit.Close()

@@ -76,19 +76,13 @@ func ParseRepoConfig(data []byte) (*RepoConfig, error) {
 	return &rc, nil
 }
 
-// ToolsetManifest is .silo/tools/<set>/toolset.yaml: a tool set whose
-// MCP server is the code in that directory.
+// ToolsetManifest is the optional .silo/tools/<set>/toolset.yaml:
+// metadata about a tool set. How the set's server starts is not in it;
+// that is the directory's start.sh or start.py.
 type ToolsetManifest struct {
-	// Name must match the directory name.
+	// Name, if set, must match the directory name.
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
-	// Build, if set, runs once before Run, in the tool set's directory.
-	// ${BUILD_DIR} is a scratch directory outside the checkout for its
-	// output.
-	Build []string `yaml:"build"`
-	// Run starts the MCP server (stdio), in the checkout. ${TOOLSET_DIR},
-	// ${BUILD_DIR} and ${CHECKOUT} are substituted in every argument.
-	Run []string `yaml:"run"`
 	// Env is set in the server's environment.
 	Env map[string]string `yaml:"env"`
 	// PassEnv names variables copied from silo's own environment.
@@ -107,9 +101,48 @@ type ToolDecl struct {
 	Description string `yaml:"description"`
 }
 
+// Entry points: a tool set's directory holds exactly one of these, which
+// silo runs as `bash start.sh <port>` or `python3 start.py <port>`.
+const (
+	StartSh = "start.sh"
+	StartPy = "start.py"
+)
+
+// Interpreter is the program that runs an entry point.
+func Interpreter(entry string) string {
+	if entry == StartPy {
+		return "python3"
+	}
+	return "bash"
+}
+
+// Entrypoint finds the one entry point among a tool set's top-level file
+// names (has reports whether a name is present).
+func Entrypoint(has func(name string) bool) (string, error) {
+	sh, py := has(StartSh), has(StartPy)
+	switch {
+	case sh && py:
+		return "", fmt.Errorf("has both %s and %s; keep exactly one", StartSh, StartPy)
+	case sh:
+		return StartSh, nil
+	case py:
+		return StartPy, nil
+	}
+	return "", fmt.Errorf("has no %s or %s: one of them starts the tool set's MCP server", StartSh, StartPy)
+}
+
+// DirEntrypoint is Entrypoint for a directory on disk.
+func DirEntrypoint(dir string) (string, error) {
+	return Entrypoint(func(name string) bool {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		return err == nil && fi.Mode().IsRegular()
+	})
+}
+
 var setNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 
-// ValidToolsetName reports whether name is usable as a tool-set name.
+// ValidToolsetName reports whether name is usable as a tool-set name (or
+// a vendor alias).
 func ValidToolsetName(name string) error {
 	if !setNameRE.MatchString(name) {
 		return fmt.Errorf("tool-set name %q: want lowercase letters, digits, '_' and '-', starting with a letter or digit, at most 40", name)
@@ -117,22 +150,34 @@ func ValidToolsetName(name string) error {
 	return nil
 }
 
+// retiredKeys were toolset.yaml's launch settings before start.sh and
+// start.py replaced them.
+var retiredKeys = []string{"build", "run"}
+
 // ParseManifest decodes and validates a toolset.yaml. dirName is the
-// directory it was found in, which the name must match; pass "" to skip
-// that check.
+// directory it was found in, which a name in it must match; pass "" to
+// skip that check.
 func ParseManifest(data []byte, dirName string) (*ToolsetManifest, error) {
+	var keys map[string]any
+	if err := strictDecode(data, &keys); err == nil {
+		for _, k := range retiredKeys {
+			if _, ok := keys[k]; ok {
+				return nil, fmt.Errorf("%q is no longer a toolset.yaml setting: the server starts from %s or %s in the tool set's directory, "+
+					"which silo runs with a port to serve MCP over HTTP on (see docs/repo-layout.md)", k, StartSh, StartPy)
+			}
+		}
+	}
 	var m ToolsetManifest
 	if err := strictDecode(data, &m); err != nil {
 		return nil, err
 	}
-	if err := ValidToolsetName(m.Name); err != nil {
-		return nil, err
-	}
-	if dirName != "" && m.Name != dirName {
-		return nil, fmt.Errorf("name %q does not match its directory %q", m.Name, dirName)
-	}
-	if len(m.Run) == 0 {
-		return nil, errors.New("run is required: the command that starts the MCP server")
+	if m.Name != "" {
+		if err := ValidToolsetName(m.Name); err != nil {
+			return nil, err
+		}
+		if dirName != "" && m.Name != dirName {
+			return nil, fmt.Errorf("name %q does not match its directory %q", m.Name, dirName)
+		}
 	}
 	declared := map[string]bool{}
 	for _, t := range m.Tools {
@@ -154,10 +199,13 @@ func ParseManifest(data []byte, dirName string) (*ToolsetManifest, error) {
 	return &m, nil
 }
 
-// LoadManifest reads <dir>/toolset.yaml.
+// LoadManifest reads <dir>/toolset.yaml; without one, a set has no
+// metadata.
 func LoadManifest(dir string) (*ToolsetManifest, error) {
 	data, err := os.ReadFile(filepath.Join(dir, Manifest))
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		return &ToolsetManifest{}, nil
+	} else if err != nil {
 		return nil, err
 	}
 	m, err := ParseManifest(data, filepath.Base(dir))
@@ -167,10 +215,82 @@ func LoadManifest(dir string) (*ToolsetManifest, error) {
 	return m, nil
 }
 
-// RepoToolsets lists the tool-set directory names under
-// <checkout>/.silo/tools, sorted.
+// VendorDir holds tool sets vendored from other repositories, one
+// directory per alias: .silo/tools/vendor/<alias>/<set>/.
+const (
+	VendorName = "vendor"
+	VendorDir  = ToolsDir + "/" + VendorName
+	VendorLock = "VENDOR.lock"
+)
+
+// A tool set's key is its directory relative to .silo/tools: "<set>" for
+// the repository's own, "vendor/<alias>/<set>" for a vendored one.
+
+// ToolsetName is the name the router knows a tool set by: the key itself
+// for the repository's own sets, "<alias>.<set>" for vendored ones.
+func ToolsetName(key string) string {
+	if alias, set, ok := VendoredKey(key); ok {
+		return alias + "." + set
+	}
+	return key
+}
+
+// VendoredKey splits a vendored set's key into alias and set.
+func VendoredKey(key string) (alias, set string, ok bool) {
+	parts := strings.Split(key, "/")
+	if len(parts) == 3 && parts[0] == VendorName {
+		return parts[1], parts[2], true
+	}
+	return "", "", false
+}
+
+// ValidToolsetKey reports whether key names a tool-set directory.
+func ValidToolsetKey(key string) error {
+	if alias, set, ok := VendoredKey(key); ok {
+		if err := ValidToolsetName(alias); err != nil {
+			return fmt.Errorf("vendor alias: %w", err)
+		}
+		return ValidToolsetName(set)
+	}
+	if key == VendorName {
+		return fmt.Errorf("%s/ holds vendored tool sets, not a tool set", VendorDir)
+	}
+	return ValidToolsetName(key)
+}
+
+// RepoToolsets lists the keys of the tool-set directories under
+// <checkout>/.silo/tools, the vendored ones included, sorted.
 func RepoToolsets(checkout string) ([]string, error) {
-	ents, err := os.ReadDir(filepath.Join(checkout, ToolsDir))
+	keys, err := subdirs(filepath.Join(checkout, ToolsDir))
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, k := range keys {
+		if k != VendorName {
+			out = append(out, k)
+			continue
+		}
+		aliases, err := subdirs(filepath.Join(checkout, VendorDir))
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range aliases {
+			sets, err := subdirs(filepath.Join(checkout, VendorDir, a))
+			if err != nil {
+				return nil, err
+			}
+			for _, s := range sets {
+				out = append(out, VendorName+"/"+a+"/"+s)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func subdirs(dir string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	} else if err != nil {

@@ -21,15 +21,19 @@ type Refresher struct {
 	Log    audit.Logger
 }
 
-// NewSilo returns the silo tool set: refresh, plus (when fallback is set,
-// for CLIs that ignore tools/list_changed) list_tools and call.
-func NewSilo(rf *Refresher, rt *router.Router, fallback bool) *set {
+// NewSilo returns the silo tool set: refresh, vendor (when v is set),
+// plus (when fallback is set, for CLIs that ignore
+// tools/list_changed) list_tools and call.
+func NewSilo(rf *Refresher, rt *router.Router, fallback bool, v *Vendorer) *set {
 	s := &set{}
 	s.add("refresh",
 		"Fetch the repository and fast-forward this session's checkout to commits made outside the session "+
 			"(on the session branch, or on the base branch if the session has not diverged from it), "+
-			"then reload every tool set those commits changed. Reports what changed.",
+			"then reload every tool set those commits changed, and restart any whose server has exited. Reports what changed.",
 		mcp.Schema(map[string]any{}), rf.refresh)
+	if v != nil {
+		v.addTo(s)
+	}
 	if fallback {
 		s.add("list_tools",
 			"List every tool this session offers now, with its input schema. Tool sets can be added mid-session; "+
@@ -93,7 +97,15 @@ func (rf *Refresher) refresh(ctx context.Context, _ json.RawMessage) *mcp.ToolRe
 		if len(notes) == 0 {
 			notes = append(notes, "Already up to date.")
 		}
-		return mcp.Text(strings.Join(notes, "\n"))
+		ok := true
+		if exited := rf.Host.ExitedRepoSets(); len(exited) > 0 {
+			var report string
+			report, ok = rf.Host.ReloadRepoSets(ctx, exited)
+			notes = append(notes, "Restarted tool sets whose server had exited:\n"+report)
+		}
+		res := mcp.Text(strings.Join(notes, "\n"))
+		res.IsError = !ok
+		return res
 	}
 	paths, err := c.ChangedPaths(ctx, before, after)
 	if err != nil {
@@ -102,7 +114,7 @@ func (rf *Refresher) refresh(ctx context.Context, _ json.RawMessage) *mcp.ToolRe
 	log, _ := c.Git(ctx, "log", "--oneline", "--no-decorate", before+".."+after)
 	out := append(notes, "New commits:\n"+strings.TrimRight(log, "\n"), "Changed files:\n"+clip(strings.Join(paths, "\n"), 16*1024))
 	ok := true
-	if names := router.ChangedToolsets(paths); len(names) > 0 {
+	if names := union(router.ChangedToolsets(paths), rf.Host.ExitedRepoSets()); len(names) > 0 {
 		var report string
 		report, ok = rf.Host.ReloadRepoSets(ctx, names)
 		out = append(out, "Tool sets:\n"+report)
@@ -110,4 +122,16 @@ func (rf *Refresher) refresh(ctx context.Context, _ json.RawMessage) *mcp.ToolRe
 	res := mcp.Text(strings.Join(out, "\n"))
 	res.IsError = !ok
 	return res
+}
+
+func union(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range append(append([]string{}, a...), b...) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

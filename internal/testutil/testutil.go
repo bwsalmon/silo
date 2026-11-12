@@ -1,6 +1,7 @@
 // Package testutil holds test fixtures: git repositories with a bare
-// remote, and a fake tool-set MCP server that the test binary itself
-// serves when re-executed with SILO_TEST_ROLE=echo-server.
+// remote, and a fake tool-set MCP server (Streamable HTTP) that the test
+// binary itself serves when a start.sh re-executes it with
+// SILO_TEST_ROLE=echo-server.
 package testutil
 
 import (
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/silo/internal/mcp"
 )
@@ -20,11 +22,30 @@ import (
 // RoleEnv selects what a re-executed test binary does.
 const RoleEnv = "SILO_TEST_ROLE"
 
+// ModeEnv makes the fake server misbehave: "never-listen", "exit",
+// "bind-all" (listen on every interface) or "" (behave).
+const ModeEnv = "ECHO_MODE"
+
 // MaybeServe runs the fake tool-set server and exits, when the test
-// binary was started as one. Call it first in TestMain.
+// binary was started as one. Call it first in TestMain. The server
+// takes its port from its first argument, as a start.sh passes it, and
+// checks it against $SILO_PORT.
 func MaybeServe() {
 	if os.Getenv(RoleEnv) != "echo-server" {
 		return
+	}
+	if len(os.Args) < 2 || os.Args[1] != os.Getenv("SILO_PORT") {
+		fmt.Fprintf(os.Stderr, "echo-server: want the port as the only argument, matching $SILO_PORT; got %q, SILO_PORT=%q\n", os.Args[1:], os.Getenv("SILO_PORT"))
+		os.Exit(2)
+	}
+	port := os.Args[1]
+	switch os.Getenv(ModeEnv) {
+	case "never-listen":
+		fmt.Fprintln(os.Stderr, "echo-server: taking my time")
+		time.Sleep(time.Hour)
+	case "exit":
+		fmt.Fprintln(os.Stderr, "echo-server: giving up at once")
+		os.Exit(3)
 	}
 	s := mcp.NewServer("echo", "1")
 	s.Add(mcp.Tool{Name: "echo", Description: "Echo text back, prefixed with $ECHO_PREFIX.", InputSchema: mcp.Schema(map[string]any{"text": map[string]any{"type": "string"}})},
@@ -48,23 +69,65 @@ func MaybeServe() {
 			wd, _ := os.Getwd()
 			return mcp.Text(wd)
 		})
-	s.Serve(context.Background(), os.Stdin, os.Stdout)
-	os.Exit(0)
+	s.Add(mcp.Tool{Name: "grow", Description: "Add a tool named extra and say the list changed.", InputSchema: mcp.Schema(map[string]any{})},
+		func(ctx context.Context, args json.RawMessage) *mcp.ToolResult {
+			s.Add(mcp.Tool{Name: "extra", InputSchema: mcp.Schema(map[string]any{})},
+				func(context.Context, json.RawMessage) *mcp.ToolResult { return mcp.Text("extra") })
+			s.NotifyToolsChanged()
+			return mcp.Text("grown")
+		})
+	s.Add(mcp.Tool{Name: "crash", Description: "Exit at once.", InputSchema: mcp.Schema(map[string]any{})},
+		func(ctx context.Context, args json.RawMessage) *mcp.ToolResult {
+			fmt.Fprintln(os.Stderr, "echo-server: crashing as asked")
+			os.Exit(4)
+			return nil
+		})
+	host := "127.0.0.1"
+	if os.Getenv(ModeEnv) == "bind-all" {
+		host = "0.0.0.0"
+	}
+	fmt.Fprintf(os.Stderr, "echo-server: listening on %s:%s\n", host, port)
+	err := s.ListenAndServe(context.Background(), host+":"+port)
+	fmt.Fprintln(os.Stderr, "echo-server:", err)
+	os.Exit(1)
 }
 
-// EchoManifest is a toolset.yaml serving the fake server as set name,
-// with ECHO_PREFIX=prefix.
-func EchoManifest(t testing.TB, name, prefix string) string {
+// EchoToolset is the files of a tool set serving the fake server with
+// ECHO_PREFIX=prefix: a toolset.yaml carrying its environment and a
+// start.sh that runs the test binary. Extra lines are added to the
+// manifest as is.
+func EchoToolset(t testing.TB, prefix string, extra ...string) map[string]string {
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return EchoManifestFor(self, name, prefix)
+	return EchoToolsetFor(self, prefix, extra...)
 }
 
-// EchoManifestFor is EchoManifest for the binary self.
-func EchoManifestFor(self, name, prefix string) string {
-	return fmt.Sprintf("name: %s\ndescription: test echo server\nrun: [%q]\nenv:\n  %s: echo-server\n  ECHO_PREFIX: %s\n", name, self, RoleEnv, prefix)
+// EchoToolsetFor is EchoToolset for the binary self.
+func EchoToolsetFor(self, prefix string, extra ...string) map[string]string {
+	manifest := fmt.Sprintf("description: test echo server\nenv:\n  %s: echo-server\n  ECHO_PREFIX: %s\n", RoleEnv, prefix)
+	for _, e := range extra {
+		manifest += e + "\n"
+	}
+	return map[string]string{
+		"toolset.yaml": manifest,
+		"start.sh":     "exec " + ShellQuote(self) + " \"$1\"\n",
+	}
+}
+
+// ShellQuote quotes s for a POSIX shell.
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// Prefixed returns files with every path under dir/.
+func Prefixed(dir string, files map[string]string) map[string]string {
+	out := map[string]string{}
+	for p, c := range files {
+		out[dir+"/"+p] = c
+	}
+	return out
 }
 
 // Git runs git in dir, failing the test on error.

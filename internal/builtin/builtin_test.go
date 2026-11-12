@@ -32,6 +32,7 @@ type fixture struct {
 	fake    *approval.Fake
 	log     *audit.Memory
 	scratch *Scratch
+	cfg     *config.Config
 }
 
 const branch = "silo/test"
@@ -59,7 +60,8 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 	f.rt.Add(ctx, "repo-read", NewRepoRead(&co.Repo), router.Options{Origin: router.Builtin})
 	f.rt.Add(ctx, "repo-write", NewRepoWrite(w), router.Options{Origin: router.Builtin})
 	f.rt.Add(ctx, "scratch", NewScratch(f.scratch), router.Options{Origin: router.Builtin})
-	f.rt.Add(ctx, "silo", NewSilo(rf, f.rt, true), router.Options{Origin: router.Builtin})
+	f.cfg = cfg
+	f.rt.Add(ctx, "silo", NewSilo(rf, f.rt, true, &Vendorer{Config: cfg, Checkout: co.Dir, Writer: w}), router.Options{Origin: router.Builtin})
 	t.Cleanup(f.rt.Close)
 	return f
 }
@@ -280,30 +282,35 @@ func TestProposeInvalidEditNeverAsks(t *testing.T) {
 
 func addEcho(f *fixture, name, prefix string) *mcp.ToolResult {
 	f.t.Helper()
-	return f.call("repo-write.propose_change", map[string]any{
-		"message": "Add tool set " + name,
-		"edits":   []map[string]any{{"path": ".silo/tools/" + name + "/toolset.yaml", "content": testutil.EchoManifest(f.t, name, prefix)}},
-	})
+	var edits []map[string]any
+	for p, c := range testutil.Prefixed(".silo/tools/"+name, testutil.EchoToolset(f.t, prefix)) {
+		edits = append(edits, map[string]any{"path": p, "content": c})
+	}
+	return f.call("repo-write.propose_change", map[string]any{"message": "Add tool set " + name, "edits": edits})
 }
 
 func TestHotReloadAfterApprovedCommit(t *testing.T) {
 	f := newFixture(t, nil)
 	approveNext(f, yes(), yes())
 	res := addEcho(f, "echo", "v1")
-	if res.IsError || !strings.Contains(res.AllText(), "loaded echo (tools: echo.echo, echo.env, echo.pwd)") {
+	if res.IsError || !strings.Contains(res.AllText(), "loaded echo (tools: echo.crash, echo.echo, echo.env, echo.grow, echo.pwd)") {
 		t.Fatalf("add: %q", res.AllText())
 	}
 	if got := f.ok("echo.echo", map[string]any{"text": "hi"}); got != "v1:hi" {
 		t.Errorf("echo = %q", got)
 	}
-	// The child gets only what its manifest declares, and runs in the checkout.
+	// The child gets only what its manifest declares, and runs in its
+	// own directory.
+	t.Setenv("SILO_TEST_UNLISTED", "x")
+	approveNext(f, yes(), yes())
+	addEcho(f, "echo", "v1b")
 	env := f.ok("echo.env", nil)
 	names := " " + strings.Join(strings.Fields(env), " ") + " "
-	if !strings.Contains(names, " ECHO_PREFIX ") || !strings.Contains(names, " PATH ") || strings.Contains(names, " HOME ") {
+	if !strings.Contains(names, " ECHO_PREFIX ") || !strings.Contains(names, " PATH ") || !strings.Contains(names, " SILO_PORT ") || strings.Contains(names, " SILO_TEST_UNLISTED ") {
 		t.Errorf("child env = %q", env)
 	}
-	if got := f.ok("echo.pwd", nil); got != f.co.Dir {
-		t.Errorf("child cwd = %q, want %q", got, f.co.Dir)
+	if got, want := f.ok("echo.pwd", nil), filepath.Join(f.co.Dir, ".silo", "tools", "echo"); got != want {
+		t.Errorf("child cwd = %q, want %q", got, want)
 	}
 	// A changed set restarts in place.
 	res = addEcho(f, "echo", "v2")
@@ -315,22 +322,22 @@ func TestHotReloadAfterApprovedCommit(t *testing.T) {
 	}
 	// Deleting it unloads it.
 	approveNext(f, yes())
-	f.ok("repo-write.propose_change", map[string]any{"message": "Drop echo", "edits": []map[string]any{{"path": ".silo/tools/echo/toolset.yaml", "delete": true}}})
+	f.ok("repo-write.propose_change", map[string]any{"message": "Drop echo", "edits": []map[string]any{
+		{"path": ".silo/tools/echo/toolset.yaml", "delete": true}, {"path": ".silo/tools/echo/start.sh", "delete": true}}})
 	if f.rt.Has("echo") {
 		t.Error("echo still loaded after deletion")
 	}
 }
 
-func TestReloadFailureReturnsBuildOutput(t *testing.T) {
+func TestReloadFailureReturnsServerOutput(t *testing.T) {
 	f := newFixture(t, nil)
 	approveNext(f, yes())
 	res := f.call("repo-write.propose_change", map[string]any{
 		"message": "Add broken",
-		"edits": []map[string]any{{"path": ".silo/tools/broken/toolset.yaml", "content": "name: broken\n" +
-			"build: [sh, -c, 'echo compiler says no >&2; exit 3']\nrun: [./server]\n"}},
+		"edits":   []map[string]any{{"path": ".silo/tools/broken/start.sh", "content": "echo compiler says no >&2\nexit 3\n"}},
 	})
 	text := res.AllText()
-	if !res.IsError || !strings.Contains(text, "build failed") || !strings.Contains(text, "compiler says no") || !strings.Contains(text, "Approved and committed") {
+	if !res.IsError || !strings.Contains(text, "exited (exit status 3)") || !strings.Contains(text, "compiler says no") || !strings.Contains(text, "Approved and committed") {
 		t.Errorf("result = %v %q", res.IsError, text)
 	}
 	if f.rt.Has("broken") {
@@ -351,7 +358,29 @@ func TestDisabledToolsetIsNotLoaded(t *testing.T) {
 }
 
 func defineArgs(t *testing.T, prefix string) map[string]any {
-	return map[string]any{"name": "tmp", "manifest": testutil.EchoManifest(t, "tmp", prefix), "files": map[string]string{"NOTES.txt": "scratch notes " + prefix + "\n"}}
+	files := testutil.EchoToolset(t, prefix)
+	manifest := files["toolset.yaml"]
+	delete(files, "toolset.yaml")
+	files["NOTES.txt"] = "scratch notes " + prefix + "\n"
+	return map[string]any{"name": "tmp", "manifest": manifest, "files": files}
+}
+
+func TestScratchNeedsOneEntrypoint(t *testing.T) {
+	f := newFixture(t, nil)
+	args := defineArgs(t, "s1")
+	files := args["files"].(map[string]string)
+	files["start.py"] = "print('hi')\n"
+	if res := f.call("scratch.define", args); !res.IsError || !strings.Contains(res.AllText(), "has both start.sh and start.py") {
+		t.Errorf("both = %q", res.AllText())
+	}
+	delete(files, "start.py")
+	delete(files, "start.sh")
+	if res := f.call("scratch.define", args); !res.IsError || !strings.Contains(res.AllText(), "has no start.sh or start.py") {
+		t.Errorf("neither = %q", res.AllText())
+	}
+	if f.fake.Asked() != 0 {
+		t.Error("asked to approve an invalid one-off")
+	}
 }
 
 func TestScratchNeedsApprovalToCreateAndChange(t *testing.T) {
@@ -439,7 +468,7 @@ func TestRefreshPullsAndReloads(t *testing.T) {
 	if got := f.ok("silo.refresh", nil); !strings.Contains(got, "Already up to date") {
 		t.Errorf("refresh = %q", got)
 	}
-	testutil.PushFiles(t, f.bare, "main", map[string]string{".silo/tools/echo/toolset.yaml": testutil.EchoManifest(t, "echo", "pulled")})
+	testutil.PushFiles(t, f.bare, "main", testutil.Prefixed(".silo/tools/echo", testutil.EchoToolset(t, "pulled")))
 	got := f.ok("silo.refresh", nil)
 	if !strings.Contains(got, "Fast-forwarded to origin/main") || !strings.Contains(got, "loaded echo") || !strings.Contains(got, ".silo/tools/echo/toolset.yaml") {
 		t.Errorf("refresh = %q", got)
@@ -459,5 +488,78 @@ func TestFallbackCall(t *testing.T) {
 	}
 	if got := f.ok("silo.call", map[string]any{"tool": "repo-read.read_file", "arguments": map[string]any{"path": "a.txt"}}); got != "A\n" {
 		t.Errorf("call = %q", got)
+	}
+}
+
+func TestVendorInSession(t *testing.T) {
+	f := newFixture(t, nil)
+	base := strings.TrimSuffix(f.cfg.Repos.GitBase, "/")
+	upFiles := testutil.Prefixed(".silo/tools/echo", testutil.EchoToolset(t, "up1"))
+	upFiles[".silo/tools/vendor/far/x/start.sh"] = "exit 0\n"
+	up := testutil.Remote(t, base, "shared", upFiles)
+	head := strings.TrimSpace(testutil.Git(t, up, "rev-parse", "main"))
+	args := map[string]any{"repo": "shared.git", "alias": "acme"}
+
+	approveNext(f, no("read it first"))
+	res := f.call("silo.vendor", args)
+	if !res.IsError || !strings.Contains(res.AllText(), "read it first") {
+		t.Fatalf("rejected vendor = %q", res.AllText())
+	}
+	req := f.fake.Requests[0]
+	for _, want := range []string{
+		"Vendor echo from shared.git@main (commit " + head[:12] + ") as acme",
+		"+++ b/.silo/tools/vendor/acme/echo/start.sh",
+		"+exec ", // the vendored code itself
+		"+++ b/.silo/tools/vendor/acme/echo/toolset.yaml",
+		"+  ECHO_PREFIX: up1",
+		"+++ b/.silo/tools/vendor/acme/VENDOR.lock",
+		"+commit: " + head,
+	} {
+		if req.Kind != "commit" || !strings.Contains(req.Title+req.Body, want) {
+			t.Errorf("approval lacks %q:\n%s\n%s", want, req.Title, req.Body)
+		}
+	}
+	if strings.Contains(req.Body, "vendor/far") {
+		t.Error("the upstream's own vendored sets were included")
+	}
+	if !strings.Contains(res.AllText(), "not transitive") {
+		t.Errorf("no transitivity warning: %q", res.AllText())
+	}
+	if _, err := os.Stat(filepath.Join(f.co.Dir, ".silo/tools/vendor")); !os.IsNotExist(err) {
+		t.Fatal("written despite rejection")
+	}
+
+	approveNext(f, yes())
+	got := f.ok("silo.vendor", args)
+	if !strings.Contains(got, "loaded acme.echo (tools: acme.echo.crash, acme.echo.echo,") {
+		t.Fatalf("vendor = %q", got)
+	}
+	if got := f.ok("acme.echo.echo", map[string]any{"text": "x"}); got != "up1:x" {
+		t.Errorf("acme.echo.echo = %q", got)
+	}
+	if out := testutil.Git(t, f.bare, "show", branch+":.silo/tools/vendor/acme/VENDOR.lock"); !strings.Contains(out, "commit: "+head) || !strings.Contains(out, "repo: shared.git") {
+		t.Errorf("pushed lock = %q", out)
+	}
+	if mode := testutil.Git(t, f.co.Dir, "ls-files", "-s", ".silo/tools/vendor/acme/echo/start.sh"); !strings.HasPrefix(mode, "100644") {
+		t.Errorf("mode = %q", mode)
+	}
+
+	// Without update, the alias is taken.
+	if res := f.call("silo.vendor", args); !res.IsError || !strings.Contains(res.AllText(), "already vendored") {
+		t.Errorf("second vendor = %q", res.AllText())
+	}
+	// An update brings the new upstream code, after approval, and
+	// restarts the set.
+	testutil.PushFiles(t, up, "main", testutil.Prefixed(".silo/tools/echo", testutil.EchoToolset(t, "up2")))
+	approveNext(f, yes())
+	got = f.ok("silo.vendor", map[string]any{"alias": "acme", "update": true})
+	if !strings.Contains(got, "reloaded acme.echo") {
+		t.Errorf("update = %q", got)
+	}
+	if body := f.fake.Requests[0].Body; !strings.Contains(body, "-  ECHO_PREFIX: up1") || !strings.Contains(body, "+  ECHO_PREFIX: up2") {
+		t.Errorf("update diff = %s", body)
+	}
+	if got := f.ok("acme.echo.echo", map[string]any{"text": "x"}); got != "up2:x" {
+		t.Errorf("after update = %q", got)
 	}
 }

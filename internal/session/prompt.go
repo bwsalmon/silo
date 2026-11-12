@@ -16,7 +16,8 @@ import (
 // Instructions go to the CLI in the router's initialize result.
 func Instructions(fallback bool) string {
 	s := "silo's tools are named <toolset>.<tool>. repo-read reads the repository; repo-write.propose_change proposes a commit " +
-		"the person approves; scratch.define creates a one-off tool the person approves; silo.refresh pulls commits made outside the session."
+		"the person approves; scratch.define creates a one-off tool the person approves; silo.refresh pulls commits made outside the session; " +
+		"silo.vendor proposes copying tool sets from another repository."
 	if fallback {
 		s += " Tools added mid-session may not appear in your tool list: use silo.list_tools and silo.call to reach them."
 	}
@@ -36,10 +37,13 @@ You have no shell and no file-editing tools. Everything you do goes through the 
 - repo-write.propose_change: propose a commit as file edits plus a commit message. The person sees the full diff and
   approves or rejects it; only then is it written, committed and pushed. A rejection comes back with their reason.
   Committed changes under .silo/tools/ are loaded as tool sets straight away.
-- scratch.*: define a one-off tool set for this session (a manifest plus MCP server code). The person approves its code
-  first. scratch.promote commits one to the repository.
+- scratch.*: define a one-off tool set for this session: a start.sh or start.py that silo runs with a port, serving MCP
+  over Streamable HTTP on 127.0.0.1:<port>/mcp. The person approves its code first. scratch.promote commits one to the
+  repository.
 - silo.refresh: pull in commits made outside this session and reload the tool sets they change.
-- <toolset>.*: the repository's own tool sets, from .silo/tools/.
+- silo.vendor: propose copying tool sets from another context repository into .silo/tools/vendor/<alias>/; the person
+  approves the full diff of the vendored code.
+- <toolset>.* and <alias>.<toolset>.*: the repository's own tool sets, from .silo/tools/, and those vendored into it.
 `, repo, branch)
 	if fallback {
 		b.WriteString("\nYour CLI may not pick up tools added during the session. silo.list_tools lists every current tool, and silo.call calls one by name.\n")
