@@ -26,7 +26,6 @@ fn strict_schema_references_limits_and_pins() {
         |v| v["jobs"]["app"]["unknown"] = json!(true),
         |v| v["jobs"]["app"]["image"] = json!("app:latest"),
         |v| v["jobs"]["app"]["command"] = json!(["app"]),
-        |v| v["jobs"]["app"]["command"] = json!([]),
         |v| v["jobs"]["app"]["workdir"] = json!("/app/../tmp"),
         |v| v["jobs"]["app"]["limits"]["memory_bytes"] = json!(0),
         |v| v["jobs"]["app"]["limits"]["duration_secs"] = json!(86401),

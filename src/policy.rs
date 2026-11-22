@@ -71,11 +71,15 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub struct Template {
     pub image: String,
+    #[serde(default)]
     pub command: Vec<String>,
     #[serde(default, deserialize_with = "unique_map")]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
     pub workdir: String,
+    #[serde(default)]
     pub uid: u32,
+    #[serde(default)]
     pub gid: u32,
     #[serde(default)]
     pub executable_inputs: BTreeSet<String>,
@@ -295,10 +299,9 @@ impl Manifest {
             .unwrap_or(false);
         let l = &t.limits;
         if !image_ok
-            || t.command.is_empty()
-            || !absolute(&t.command[0])
+            || (!t.command.is_empty() && !absolute(&t.command[0]))
             || t.command.iter().any(|v| v.contains('\0'))
-            || !absolute(&t.workdir)
+            || (!t.workdir.is_empty() && !absolute(&t.workdir))
             || t.env
                 .iter()
                 .any(|(k, v)| k.is_empty() || k.contains(['=', '\0']) || v.contains('\0'))
@@ -333,11 +336,7 @@ impl Manifest {
             targets.push(&m.target);
         }
         // All executable inputs must remain in the immutable image, never a mounted volume.
-        for input in t
-            .executable_inputs
-            .iter()
-            .chain(std::iter::once(&t.command[0]))
-        {
+        for input in t.executable_inputs.iter().chain(t.command.first()) {
             if !absolute(input)
                 || targets.iter().any(|p| under(input, p))
                 || ["/tmp", "/run", "/proc", "/sys", "/dev"]

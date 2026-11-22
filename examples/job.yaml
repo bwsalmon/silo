@@ -1,0 +1,23 @@
+version: 1
+project: example
+jobs:
+  hello:
+    image: docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9
+    # Empty command/workdir use the verified image's defaults.
+    command: []
+    env: {}
+    workdir: ""
+    uid: 0
+    gid: 0
+    limits:
+      processes: 64
+      memory_bytes: 134217728
+      cpu_millis: 1000
+      scratch_bytes: 8388608
+      connections: 1
+      duration_secs: 30
+      max_instances: 1
+    agent: [run, list, status, logs, stop]
+network:
+  external: deny
+  allow: []

@@ -1,0 +1,115 @@
+{
+  "kind": "real-worker",
+  "passed": [
+    "static ELF has no interpreter or shared dependencies",
+    "authenticated approved stock OCI image runs with verified output",
+    "OCI entrypoint/args/env/workdir defaults",
+    "fixed template command/env override",
+    "native agent cannot join helper namespaces",
+    "helper shares private net but has separate PID/mount namespaces",
+    "real descriptor/env noninheritance; denied host files/network/nested namespaces; zero caps",
+    "real layered whiteouts and opaque directory handling",
+    "native agent OS principal cannot browse protected image storage",
+    "bounded scratch tmpfs reaches actual ENOSPC",
+    "actual process exhaustion and orphan cleanup",
+    "actual cgroup memory exhaustion fails without fabricated success",
+    "CPU is kernel-throttled",
+    "nonzero workload exit code preserved",
+    "stdout snapshot is bounded",
+    "unsupported identities/config/mount requirements and malicious archives rejected",
+    "mature unpacker scopes absolute layer symlinks inside rootfs",
+    "cross-principal status invisible",
+    "cross-principal stop invisible",
+    "worker-wide instance ceiling enforced",
+    "whole process tree including setsid grandchildren removed",
+    "normal parent exit also removes leftover children",
+    "grant instance quota enforced separately",
+    "logs require separate permission",
+    "duration bound enforced",
+    "credential lease independently bounded",
+    "security revocation tears down grant-owned tree",
+    "missing worker configuration fails closed precisely",
+    "wrong Bubblewrap pin rejected",
+    "unbounded/shared storage rejected",
+    "mock cgroup files cannot qualify a real worker",
+    "actual missing writable CPU controller fails closed precisely",
+    "kernel denial of user namespaces fails closed precisely",
+    "supervisor crash kills descendants and refuses stale endpoint recovery"
+  ],
+  "pins": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "silo_sha256": "8adfd7aba8d78bbe6f477aea993e941b3e584a161574e6b3bb5fd2eafd8cc58b",
+    "fixture_index": "localhost:42309/silo/probe@sha256:c5d15efdc9ad2b795047706c39f43705211d88518b41cc789a870fa2f69ff36e",
+    "stock_platform_manifest": "sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e",
+    "stock_image": "docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9"
+  },
+  "worker": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-jyve4bu7/certs",
+    "storage": "/tmp/silo-worker-jyve4bu7/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-43c1f9dbb6d6/jobs",
+    "ceilings": {
+      "processes": 256,
+      "memory_bytes": 536870912,
+      "cpu_millis": 2000,
+      "scratch_bytes": 16777216,
+      "disk_bytes": 268435456,
+      "duration_secs": 60,
+      "max_instances": 2
+    }
+  },
+  "kernel": "6.1.0-56-amd64",
+  "native_namespace_join": {
+    "exit": 1,
+    "stderr": "nsenter: cannot open /proc/23028/ns/net: Permission denied\n"
+  },
+  "resources": {
+    "scratch_stdout": "scratch_bytes=4194304\n",
+    "pids_events": {
+      "max": 1
+    },
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 18,
+      "oom": 1,
+      "oom_kill": 5,
+      "oom_group_kill": 1
+    },
+    "cpu_stat": {
+      "usage_usec": 423106,
+      "user_usec": 411131,
+      "system_usec": 11974,
+      "nr_periods": 21,
+      "nr_throttled": 21,
+      "throttled_usec": 1900149,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "cpu_stdout": "cpu_ms=397 loops=4956873\n"
+  },
+  "result": "passed"
+}

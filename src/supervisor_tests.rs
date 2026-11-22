@@ -44,6 +44,7 @@ fn insert(s: &mut Supervisor, id: &str, grant_id: &str, g: &Grant, state: State)
             template: "app".into(),
             state,
             exit_code: Some(17),
+            image_digest: None,
             project: g.project.clone(),
             session: g.session.clone(),
             grant_id: grant_id.into(),

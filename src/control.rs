@@ -225,6 +225,11 @@ pub fn connect(path: &Path) -> Result<TcpStream> {
 }
 pub fn call(path: &Path, req: Request) -> Result<Value> {
     let mut stream = connect(path)?;
+    if matches!(req.operation, Operation::Run { .. }) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(300)))
+            .map_err(|_| unavailable())?;
+    }
     write_frame(&mut stream, &req)?;
     drop(req); // Zeroize token before waiting for a reply.
     let mut buf = read_frame(&mut stream).map_err(|_| unavailable())?;

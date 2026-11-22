@@ -1,6 +1,6 @@
 # Silo v1: rootless OCI jobs, private services, and named volumes
 
-**Status:** Runtime design baseline. The Rust [policy/control foundation](foundation.md) is implemented; the integrated runner, storage and enforcement described here remain pending. Earlier local proofs cover an allowed/denied named TCP service and passing connected TCP sockets across namespaces; they do not qualify this implementation or worker.
+**Status:** Runtime design baseline. The Rust [policy/control foundation](foundation.md) and [single-image job runner](runner.md) are implemented, with [real disposable-worker evidence](runner-evidence.md). Services, TCP relay and named volumes described below remain pending. Qualification applies only to the tested worker configuration; activation or mock tests do not qualify another deployment.
 
 ## Goal
 

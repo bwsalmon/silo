@@ -13,7 +13,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-pub const HELP: &str = "silo: authenticated policy and control foundation
+pub const HELP: &str = "silo: authenticated single-image rootless jobs
 Local: validate MANIFEST
 Control: up MANIFEST --no-start | run TEMPLATE | ps | status ID | logs ID | stop ID
 Metadata: volume list|inspect NAME; service list|inspect NAME
@@ -22,8 +22,8 @@ Trusted launcher: supervisor --state-dir DIR --auth-fd FD
 Trusted operator: operator issue GRANT --token-fd FD | operator revoke ID | operator audit | operator shutdown
 Control commands require --endpoint /absolute/private/endpoint.json --auth-fd FD
 Output: --json (one JSON value, including errors)
-Runtime, storage and namespace helper are unavailable; no workloads are launched.
-See docs/foundation.md for schema, transport and limitations.";
+Jobs require a qualified worker and the static musl supervisor; services, links and volumes are unsupported.
+See docs/runner.md and docs/foundation.md for qualification, schema and transport.";
 
 pub enum Command {
     Help,
@@ -158,7 +158,7 @@ pub fn execute(args: Args) -> Result<Value> {
             Ok(json!({"stopped": true}))
         }
         command => {
-            // Read and close credentials before any operation; no subprocesses are started.
+            // Read and close credentials before any operation or future child launch.
             let auth = linux::credential(args.auth_fd.ok_or_else(crate::error::unauthenticated)?)?;
             let operation = match command {
                 Command::Remote(op) => op,

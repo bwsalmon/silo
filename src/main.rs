@@ -3,6 +3,23 @@ use silo::{cli, error::Result};
 
 fn main() {
     let raw: Vec<_> = std::env::args_os().skip(1).collect();
+    if raw.len() == 1 && raw[0] == "__workload_exec" {
+        std::process::exit(if silo::trampoline::entry().is_ok() {
+            0
+        } else {
+            5
+        });
+    }
+    if raw.len() == 1 && raw[0] == "__namespace_helper" {
+        match silo::helper::entry() {
+            Ok(_) => return,
+            Err(error) => {
+                let exit = error.exit();
+                let _ = silo::helper::emit(&silo::helper::Event::Error { error });
+                std::process::exit(exit);
+            }
+        }
+    }
     let json = raw.iter().any(|s| s == "--json");
     let strings = raw
         .into_iter()

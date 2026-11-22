@@ -70,5 +70,5 @@ pub fn unavailable() -> Error {
 }
 pub fn unsupported() -> Error {
     Error::new(Code::UnsupportedWorker,
-        "Runtime unavailable: OCI runner, namespace launcher, protected storage, resource ceilings and TCP relay are not implemented; no worker has been qualified")
+        "Services, TCP relay and named-volume operations are unsupported in the single-image job runner")
 }
