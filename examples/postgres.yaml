@@ -1,0 +1,316 @@
+# Disposable acceptance fixture: public test passwords, never production credentials.
+{
+  "version": 1,
+  "project": "worker-test",
+  "jobs": {
+    "initialize": {
+      "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "uid": 70,
+      "gid": 70,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "\ntest \"$(id -u)\" = 70\ntest \"$(id -g)\" = 70\ntest \"$(stat -c %u \"$PGDATA\")\" = 70\necho image-and-data-owner=70:70\nprintf '%s\n' disposable-operator > /tmp/password\ninitdb -D \"$PGDATA\" -U operator --pwfile=/tmp/password --auth-host=scram-sha-256 --auth-local=reject\npostgres -D \"$PGDATA\" -c unix_socket_directories= -c listen_addresses=127.0.0.1 -c shared_buffers=16MB &\npid=$!\ntrap 'kill -TERM \"$pid\" 2>/dev/null || true; wait \"$pid\" || true' EXIT\nexport PGHOST=127.0.0.1 PGUSER=operator PGPASSWORD=disposable-operator\nfor i in 1 2 3 4 5 6 7 8 9 10; do\n  if psql -d postgres -v ON_ERROR_STOP=1 -c \"SELECT 1\"; then break; fi\n  sleep 0.2\ndone\npsql -d postgres -v ON_ERROR_STOP=1 -c \"\nCREATE ROLE app LOGIN PASSWORD 'disposable-app';\nCREATE TABLE allowed(value text);\nCREATE TABLE secret(value text);\nINSERT INTO secret VALUES ('operator-only');\nGRANT SELECT,INSERT ON allowed TO app;\nREVOKE ALL ON SCHEMA public FROM PUBLIC;\nGRANT USAGE ON SCHEMA public TO app;\n\"\nkill -TERM \"$pid\"\nwait \"$pid\"\ntrap - EXIT\n"
+      ],
+      "limits": {
+        "processes": 64,
+        "memory_bytes": 805306368,
+        "cpu_millis": 1000,
+        "scratch_bytes": 16777216,
+        "connections": 8,
+        "duration_secs": 300,
+        "max_instances": 4
+      },
+      "mounts": [
+        {
+          "volume": "pgdata",
+          "target": "/var/lib/postgresql/data",
+          "mode": "rw"
+        }
+      ],
+      "agent": [],
+      "env": {
+        "PGDATA": "/var/lib/postgresql/data"
+      }
+    },
+    "seed": {
+      "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "uid": 70,
+      "gid": 70,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "echo fixture-value > /fixtures/fixture; echo private > /other/private"
+      ],
+      "limits": {
+        "processes": 64,
+        "memory_bytes": 805306368,
+        "cpu_millis": 1000,
+        "scratch_bytes": 16777216,
+        "connections": 8,
+        "duration_secs": 300,
+        "max_instances": 4
+      },
+      "mounts": [
+        {
+          "volume": "fixtures",
+          "target": "/fixtures",
+          "mode": "rw"
+        },
+        {
+          "volume": "other",
+          "target": "/other",
+          "mode": "rw"
+        }
+      ],
+      "agent": []
+    },
+    "app": {
+      "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "uid": 70,
+      "gid": 70,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n if psql -X -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then break; fi\n sleep 0.1\ndone\n\ntest \"$(cat /fixtures/fixture)\" = fixture-value\nif echo poison >> /fixtures/fixture; then exit 91; fi\ntest ! -e /other/private\npsql -X -v ON_ERROR_STOP=1 -c \"INSERT INTO allowed VALUES ('durable-row'); SELECT value FROM allowed\"\nprintf '%s\n' results-value > /results/result\n"
+      ],
+      "limits": {
+        "processes": 64,
+        "memory_bytes": 805306368,
+        "cpu_millis": 1000,
+        "scratch_bytes": 16777216,
+        "connections": 8,
+        "duration_secs": 300,
+        "max_instances": 4
+      },
+      "mounts": [
+        {
+          "volume": "fixtures",
+          "target": "/fixtures",
+          "mode": "ro"
+        },
+        {
+          "volume": "results",
+          "target": "/results",
+          "mode": "rw"
+        }
+      ],
+      "agent": [
+        "run",
+        "list",
+        "status",
+        "stop"
+      ],
+      "env": {
+        "PGHOST": "db.silo",
+        "PGPORT": "5432",
+        "PGDATABASE": "postgres",
+        "PGUSER": "app",
+        "PGPASSWORD": "disposable-app",
+        "PGCONNECT_TIMEOUT": "3"
+      }
+    },
+    "verify": {
+      "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "uid": 70,
+      "gid": 70,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "\nfor i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n if psql -X -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then break; fi\n sleep 0.1\ndone\nexec /usr/local/bin/psql -X -At -v ON_ERROR_STOP=1 -c 'SELECT value FROM allowed'"
+      ],
+      "limits": {
+        "processes": 64,
+        "memory_bytes": 805306368,
+        "cpu_millis": 1000,
+        "scratch_bytes": 16777216,
+        "connections": 8,
+        "duration_secs": 300,
+        "max_instances": 4
+      },
+      "mounts": [],
+      "agent": [
+        "run",
+        "list",
+        "status",
+        "stop",
+        "logs"
+      ],
+      "env": {
+        "PGHOST": "db.silo",
+        "PGPORT": "5432",
+        "PGDATABASE": "postgres",
+        "PGUSER": "app",
+        "PGPASSWORD": "disposable-app",
+        "PGCONNECT_TIMEOUT": "3"
+      }
+    },
+    "unrelated": {
+      "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "uid": 70,
+      "gid": 70,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "\nif psql -X -At -c 'SELECT 1'; then exit 91; fi\nif PGHOST=127.77.0.1 psql -X -At -c 'SELECT 1'; then exit 92; fi\necho unrelated-denied\n"
+      ],
+      "limits": {
+        "processes": 64,
+        "memory_bytes": 805306368,
+        "cpu_millis": 1000,
+        "scratch_bytes": 16777216,
+        "connections": 8,
+        "duration_secs": 300,
+        "max_instances": 4
+      },
+      "mounts": [],
+      "agent": [
+        "run",
+        "list",
+        "status",
+        "stop"
+      ],
+      "env": {
+        "PGHOST": "db.silo",
+        "PGPORT": "5432",
+        "PGDATABASE": "postgres",
+        "PGUSER": "app",
+        "PGPASSWORD": "disposable-app",
+        "PGCONNECT_TIMEOUT": "3"
+      }
+    },
+    "sql-deny": {
+      "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "uid": 70,
+      "gid": 70,
+      "command": [
+        "/bin/sh",
+        "-ec",
+        "\nfor q in \"SELECT * FROM secret\" \"SELECT pg_read_file('/etc/passwd')\" \"COPY allowed TO PROGRAM 'id'\" \"SET ROLE operator\"; do\n if psql -X -v ON_ERROR_STOP=1 -c \"$q\"; then exit 93; fi\ndone\necho sql-denied\n"
+      ],
+      "limits": {
+        "processes": 64,
+        "memory_bytes": 805306368,
+        "cpu_millis": 1000,
+        "scratch_bytes": 16777216,
+        "connections": 8,
+        "duration_secs": 300,
+        "max_instances": 4
+      },
+      "mounts": [],
+      "agent": [
+        "run",
+        "list",
+        "status",
+        "stop"
+      ],
+      "env": {
+        "PGHOST": "db.silo",
+        "PGPORT": "5432",
+        "PGDATABASE": "postgres",
+        "PGUSER": "app",
+        "PGPASSWORD": "disposable-app",
+        "PGCONNECT_TIMEOUT": "3"
+      }
+    }
+  },
+  "services": {
+    "db": {
+      "template": {
+        "image": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+        "uid": 70,
+        "gid": 70,
+        "command": [
+          "/usr/local/bin/postgres",
+          "-D",
+          "/var/lib/postgresql/data",
+          "-c",
+          "unix_socket_directories=",
+          "-c",
+          "listen_addresses=127.0.0.1",
+          "-c",
+          "shared_buffers=16MB"
+        ],
+        "limits": {
+          "processes": 64,
+          "memory_bytes": 805306368,
+          "cpu_millis": 1000,
+          "scratch_bytes": 16777216,
+          "connections": 8,
+          "duration_secs": 600,
+          "max_instances": 4
+        },
+        "mounts": [
+          {
+            "volume": "pgdata",
+            "target": "/var/lib/postgresql/data",
+            "mode": "rw"
+          }
+        ],
+        "agent": [],
+        "env": {
+          "PGDATA": "/var/lib/postgresql/data"
+        }
+      },
+      "listen": [
+        5432
+      ]
+    }
+  },
+  "network": {
+    "external": "deny",
+    "allow": [
+      {
+        "from": "app",
+        "to": "db",
+        "protocol": "tcp",
+        "port": 5432
+      },
+      {
+        "from": "verify",
+        "to": "db",
+        "protocol": "tcp",
+        "port": 5432
+      },
+      {
+        "from": "sql-deny",
+        "to": "db",
+        "protocol": "tcp",
+        "port": 5432
+      }
+    ]
+  },
+  "volumes": {
+    "fixtures": {
+      "sharing": "exclusive-writer",
+      "uid": 70,
+      "gid": 70,
+      "max_bytes": 67108864,
+      "agent": [
+        "volume_list",
+        "volume_inspect"
+      ]
+    },
+    "results": {
+      "sharing": "exclusive-writer",
+      "uid": 70,
+      "gid": 70,
+      "max_bytes": 67108864,
+      "agent": []
+    },
+    "pgdata": {
+      "sharing": "exclusive-writer",
+      "uid": 70,
+      "gid": 70,
+      "max_bytes": 268435456,
+      "agent": []
+    },
+    "other": {
+      "sharing": "exclusive-writer",
+      "uid": 70,
+      "gid": 70,
+      "max_bytes": 67108864,
+      "agent": []
+    }
+  }
+}

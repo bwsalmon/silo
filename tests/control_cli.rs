@@ -245,11 +245,9 @@ fn actual_authenticated_cli_activation_and_allow_deny() {
         3,
         "not_found",
     );
-    failure(
-        h.cli(&["run", "app"], &agent, None),
-        5,
-        "unsupported_worker",
-    );
+    failure(h.cli(&["run", "app"], &agent, None), 3, "forbidden");
+    // A grant issued before explicit creation cannot acquire future volume IDs.
+    failure(h.operator(&["run", "app"]), 5, "unsupported_worker");
     failure(h.cli(&["run", "db"], &agent, None), 3, "forbidden");
     failure(
         h.cli(

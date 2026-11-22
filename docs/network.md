@@ -5,7 +5,7 @@ e621525a0e8501e9eea83a31ba4b9c187955e2d2) with the static directional
 relay from the design pinned at 5ae66d9db83199e98561dc37c82d1b4bd19d9078.
 The prerequisite commit and its implementation were verified on main before
 this extension. All [runner prerequisites and image restrictions](runner.md)
-still apply. Named volumes remain unsupported.
+still apply. [Protected named volumes and durable Postgres](volumes.md) now extend this boundary.
 
 ## Operator policy and launches
 

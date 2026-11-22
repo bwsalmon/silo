@@ -16,8 +16,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 const MAX_METADATA: u64 = 1024 * 1024;
-const MAX_BLOB: u64 = 64 * 1024 * 1024;
-const MAX_EXPANDED: u64 = 128 * 1024 * 1024;
+const MAX_BLOB: u64 = 256 * 1024 * 1024;
+const MAX_EXPANDED: u64 = 512 * 1024 * 1024;
 const MAX_ENTRIES: usize = 32768;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -322,14 +322,54 @@ pub fn execution(config: &Value, template: Option<&Template>) -> Result<Executio
         return Err(failed("Invalid OCI ArgsEscaped config"));
     }
     let user = cfg.get("User").and_then(Value::as_str).unwrap_or("");
-    if !matches!(user, "" | "0" | "0:0")
-        || template.map(|t| t.uid != 0 || t.gid != 0).unwrap_or(false)
+    let numeric = user.is_empty()
+        || user.split(':').count() <= 2
+            && user
+                .split(':')
+                .all(|v| v.parse::<u32>().map(|n| n < 65535).unwrap_or(false));
+    if !numeric
+        || template
+            .map(|t| t.uid > 65534 || t.gid > 65534)
+            .unwrap_or(false)
     {
         return Err(failed(
-            "Unsupported image/template identity: only numeric 0:0 has a verified rootless mapping",
+            "Unsupported image/template identity: only one numeric UID/GID below 65535 is mapped",
         ));
     }
-    for key in ["Volumes", "ExposedPorts", "OnBuild", "Healthcheck", "Shell"] {
+    if let Some(t) = template {
+        if !user.is_empty() {
+            let mut parts = user.split(':');
+            let uid = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(u32::MAX);
+            let gid = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(uid);
+            if uid != t.uid || gid != t.gid {
+                return Err(failed("Template must pin the image's numeric UID/GID"));
+            }
+        }
+    }
+    for key in ["Volumes", "ExposedPorts"] {
+        if let Some(value) = cfg.get(key).filter(|v| !v.is_null()) {
+            if !value
+                .as_object()
+                .map(|entries| {
+                    entries.iter().all(|(name, value)| {
+                        !name.is_empty()
+                            && !name.contains('\0')
+                            && value.as_object().map(|v| v.is_empty()).unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+            {
+                return Err(failed("Invalid inert OCI volume/port metadata"));
+            }
+        }
+    }
+    for key in ["OnBuild", "Healthcheck", "Shell"] {
         if let Some(v) = cfg.get(key) {
             if !v.is_null()
                 && v.as_object()
@@ -347,11 +387,6 @@ pub fn execution(config: &Value, template: Option<&Template>) -> Result<Executio
         .get("ArgsEscaped")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || cfg
-            .get("StopSignal")
-            .and_then(Value::as_str)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
     {
         return Err(failed(
             "Unsupported OCI argument or stop-signal requirement",
@@ -588,12 +623,14 @@ pub fn validate_layer(reader: impl Read, diff: &str, budget: &mut ArchiveBudget)
         {
             return Err(failed("Unsafe OCI archive path"));
         }
-        if entry.header().uid().ok() != Some(0)
-            || entry.header().gid().ok() != Some(0)
+        if entry.header().uid().map(|v| v > 65534).unwrap_or(true)
+            || entry.header().gid().map(|v| v > 65534).unwrap_or(true)
             || entry
                 .header()
                 .mode()
-                .map(|m| m & 0o6000 != 0)
+                .map(|m| {
+                    m & 0o4000 != 0 || m & 0o2000 != 0 && !entry.header().entry_type().is_dir()
+                })
                 .unwrap_or(true)
         {
             return Err(failed(
@@ -680,7 +717,10 @@ fn inspect_tree(path: &Path) -> Result<()> {
             return Err(failed("Unpacked OCI inode ceiling exceeded"));
         }
         let m = fs::symlink_metadata(&path).map_err(|_| failed("Cannot inspect unpacked image"))?;
-        if !m.is_file() && !m.is_dir() && !m.file_type().is_symlink() || m.mode() & 0o6000 != 0 {
+        if !m.is_file() && !m.is_dir() && !m.file_type().is_symlink()
+            || m.mode() & 0o4000 != 0
+            || m.mode() & 0o2000 != 0 && !m.is_dir()
+        {
             return Err(failed(
                 "Unpacked image contains unsupported special/set-ID files",
             ));

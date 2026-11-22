@@ -46,6 +46,9 @@ pub enum Action {
         scratch_bytes: u64,
         deadline_unix_ms: u64,
         network: crate::relay::Network,
+        mounts: Vec<crate::volume::Binding>,
+        uid: u32,
+        gid: u32,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -151,6 +154,9 @@ pub fn entry() -> Result<serde_json::Value> {
             scratch_bytes,
             deadline_unix_ms,
             network,
+            mounts,
+            uid,
+            gid,
         } => {
             bwrap.verify()?;
             let remaining = Duration::from_millis(deadline_unix_ms).saturating_sub(
@@ -159,7 +165,19 @@ pub fn entry() -> Result<serde_json::Value> {
                     .unwrap_or_default(),
             );
             let deadline = Instant::now() + remaining;
-            namespace()?; // This precedes Bubblewrap, and no threads exist yet.
+            let mut sources = Vec::new();
+            for mount in &mounts {
+                use std::os::unix::fs::MetadataExt;
+                let source = crate::volume::open_source(&mount.source)?;
+                let metadata = source
+                    .metadata()
+                    .map_err(|_| failed("Cannot inspect opened volume source"))?;
+                if metadata.dev() != mount.device || metadata.ino() != mount.inode {
+                    return Err(failed("Volume source changed during launch"));
+                }
+                sources.push(source);
+            }
+            namespace_as(uid, gid)?; // No threads exist yet.
             relay_channel
                 .as_ref()
                 .expect("private workload channel")
@@ -206,16 +224,13 @@ pub fn entry() -> Result<serde_json::Value> {
                     "--unshare-cgroup",
                     "--disable-userns",
                     "--assert-userns-disabled",
-                    "--uid",
-                    "0",
-                    "--gid",
-                    "0",
                     "--cap-drop",
                     "ALL",
                     "--new-session",
                     "--die-with-parent",
                     "--clearenv",
                 ])
+                .args(["--uid", &uid.to_string(), "--gid", &gid.to_string()])
                 .arg("--ro-bind")
                 .arg(rootfs)
                 .arg("/")
@@ -243,8 +258,18 @@ pub fn entry() -> Result<serde_json::Value> {
                 .arg(status_write.as_raw_fd().to_string())
                 .arg("--ro-bind")
                 .arg(executable)
-                .arg("/run/.silo-exec")
-                .args(["--chdir", "/", "--", "/run/.silo-exec", "__workload_exec"]);
+                .arg("/run/.silo-exec");
+            for (mount, source) in mounts.iter().zip(&sources) {
+                inherit(source.as_raw_fd())?;
+                cmd.arg(if mount.readonly {
+                    "--ro-bind-fd"
+                } else {
+                    "--bind-fd"
+                })
+                .arg(source.as_raw_fd().to_string())
+                .arg(&mount.target);
+            }
+            cmd.args(["--chdir", "/", "--", "/run/.silo-exec", "__workload_exec"]);
             let mut child = cmd
                 .spawn()
                 .map_err(|_| missing("Cannot execute pinned Bubblewrap"))?;
@@ -252,6 +277,7 @@ pub fn entry() -> Result<serde_json::Value> {
             drop(status_write);
             drop(filter);
             drop(hosts);
+            drop(sources);
             serde_json::to_writer(&mut exec_channel, &execution)
                 .map_err(|_| failed("Cannot send trusted exec specification"))?;
             exec_channel
@@ -285,10 +311,10 @@ pub fn entry() -> Result<serde_json::Value> {
                 let _ = child.kill();
                 let _ = child.wait();
                 let diagnostics = err.join().unwrap_or_default();
-                return Err(missing(&format!(
-                    "Bubblewrap PID/mount/userns/seccomp/tmpfs setup failed: {}",
-                    String::from_utf8_lossy(&diagnostics)
-                )));
+                return Err(setup_error(
+                    "Bubblewrap PID/mount/userns/seccomp/tmpfs setup failed",
+                    &diagnostics,
+                ));
             }
             let exec_error = match crate::fd_channel::receive(exec_channel.as_raw_fd()) {
                 Ok(fd) => fd,
@@ -296,6 +322,11 @@ pub fn entry() -> Result<serde_json::Value> {
                     let _ = child.kill();
                     let _ = child.wait();
                     let diagnostics = err.join().unwrap_or_default();
+                    if source_changed(&diagnostics) {
+                        return Err(failed(
+                            "Bubblewrap rejected a changed mount source before image execution",
+                        ));
+                    }
                     return Err(Error::new(
                         error.code,
                         &format!(
@@ -366,7 +397,30 @@ fn limit(resource: u64, value: u64) -> Result<()> {
     }
     Ok(())
 }
+fn source_changed(diagnostics: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(diagnostics);
+    [
+        "Race condition binding dirfd",
+        "Can't get type of source",
+        "Can't find source path",
+    ]
+    .iter()
+    .any(|message| text.contains(message))
+}
+fn setup_error(context: &str, diagnostics: &[u8]) -> Error {
+    if source_changed(diagnostics) {
+        failed("Bubblewrap rejected a changed mount source before image execution")
+    } else {
+        missing(&format!(
+            "{context}: {}",
+            String::from_utf8_lossy(diagnostics)
+        ))
+    }
+}
 fn namespace() -> Result<()> {
+    namespace_as(0, 0)
+}
+fn namespace_as(container_uid: u32, container_gid: u32) -> Result<()> {
     let uid = linux::uid();
     // SAFETY: getgid has no preconditions.
     let gid = unsafe { libc::getgid() };
@@ -376,12 +430,14 @@ fn namespace() -> Result<()> {
     }
     fs::write("/proc/self/setgroups", "deny")
         .map_err(|_| missing("Worker denies setgroups isolation"))?;
-    fs::write("/proc/self/uid_map", format!("0 {uid} 1"))
+    fs::write("/proc/self/uid_map", format!("{container_uid} {uid} 1"))
         .map_err(|_| missing("Worker denies single UID mapping"))?;
-    fs::write("/proc/self/gid_map", format!("0 {gid} 1"))
+    fs::write("/proc/self/gid_map", format!("{container_gid} {gid} 1"))
         .map_err(|_| missing("Worker denies single GID mapping"))?;
     // SAFETY: mappings have just been established in this single-threaded process.
-    if unsafe { libc::setresgid(0, 0, 0) } != 0 || unsafe { libc::setresuid(0, 0, 0) } != 0 {
+    if unsafe { libc::setresgid(container_gid, container_gid, container_gid) } != 0
+        || unsafe { libc::setresuid(container_uid, container_uid, container_uid) } != 0
+    {
         return Err(missing("Worker denies mapped helper identity"));
     }
     // SAFETY: network namespace is private; helper remains outside workload PID/mount namespaces.

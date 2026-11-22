@@ -1,4 +1,4 @@
-# Foundation example. Image digests are illustrative; no runtime is implemented.
+# Schema example with illustrative image digests; use postgres.yaml for real acceptance.
 version: 1
 project: example
 jobs:

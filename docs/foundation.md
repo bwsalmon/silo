@@ -4,7 +4,7 @@ This describes the policy/control foundation of the [runtime design](design.md)
 and [CLI contract](cli.md), based on design commit
 `5ae66d9db83199e98561dc37c82d1b4bd19d9078`. The subsequent
 [single-image runner](runner.md) adds verified OCI jobs and a separate trusted
-namespace helper to the same Cargo package and executable.
+namespace helper to the same Cargo package and executable. [Private services](network.md) and [managed volumes](volumes.md) extend it further.
 
 ## Build and checks
 
@@ -45,8 +45,8 @@ evidence of a launched process, enforced storage, or completed teardown.
 | `up FILE --no-start` | Operator-only activation, persisted policy, no workloads or volumes |
 | `ps` | Only instances visible under the separate list permission |
 | `run TEMPLATE`, `status ID`, `stop ID`, `logs ID` | Scoped single-image jobs on qualified workers; logs need their own permission |
-| `volume list/inspect NAME` | Authorized **declaration metadata**, explicitly `created:false`; no host paths or contents |
-| `service list/inspect NAME` | Authorized declaration metadata, explicitly `started:false` |
+| `volume list/inspect NAME` | Authorized declaration/created metadata with managed IDs; no host paths or contents |
+| `service list/inspect NAME` | Authorized service metadata and started instance ID |
 | `operator issue GRANT.json --token-fd FD` | Trusted operator only; credential goes exclusively to output FD |
 | `operator revoke GRANT_ID` | Trusted operator only; reject new requests and queue owned-instance teardown |
 | `operator audit` | Operator-only bounded audit snapshot |
@@ -59,13 +59,14 @@ credential input is 64 hex characters with an optional newline, followed by EOF.
 Silo consumes and closes it before sending a request or entering the supervisor.
 There is no credential environment variable or automatic retry.
 
-`volume create/rm` return `unsupported_worker` (exit 5) after authorization.
-`run` requires the [qualified runner](runner.md). Operator `up` now starts
-[static private services](network.md); the foundation example still includes
-unsupported mounts and cannot launch. Activation may persist policy before
-service startup failure is reported. Attach/exec, overrides,
-external egress, UDP/DNS, dynamic topology, public/remote APIs, MCP and multi-host
-operation remain absent.
+`volume create/rm/recover` are operator-only operations on qualified protected
+persistent storage. `run` requires the [qualified runner](runner.md), explicit
+volume creation and ID-bound mount grants. Operator `up` starts
+[static private services](network.md); the foundation example's image digests
+are illustrative, so use the [stock Postgres fixture](../examples/postgres.yaml)
+for real storage acceptance. Activation may persist policy before service setup
+fails. Attach/exec, overrides, external egress, UDP/DNS, dynamic topology,
+public/remote APIs, MCP and multi-host operation remain absent.
 
 `--json` writes exactly one JSON value to stdout for success or error. Invalid
 CLI arguments, manifests and raw protocol fields have fixed, redacted messages.
@@ -119,7 +120,7 @@ silo volume inspect fixtures --json --endpoint "$state/endpoint.json" \
 # Expected: created:false. No volume was created.
 silo run app --json --endpoint "$state/endpoint.json" \
   --auth-fd 3 3<"$state/agent.token"
-# Expected: unsupported_worker, exit 5. No instance was launched.
+# Expected: forbidden, exit 3: no created-volume IDs were bound to this grant.
 silo operator shutdown --json --endpoint "$state/endpoint.json" \
   --auth-fd 3 3<"$state/operator.token"
 ```
@@ -214,7 +215,7 @@ grant's instances.
 Policy persists; issued credentials, runtime records and audit records do not.
 A clean restart invalidates all issued agent credentials. An exclusive lock
 prevents concurrent supervisors. A stale endpoint after abnormal loss causes
-startup refusal; there is no recovery/reattachment path or cleanup assertion.
+startup refusal; [explicit storage recovery](volumes.md#supervisor-loss-and-explicit-recovery) requires independent whole-tree cleanup proof.
 Do not remove recovery evidence to resume an uncertain writer.
 
 Audit retains the newest 512 records with sequence, time, principal,
@@ -233,5 +234,5 @@ separate [real-worker suite](runner-evidence.md) verifies actual process cleanup
 resource exhaustion and crash refusal.
 
 [Static services and TCP relay](network.md) now extend this foundation.
-Named volumes, PostgreSQL persistence and recovery reattachment remain unsupported. Worker qualification never follows from API
+[Named volumes, PostgreSQL persistence and explicit recovery](volumes.md) now extend it too. Worker qualification never follows from API
 quotas, activation, synthetic fixtures or mocks alone.

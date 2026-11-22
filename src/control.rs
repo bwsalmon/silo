@@ -53,6 +53,9 @@ pub enum Operation {
     VolumeRm {
         name: String,
     },
+    VolumeRecover {
+        name: String,
+    },
     ServiceList,
     ServiceInspect {
         name: String,
@@ -79,6 +82,7 @@ impl Operation {
             Self::VolumeInspect { .. } => "volume_inspect",
             Self::VolumeCreate { .. } => "volume_create",
             Self::VolumeRm { .. } => "volume_rm",
+            Self::VolumeRecover { .. } => "volume_recover",
             Self::ServiceList => "service_list",
             Self::ServiceInspect { .. } => "service_inspect",
             Self::Issue { .. } => "issue",
@@ -225,7 +229,14 @@ pub fn connect(path: &Path) -> Result<TcpStream> {
 }
 pub fn call(path: &Path, req: Request) -> Result<Value> {
     let mut stream = connect(path)?;
-    if matches!(req.operation, Operation::Run { .. }) {
+    if matches!(
+        req.operation,
+        Operation::Run { .. }
+            | Operation::Activate {
+                no_start: false,
+                ..
+            }
+    ) {
         stream
             .set_read_timeout(Some(Duration::from_secs(300)))
             .map_err(|_| unavailable())?;

@@ -77,6 +77,8 @@ pub struct Worker {
     pub skopeo: Tool,
     pub umoci: Tool,
     pub storage: PathBuf,
+    #[serde(default)]
+    pub volume_root: Option<PathBuf>,
     pub cgroup: PathBuf,
     /// Restricted native agents must run under this separate, unprivileged OS principal.
     pub agent_uid: u32,

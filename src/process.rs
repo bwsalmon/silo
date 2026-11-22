@@ -23,6 +23,13 @@ pub fn spawn_with_channel(
         std::env::current_exe().map_err(|_| failed("Cannot locate trusted Silo executable"))?;
     crate::worker::trusted_path(&exe, false)?;
     let mut command = Command::new(exe);
+    let supervisor_pid = std::process::id() as libc::pid_t;
+    // Establish this before exec/request parsing: adoption by a subreaper must never
+    // make a delayed helper accept a replacement parent after supervisor loss.
+    // SAFETY: protect_parent uses only async-signal-safe operations in the fork child.
+    unsafe {
+        command.pre_exec(move || protect_parent(supervisor_pid));
+    }
     if let Some(channel) = channel {
         let fd = channel.0.as_raw_fd();
         // SAFETY: pre_exec uses only async-signal-safe descriptor operations in the fork child.
@@ -61,6 +68,16 @@ pub fn spawn_with_channel(
         return Err(failed("Cannot send namespace helper request"));
     }
     Ok(child)
+}
+fn protect_parent(expected: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: these calls affect/read only the current process and allocate nothing.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != expected {
+        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+    }
+    Ok(())
 }
 pub fn events(child: &mut Child) -> Receiver<Event> {
     let output = child.stdout.take().expect("helper stdout");
@@ -191,4 +208,47 @@ fn bounded_drain(mut file: impl Read, limit: usize) -> Vec<u8> {
         output.extend_from_slice(&buf[..keep]);
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn helper_rejects_replacement_parent_before_exec() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 99"]);
+        // SAFETY: the hook only installs/checks the guard in the fork child.
+        unsafe {
+            command.pre_exec(|| protect_parent(0));
+        }
+        // A mismatched parent must fail spawn, rather than execute even a trusted helper.
+        assert_eq!(
+            command.spawn().unwrap_err().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn helper_installs_sigkill_guard_before_exec() {
+        let parent = std::process::id() as libc::pid_t;
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 99"]);
+        // SAFETY: the hook uses only the parent guard and prctl with a live stack pointer.
+        unsafe {
+            command.pre_exec(move || {
+                protect_parent(parent)?;
+                let mut signal: libc::c_int = 0;
+                if libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if signal != libc::SIGKILL {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                Ok(())
+            });
+        }
+        assert_eq!(command.status().unwrap().code(), Some(99));
+    }
 }

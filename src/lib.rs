@@ -14,6 +14,7 @@ pub mod process;
 pub mod runner;
 pub mod supervisor;
 pub mod trampoline;
+pub mod volume;
 pub mod worker;
 
 pub mod relay;

@@ -125,3 +125,4 @@ jobs:
           fi
           "$binary" validate examples/foundation.yaml --json
           "$binary" validate examples/job.yaml --json
+          "$binary" validate examples/postgres.yaml --json
