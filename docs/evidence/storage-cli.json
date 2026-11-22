@@ -1,0 +1,267 @@
+[
+  {
+    "identity": 65534,
+    "argv": [
+      "run",
+      "app"
+    ],
+    "exit": 0,
+    "response": {
+      "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+      "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+      "state": "running",
+      "template": "app"
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "status",
+      "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+    ],
+    "exit": 0,
+    "response": {
+      "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+      "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+      "state": "running",
+      "template": "app"
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "status",
+      "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+    ],
+    "exit": 0,
+    "response": {
+      "exit_code": 0,
+      "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+      "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+      "state": "exited",
+      "template": "app"
+    }
+  },
+  {
+    "identity": 65533,
+    "argv": [
+      "status",
+      "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "run",
+      "db"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "forbidden",
+        "message": "Operation is not allowed"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "volume",
+      "inspect",
+      "pgdata"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "run",
+      "app",
+      "--mount",
+      "pgdata:/data:rw"
+    ],
+    "exit": 2,
+    "response": {
+      "error": {
+        "code": "invalid_request",
+        "message": "Invalid request"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "stop",
+      "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+    ],
+    "exit": 0,
+    "response": {
+      "exit_code": 0,
+      "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+      "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+      "state": "exited",
+      "template": "app"
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "logs",
+      "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "ps"
+    ],
+    "exit": 0,
+    "response": {
+      "instances": [
+        {
+          "exit_code": 0,
+          "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+          "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+          "state": "exited",
+          "template": "app"
+        }
+      ]
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "status",
+      "svc_c20bc22f6164a6c561ab8ebbb0c64b0f34c1912060876cb9468eb86dbff04118"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "logs",
+      "svc_c20bc22f6164a6c561ab8ebbb0c64b0f34c1912060876cb9468eb86dbff04118"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "stop",
+      "svc_c20bc22f6164a6c561ab8ebbb0c64b0f34c1912060876cb9468eb86dbff04118"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "volume",
+      "create",
+      "pgdata"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "forbidden",
+        "message": "Operation is not allowed"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "volume",
+      "rm",
+      "pgdata"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "forbidden",
+        "message": "Operation is not allowed"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "volume",
+      "recover",
+      "pgdata"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "forbidden",
+        "message": "Operation is not allowed"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "volume",
+      "inspect",
+      "fixtures"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "not_found",
+        "message": "No visible resource with that ID or name"
+      }
+    }
+  },
+  {
+    "identity": 65534,
+    "argv": [
+      "run",
+      "app"
+    ],
+    "exit": 3,
+    "response": {
+      "error": {
+        "code": "forbidden",
+        "message": "Operation is not allowed"
+      }
+    }
+  }
+]

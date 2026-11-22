@@ -71,6 +71,6 @@ pub fn unavailable() -> Error {
 pub fn unsupported() -> Error {
     Error::new(
         Code::UnsupportedWorker,
-        "Named-volume operations are unsupported in this runner",
+        "Operation is unavailable in this execution context",
     )
 }

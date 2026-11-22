@@ -256,6 +256,8 @@ impl Manifest {
         for (n, v) in &self.volumes {
             if !name(n)
                 || v.max_bytes == 0
+                || v.uid > 65534
+                || v.gid > 65534
                 || !v
                     .agent
                     .iter()
@@ -317,13 +319,29 @@ impl Manifest {
         {
             return Err(manifest());
         }
+        if t.uid > 65534 || t.gid > 65534 {
+            return Err(manifest());
+        }
+        let mut volumes = BTreeSet::new();
         let mut targets: Vec<&str> = Vec::new();
         for m in &t.mounts {
-            if !self.volumes.contains_key(&m.volume)
+            if !volumes.insert(&m.volume)
+                || !self.volumes.contains_key(&m.volume)
                 || !absolute(&m.target)
                 || [
-                    "/", "/proc", "/sys", "/dev", "/etc", "/run", "/tmp", "/bin", "/sbin", "/usr",
-                    "/lib", "/lib64",
+                    "/",
+                    "/proc",
+                    "/sys",
+                    "/dev",
+                    "/etc",
+                    "/run",
+                    "/tmp",
+                    "/bin",
+                    "/sbin",
+                    "/usr",
+                    "/lib",
+                    "/lib64",
+                    "/docker-entrypoint-initdb.d",
                 ]
                 .iter()
                 .any(|p| under(p, &m.target) || under(&m.target, p) && *p != "/")
@@ -351,7 +369,19 @@ impl Manifest {
         if t.command
             .iter()
             .skip(1)
-            .any(|arg| targets.iter().any(|p| arg.contains(p)))
+            .filter(|arg| absolute(arg))
+            .chain(t.env.values())
+            .any(|arg| {
+                t.mounts.iter().any(|m| {
+                    arg.contains(&m.target)
+                        && self.jobs.values().any(|j| {
+                            j.agent.contains(&Permission::Run)
+                                && j.mounts
+                                    .iter()
+                                    .any(|w| w.volume == m.volume && w.mode == Mode::Rw)
+                        })
+                })
+            })
         {
             return Err(manifest());
         }

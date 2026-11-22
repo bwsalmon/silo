@@ -4,7 +4,7 @@ use crate::{
     error::{Code, Error, Result},
     helper::{Action, Event, Spec},
     image::{self, Prepared},
-    policy::Template,
+    policy::{Manifest, Template},
     process::{self, Context},
     worker::{failed, missing, Worker},
 };
@@ -33,6 +33,7 @@ pub struct Runner {
     pub worker: Worker,
     _storage_lock: fs::File,
     images: BTreeMap<String, Prepared>,
+    pub volumes: Option<crate::volume::Catalog>,
     relay: crate::relay::Relay,
     live: BTreeMap<String, Running>,
     logs: BTreeMap<String, Value>,
@@ -47,21 +48,23 @@ impl Runner {
             worker,
             _storage_lock: storage_lock,
             images: BTreeMap::new(),
+            volumes: None,
             relay: crate::relay::Relay::new()?,
             live: BTreeMap::new(),
             logs: BTreeMap::new(),
             completed: VecDeque::new(),
         })
     }
-    pub fn check(&self, t: &Template) -> Result<()> {
-        if !t.mounts.is_empty() {
-            return Err(missing(
-                "Named-volume mounts are unsupported in the single-image runner",
-            ));
+    pub fn catalog(&mut self) -> Result<&mut crate::volume::Catalog> {
+        if self.volumes.is_none() {
+            self.volumes = Some(crate::volume::Catalog::open(&self.worker)?);
         }
-        if t.uid != 0 || t.gid != 0 {
+        Ok(self.volumes.as_mut().expect("catalog"))
+    }
+    pub fn check(&self, t: &Template) -> Result<()> {
+        if t.uid > 65534 || t.gid > 65534 {
             return Err(failed(
-                "Unsupported template identity: only numeric 0:0 is mapped",
+                "Unsupported template identity: numeric UID/GID must be below 65535",
             ));
         }
         self.worker.check_limits(&t.limits)?;
@@ -89,6 +92,7 @@ impl Runner {
         &mut self,
         id: &str,
         t: &Template,
+        manifest: &Manifest,
         deadline: u64,
         network: crate::relay::Network,
         routes: Vec<crate::relay::Route>,
@@ -105,7 +109,7 @@ impl Runner {
                 result: None,
             },
         );
-        let result = self.setup(id, t, deadline, network, routes);
+        let result = self.setup(id, t, manifest, deadline, network, routes);
         if result.is_err() {
             let r = self.live.get_mut(id).expect("reserved instance");
             r.setup_failed = true;
@@ -119,6 +123,7 @@ impl Runner {
         &mut self,
         id: &str,
         t: &Template,
+        manifest: &Manifest,
         deadline: u64,
         network: crate::relay::Network,
         routes: Vec<crate::relay::Route>,
@@ -142,8 +147,98 @@ impl Runner {
             }
         };
         let execution = image::resolve_execution(&prepared, t)?;
-        for input in &t.executable_inputs {
-            image::immutable_path(&prepared.rootfs, input)?;
+        // Reject image symlinks at every target component before any mount is acquired.
+        for mount in &t.mounts {
+            let mut path = prepared.rootfs.clone();
+            for part in mount.target.split('/').filter(|p| !p.is_empty()) {
+                path.push(part);
+                match fs::symlink_metadata(&path) {
+                    Ok(m) if m.is_dir() && !m.file_type().is_symlink() => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        fs::create_dir(&path)
+                            .map_err(|_| failed("Cannot prepare volume target"))?;
+                    }
+                    _ => {
+                        return Err(failed(
+                            "Volume target must have symlink-free directory components",
+                        ))
+                    }
+                }
+            }
+        }
+        // Inline command text is trusted operator code, not a shell language to infer here.
+        // Resolve single path-valued tokens, including relative script/config aliases.
+        let mutable_targets: Vec<_> = t
+            .mounts
+            .iter()
+            .filter(|mount| {
+                manifest.jobs.values().any(|j| {
+                    j.agent.contains(&crate::policy::Permission::Run)
+                        && j.mounts
+                            .iter()
+                            .any(|w| w.volume == mount.volume && w.mode == crate::policy::Mode::Rw)
+                })
+            })
+            .map(|mount| prepared.rootfs.join(mount.target.trim_start_matches('/')))
+            .collect();
+        if !mutable_targets.is_empty() {
+            for value in execution.argv.iter().skip(1).chain(execution.env.values()) {
+                for candidate in value.split(':') {
+                    let candidate = candidate
+                        .split_once('=')
+                        .map(|(_, v)| v)
+                        .unwrap_or(candidate);
+                    if candidate.is_empty()
+                        || candidate.starts_with('-')
+                        || candidate.chars().any(char::is_whitespace)
+                    {
+                        continue;
+                    }
+                    if std::path::Path::new(candidate).components().any(|p| {
+                        matches!(
+                            p,
+                            std::path::Component::ParentDir | std::path::Component::CurDir
+                        )
+                    }) || candidate.split('/').any(|p| p == "." || p == "..")
+                    {
+                        return Err(failed("Traversing executable argument/environment paths are unsupported with agent-writable mounts"));
+                    }
+                    let path = if candidate.starts_with('/') {
+                        candidate.to_string()
+                    } else {
+                        format!("{}/{candidate}", execution.workdir.trim_end_matches('/'))
+                    };
+                    if !crate::policy::absolute(&path) {
+                        return Err(failed("Noncanonical executable input path"));
+                    }
+                    let mut prefix = String::new();
+                    for component in path.split('/').filter(|p| !p.is_empty()) {
+                        prefix.push('/');
+                        prefix.push_str(component);
+                        if let Ok(resolved) = image::image_path(&prepared.rootfs, &prefix) {
+                            if mutable_targets
+                                .iter()
+                                .any(|target| resolved.starts_with(target))
+                            {
+                                return Err(failed("Executable argument/environment alias reaches agent-writable storage"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for input in t
+            .executable_inputs
+            .iter()
+            .chain(std::iter::once(&execution.argv[0]))
+            .chain(std::iter::once(&execution.workdir))
+        {
+            let resolved = image::immutable_path(&prepared.rootfs, input)?;
+            if t.mounts.iter().any(|m| {
+                resolved.starts_with(prepared.rootfs.join(m.target.trim_start_matches('/')))
+            }) {
+                return Err(failed("Executable input resolves into a mounted volume"));
+            }
         }
         for target in ["dev", "proc", "tmp", "run", "etc"] {
             let path = prepared.rootfs.join(target);
@@ -182,6 +277,12 @@ impl Runner {
         }
         let (supervisor_channel, helper_channel) = crate::relay_channel::Channel::pair()
             .map_err(|_| missing("Worker denies private SCM_RIGHTS socketpair"))?;
+        let mounts = if t.mounts.is_empty() {
+            Vec::new()
+        } else {
+            self.catalog()?.acquire(manifest, t, id)?
+        };
+        let running = self.live.get_mut(id).expect("reserved instance");
         running.context.child = Some(process::spawn_with_channel(
             &Spec {
                 cgroup: running.context.group.path.clone(),
@@ -194,6 +295,9 @@ impl Runner {
                     scratch_bytes: t.limits.scratch_bytes,
                     deadline_unix_ms: deadline * 1000,
                     network,
+                    mounts,
+                    uid: t.uid,
+                    gid: t.gid,
                 },
             },
             Some(&helper_channel),
@@ -277,7 +381,15 @@ impl Runner {
                     "pids_events": fs::read_to_string(running.context.group.path.join("pids.events")).unwrap_or_default(),
                     "cpu_stat": fs::read_to_string(running.context.group.path.join("cpu.stat")).unwrap_or_default(),
                 });
-                if running.context.cleanup().is_ok() && running.context.group.remove().is_ok() {
+                if running.context.cleanup().is_ok()
+                    && (!running.context.group.path.exists()
+                        || running.context.group.remove().is_ok())
+                    && self
+                        .volumes
+                        .as_mut()
+                        .map(|v| v.release_verified(id).is_ok())
+                        .unwrap_or(true)
+                {
                     let verified_exit = running.result.is_some();
                     let (code, stdout, stderr) = running.result.take().unwrap_or_default();
                     self.logs.insert(

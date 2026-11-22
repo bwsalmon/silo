@@ -82,6 +82,8 @@ pub struct Supervisor {
     pub shutdown: bool,
     runner: Option<crate::runner::Runner>,
     services: BTreeMap<String, String>,
+    // Resolve friendly names once at issuance; an old grant never follows name reuse.
+    volume_bindings: BTreeMap<String, BTreeMap<String, Option<String>>>,
 }
 impl Supervisor {
     pub fn new(root: PathBuf, operator: Secret) -> Result<Self> {
@@ -102,6 +104,7 @@ impl Supervisor {
             shutdown: false,
             runner: None,
             services: BTreeMap::new(),
+            volume_bindings: BTreeMap::new(),
         })
     }
     fn record(
@@ -152,6 +155,17 @@ impl Supervisor {
         } else {
             principal.and_then(|p| self.dispatch(&p, req.operation, time))
         };
+        let resource = if label.starts_with("volume_") {
+            result
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or(resource)
+        } else {
+            resource
+        };
         self.record(&who, label, &resource, &result, time);
         result
     }
@@ -172,15 +186,50 @@ impl Supervisor {
             Operation::VolumeInspect { name }
             | Operation::VolumeCreate { name }
             | Operation::VolumeRm { name }
+            | Operation::VolumeRecover { name }
                 if m.volumes.contains_key(name) =>
             {
-                m.resource_id("vol", name)
+                self.runner
+                    .as_ref()
+                    .and_then(|r| r.volumes.as_ref())
+                    .and_then(|c| c.id(m, name))
+                    .unwrap_or_else(|| m.resource_id("declared_vol", name))
             }
             Operation::ServiceInspect { name } if m.services.contains_key(name) => {
                 m.resource_id("svc", name)
             }
             _ => "-".into(),
         }
+    }
+    fn volume_bound(&self, p: &Principal, m: &Manifest, name: &str, require_created: bool) -> bool {
+        let Principal::Agent { id, .. } = p else {
+            return true;
+        };
+        let Some(expected) = self
+            .volume_bindings
+            .get(id)
+            .and_then(|bindings| bindings.get(name))
+        else {
+            return false;
+        };
+        let current = self
+            .runner
+            .as_ref()
+            .and_then(|r| r.volumes.as_ref())
+            .and_then(|c| c.id(m, name));
+        (!require_created || expected.is_some()) && expected == &current
+    }
+    fn volume_metadata(&mut self, m: &Manifest, name: &str) -> Result<Value> {
+        if !self.root.join("worker.json").exists() {
+            return Ok(json!({"name":name,"created":false}));
+        }
+        Ok(self.runtime()?.catalog()?.metadata(m, name))
+    }
+    fn runtime(&mut self) -> Result<&mut crate::runner::Runner> {
+        if self.runner.is_none() {
+            self.runner = Some(crate::runner::Runner::new(&self.root)?);
+        }
+        Ok(self.runner.as_mut().expect("runner"))
     }
     fn manifest(&self) -> Result<&Manifest> {
         self.policy.as_ref().ok_or_else(forbidden)
@@ -220,7 +269,17 @@ impl Supervisor {
                     return Err(forbidden());
                 }
                 let m = self.manifest()?.clone();
+                grant.validate(&m, time)?;
+                let mut bindings = BTreeMap::new();
+                for name in grant.scope.volumes.iter().chain(grant.scope.mounts.keys()) {
+                    let metadata = self.volume_metadata(&m, name)?;
+                    bindings.insert(
+                        name.clone(),
+                        metadata.get("id").and_then(Value::as_str).map(String::from),
+                    );
+                }
                 let (id, token) = self.credentials.issue(grant, &m, time)?;
+                self.volume_bindings.insert(id.clone(), bindings);
                 // Only an authenticated trusted launcher receives this response. CLI sends token to its output FD.
                 Ok(json!({"grant": id, "token": token.0}))
             }
@@ -278,6 +337,13 @@ impl Supervisor {
                     ));
                 }
                 let t = m.jobs[&template].clone();
+                if !operator
+                    && t.mounts
+                        .iter()
+                        .any(|mount| !self.volume_bound(p, m, &mount.volume, true))
+                {
+                    return Err(forbidden());
+                }
                 let layout = crate::relay::layout(m, &template, &self.services);
                 if self.runner.is_none() {
                     self.runner = Some(crate::runner::Runner::new(&self.root)?);
@@ -299,35 +365,60 @@ impl Supervisor {
             Operation::Logs { id } => self.instance_operation(p, &id, Permission::Logs),
             Operation::Stop { id } => self.instance_operation(p, &id, Permission::Stop),
             Operation::VolumeList => {
-                let m = self.manifest()?;
-                let values: Vec<_> = m
+                let m = self.manifest()?.clone();
+                let names: Vec<_> = m
                     .volumes
                     .keys()
                     .filter(|n| {
-                        operator || self.metadata_visible(p, m, n, Permission::VolumeList, true)
+                        operator || self.metadata_visible(p, &m, n, Permission::VolumeList, true)
                     })
-                    .map(|n| json!({"id": m.resource_id("vol", n), "name": n, "created": false}))
+                    .cloned()
                     .collect();
+                let values: Vec<_> = names
+                    .iter()
+                    .map(|n| self.volume_metadata(&m, n))
+                    .collect::<Result<_>>()?;
                 Ok(json!({"volumes": values}))
             }
             Operation::VolumeInspect { name } => {
-                let m = self.manifest()?;
+                let m = self.manifest()?.clone();
                 if !m.volumes.contains_key(&name)
                     || (!operator
-                        && !self.metadata_visible(p, m, &name, Permission::VolumeInspect, true))
+                        && !self.metadata_visible(p, &m, &name, Permission::VolumeInspect, true))
                 {
                     return Err(not_found());
                 }
-                Ok(json!({"id": m.resource_id("vol", &name), "name": name, "created": false}))
+                self.volume_metadata(&m, &name)
             }
-            Operation::VolumeCreate { name } | Operation::VolumeRm { name } => {
+            Operation::VolumeCreate { name } => {
                 if !operator {
                     return Err(forbidden());
                 }
-                if !self.manifest()?.volumes.contains_key(&name) {
+                let m = self.manifest()?.clone();
+                let v = m.volumes.get(&name).ok_or_else(not_found)?;
+                self.runtime()?.catalog()?.create(&m, &name, v)
+            }
+            Operation::VolumeRm { name } => {
+                if !operator {
+                    return Err(forbidden());
+                }
+                let m = self.manifest()?.clone();
+                if !m.volumes.contains_key(&name) {
                     return Err(not_found());
                 }
-                Err(unsupported())
+                self.runtime()?.catalog()?.remove(&m, &name)
+            }
+            Operation::VolumeRecover { name } => {
+                if !operator {
+                    return Err(forbidden());
+                }
+                let m = self.manifest()?.clone();
+                if !m.volumes.contains_key(&name) {
+                    return Err(not_found());
+                }
+                let runner = self.runtime()?;
+                let cgroup = runner.worker.cgroup.clone();
+                runner.catalog()?.recover(&m, &name, &cgroup)
             }
             Operation::ServiceList => {
                 let m = self.manifest()?;
@@ -367,6 +458,7 @@ impl Supervisor {
         time: u64,
     ) -> Result<Value> {
         let m = self.manifest()?;
+        let m = m.clone();
         let policy = m.id();
         let project = m.project.clone();
         if self.runner.is_none() {
@@ -397,7 +489,7 @@ impl Supervisor {
             .runner
             .as_mut()
             .expect("runner")
-            .start(&id, &t, deadline, network, routes)
+            .start(&id, &t, &m, deadline, network, routes)
         {
             Ok(digest) => {
                 let i = self.instances.get_mut(&id).expect("reserved instance");
@@ -432,7 +524,13 @@ impl Supervisor {
             }) {
                 return Ok(());
             }
-            return Err(Error::new(Code::PolicyInUse, "Static service topology cannot be replaced after exit; verify cleanup and use a fresh supervisor"));
+            if self.instances.values().any(|i| !i.terminal()) {
+                return Err(Error::new(
+                    Code::PolicyInUse,
+                    "Stop all instances and verify cleanup before replacing static services",
+                ));
+            }
+            self.services.clear();
         }
         if m.services.is_empty() {
             return Ok(());
@@ -499,7 +597,7 @@ impl Supervisor {
         };
         let (scoped, allowed) = if volume {
             (
-                g.scope.volumes.contains(name),
+                g.scope.volumes.contains(name) && self.volume_bound(p, m, name, false),
                 m.volumes.get(name).map(|v| &v.agent),
             )
         } else {

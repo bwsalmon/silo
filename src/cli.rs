@@ -13,16 +13,16 @@ use std::{
 };
 use zeroize::Zeroize;
 
-pub const HELP: &str = "silo: authenticated single-image rootless jobs
+pub const HELP: &str = "silo: authenticated rootless jobs, private services and managed volumes
 Local: validate MANIFEST
-Control: up MANIFEST --no-start | run TEMPLATE | ps | status ID | logs ID | stop ID
+Control: up MANIFEST [--no-start] | run TEMPLATE | ps | status ID | logs ID | stop ID
 Metadata: volume list|inspect NAME; service list|inspect NAME
-Pending storage: volume create|rm NAME
+Managed storage: volume create|rm|recover NAME
 Trusted launcher: supervisor --state-dir DIR --auth-fd FD
 Trusted operator: operator issue GRANT --token-fd FD | operator revoke ID | operator audit | operator shutdown
 Control commands require --endpoint /absolute/private/endpoint.json --auth-fd FD
 Output: --json (one JSON value, including errors)
-Jobs require a qualified worker and the static musl supervisor; services, links and volumes are unsupported.
+Jobs require a qualified worker and the static musl supervisor; services and managed volumes require qualified protected storage.
 See docs/runner.md and docs/foundation.md for qualification, schema and transport.";
 
 pub enum Command {
@@ -97,6 +97,9 @@ pub fn parse(args: &[String]) -> Result<Args> {
             name: (*name).into(),
         }),
         ["volume", "create", name] => Command::Remote(Operation::VolumeCreate {
+            name: (*name).into(),
+        }),
+        ["volume", "recover", name] => Command::Remote(Operation::VolumeRecover {
             name: (*name).into(),
         }),
         ["volume", "rm", name] => Command::Remote(Operation::VolumeRm {

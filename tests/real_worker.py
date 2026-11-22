@@ -272,7 +272,7 @@ def suite(workspace, worker, registry, probe):
     for label, cfg in [
         ("image-user", {**config, "User": "1000:1000"}),
         ("image-named-user", {**config, "User": "root"}),
-        ("image-volume", {**config, "Volumes": {"/data": {}}}),
+        ("image-volume", {**config, "Volumes": ["invalid-schema"]}),
         ("image-health", {**config, "Healthcheck": {"Test": ["CMD", "probe"]}}),
     ]:
         jobs[label] = job(["/probe", "exit"], ref=registry.image(cfg, [first]))
@@ -280,7 +280,7 @@ def suite(workspace, worker, registry, probe):
         ("archive-absolute", [file(str(workspace / "escaped"))]),
         ("archive-parent", [file("../escaped")]),
         ("archive-link", [("x", b"", tarfile.SYMTYPE, "../../outside", 0, 0, 0o777)]),
-        ("archive-owner", [file("owned", uid=42)]),
+        ("archive-owner", [file("owned", uid=65535)]),
         ("archive-setuid", [file("owned", mode=0o4755)]),
         ("archive-device", [("device", b"", tarfile.CHRTYPE, "", 0, 0, 0o600)]),
     ]:
@@ -507,7 +507,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
-    parser.add_argument("--suite", choices=["runner", "network", "all"], default="all")
+    parser.add_argument("--suite", choices=["runner", "network", "volumes", "all"], default="all")
     args = parser.parse_args()
     BINARY = str(args.binary.resolve())
     assert os.getuid() != 0, "Run as non-root; sudo provisions only task-owned mounts/cgroups"
@@ -532,7 +532,7 @@ def main():
         run(["sudo", "sh", "-c", "echo %d > %s/cgroup.procs" % (os.getpid(), supervisor_group)])
         moved = True
         run(["sudo", "mount", "-t", "tmpfs", "-o",
-             "size=256M,nr_inodes=32768,mode=0700,uid=%d,gid=%d" % (os.getuid(), os.getgid()),
+             "size=1G,nr_inodes=65536,mode=0700,uid=%d,gid=%d" % (os.getuid(), os.getgid()),
              "silo-disposable-test", storage])
         mounted = True
         protected(workspace / "host-secret", "host control credential must be unreachable")
@@ -569,7 +569,7 @@ os.execv(sys.argv[6],sys.argv[6:])
                   "agent_uid": 65534, "registry_ca_dir": str(certs),
                   "storage": str(storage), "cgroup": str(job_group),
                   "ceilings": {"processes": 256, "memory_bytes": 536870912, "cpu_millis": 2000,
-                  "scratch_bytes": 16777216, "disk_bytes": 268435456, "duration_secs": 60, "max_instances": 2}}
+                  "scratch_bytes": 16777216, "disk_bytes": 1073741824, "duration_secs": 60, "max_instances": 2}}
         REPORT["worker"] = worker
         REPORT["kernel"] = os.uname().release
         REPORT["pins"]["silo_sha256"] = hashlib.sha256(Path(BINARY).read_bytes()).hexdigest()
@@ -583,6 +583,10 @@ os.execv(sys.argv[6],sys.argv[6:])
             sys.dont_write_bytecode = True
             from network_acceptance import suite as network_suite
             network_suite(sys.modules[__name__], workspace, worker, registry, (workspace / "probe").read_bytes())
+        if args.suite in ("volumes", "all"):
+            sys.dont_write_bytecode = True
+            from volume_acceptance import suite as volume_suite
+            volume_suite(sys.modules[__name__], workspace, worker, registry, (workspace / "probe").read_bytes())
         REPORT["result"] = "passed"
     except BaseException as error:
         REPORT["result"] = "failed"

@@ -99,8 +99,8 @@ fn malicious_archive_paths_links_ownership_and_special_files_are_rejected() {
         assert!(validate(&layer(path, kind, link, 0, 0, 0o644)).is_err());
     }
     for (uid, gid, mode) in [
-        (1, 0, 0o644),
-        (0, 42, 0o644),
+        (65535, 0, 0o644),
+        (0, 65535, 0o644),
         (0, 0, 0o4755),
         (0, 0, 0o2755),
     ] {
@@ -109,6 +109,8 @@ fn malicious_archive_paths_links_ownership_and_special_files_are_rejected() {
     for kind in [b'3', b'4', b'6', b'S'] {
         assert!(validate(&layer("special", kind, "", 0, 0, 0o644)).is_err());
     }
+    validate(&layer("run/postgresql", b'5', "", 70, 70, 0o3777)).unwrap();
+    validate(&layer("owned-data", b'0', "", 70, 70, 0o600)).unwrap();
     for (path, kind, link) in [
         ("file", b'0', ""),
         ("./dir/", b'5', ""),
@@ -188,20 +190,17 @@ fn image_config_defaults_and_fixed_template_overrides_are_supported() {
 }
 #[test]
 fn unsupported_identity_mount_and_runtime_requirements_fail_closed() {
-    for user in ["1000", "0:1", "1:0", "root", "root:root", "0:0:0"] {
+    for user in ["65535", "-1", "root", "root:root", "0:0:0"] {
         assert!(
             execution(&json!({"config":{"Cmd":["/tool"],"User":user}}), None).is_err(),
             "{user}"
         );
     }
     for (field, value) in [
-        ("Volumes", json!({"/data":{}})),
-        ("ExposedPorts", json!({"80/tcp":{}})),
         ("Healthcheck", json!({"Test":["CMD","probe"]})),
         ("OnBuild", json!(["RUN x"])),
         ("Shell", json!(["/bin/sh"])),
         ("ArgsEscaped", json!(true)),
-        ("StopSignal", json!("SIGQUIT")),
         ("User", json!(42)),
         ("WorkingDir", json!(false)),
         ("WorkingDir", json!("/../escape")),

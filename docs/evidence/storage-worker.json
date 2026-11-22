@@ -1,0 +1,738 @@
+{
+  "kind": "real-worker",
+  "passed": [
+    "static ELF has no interpreter or shared dependencies",
+    "authenticated approved stock OCI image runs with verified output",
+    "OCI entrypoint/args/env/workdir defaults",
+    "fixed template command/env override",
+    "native agent cannot join helper namespaces",
+    "helper shares private net but has separate PID/mount namespaces",
+    "real descriptor/env noninheritance; denied host files/network/nested namespaces; zero caps",
+    "real layered whiteouts and opaque directory handling",
+    "native agent OS principal cannot browse protected image storage",
+    "bounded scratch tmpfs reaches actual ENOSPC",
+    "actual process exhaustion and orphan cleanup",
+    "actual cgroup memory exhaustion fails without fabricated success",
+    "CPU is kernel-throttled",
+    "nonzero workload exit code preserved",
+    "stdout snapshot is bounded",
+    "unsupported identities/config/mount requirements and malicious archives rejected",
+    "mature unpacker scopes absolute layer symlinks inside rootfs",
+    "cross-principal status invisible",
+    "cross-principal stop invisible",
+    "worker-wide instance ceiling enforced",
+    "whole process tree including setsid grandchildren removed",
+    "normal parent exit also removes leftover children",
+    "grant instance quota enforced separately",
+    "logs require separate permission",
+    "duration bound enforced",
+    "credential lease independently bounded",
+    "security revocation tears down grant-owned tree",
+    "missing worker configuration fails closed precisely",
+    "wrong Bubblewrap pin rejected",
+    "unbounded/shared storage rejected",
+    "mock cgroup files cannot qualify a real worker",
+    "actual missing writable CPU controller fails closed precisely",
+    "kernel denial of user namespaces fails closed precisely",
+    "supervisor crash kills descendants and refuses stale endpoint recovery",
+    "missing immutable link grant denies template launch over raw protocol",
+    "raw protocol rejects destination/link/command/environment overrides",
+    "CLI rejects endpoint overrides",
+    "operator up starts actual services",
+    "repeated identical up is idempotent",
+    "agents cannot stop or see operator service instances",
+    "unmodified stock wget reaches only approved named and numeric endpoints",
+    "distinct service destinations share a port with readonly generated hosts",
+    "other-agent job denied named and numeric destination",
+    "other-port is denied inside actual isolated image",
+    "other-service is denied inside actual isolated image",
+    "local-address is denied inside actual isolated image",
+    "outbound is denied inside actual isolated image",
+    "workload wildcard bind cannot steal helper port",
+    "missing destination workload listener closes setup",
+    "reverse-live with real Bubblewrap kernel TCP descriptors",
+    "half with real Bubblewrap kernel TCP descriptors",
+    "reset with real Bubblewrap kernel TCP descriptors",
+    "repeat with real Bubblewrap kernel TCP descriptors",
+    "parallel with real Bubblewrap kernel TCP descriptors",
+    "parallel stream accounting stays bounded",
+    "excess parallel connection is rejected within per-instance limit",
+    "stalled reader triggers bounded buffers and idle deadline",
+    "live relay descriptors remain outside workload and in fixed supervisor budget",
+    "security revocation closes open stream and removes grant-owned processes",
+    "operator services survive caller security revocation",
+    "credential expiry closes established relay and stops job",
+    "template lease closes established link before credential expiry",
+    "service still accepts fresh approved grant after revocation/expiry",
+    "repeated parallel failure and revoke paths return supervisor FD/thread counts",
+    "only operator service cgroups remain after caller cleanup",
+    "directional service link grants no new reverse connection",
+    "missing real SCM_RIGHTS capability fails before workload execution",
+    "declared workload/wildcard relay conflict fails activation before exec",
+    "all network workload/helper cgroups removed",
+    "validate and no-start are non-mutating; up reports missing explicitly-created service volume",
+    "missing bounded storage capability and aggregate disk overcommit fail closed",
+    "explicit idempotent creation allocates protected managed IDs",
+    "catalog metadata exposes no host paths",
+    "stock Postgres initdb runs as actual numeric image owner with TCP-only bootstrap",
+    "identical up is idempotent and starts only services",
+    "kernel confirms both agent UID/GID, empty groups, zero capabilities, no_new_privs and private process views",
+    "restricted stock psql writes authorized SQL and results, reads fixtures and cannot write RO fixtures",
+    "documented two-identity JSON CLI transcript uses actual restricted OS contexts",
+    "ps filters instances by grant and hides service ownership",
+    "actual restricted OS identity cannot browse data/catalog/images/process state or signal supervisor",
+    "restricted SQL role cannot read secret table/files, COPY PROGRAM or assume operator role",
+    "unrelated client cannot connect by name or numeric address while Postgres listens",
+    "raw API cannot override commands/mounts or turn names, IDs and host paths into authority",
+    "bounded raw logs require separate permission and matching grant ownership",
+    "volume writer reservation releases only after actual parent/children exit and whole cgroup removal",
+    "exclusive writer rejects all competing attachments and deletion; multiple readers share without writer",
+    "persistent filesystem enforces actual disk ENOSPC",
+    "mounted data symlinks cannot escape workload root or expose other volume",
+    "image target symlinks, wrong data ownership and mutable executable/config/environment aliases fail on actual supervisor",
+    "symlink-swapped managed source fails closed without leaking the alternate data",
+    "repeated concurrent source symlink swaps either reject or bind the catalogued directory inode",
+    "actual restricted agent cannot rename or substitute source paths",
+    "old grants cannot follow removed/recreated friendly volume names; fresh issuance binds the new managed ID",
+    "row persists after real server replacement using the same volume ID",
+    "crash test starts with live writer and populated whole cgroup",
+    "supervisor death with live writer retains journal and prevents reattachment from fresh state",
+    "explicit recovery after verified tree removal preserves committed Postgres row",
+    "operator-only unmounted deletion is idempotent and preserves unrelated volume IDs",
+    "persistent acceptance removes every task-owned mount and workload cgroup"
+  ],
+  "pins": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "silo_sha256": "1f4382ea2a53b3454b3fdcc7652df668d0e382826dd7dc0fe9d1b0ed270b2bcf",
+    "fixture_index": "localhost:43365/silo/probe@sha256:c5d15efdc9ad2b795047706c39f43705211d88518b41cc789a870fa2f69ff36e",
+    "stock_platform_manifest": "sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e",
+    "stock_image": "docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9",
+    "stock_busybox": {
+      "sha256": "3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6",
+      "version": "BusyBox v1.35.0 (Debian 1:1.35.0-4+deb12u1+b1) multi-call binary."
+    },
+    "network_fixture": "localhost:43365/silo/probe@sha256:87db1bf15d73b0797e9f74c9949810efd0095ee146eb56095e4545ec39f04986",
+    "stock_postgres": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d"
+  },
+  "worker": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-r0s9frxo/certs",
+    "storage": "/tmp/silo-worker-r0s9frxo/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-8bd54a46144b/jobs",
+    "ceilings": {
+      "processes": 256,
+      "memory_bytes": 536870912,
+      "cpu_millis": 2000,
+      "scratch_bytes": 16777216,
+      "disk_bytes": 1073741824,
+      "duration_secs": 60,
+      "max_instances": 2
+    }
+  },
+  "kernel": "6.1.0-56-amd64",
+  "native_namespace_join": {
+    "exit": 1,
+    "stderr": "nsenter: cannot open /proc/54145/ns/net: Permission denied\n"
+  },
+  "resources": {
+    "scratch_stdout": "scratch_bytes=4194304\n",
+    "pids_events": {
+      "max": 1
+    },
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 18,
+      "oom": 1,
+      "oom_kill": 5,
+      "oom_group_kill": 1
+    },
+    "cpu_stat": {
+      "usage_usec": 429243,
+      "user_usec": 408199,
+      "system_usec": 21044,
+      "nr_periods": 22,
+      "nr_throttled": 21,
+      "throttled_usec": 2785371,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "cpu_stdout": "cpu_ms=385 loops=4808312\n"
+  },
+  "network_worker": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-r0s9frxo/certs",
+    "storage": "/tmp/silo-worker-r0s9frxo/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-8bd54a46144b/jobs",
+    "ceilings": {
+      "processes": 512,
+      "memory_bytes": 1073741824,
+      "cpu_millis": 2000,
+      "scratch_bytes": 50331648,
+      "disk_bytes": 1073741824,
+      "duration_secs": 300,
+      "max_instances": 6
+    }
+  },
+  "service_listener_ports": {
+    "db": [
+      8080,
+      8081,
+      9000
+    ],
+    "other": [
+      8080
+    ],
+    "secret": [
+      8080
+    ]
+  },
+  "network_supervisor_baseline": {
+    "fds": 14,
+    "threads": 5,
+    "rss_kib": 4176,
+    "cpu_ticks": 35
+  },
+  "clock_ticks_per_second": 100,
+  "network_scenarios": {
+    "stock": {
+      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4340
+      }
+    },
+    "unrelated": {
+      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4180
+      }
+    },
+    "other-port": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4184
+      }
+    },
+    "other-service": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4188
+      }
+    },
+    "local-address": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4196
+      }
+    },
+    "outbound": {
+      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4200
+      }
+    },
+    "conflict": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4212
+      }
+    },
+    "no-listener": {
+      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4228
+      }
+    },
+    "reverse-live": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4248
+      }
+    },
+    "half": {
+      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4264
+      }
+    },
+    "reset": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4268
+      }
+    },
+    "repeat": {
+      "supervisor_cpu_ticks_delta": 9,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4276
+      }
+    },
+    "parallel": {
+      "supervisor_cpu_ticks_delta": 4,
+      "supervisor_peak_observed": {
+        "fds": 24,
+        "threads": 6,
+        "rss_kib": 4408
+      }
+    },
+    "direct": {
+      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4312
+      }
+    },
+    "quota": {
+      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4272
+      }
+    },
+    "backpressure": {
+      "supervisor_cpu_ticks_delta": 65,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4296
+      }
+    }
+  },
+  "network_relay_measurements": "relay_short_32_seconds=0.310564 relay_bulk_bytes=4194304 relay_bulk_seconds=0.599010\nrepeat-duplex=ok\n",
+  "network_direct_measurements": "direct_short_32_seconds=0.017637 direct_bulk_bytes=4194304 direct_bulk_seconds=0.013646\n",
+  "network_backpressure": "backpressure_bytes=335872 seconds=15.273167 errno=32\n",
+  "established_source_socket_inodes": [
+    [
+      "441458"
+    ],
+    [
+      "440500"
+    ],
+    [
+      "441315"
+    ]
+  ],
+  "network_supervisor_live": {
+    "fds": 18,
+    "threads": 6,
+    "rss_kib": 4320,
+    "cpu_ticks": 140
+  },
+  "network_supervisor_after": {
+    "fds": 14,
+    "threads": 5,
+    "rss_kib": 4340,
+    "cpu_ticks": 165
+  },
+  "storage_worker": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-r0s9frxo/certs",
+    "storage": "/tmp/silo-worker-r0s9frxo/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-8bd54a46144b/jobs",
+    "ceilings": {
+      "processes": 512,
+      "memory_bytes": 2147483648,
+      "cpu_millis": 2000,
+      "scratch_bytes": 16777216,
+      "disk_bytes": 2147483648,
+      "duration_secs": 600,
+      "max_instances": 8
+    },
+    "volume_root": "/var/tmp/silo-persistent-q880sjvk"
+  },
+  "agent_os_profile": {
+    "uids": [
+      65534,
+      65533
+    ],
+    "private_pid_and_mount_namespaces": true,
+    "private_procfs": true,
+    "no_new_privs": true,
+    "supplementary_groups": []
+  },
+  "agent_kernel_profiles": [
+    {
+      "uid": 65534,
+      "gid": 65534,
+      "groups": [],
+      "no_new_privs": 1,
+      "capabilities": {
+        "CapEff": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapInh": "0000000000000000",
+        "CapAmb": "0000000000000000"
+      },
+      "pid_namespace_inode": 4026532221,
+      "mount_namespace_inode": 4026532220,
+      "visible_pids": [
+        "1"
+      ]
+    },
+    {
+      "uid": 65533,
+      "gid": 65533,
+      "groups": [],
+      "no_new_privs": 1,
+      "capabilities": {
+        "CapEff": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapInh": "0000000000000000",
+        "CapAmb": "0000000000000000"
+      },
+      "pid_namespace_inode": 4026532222,
+      "mount_namespace_inode": 4026532220,
+      "visible_pids": [
+        "1"
+      ]
+    }
+  ],
+  "postgres_platform_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+  "postgres_listening_tcp": "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode                                                     \n   0: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 449387 1 00000000fb5741f5 100 0 0 10 0                    \n   1: 0100007F:BCEE 0100007F:1538 06 00000000:00000000 03:000016BD 00000000     0        0 0 3 0000000039a0ca81                                      \n   2: 0100007F:BCEC 0100007F:1538 06 00000000:00000000 03:000016B5 00000000     0        0 0 3 00000000c7be42b0                                      \n",
+  "symlink_race": {
+    "attempts": 16,
+    "safe_launches": 2,
+    "rejected_before_exec": 14
+  },
+  "crash_writer_process_count": 9,
+  "cli_transcript": [
+    {
+      "identity": 65534,
+      "argv": [
+        "run",
+        "app"
+      ],
+      "exit": 0,
+      "response": {
+        "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+        "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+        "state": "running",
+        "template": "app"
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "status",
+        "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+      ],
+      "exit": 0,
+      "response": {
+        "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+        "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+        "state": "running",
+        "template": "app"
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "status",
+        "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+      ],
+      "exit": 0,
+      "response": {
+        "exit_code": 0,
+        "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+        "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+        "state": "exited",
+        "template": "app"
+      }
+    },
+    {
+      "identity": 65533,
+      "argv": [
+        "status",
+        "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "run",
+        "db"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "forbidden",
+          "message": "Operation is not allowed"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "volume",
+        "inspect",
+        "pgdata"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "run",
+        "app",
+        "--mount",
+        "pgdata:/data:rw"
+      ],
+      "exit": 2,
+      "response": {
+        "error": {
+          "code": "invalid_request",
+          "message": "Invalid request"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "stop",
+        "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+      ],
+      "exit": 0,
+      "response": {
+        "exit_code": 0,
+        "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+        "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+        "state": "exited",
+        "template": "app"
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "logs",
+        "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "ps"
+      ],
+      "exit": 0,
+      "response": {
+        "instances": [
+          {
+            "exit_code": 0,
+            "id": "job_581ced389aff4ee080255f44fc16426e05ddd8832d197a010100d79decac5ddc",
+            "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
+            "state": "exited",
+            "template": "app"
+          }
+        ]
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "status",
+        "svc_c20bc22f6164a6c561ab8ebbb0c64b0f34c1912060876cb9468eb86dbff04118"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "logs",
+        "svc_c20bc22f6164a6c561ab8ebbb0c64b0f34c1912060876cb9468eb86dbff04118"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "stop",
+        "svc_c20bc22f6164a6c561ab8ebbb0c64b0f34c1912060876cb9468eb86dbff04118"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "volume",
+        "create",
+        "pgdata"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "forbidden",
+          "message": "Operation is not allowed"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "volume",
+        "rm",
+        "pgdata"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "forbidden",
+          "message": "Operation is not allowed"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "volume",
+        "recover",
+        "pgdata"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "forbidden",
+          "message": "Operation is not allowed"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "volume",
+        "inspect",
+        "fixtures"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "not_found",
+          "message": "No visible resource with that ID or name"
+        }
+      }
+    },
+    {
+      "identity": 65534,
+      "argv": [
+        "run",
+        "app"
+      ],
+      "exit": 3,
+      "response": {
+        "error": {
+          "code": "forbidden",
+          "message": "Operation is not allowed"
+        }
+      }
+    }
+  ],
+  "result": "passed"
+}

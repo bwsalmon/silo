@@ -4,7 +4,7 @@ This implements the OCI runner from the design pinned at
 `5ae66d9db83199e98561dc37c82d1b4bd19d9078`, building on PR #239's delivered
 policy/control foundation and PR #241's verified-image runner. The subsequent
 [private TCP service extension](network.md) reuses this isolation and lifecycle
-boundary. Named-volume mounts remain unsupported. `up --no-start` activates
+boundary. [Protected named volumes](volumes.md) extend the same cleanup proof. `up --no-start` activates
 policy; operator `up` now starts declared private services.
 
 ## Trusted worker setup
@@ -14,7 +14,7 @@ permitted, inheritable or ambient host capabilities, and no supplementary groups
 beyond its primary GID. A rootless helper cannot remove extra groups after
 setgroups is disabled for a single-GID map, so inherited extra authority is
 rejected before launch. Restricted native agents
-must use a different non-root OS principal and a trusted control broker. A
+must use a different non-root OS principal, a protected process view and a trusted control broker. The tested native-agent launcher supplies private PID/mount namespaces and a private procfs; a different UID alone still exposes command lines on ordinary procfs. Validate the actual agent OS context before issuing credentials; a configured UID is not proof of that external boundary. A
 token cannot isolate another shell running as the supervisor's user. The
 `agent_uid` setting identifies that operator-established boundary; it does not
 create users or move agents. Actual OS separation must be tested.
@@ -84,7 +84,7 @@ eight tasks, with at least 32 MiB worker memory and 8 KiB scratch. Scratch is
 split between `/tmp` and `/run`, each rounded down to a 4 KiB page, so rounding
 cannot exceed the approved total. CPU and memory are kernel limits, independent
 of grant/template/worker instance quotas. Protected image storage has its own
-mount size/inode limit. There are no persistent writable volumes in this slice.
+mount size/inode limit. Persistent volumes additionally require a protected ext4/XFS catalog and bounded filesystem slots; see the volume guide.
 
 No command changes global sysctls, routes, firewall rules or worker grants.
 Missing capabilities cause `unsupported_worker`, with the failed capability
@@ -104,14 +104,14 @@ to OCI for umoci, but config/layer content must remain identical.
 
 Upstream umoci performs rootless extraction and layer/whiteout application.
 Silo does not implement an extractor. Its independent tar preflight rejects
-absolute/traversing entry paths, escaping links, special/sparse files, set-ID
-bits, unsupported ownership/PAX/xattr metadata, trailing nonzero archive data,
+absolute/traversing entry paths, escaping links, special/sparse files, privileged set-ID
+file bits, out-of-range ownership and unsupported PAX/xattr metadata, trailing nonzero archive data,
 and size/inode/diff-ID violations. Gzip members are decoded through a bounded
 reader. Absolute image symlinks resolve within the image root, including during
 safe extraction. Extraction results are inspected without following symlinks.
 
-Limits are 1 MiB per metadata object, 64 MiB per compressed blob, 64 layers,
-128 MiB total expanded layer bytes (also bounded by storage capacity), and
+Limits are 1 MiB per metadata object, 256 MiB per compressed blob, 64 layers,
+512 MiB total expanded layer bytes (also bounded by storage capacity), and
 32,768 archive entries/unpacked inodes. These deliberate bounds exclude larger
 images. Failed staging is removed only after setup-process cleanup is verified.
 Prepared images are reused within a supervisor lifetime; stale staging is
@@ -125,8 +125,8 @@ Supported image execution fields:
 | `Entrypoint` + `Cmd` | Combined defaults when template `command` is absent/empty; a fixed nonempty template command replaces both |
 | `Env` | Image environment plus fixed template overrides; no inherited worker environment |
 | `WorkingDir` | Image default, or `/`; a nonempty template `workdir` overrides it |
-| `User` | Only absent, empty, `0`, or `0:0`; template UID/GID must both be zero |
-| `Labels` | Inert metadata |
+| `User` | Absent/empty allows a template-pinned numeric UID/GID; a numeric image user must match the template; each must be below 65535 |
+| `Labels`, `Volumes`, `ExposedPorts`, `StopSignal` | Inert image metadata; no implicit mounts/listeners or application shutdown signal |
 
 A relative executable name is searched only in absolute directories from the
 image's PATH (or the fixed standard default). Relative executable paths with
@@ -134,12 +134,14 @@ slashes are unsupported. Required executable inputs and workdir resolve within
 the immutable image, outside scratch/pseudo-filesystems. Execution configuration
 is bounded to 256 arguments/environment keys and 64 KiB of strings.
 
-Only one UID/GID is mapped. Every archive entry must have owner/group zero;
-Silo rejects other ownership instead of squashing it. Many stock distributions,
-including the tested BusyBox image, contain other file owners and are therefore
-unsupported. Named users, supplementary mappings, declared volumes/exposed
-ports, health checks, OnBuild, Shell, custom stop signals, escaped arguments and
-unknown runtime requirements are rejected.
+Only one UID/GID pair is mapped to the dedicated worker OS identity. Verified
+rootless umoci extraction flattens supported numeric archive owners onto that
+identity; the immutable image therefore does not preserve multiple owners.
+Setgid directories are allowed for stock Postgres; setuid entries and setgid
+files remain rejected. Named users, supplementary mappings, health checks,
+OnBuild, Shell, escaped arguments and unknown runtime requirements are rejected.
+Volume ownership must match the template; no recurring recursive chown occurs.
+The [volume guide](volumes.md) describes the tested numeric 70:70 Postgres setup.
 
 ## Namespace and exec boundary
 
@@ -194,8 +196,9 @@ lossily as UTF-8. A killed helper can lose output; `capture` explicitly reports
 is limited to 256 instances per supervisor lifetime.
 
 Policy persists; tokens, runtime records and audit remain in memory. A stale
-endpoint or existing cgroup descendants refuses recovery/reattachment. No
-command infers completion from supervisor loss or removes uncertain evidence.
+endpoint or existing cgroup descendants refuses ordinary restart/reattachment.
+The explicit operator volume recovery procedure requires verified whole-tree
+removal; no command infers completion from supervisor loss.
 
 The control server remains serial. Image setup has bounded subprocess deadlines
 (60 seconds per tool invocation; at most four invocations), and a launch client
@@ -215,12 +218,14 @@ parent controllers, changes sysctls or relaxes isolation to pass.
 
 ```sh
 # Disposable environment prerequisites: Rust 1.85.1, musl target, binutils,
-# bubblewrap >=0.8, skopeo, umoci, musl-tools, gcc, openssl, python3, sudo, busybox-static.
+# bubblewrap with --bind-fd/--ro-bind-fd, skopeo, umoci, musl-tools, gcc, openssl, python3, sudo, busybox-static, e2fsprogs, mount/loop support, util-linux setpriv.
 cargo build --locked --release --target x86_64-unknown-linux-musl
 python3 tests/real_worker.py --suite all \
   --binary target/x86_64-unknown-linux-musl/release/silo \
   --report /tmp/silo-real-worker.json
 ```
+
+The full suite also runs the stock Postgres and actual restricted-identity CLI acceptance; `--suite volumes` selects that portion. Use disposable persistent backing space with at least 448 MiB for volume filesystems and sufficient tmpfs/memory for the 288 MiB expanded stock image. The Postgres suite uses a 2 GiB worker memory ceiling and a 768 MiB per-job ceiling, including setup tools.
 
 The report records exact tool/image/binary hashes, kernel, assertions and actual
 resource counters. A missing worker feature makes this suite fail with its

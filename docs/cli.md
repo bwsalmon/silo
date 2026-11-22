@@ -1,6 +1,6 @@
 # Silo v1 CLI design
 
-**Status:** Full v1 interface design. The Rust [policy/control foundation](foundation.md) and [single-image runner](runner.md) implement authenticated activation and scoped job start/status/stop/final logs on a qualified worker. [Static private services and links](network.md) are implemented. Named volumes and the storage examples below remain future acceptance behavior; the runnable current example is [job.yaml](../examples/job.yaml).
+**Status:** Implemented on the actual Rust supervisor with verified OCI jobs, static private services, protected named volumes and explicit recovery. See [worker requirements and limits](runner.md), [managed storage and Postgres](volumes.md), and [recorded acceptance evidence](storage-evidence.md). Qualification applies only to the tested disposable worker.
 
 The CLI is a client of one local supervisor. Every request is authorized server-side. An operator owns policy, services, and volumes; a restricted agent can ask for launches and limited lifecycle operations. The CLI is not a Docker replacement or an arbitrary command runner.
 
@@ -19,9 +19,9 @@ silo ps
 ```
 
 - `validate <manifest>` checks schema, references, and policy consistency without creating objects or starting workloads. Worker capability checks happen at activation and launch.
-- `volume create <name>` creates the named directory using its operator-defined ownership and limits. The supervisor uses managed IDs, not names as paths. A declaration is not creation. The declaration in the activated manifest supplies ownership and limits.
-- `up <manifest>` validates and activates the operator's manifest and starts its declared operator-owned services. It does not start ordinary jobs. Manifest and image references are trusted operator inputs; a remote client never sends an arbitrary worker path for the daemon to open. An identical repeat is idempotent; reject live policy replacement in v1. Stop all workloads and verify cleanup before applying a policy change. A failed service setup reports the service and failure; CLI success does not imply app-level readiness.
-- `volume list` and `volume inspect <name>` reveal metadata, not contents or host paths. `volume rm <name>` is explicitly destructive, operator-only, and refuses mounted or uncertain volumes. No force.
+- `volume create <name>` creates the named directory using its operator-defined ownership and limits. The supervisor uses managed IDs, not names as paths. A declaration is not creation. The declaration in the activated manifest supplies ownership and limits. Create volumes before issuing mount grants: issuance binds names to existing managed IDs, and a grant cannot follow later name reuse.
+- `up <manifest>` validates and activates the operator's manifest and starts its declared operator-owned services. It does not start ordinary jobs. Manifest and image references are trusted operator inputs; a remote client never sends an arbitrary worker path for the daemon to open. An identical repeat is idempotent; reject live policy replacement in v1. After stopping all instances and verifying cleanup, repeat `up` to recreate the static service topology with fresh instance IDs and the same volumes. Stop all workloads and verify cleanup before applying a policy change. A failed service setup reports the service and failure; CLI success does not imply app-level readiness.
+- `volume list` and `volume inspect <name>` reveal metadata, not contents or host paths. `volume rm <name>` is explicitly destructive, operator-only, and refuses mounted or uncertain volumes. No force. `volume recover <name>` is a separate operator-only action after kernel-verified removal of journaled cgroups; see the [recovery procedure](volumes.md#supervisor-loss-and-explicit-recovery).
 - `logs <id>` is a bounded snapshot and a distinct permission; no default agent log access. `stop <id>` is scoped to a stable instance ID, not a mutable service name.
 
 Activate policy separately from service startup when preparing a fresh worker: use `silo up ./silo.yaml --no-start` first, then create the volumes, then repeat `silo up ./silo.yaml`. No implicit mkdir or volume deletion on activation.
@@ -83,6 +83,6 @@ agent A$ silo stop job_01 --json
 {"id":"job_01","state":"exited","exit_code":0}
 ```
 
-Configure the approved test template to use stock psql, exercise the allowed SQL role, verify fixture reads and denied fixture writes, and write results. Have the unrelated client verify it cannot connect even if given the numeric loopback address. Separately exercise the raw private protocol to verify that rejected CLI arguments cannot bypass supervisor policy. Revoke a running grant with an open TCP connection and verify teardown; attempt a second writer and a restart after supervisor loss, then verify persisted rows after safe recovery.
+The executable [Postgres fixture](../examples/postgres.yaml) and [acceptance harness](../tests/volume_acceptance.py) configure the approved test template to use stock psql, exercise the allowed SQL role, verify fixture reads and denied fixture writes, and write results. Have the unrelated client verify it cannot connect even if given the numeric loopback address. Separately exercise the raw private protocol to verify that rejected CLI arguments cannot bypass supervisor policy. Revoke a running grant with an open TCP connection and verify teardown; attempt a second writer and a restart after supervisor loss, then verify persisted rows after safe recovery.
 
 Defer attach, exec, arbitrary volume content commands, live policy editing, external egress, DNS, remote/public APIs and MCP integration.
