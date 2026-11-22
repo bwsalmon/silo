@@ -1,4 +1,4 @@
-//! Linux ownership and descriptor boundary. No workload spawning exists in this slice.
+//! Linux ownership and descriptor boundary. Namespace mutation lives only in the separate helper.
 use crate::{
     auth::Secret,
     error::{invalid, unauthenticated, unavailable, Code, Error, Result},

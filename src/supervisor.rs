@@ -38,6 +38,8 @@ pub struct Instance {
     pub state: State,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<String>,
     #[serde(skip)]
     pub project: String,
     #[serde(skip)]
@@ -78,6 +80,7 @@ pub struct Supervisor {
     sequence: u64,
     teardown: VecDeque<Teardown>,
     pub shutdown: bool,
+    runner: Option<crate::runner::Runner>,
 }
 impl Supervisor {
     pub fn new(root: PathBuf, operator: Secret) -> Result<Self> {
@@ -96,6 +99,7 @@ impl Supervisor {
             sequence: 0,
             teardown: VecDeque::new(),
             shutdown: false,
+            runner: None,
         })
     }
     fn record(
@@ -269,8 +273,69 @@ impl Supervisor {
                         "Live instance quota reached",
                     ));
                 }
-                // Never allocate an instance or claim launch success before enforcement exists.
-                Err(unsupported())
+                if m.network.allow.iter().any(|link| link.from == template) {
+                    return Err(Error::new(
+                        Code::UnsupportedWorker,
+                        "Service links are unsupported in the single-image runner",
+                    ));
+                }
+                let t = m.jobs[&template].clone();
+                let policy = m.id();
+                let project = m.project.clone();
+                if self.runner.is_none() {
+                    self.runner = Some(crate::runner::Runner::new(&self.root)?);
+                }
+                self.runner.as_ref().expect("runner").check(&t)?;
+                let id = crate::auth::random_id("job_")?;
+                let (grant_id, session, expiry) = match p {
+                    Principal::Operator => ("operator".into(), "operator".into(), u64::MAX),
+                    Principal::Agent { id, grant } => {
+                        (id.clone(), grant.session.clone(), grant.expires_at)
+                    }
+                };
+                let deadline = expiry.min(time.saturating_add(t.limits.duration_secs));
+                self.instances.insert(
+                    id.clone(),
+                    Instance {
+                        id: id.clone(),
+                        template,
+                        state: State::Starting,
+                        exit_code: None,
+                        image_digest: None,
+                        project,
+                        session,
+                        grant_id,
+                        policy,
+                        lease_deadline: deadline,
+                    },
+                );
+                match self
+                    .runner
+                    .as_mut()
+                    .expect("runner")
+                    .start(&id, &t, deadline)
+                {
+                    Ok(digest) => {
+                        let i = self.instances.get_mut(&id).expect("reserved instance");
+                        i.state = State::Running;
+                        i.image_digest = Some(digest);
+                        Ok(serde_json::to_value(i).expect("typed instance"))
+                    }
+                    Err(e) => {
+                        self.tick(now());
+                        if !self.instances[&id].terminal() {
+                            self.instances
+                                .get_mut(&id)
+                                .expect("reserved instance")
+                                .state = State::Stopping;
+                            return Err(Error::new(
+                                Code::CleanupUnverified,
+                                "Launch failed; whole-cgroup cleanup remains unverified",
+                            ));
+                        }
+                        Err(e)
+                    }
+                }
             }
             Operation::Ps => {
                 let m = self.manifest()?;
@@ -395,7 +460,11 @@ impl Supervisor {
             })
             .ok_or_else(not_found)?;
         if permission == Permission::Logs {
-            return Err(unsupported());
+            return self
+                .runner
+                .as_ref()
+                .map(|r| r.logs(id))
+                .ok_or_else(unsupported);
         }
         if permission == Permission::Stop && !i.terminal() {
             self.request_teardown(id, "stop");
@@ -430,6 +499,27 @@ impl Supervisor {
             .collect();
         for id in due {
             self.request_teardown(&id, "lease_or_revocation");
+        }
+        if let Some(runner) = &mut self.runner {
+            for teardown in self.teardown.drain(..) {
+                runner.stop(&teardown.instance);
+            }
+            runner.poll();
+            for id in runner.stopping() {
+                if let Some(instance) = self.instances.get_mut(&id) {
+                    instance.state = State::Stopping;
+                }
+            }
+            for result in runner.completions() {
+                if let Some(instance) = self.instances.get_mut(&result.id) {
+                    instance.state = if result.failed {
+                        State::Failed
+                    } else {
+                        State::Exited
+                    };
+                    instance.exit_code = result.code;
+                }
+            }
         }
     }
 }

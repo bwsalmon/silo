@@ -3,17 +3,19 @@ name = "silo"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Authenticated policy and control foundation for Silo"
+description = "Authenticated rootless OCI jobs with a fail-closed Bubblewrap runner"
 license = "Apache-2.0"
 publish = false
 
 [dependencies]
+flate2 = "1"
 hmac = "=0.12.1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
+tar = "0.4"
 zeroize = "1"
 
 [dev-dependencies]

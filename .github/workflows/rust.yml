@@ -124,3 +124,4 @@ jobs:
             echo "Unexpected dynamic dependency"; exit 1
           fi
           "$binary" validate examples/foundation.yaml --json
+          "$binary" validate examples/job.yaml --json

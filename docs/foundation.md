@@ -1,10 +1,10 @@
 # Rust policy and control foundation
 
-This is the first implementation slice of the [runtime design](design.md) and
-[CLI contract](cli.md), based on design commit
-`5ae66d9db83199e98561dc37c82d1b4bd19d9078`. It is not a workload runtime.
-One Cargo package builds the `silo` CLI, supervisor and reserved
-`__namespace_helper` mode. The helper always fails closed.
+This describes the policy/control foundation of the [runtime design](design.md)
+and [CLI contract](cli.md), based on design commit
+`5ae66d9db83199e98561dc37c82d1b4bd19d9078`. The subsequent
+[single-image runner](runner.md) adds verified OCI jobs and a separate trusted
+namespace helper to the same Cargo package and executable.
 
 ## Build and checks
 
@@ -23,8 +23,9 @@ cargo build --locked --release --target x86_64-unknown-linux-musl
 GitHub Actions runs formatting, lint, tests, native release build, and a musl
 build with ELF interpreter/dependency inspection and a validation smoke test.
 It does not build or publish a release archive. No Bubblewrap binary is bundled
-yet; helper pinning, licensing/source distribution, a clean-worker smoke test
-and worker qualification remain release gates. No Go pipeline is restored.
+yet; tool pins and real-worker validation are described in the runner guide.
+Licensing/source distribution and a packaged clean-worker smoke test remain
+release gates. No Go pipeline is restored.
 
 Tests use disposable directories and private ephemeral loopback endpoints.
 Binary integration tests activate policy, issue credentials through dedicated
@@ -42,8 +43,8 @@ evidence of a launched process, enforced storage, or completed teardown.
 | `validate FILE` | Validate locally, return content-derived policy ID; no objects created |
 | `supervisor --state-dir DIR --auth-fd FD` | Run foreground private authenticated control server |
 | `up FILE --no-start` | Operator-only activation, persisted policy, no workloads or volumes |
-| `ps` | Only instances visible under the separate list permission; empty until runtime exists |
-| `status ID`, `stop ID` | Scoped lifecycle foundation; no production instances exist yet |
+| `ps` | Only instances visible under the separate list permission |
+| `run TEMPLATE`, `status ID`, `stop ID`, `logs ID` | Scoped single-image jobs on qualified workers; logs need their own permission |
 | `volume list/inspect NAME` | Authorized **declaration metadata**, explicitly `created:false`; no host paths or contents |
 | `service list/inspect NAME` | Authorized declaration metadata, explicitly `started:false` |
 | `operator issue GRANT.json --token-fd FD` | Trusted operator only; credential goes exclusively to output FD |
@@ -58,13 +59,13 @@ credential input is 64 hex characters with an optional newline, followed by EOF.
 Silo consumes and closes it before sending a request or entering the supervisor.
 There is no credential environment variable or automatic retry.
 
-`run`, `up` without `--no-start`, `logs`, `volume create/rm` and the internal
-helper return `unsupported_worker` (exit 5) after authorization, or the appropriate
-authorization error first. They never return a fictitious launch or create a
-volume. `up` activates the policy before trying startup, so a startup error may
-leave the policy activated. `logs` has no snapshot backend yet. Attach/exec,
-overrides, external egress, UDP/DNS, dynamic topology, public/remote APIs, MCP and
-multi-host operation are absent.
+`up` without `--no-start` and `volume create/rm` return
+`unsupported_worker` (exit 5) after authorization. `run` requires the
+[qualified runner](runner.md); the foundation example includes unsupported
+mounts/links and therefore still cannot launch. Activation may persist policy
+before unsupported service startup is reported. Attach/exec, overrides,
+external egress, UDP/DNS, dynamic topology, public/remote APIs, MCP and multi-host
+operation remain absent.
 
 `--json` writes exactly one JSON value to stdout for success or error. Invalid
 CLI arguments, manifests and raw protocol fields have fixed, redacted messages.
@@ -135,8 +136,9 @@ example, with illustrative digests that are not fetched. Version 1 requires
 `project` and `network.external: deny`. Named maps have unique, bounded names;
 unknown fields, duplicate declarations, unsupported enum values and unpinned
 images are rejected. Services wrap a fixed `template` and declared TCP ports.
-Every template requires a fixed absolute command, UID/GID, working directory and
-nonzero process, memory, CPU, scratch, connection, duration and instance ceilings.
+Every template fixes its UID/GID and limits. Nonempty command/workdir fields
+supply absolute overrides; omitted/empty fields use verified image defaults. Each
+template requires nonzero process, memory, CPU, scratch, connection, duration and instance ceilings.
 Duration is at most one day; instance ceilings are at most 256.
 
 Volumes declare ownership, byte ceiling and `exclusive-writer` sharing. Mounts
@@ -188,13 +190,14 @@ absolute, symlink-free, owned by the supervisor UID, mode 0700 or stricter, with
 trusted ancestors preventing untrusted rename. Endpoint/policy/lock files use
 owner-only modes and no-follow/close-on-exec descriptors. No remote binding or
 environment-controlled helper path exists. Loopback availability and filesystem
-protection are checked; namespace, storage and workload resource qualification
-are pending and cannot be inferred from activation success.
+protection are checked. Namespace, protected storage and kernel resource
+qualification happen at job launch and cannot be inferred from activation success.
 
 The private version-1 protocol uses four-byte big-endian lengths and strictly
 typed JSON. A client challenge and server proof precede the authenticated request.
 One request per connection, two-second I/O timeouts and a 256 KiB frame bound
-constrain each exchange. The server is serial and intended
+constrain exchanges. Authenticated launch clients allow 300 seconds for bounded
+image setup after the server handshake. The server is serial and intended
 for local control, not high request throughput. An abusive local caller can
 delay other calls; no availability guarantee against the worker's OS peers is
 made. Policy activation sends typed content, never a path for the server to open.
@@ -208,7 +211,7 @@ Restricted principals cannot issue/revoke credentials, activate policy or access
 audit records. A different token for the same session does not inherit another
 grant's instances.
 
-Policy persists; issued credentials, instance fixtures and audit records do not.
+Policy persists; issued credentials, runtime records and audit records do not.
 A clean restart invalidates all issued agent credentials. An exclusive lock
 prevents concurrent supervisors. A stale endpoint after abnormal loss causes
 startup refusal; there is no recovery/reattachment path or cleanup assertion.
@@ -222,16 +225,13 @@ runtime request that cannot execute records `allowed:true` with
 `unsupported_worker`.
 
 Lifecycle states are `starting/running/stopping/exited/failed`. Lease expiry,
-security revocation and explicit stop queue idempotent teardown requests and
-move active instances to `stopping`. They do not assert process death or release
-write locks. Stopping instances still consume quotas. A future runtime must
-bound each lease by token expiry and template duration, close sockets, kill/reap
-all processes and verify storage cleanup before marking terminal or releasing
-locks. No process/socket teardown has been proven here.
+security revocation and explicit stop move active instances to `stopping`;
+reservations remain until the runner verifies whole-cgroup cleanup. The helper
+independently bounds leases by credential expiry and template duration. Synthetic
+foundation fixtures still test scheduling without claiming real teardown; the
+separate [real-worker suite](runner-evidence.md) verifies actual process cleanup,
+resource exhaustion and crash refusal.
 
-Required missing runtime capabilities are reported explicitly: OCI runner,
-namespace launcher, protected storage, resource ceilings and TCP relay. No
-worker is qualified. Bubblewrap isolation, PostgreSQL persistence, actual
-cross-OS-principal storage denial, open-link revocation, resource enforcement
-and safe crash recovery require later integrated tests. Nothing in this
-foundation relaxes their fail-closed requirements.
+Services, TCP relay, named volumes, PostgreSQL persistence and safe recovery
+reattachment remain unsupported. Worker qualification never follows from API
+quotas, activation, synthetic fixtures or mocks alone.
