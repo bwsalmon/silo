@@ -511,19 +511,25 @@ def main():
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--suite", choices=["runner", "network", "volumes", "all"], default="all")
     args = parser.parse_args()
-    BINARY = str(args.binary.resolve())
-    workspace = Path(tempfile.mkdtemp(prefix="silo-worker-"))
-    workspace.chmod(0o700)
-    original_cgroup = Path("/sys/fs/cgroup" + Path("/proc/self/cgroup").read_text().strip().split("::")[1])
-    group = Path("/sys/fs/cgroup") / ("silo-test-" + secrets.token_hex(6))
+    report_path = args.report.resolve()
+    workspace = None
+    group = None
     mounted = False
     moved = False
     registry = None
-    REPORT.update(result="running", completed_suites=[], architecture=os.uname().machine,
-                  kernel=os.uname().release, namespace_policy=namespace_policy(),
+    # Invalidate previous evidence before even discovering worker capabilities.
+    REPORT.clear()
+    REPORT.update(kind="real-worker", passed=[], pins={}, result="running", completed_suites=[],
                   cleanup={"verified": False}, qualification={"status": "blocked", "reasons": ["run incomplete"]})
-    write_report(args.report.resolve(), REPORT)
+    write_report(report_path, REPORT)
     try:
+        BINARY = str(args.binary.resolve())
+        REPORT.update(architecture=os.uname().machine, kernel=os.uname().release,
+                      namespace_policy=namespace_policy())
+        workspace = Path(tempfile.mkdtemp(prefix="silo-worker-"))
+        workspace.chmod(0o700)
+        original_cgroup = Path("/sys/fs/cgroup" + Path("/proc/self/cgroup").read_text().strip().split("::")[1])
+        group = Path("/sys/fs/cgroup") / ("silo-test-" + secrets.token_hex(6))
         assert os.getuid() != 0, "Run as non-root; sudo provisions only task-owned mounts/cgroups"
         for tool in ["sudo", "bwrap", "umoci", "skopeo", "openssl", "musl-gcc", "gcc", "readelf"]:
             assert shutil.which(tool), "Missing disposable test prerequisite: " + tool
@@ -602,11 +608,11 @@ os.execv(sys.argv[6],sys.argv[6:])
         REPORT["error"] = repr(error)
         raise
     finally:
-        with finalization(REPORT, args.report.resolve()):
+        with finalization(REPORT, report_path):
             if registry:
                 registry.shutdown(); registry.server_close()
             # Suite errors cannot leave untrusted descendants running.
-            if group.exists():
+            if group is not None and group.exists():
                 jobs = group / "jobs"
                 if jobs.exists():
                     for child in jobs.iterdir():
@@ -616,14 +622,15 @@ os.execv(sys.argv[6],sys.argv[6:])
                             child.rmdir()
             if moved:
                 run(["sudo", "sh", "-c", "echo %d > %s/cgroup.procs" % (os.getpid(), original_cgroup)])
-            if group.exists():
+            if group is not None and group.exists():
                 for child in group.iterdir():
                     if child.is_dir():
                         child.rmdir()
                 run(["sudo", "rmdir", group])
             if mounted:
                 run(["sudo", "umount", workspace / "storage"])
-            shutil.rmtree(workspace)
+            if workspace is not None:
+                shutil.rmtree(workspace)
         print("Report:", args.report, flush=True)
 
 
