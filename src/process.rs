@@ -200,6 +200,16 @@ impl Context {
         Ok(bytes)
     }
 }
+fn bounded_drain(mut file: impl Read, limit: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buf = [0; 8192];
+    while let Ok(n @ 1..) = file.read(&mut buf) {
+        let keep = n.min((limit + 1).saturating_sub(output.len()));
+        output.extend_from_slice(&buf[..keep]);
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,14 +251,4 @@ mod tests {
         }
         assert_eq!(command.status().unwrap().code(), Some(99));
     }
-}
-
-fn bounded_drain(mut file: impl Read, limit: usize) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut buf = [0; 8192];
-    while let Ok(n @ 1..) = file.read(&mut buf) {
-        let keep = n.min((limit + 1).saturating_sub(output.len()));
-        output.extend_from_slice(&buf[..keep]);
-    }
-    output
 }
