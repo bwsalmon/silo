@@ -30,7 +30,7 @@ passwords, never production or control credentials.
   17 explicitly rejected image/launch cases. Existing namespace, storage,
   cgroup exhaustion, child cleanup, relay allow/deny, duplex/backpressure,
   revocation, expiry and missing-capability regressions still pass.
-- Final tested static executable SHA-256: `1f4382ea2a53b3454b3fdcc7652df668d0e382826dd7dc0fe9d1b0ed270b2bcf`.
+- Initial integration static executable SHA-256: `1f4382ea2a53b3454b3fdcc7652df668d0e382826dd7dc0fe9d1b0ed270b2bcf`.
 - Kernel: `6.1.0-56-amd64`. Full pins and ceilings are in the report.
 
 Reproduction on a disposable qualified machine:
@@ -126,3 +126,35 @@ release archives, attach/exec and all other excluded v1 features remain deferred
 Every recorded task-owned cgroup, storage mount, loop mount, persistent data
 root and agent bridge directory was removed. No deployment, live infrastructure,
 configuration, live grants or releases changed; no follow-up work was filed.
+
+## Parent-death guard repair validation
+
+The helper startup guard added in `5d07c07` installs SIGKILL protection in the
+fork child before exec and checks the original supervisor PID. An adopted
+subreaper cannot become a newly trusted parent during delayed startup.
+`b5e5610` places its regressions after production functions, fixing the
+branch-specific Clippy `items_after_test_module` failure without suppressing
+warnings or weakening tests. Base main `99b487a` had passing GitHub Actions;
+this failure was not inherited from main.
+
+On 2026-11-22 a fresh disposable environment revalidated runtime source
+`b5e5610b03b38dbba0cfdfe6a44ac1eedc0e6f7d`. Formatting, native and musl Clippy with
+warnings denied, all **46 Rust tests**, the static musl build and all
+**99 real-worker assertion groups** passed, plus 17 explicit
+rejected launch cases. The two focused parent-guard regressions use real
+pre-exec hooks: one rejects a mismatched parent and one reads the kernel's
+PR_GET_PDEATHSIG setting to confirm SIGKILL. The integrated run again exercised
+real stock Postgres/psql, live-writer supervisor SIGKILL, refused reattachment,
+verified whole-cgroup recovery, persisted rows and the two actual restricted OS
+identities. The earlier integration record above is retained as provenance;
+the [parent-guard revalidation report](evidence/storage-parent-guard.json)
+contains the current runtime's exact pins, transcript and kernel observations.
+
+Revalidated executable SHA-256:
+`56f63de84cbc1d09220ab13f61ed13e44fe231b0b8e6ec1543eac19af0c872f9`.
+The source-swap race made 16 attempts:
+1 safe launches and
+15 rejections before image exec.
+All recorded task-owned cgroups, mounts, loop devices and data roots were
+removed. The qualification limits above remain unchanged; this is not a claim
+that another deployment or native-agent context is qualified.
