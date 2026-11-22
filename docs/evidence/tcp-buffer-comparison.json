@@ -1,0 +1,54 @@
+{
+  "initial": {
+    "silo_sha256": "4c78c49cf677ed87ee18404e2c93af94e4502e887464a9169616126d2cd98ebc",
+    "kernel_socket_buffer_request": 16384,
+    "helper_poll_ms": 10,
+    "tcp_nodelay": false,
+    "relay": "relay_short_32_seconds=0.657298 relay_bulk_bytes=4194304 relay_bulk_seconds=27.027051\nrepeat-duplex=ok\n",
+    "direct": "direct_short_32_seconds=0.018783 direct_bulk_bytes=4194304 direct_bulk_seconds=0.013594\n",
+    "supervisor_baseline": {
+      "fds": 14,
+      "threads": 5,
+      "rss_kib": 4144,
+      "cpu_ticks": 28
+    },
+    "supervisor_live": {
+      "fds": 18,
+      "threads": 6,
+      "rss_kib": 4332,
+      "cpu_ticks": 278
+    },
+    "supervisor_after": {
+      "fds": 14,
+      "threads": 5,
+      "rss_kib": 4352,
+      "cpu_ticks": 295
+    }
+  },
+  "bounded_tuning": {
+    "silo_sha256": "7207746882dbf75382fffa6dab6516b1f8e1de1338d219f24b00d46c78f5b418",
+    "kernel_socket_buffer_request": 65536,
+    "helper_poll_ms": 2,
+    "tcp_nodelay": true,
+    "relay": "relay_short_32_seconds=0.312024 relay_bulk_bytes=4194304 relay_bulk_seconds=0.598783\nrepeat-duplex=ok\n",
+    "direct": "direct_short_32_seconds=0.018006 direct_bulk_bytes=4194304 direct_bulk_seconds=0.013470\n",
+    "supervisor_baseline": {
+      "fds": 14,
+      "threads": 5,
+      "rss_kib": 4140,
+      "cpu_ticks": 32
+    },
+    "supervisor_live": {
+      "fds": 18,
+      "threads": 6,
+      "rss_kib": 4272,
+      "cpu_ticks": 134
+    },
+    "supervisor_after": {
+      "fds": 14,
+      "threads": 5,
+      "rss_kib": 4276,
+      "cpu_ticks": 151
+    }
+  }
+}

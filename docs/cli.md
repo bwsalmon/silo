@@ -1,6 +1,6 @@
 # Silo v1 CLI design
 
-**Status:** Full v1 interface design. The Rust [policy/control foundation](foundation.md) and [single-image runner](runner.md) implement authenticated activation and scoped job start/status/stop/final logs on a qualified worker. Services, links and named volumes remain unsupported. The multi-service/storage examples below describe future acceptance behavior; the runnable current example is [job.yaml](../examples/job.yaml).
+**Status:** Full v1 interface design. The Rust [policy/control foundation](foundation.md) and [single-image runner](runner.md) implement authenticated activation and scoped job start/status/stop/final logs on a qualified worker. [Static private services and links](network.md) are implemented. Named volumes and the storage examples below remain future acceptance behavior; the runnable current example is [job.yaml](../examples/job.yaml).
 
 The CLI is a client of one local supervisor. Every request is authorized server-side. An operator owns policy, services, and volumes; a restricted agent can ask for launches and limited lifecycle operations. The CLI is not a Docker replacement or an arbitrary command runner.
 

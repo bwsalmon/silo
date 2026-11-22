@@ -12,10 +12,32 @@ use std::{
     time::{Duration, Instant},
 };
 pub fn spawn(spec: &Spec) -> Result<Child> {
+    spawn_with_channel(spec, None)
+}
+pub fn spawn_with_channel(
+    spec: &Spec,
+    channel: Option<&crate::relay_channel::Channel>,
+) -> Result<Child> {
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
     let exe =
         std::env::current_exe().map_err(|_| failed("Cannot locate trusted Silo executable"))?;
     crate::worker::trusted_path(&exe, false)?;
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    if let Some(channel) = channel {
+        let fd = channel.0.as_raw_fd();
+        // SAFETY: pre_exec uses only async-signal-safe descriptor operations in the fork child.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(fd, crate::relay_channel::HELPER_FD) < 0
+                    || libc::fcntl(crate::relay_channel::HELPER_FD, libc::F_SETFD, 0) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command
         .arg("__namespace_helper")
         .env_clear()
         .stdin(Stdio::piped())

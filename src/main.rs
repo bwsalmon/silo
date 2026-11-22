@@ -4,10 +4,12 @@ use silo::{cli, error::Result};
 fn main() {
     let raw: Vec<_> = std::env::args_os().skip(1).collect();
     if raw.len() == 1 && raw[0] == "__workload_exec" {
-        std::process::exit(if silo::trampoline::entry().is_ok() {
-            0
-        } else {
-            5
+        std::process::exit(match silo::trampoline::entry() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("Trusted image exec handshake failed: {}", error.message);
+                5
+            }
         });
     }
     if raw.len() == 1 && raw[0] == "__namespace_helper" {

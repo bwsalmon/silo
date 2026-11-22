@@ -1,11 +1,11 @@
 # Single-image job runner
 
-This implements the job slice of the design pinned at
-`5ae66d9db83199e98561dc37c82d1b4bd19d9078`, building on the delivered Rust
-policy/control implementation from PR #239. Services, links and volumes are
-unsupported. Their declarations remain parseable for policy compatibility;
-a job requiring a link or mount is rejected. `up --no-start` activates policy;
-`up` without that flag still reports unsupported startup.
+This implements the OCI runner from the design pinned at
+`5ae66d9db83199e98561dc37c82d1b4bd19d9078`, building on PR #239's delivered
+policy/control foundation and PR #241's verified-image runner. The subsequent
+[private TCP service extension](network.md) reuses this isolation and lifecycle
+boundary. Named-volume mounts remain unsupported. `up --no-start` activates
+policy; operator `up` now starts declared private services.
 
 ## Trusted worker setup
 
@@ -215,9 +215,9 @@ parent controllers, changes sysctls or relaxes isolation to pass.
 
 ```sh
 # Disposable environment prerequisites: Rust 1.85.1, musl target, binutils,
-# bubblewrap >=0.8, skopeo, umoci, musl-tools, gcc, openssl, python3, sudo.
+# bubblewrap >=0.8, skopeo, umoci, musl-tools, gcc, openssl, python3, sudo, busybox-static.
 cargo build --locked --release --target x86_64-unknown-linux-musl
-python3 tests/real_worker.py \
+python3 tests/real_worker.py --suite all \
   --binary target/x86_64-unknown-linux-musl/release/silo \
   --report /tmp/silo-real-worker.json
 ```

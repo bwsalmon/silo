@@ -59,11 +59,11 @@ credential input is 64 hex characters with an optional newline, followed by EOF.
 Silo consumes and closes it before sending a request or entering the supervisor.
 There is no credential environment variable or automatic retry.
 
-`up` without `--no-start` and `volume create/rm` return
-`unsupported_worker` (exit 5) after authorization. `run` requires the
-[qualified runner](runner.md); the foundation example includes unsupported
-mounts/links and therefore still cannot launch. Activation may persist policy
-before unsupported service startup is reported. Attach/exec, overrides,
+`volume create/rm` return `unsupported_worker` (exit 5) after authorization.
+`run` requires the [qualified runner](runner.md). Operator `up` now starts
+[static private services](network.md); the foundation example still includes
+unsupported mounts and cannot launch. Activation may persist policy before
+service startup failure is reported. Attach/exec, overrides,
 external egress, UDP/DNS, dynamic topology, public/remote APIs, MCP and multi-host
 operation remain absent.
 
@@ -232,6 +232,6 @@ foundation fixtures still test scheduling without claiming real teardown; the
 separate [real-worker suite](runner-evidence.md) verifies actual process cleanup,
 resource exhaustion and crash refusal.
 
-Services, TCP relay, named volumes, PostgreSQL persistence and safe recovery
-reattachment remain unsupported. Worker qualification never follows from API
+[Static services and TCP relay](network.md) now extend this foundation.
+Named volumes, PostgreSQL persistence and recovery reattachment remain unsupported. Worker qualification never follows from API
 quotas, activation, synthetic fixtures or mocks alone.

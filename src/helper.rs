@@ -45,6 +45,7 @@ pub enum Action {
         workdir: String,
         scratch_bytes: u64,
         deadline_unix_ms: u64,
+        network: crate::relay::Network,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,9 +66,40 @@ pub fn entry() -> Result<serde_json::Value> {
     let bytes = linux::read_bounded(std::io::stdin().lock(), 256 * 1024)?;
     let spec: Spec =
         serde_json::from_slice(&bytes).map_err(|_| failed("Invalid internal helper request"))?;
-    // No inherited control sockets, credentials, sentinel descriptors, or parent environment survive.
-    // SAFETY: the helper is a fresh, single-threaded process; all inherited descriptors >=3 are unwanted.
-    if unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) } != 0 {
+    // Keep exactly the one private supervisor channel for a workload, CLOEXEC before any spawn.
+    let relay_channel = if matches!(spec.action, Action::Workload { .. }) {
+        // SAFETY: process::spawn_with_channel installs this one owned descriptor in the fresh helper.
+        if unsafe {
+            libc::fcntl(
+                crate::relay_channel::HELPER_FD,
+                libc::F_SETFD,
+                libc::FD_CLOEXEC,
+            )
+        } < 0
+        {
+            return Err(missing("Missing private relay descriptor"));
+        }
+        Some(crate::relay_channel::Channel(unsafe {
+            OwnedFd::from_raw_fd(crate::relay_channel::HELPER_FD)
+        }))
+    } else {
+        None
+    };
+    // No other inherited descriptors survive.
+    // SAFETY: fresh single-threaded helper; only its explicitly owned relay fd 3 is preserved.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            if relay_channel.is_some() {
+                4_u32
+            } else {
+                3_u32
+            },
+            u32::MAX,
+            0_u32,
+        )
+    } != 0
+    {
         return Err(missing("Worker lacks close_range descriptor sanitization"));
     }
     let parent = unsafe { libc::getppid() };
@@ -118,6 +150,7 @@ pub fn entry() -> Result<serde_json::Value> {
             workdir,
             scratch_bytes,
             deadline_unix_ms,
+            network,
         } => {
             bwrap.verify()?;
             let remaining = Duration::from_millis(deadline_unix_ms).saturating_sub(
@@ -127,7 +160,20 @@ pub fn entry() -> Result<serde_json::Value> {
             );
             let deadline = Instant::now() + remaining;
             namespace()?; // This precedes Bubblewrap, and no threads exist yet.
-                          // SAFETY: no_new_privs is irreversible and confined to this helper's descendants.
+            relay_channel
+                .as_ref()
+                .expect("private workload channel")
+                .handshake()
+                .map_err(|e| {
+                    missing(&format!(
+                        "Worker cannot transfer SCM_RIGHTS over the private helper socketpair: {}",
+                        e.kind()
+                    ))
+                })?;
+            let listeners = network.bind()?;
+            let hosts = data_file(network.hosts().as_bytes())?;
+            inherit(hosts.as_raw_fd())?;
+            // SAFETY: no_new_privs is irreversible and confined to this helper's descendants.
             if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
                 return Err(missing("Worker lacks no_new_privs"));
             }
@@ -188,6 +234,9 @@ pub fn entry() -> Result<serde_json::Value> {
                 .args(["--tmpfs", "/tmp", "--size"])
                 .arg(other_half.to_string())
                 .args(["--tmpfs", "/run"])
+                .arg("--ro-bind-data")
+                .arg(hosts.as_raw_fd().to_string())
+                .arg("/etc/hosts")
                 .arg("--seccomp")
                 .arg(filter.as_raw_fd().to_string())
                 .arg("--json-status-fd")
@@ -202,6 +251,7 @@ pub fn entry() -> Result<serde_json::Value> {
             drop(cmd);
             drop(status_write);
             drop(filter);
+            drop(hosts);
             serde_json::to_writer(&mut exec_channel, &execution)
                 .map_err(|_| failed("Cannot send trusted exec specification"))?;
             exec_channel
@@ -240,7 +290,22 @@ pub fn entry() -> Result<serde_json::Value> {
                     String::from_utf8_lossy(&diagnostics)
                 )));
             }
-            let exec_error = crate::fd_channel::receive(exec_channel.as_raw_fd())?;
+            let exec_error = match crate::fd_channel::receive(exec_channel.as_raw_fd()) {
+                Ok(fd) => fd,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let diagnostics = err.join().unwrap_or_default();
+                    return Err(Error::new(
+                        error.code,
+                        &format!(
+                            "{}: {}",
+                            error.message,
+                            String::from_utf8_lossy(&diagnostics)
+                        ),
+                    ));
+                }
+            };
             drop(exec_channel);
             if let Err(error) = crate::fd_channel::await_exec(exec_error) {
                 let _ = child.kill();
@@ -254,6 +319,10 @@ pub fn entry() -> Result<serde_json::Value> {
             }
             emit(&Event::Ready)?;
             let status = loop {
+                network.service(
+                    relay_channel.as_ref().expect("private workload channel"),
+                    &listeners,
+                )?;
                 if let Some(status) = child
                     .try_wait()
                     .map_err(|_| failed("Cannot monitor Bubblewrap"))?
@@ -266,7 +335,7 @@ pub fn entry() -> Result<serde_json::Value> {
                         .wait()
                         .map_err(|_| failed("Cannot reap expired Bubblewrap"))?;
                 }
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(2));
             };
             let stdout = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
             let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
@@ -498,5 +567,21 @@ fn seccomp_file() -> Result<File> {
     use std::io::{Seek, SeekFrom};
     file.seek(SeekFrom::Start(0))
         .map_err(|_| failed("Cannot rewind seccomp filter"))?;
+    Ok(file)
+}
+
+fn data_file(bytes: &[u8]) -> Result<File> {
+    // SAFETY: constant name; successful result is a new owned memfd.
+    let fd = unsafe { libc::memfd_create(c"silo-hosts".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(missing("Worker lacks memfd for generated hosts"));
+    }
+    // SAFETY: sole ownership of the successful syscall result.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|_| failed("Cannot write generated hosts"))?;
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| failed("Cannot rewind hosts"))?;
     Ok(file)
 }
