@@ -8,6 +8,14 @@ Run ordinary Linux OCI images on a single restricted Linux worker, without Docke
 
 Not in v1: Docker API compatibility, full OCI runtime compliance, arbitrary internet access, UDP, public ingress, multi-host networking or replicated storage. Bubblewrap shares the worker kernel; this is not a VM-grade tenant boundary.
 
+## Implementation and distribution
+
+Silo is written in **Rust**. Start with one Cargo package and one `silo` executable for the CLI, supervisor, and internal namespace-helper mode. Run the helper in a separate process so namespace setup stays out of the multithreaded supervisor. Keep Linux-specific operations behind a small, auditable module, using owned file descriptors and explicit close-on-exec behavior. Bubblewrap remains an upstream C executable, invoked by its exact path; Silo does not reimplement or link it.
+
+Start with a static Linux x86-64 Silo build using `x86_64-unknown-linux-musl`. Prefer dependencies that do not require host shared libraries. Verify the actual release ELF has no interpreter or dynamic dependencies, then smoke-test it on a clean worker. Add ARM64 only after testing that target.
+
+Ship one release archive containing `silo` and a pinned, non-setuid `libexec/bwrap` for the same architecture. Resolve the bundled helper by an exact, trusted path, never by an agent-controlled `PATH`. Verify the helper's own library requirements separately and provide the applicable notices and corresponding source for the exact build. Embedding and extracting the helper from the Rust binary is not required for v1. Packaging does not grant kernel capabilities: verify the required namespace and relay operations at startup and fail closed if they are unavailable.
+
 ## Architecture
 
 - **Silo supervisor:** Owns launch authorization, image cache, instance state, volume catalog, network grants, logs, and cleanup. Begin with a CLI over a private control endpoint and one operator-owned manifest. No MCP server, dynamic grants, public API, or background reconciliation in the first slice. A loopback control endpoint, if used, must authenticate requests; loopback alone is not authentication. Do not mount the control endpoint, credentials, worker socket, or machine filesystem into jobs. An MCP frontend can translate agent requests later; it does not make policy.
