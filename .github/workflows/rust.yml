@@ -60,6 +60,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      - name: Qualification reporting regressions (no worker qualification)
+        run: python3 -m unittest discover -s tests -p test_qualification.py
       - run: cargo build --locked --release
   musl:
     name: Static Linux x86-64 build smoke test
