@@ -1,7 +1,0 @@
-# Optional metadata. The server itself starts from start.py.
-description: Search the team's runbooks.
-env:
-  RUNBOOK_DIR: ${CHECKOUT}/runbooks
-tools:
-  - name: search
-  - name: list
