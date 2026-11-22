@@ -417,15 +417,22 @@ fn policy_replacement_refused_and_survives_clean_restart() {
 #[test]
 fn frame_bounds_and_private_endpoint_fail_closed() {
     let h = Harness::start();
-    let mut stream = TcpStream::connect(control::endpoint(&h.endpoint).unwrap()).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .write_all(&((MAX_DOCUMENT + 1) as u32).to_be_bytes())
-        .unwrap();
-    let v: Value = serde_json::from_slice(&control::read_frame(&mut stream).unwrap()).unwrap();
-    assert_eq!(v["error"]["code"], "invalid_request");
+    // Bounds apply both to the initial challenge and the authenticated request.
+    for authenticated in [false, true] {
+        let mut stream = if authenticated {
+            control::connect(&h.endpoint).unwrap()
+        } else {
+            TcpStream::connect(control::endpoint(&h.endpoint).unwrap()).unwrap()
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(&((MAX_DOCUMENT + 1) as u32).to_be_bytes())
+            .unwrap();
+        let v: Value = serde_json::from_slice(&control::read_frame(&mut stream).unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], "invalid_request");
+    }
     let stale = launch(
         &[
             "supervisor".into(),
@@ -440,8 +447,21 @@ fn frame_bounds_and_private_endpoint_fail_closed() {
     .unwrap();
     failure(stale, 5, "supervisor_unavailable");
     let remote = h.dir.path().join("remote");
-    protected(&remote, b"\"8.8.8.8:80\"");
+    protected(
+        &remote,
+        &serde_json::to_vec(&json!({
+            "address": "8.8.8.8:80",
+            "server_key": "c".repeat(64)
+        }))
+        .unwrap(),
+    );
     assert!(control::endpoint(&remote).is_err());
+    let legacy = h.dir.path().join("legacy");
+    protected(&legacy, b"\"127.0.0.1:12345\"");
+    assert!(
+        control::endpoint(&legacy).is_err(),
+        "no unauthenticated downgrade"
+    );
     let mut prefix_only = &b"\x00\x04\x00\x01"[..];
     assert!(control::read_frame(&mut prefix_only).is_err());
 }
