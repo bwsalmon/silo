@@ -91,9 +91,11 @@ requires operator recovery. Do not edit or discard uncertain records to resume.
 
 ## Supervisor loss and explicit recovery
 
-Parent-death protections help terminate descendants, but supervisor absence
-never proves cleanup. Attachment journals survive process death. A stale
-endpoint and any old cgroup descendants block ordinary restart. A different
+Helpers install parent-death SIGKILL protection before exec and verify the
+original supervisor PID, so adoption by a subreaper cannot become a new trusted
+parent during startup. Parent-death protections help terminate descendants, but
+supervisor absence never proves cleanup. Attachment journals survive process
+death. A stale endpoint and any old cgroup descendants block ordinary restart. A different
 state directory or token cannot bypass the volume journal.
 
 For the same immutable policy, an operator can recover in this order:
