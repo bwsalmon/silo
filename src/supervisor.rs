@@ -81,6 +81,7 @@ pub struct Supervisor {
     teardown: VecDeque<Teardown>,
     pub shutdown: bool,
     runner: Option<crate::runner::Runner>,
+    services: BTreeMap<String, String>,
 }
 impl Supervisor {
     pub fn new(root: PathBuf, operator: Secret) -> Result<Self> {
@@ -100,6 +101,7 @@ impl Supervisor {
             teardown: VecDeque::new(),
             shutdown: false,
             runner: None,
+            services: BTreeMap::new(),
         })
     }
     fn record(
@@ -207,9 +209,11 @@ impl Supervisor {
                     self.policy = Some(*manifest);
                 }
                 if !no_start {
-                    return Err(unsupported());
+                    self.start_services(time)?;
                 }
-                Ok(json!({"policy": self.manifest()?.id(), "activated": true, "started": false}))
+                Ok(
+                    json!({"policy": self.manifest()?.id(), "activated": true, "started": !no_start}),
+                )
             }
             Operation::Issue { grant } => {
                 if !operator {
@@ -273,69 +277,14 @@ impl Supervisor {
                         "Live instance quota reached",
                     ));
                 }
-                if m.network.allow.iter().any(|link| link.from == template) {
-                    return Err(Error::new(
-                        Code::UnsupportedWorker,
-                        "Service links are unsupported in the single-image runner",
-                    ));
-                }
                 let t = m.jobs[&template].clone();
-                let policy = m.id();
-                let project = m.project.clone();
+                let layout = crate::relay::layout(m, &template, &self.services);
                 if self.runner.is_none() {
                     self.runner = Some(crate::runner::Runner::new(&self.root)?);
                 }
-                self.runner.as_ref().expect("runner").check(&t)?;
+                let (network, routes) = layout?;
                 let id = crate::auth::random_id("job_")?;
-                let (grant_id, session, expiry) = match p {
-                    Principal::Operator => ("operator".into(), "operator".into(), u64::MAX),
-                    Principal::Agent { id, grant } => {
-                        (id.clone(), grant.session.clone(), grant.expires_at)
-                    }
-                };
-                let deadline = expiry.min(time.saturating_add(t.limits.duration_secs));
-                self.instances.insert(
-                    id.clone(),
-                    Instance {
-                        id: id.clone(),
-                        template,
-                        state: State::Starting,
-                        exit_code: None,
-                        image_digest: None,
-                        project,
-                        session,
-                        grant_id,
-                        policy,
-                        lease_deadline: deadline,
-                    },
-                );
-                match self
-                    .runner
-                    .as_mut()
-                    .expect("runner")
-                    .start(&id, &t, deadline)
-                {
-                    Ok(digest) => {
-                        let i = self.instances.get_mut(&id).expect("reserved instance");
-                        i.state = State::Running;
-                        i.image_digest = Some(digest);
-                        Ok(serde_json::to_value(i).expect("typed instance"))
-                    }
-                    Err(e) => {
-                        self.tick(now());
-                        if !self.instances[&id].terminal() {
-                            self.instances
-                                .get_mut(&id)
-                                .expect("reserved instance")
-                                .state = State::Stopping;
-                            return Err(Error::new(
-                                Code::CleanupUnverified,
-                                "Launch failed; whole-cgroup cleanup remains unverified",
-                            ));
-                        }
-                        Err(e)
-                    }
-                }
+                self.launch(p, id, template, t, network, routes, time)
             }
             Operation::Ps => {
                 let m = self.manifest()?;
@@ -388,7 +337,7 @@ impl Supervisor {
                     .filter(|n| {
                         operator || self.metadata_visible(p, m, n, Permission::ServiceList, false)
                     })
-                    .map(|n| json!({"id": m.resource_id("svc", n), "name": n, "started": false}))
+                    .map(|n| json!({"id": m.resource_id("svc", n), "name": n, "started": self.service_running(n), "instance": self.services.get(n)}))
                     .collect();
                 Ok(json!({"services": values}))
             }
@@ -400,9 +349,141 @@ impl Supervisor {
                 {
                     return Err(not_found());
                 }
-                Ok(json!({"id": m.resource_id("svc", &name), "name": name, "started": false}))
+                Ok(
+                    json!({"id": m.resource_id("svc", &name), "name": name, "started": self.service_running(&name), "instance": self.services.get(&name)}),
+                )
             }
         }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn launch(
+        &mut self,
+        p: &Principal,
+        id: String,
+        template: String,
+        t: crate::policy::Template,
+        network: crate::relay::Network,
+        routes: Vec<crate::relay::Route>,
+        time: u64,
+    ) -> Result<Value> {
+        let m = self.manifest()?;
+        let policy = m.id();
+        let project = m.project.clone();
+        if self.runner.is_none() {
+            self.runner = Some(crate::runner::Runner::new(&self.root)?);
+        }
+        self.runner.as_ref().expect("runner").check(&t)?;
+        let (grant_id, session, expiry) = match p {
+            Principal::Operator => ("operator".into(), "operator".into(), u64::MAX),
+            Principal::Agent { id, grant } => (id.clone(), grant.session.clone(), grant.expires_at),
+        };
+        let deadline = expiry.min(time.saturating_add(t.limits.duration_secs));
+        self.instances.insert(
+            id.clone(),
+            Instance {
+                id: id.clone(),
+                template,
+                state: State::Starting,
+                exit_code: None,
+                image_digest: None,
+                project,
+                session,
+                grant_id,
+                policy,
+                lease_deadline: deadline,
+            },
+        );
+        match self
+            .runner
+            .as_mut()
+            .expect("runner")
+            .start(&id, &t, deadline, network, routes)
+        {
+            Ok(digest) => {
+                let i = self.instances.get_mut(&id).expect("reserved instance");
+                i.state = State::Running;
+                i.image_digest = Some(digest);
+                Ok(serde_json::to_value(i).expect("typed instance"))
+            }
+            Err(e) => {
+                self.tick(now());
+                if !self.instances[&id].terminal() {
+                    self.instances
+                        .get_mut(&id)
+                        .expect("reserved instance")
+                        .state = State::Stopping;
+                    return Err(Error::new(
+                        Code::CleanupUnverified,
+                        "Launch failed; whole-cgroup cleanup remains unverified",
+                    ));
+                }
+                Err(e)
+            }
+        }
+    }
+    fn start_services(&mut self, time: u64) -> Result<()> {
+        let m = self.manifest()?.clone();
+        if !self.services.is_empty() {
+            if self.services.values().all(|id| {
+                self.instances
+                    .get(id)
+                    .map(|i| i.state == State::Running)
+                    .unwrap_or(false)
+            }) {
+                return Ok(());
+            }
+            return Err(Error::new(Code::PolicyInUse, "Static service topology cannot be replaced after exit; verify cleanup and use a fresh supervisor"));
+        }
+        if m.services.is_empty() {
+            return Ok(());
+        }
+        let planned: BTreeMap<String, String> = m
+            .services
+            .keys()
+            .map(|n| Ok((n.clone(), crate::auth::random_id("svc_")?)))
+            .collect::<Result<_>>()?;
+        // Validate the complete fixed topology before any service executes.
+        let mut layouts = BTreeMap::new();
+        if self.runner.is_none() {
+            self.runner = Some(crate::runner::Runner::new(&self.root)?);
+        }
+        for (name, service) in &m.services {
+            self.runner
+                .as_ref()
+                .expect("runner")
+                .check(&service.template)?;
+            layouts.insert(name.clone(), crate::relay::layout(&m, name, &planned)?);
+        }
+        self.services = planned.clone();
+        for (name, service) in &m.services {
+            let (network, routes) = layouts.remove(name).expect("planned service layout");
+            if let Err(error) = self.launch(
+                &Principal::Operator,
+                planned[name].clone(),
+                name.clone(),
+                service.template.clone(),
+                network,
+                routes,
+                time,
+            ) {
+                for id in planned.values() {
+                    self.request_teardown(id, "service_setup_failure");
+                }
+                self.tick(now());
+                return Err(Error::new(
+                    error.code,
+                    &format!("Service {name} setup failed: {}", error.message),
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn service_running(&self, name: &str) -> bool {
+        self.services
+            .get(name)
+            .and_then(|id| self.instances.get(id))
+            .map(|i| i.state == State::Running)
+            .unwrap_or(false)
     }
     fn metadata_visible(
         &self,

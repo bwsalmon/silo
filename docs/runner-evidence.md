@@ -1,5 +1,8 @@
 # Recorded disposable-worker validation
 
+This records Task #105 at its delivered commit. Subsequent service/relay results
+and current limits are recorded in [network evidence](network-evidence.md).
+
 Validated on 2026-11-22 in this task's disposable Debian environment, kernel
 `6.1.0-56-amd64`. This qualifies the exercised configuration only, not the
 deployment that dispatched the task or arbitrary workers.
@@ -19,7 +22,7 @@ cargo test --locked --all-targets
 cargo build --locked --release
 cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
 cargo build --locked --release --target x86_64-unknown-linux-musl
-python3 tests/real_worker.py \
+python3 tests/real_worker.py --suite runner \
   --binary target/x86_64-unknown-linux-musl/release/silo \
   --report /tmp/silo105-real-worker.json
 ```

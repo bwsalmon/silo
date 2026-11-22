@@ -69,6 +69,8 @@ pub fn unavailable() -> Error {
     )
 }
 pub fn unsupported() -> Error {
-    Error::new(Code::UnsupportedWorker,
-        "Services, TCP relay and named-volume operations are unsupported in the single-image job runner")
+    Error::new(
+        Code::UnsupportedWorker,
+        "Named-volume operations are unsupported in this runner",
+    )
 }

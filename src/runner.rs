@@ -33,6 +33,7 @@ pub struct Runner {
     pub worker: Worker,
     _storage_lock: fs::File,
     images: BTreeMap<String, Prepared>,
+    relay: crate::relay::Relay,
     live: BTreeMap<String, Running>,
     logs: BTreeMap<String, Value>,
     completed: VecDeque<Completion>,
@@ -46,6 +47,7 @@ impl Runner {
             worker,
             _storage_lock: storage_lock,
             images: BTreeMap::new(),
+            relay: crate::relay::Relay::new()?,
             live: BTreeMap::new(),
             logs: BTreeMap::new(),
             completed: VecDeque::new(),
@@ -83,7 +85,14 @@ impl Runner {
         }
         Ok(())
     }
-    pub fn start(&mut self, id: &str, t: &Template, deadline: u64) -> Result<String> {
+    pub fn start(
+        &mut self,
+        id: &str,
+        t: &Template,
+        deadline: u64,
+        network: crate::relay::Network,
+        routes: Vec<crate::relay::Route>,
+    ) -> Result<String> {
         self.check(t)?;
         let group = self.worker.group(id, &t.limits)?;
         self.live.insert(
@@ -96,7 +105,7 @@ impl Runner {
                 result: None,
             },
         );
-        let result = self.setup(id, t, deadline);
+        let result = self.setup(id, t, deadline, network, routes);
         if result.is_err() {
             let r = self.live.get_mut(id).expect("reserved instance");
             r.setup_failed = true;
@@ -106,7 +115,14 @@ impl Runner {
         }
         result
     }
-    fn setup(&mut self, id: &str, t: &Template, deadline: u64) -> Result<String> {
+    fn setup(
+        &mut self,
+        id: &str,
+        t: &Template,
+        deadline: u64,
+        network: crate::relay::Network,
+        routes: Vec<crate::relay::Route>,
+    ) -> Result<String> {
         let running = self.live.get_mut(id).expect("reserved instance");
         running.context.probe()?;
         let prepared = match self.images.get(&t.image) {
@@ -129,7 +145,7 @@ impl Runner {
         for input in &t.executable_inputs {
             image::immutable_path(&prepared.rootfs, input)?;
         }
-        for target in ["dev", "proc", "tmp", "run"] {
+        for target in ["dev", "proc", "tmp", "run", "etc"] {
             let path = prepared.rootfs.join(target);
             if !path.exists() {
                 fs::create_dir(&path)
@@ -144,22 +160,52 @@ impl Runner {
                 ));
             }
         }
+        let hosts_target = prepared.rootfs.join("etc/hosts");
+        match fs::symlink_metadata(&hosts_target) {
+            Ok(m) if m.is_file() => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&hosts_target)
+                    .map_err(|_| failed("Cannot prepare generated hosts mountpoint"))?;
+            }
+            _ => {
+                return Err(failed(
+                    "Image /etc/hosts mountpoint must be a real regular file",
+                ))
+            }
+        }
         let remaining = deadline.saturating_sub(now());
         if remaining == 0 {
             return Err(failed("Launch lease expired during image preparation"));
         }
-        running.context.child = Some(process::spawn(&Spec {
-            cgroup: running.context.group.path.clone(),
-            action: Action::Workload {
-                bwrap: self.worker.bwrap.clone(),
-                rootfs: prepared.rootfs.clone(),
-                argv: execution.argv,
-                env: execution.env,
-                workdir: execution.workdir,
-                scratch_bytes: t.limits.scratch_bytes,
-                deadline_unix_ms: deadline * 1000,
+        let (supervisor_channel, helper_channel) = crate::relay_channel::Channel::pair()
+            .map_err(|_| missing("Worker denies private SCM_RIGHTS socketpair"))?;
+        running.context.child = Some(process::spawn_with_channel(
+            &Spec {
+                cgroup: running.context.group.path.clone(),
+                action: Action::Workload {
+                    bwrap: self.worker.bwrap.clone(),
+                    rootfs: prepared.rootfs.clone(),
+                    argv: execution.argv,
+                    env: execution.env,
+                    workdir: execution.workdir,
+                    scratch_bytes: t.limits.scratch_bytes,
+                    deadline_unix_ms: deadline * 1000,
+                    network,
+                },
             },
-        })?);
+            Some(&helper_channel),
+        )?);
+        drop(helper_channel);
+        self.relay.register(
+            id,
+            supervisor_channel,
+            routes,
+            t.limits.connections,
+            deadline,
+        )?;
         let receiver = process::events(running.context.child.as_mut().expect("workload helper"));
         let result = match receiver.recv_timeout(Duration::from_secs(10)) {
             Ok(Event::Ready) => Ok(prepared.digest),
@@ -172,6 +218,7 @@ impl Runner {
         result
     }
     pub fn stop(&mut self, id: &str) {
+        self.relay.remove(id);
         if let Some(r) = self.live.get_mut(id) {
             r.stopping = true;
             let _ = r.context.group.kill();
@@ -181,6 +228,12 @@ impl Runner {
         }
     }
     pub fn poll(&mut self) {
+        for id in self.relay.failed() {
+            if let Some(r) = self.live.get_mut(&id) {
+                r.setup_failed = true;
+            }
+            self.stop(&id);
+        }
         let mut done = Vec::new();
         for (id, running) in &mut self.live {
             if let Some(receiver) = &running.receiver {
@@ -218,6 +271,7 @@ impl Runner {
                         }
                     }
                 }
+                self.relay.remove(id);
                 let resources = json!({
                     "memory_events": fs::read_to_string(running.context.group.path.join("memory.events")).unwrap_or_default(),
                     "pids_events": fs::read_to_string(running.context.group.path.join("pids.events")).unwrap_or_default(),
@@ -232,6 +286,7 @@ impl Runner {
                             "id": id, "stdout": stdout, "stderr": stderr, "complete": true,
                             "limit_bytes_per_stream": crate::helper::OUTPUT_LIMIT,
                         "resources": resources,
+                        "relay": self.relay.stats(id),
                         "capture": if verified_exit { "bounded" } else { "unavailable_after_helper_loss" },
                         }),
                     );
@@ -271,7 +326,8 @@ impl Runner {
 }
 impl Drop for Runner {
     fn drop(&mut self) {
-        for running in self.live.values_mut() {
+        for (id, running) in &mut self.live {
+            self.relay.remove(id);
             let _ = running.context.cleanup();
         }
     }

@@ -22,6 +22,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import sys
 
 HELLO = "docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9"
 OCI = "application/vnd.oci.image."
@@ -506,6 +507,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--suite", choices=["runner", "network", "all"], default="all")
     args = parser.parse_args()
     BINARY = str(args.binary.resolve())
     assert os.getuid() != 0, "Run as non-root; sudo provisions only task-owned mounts/cgroups"
@@ -575,7 +577,12 @@ os.execv(sys.argv[6],sys.argv[6:])
         elf_dynamic = run(["readelf", "-d", BINARY], text=True).stdout
         check("static ELF has no interpreter or shared dependencies", "INTERP" not in elf_headers and "NEEDED" not in elf_dynamic)
         registry = Registry(certs)
-        suite(workspace, worker, registry, (workspace / "probe").read_bytes())
+        if args.suite in ("runner", "all"):
+            suite(workspace, worker, registry, (workspace / "probe").read_bytes())
+        if args.suite in ("network", "all"):
+            sys.dont_write_bytecode = True
+            from network_acceptance import suite as network_suite
+            network_suite(sys.modules[__name__], workspace, worker, registry, (workspace / "probe").read_bytes())
         REPORT["result"] = "passed"
     except BaseException as error:
         REPORT["result"] = "failed"
