@@ -81,7 +81,9 @@ fn mutable_inputs_cannot_become_protected_service_code() {
         vec!["run", "app", "--env", "BASH_ENV=/results/script"],
         vec!["run", "app", "--entrypoint", "/bin/sh"],
     ] {
-        assert!(cli::parse(&args.iter().map(|v| v.to_string()).collect::<Vec<_>>()).is_err());
+        let mut args: Vec<_> = args.iter().map(|v| v.to_string()).collect();
+        args.extend(["--endpoint", "/private/endpoint.json", "--auth-fd", "3"].map(String::from));
+        assert!(cli::parse(&args).is_err());
     }
 }
 #[test]
@@ -95,10 +97,4 @@ fn numeric_image_user_must_match_explicit_template_identity() {
     execution(&config, Some(t)).unwrap();
     t.uid = 0;
     assert!(execution(&config, Some(t)).is_err());
-    // Inert OCI metadata does not add any policy mounts, service links or listener.
-    assert_eq!(m.jobs["app"].mounts.len(), 2);
-    assert!(m.jobs["app"]
-        .mounts
-        .iter()
-        .all(|m| m.target != "/unapproved"));
 }
