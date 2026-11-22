@@ -7,6 +7,7 @@ The Rust implementation includes verified platform-specific OCI images, upstream
 - [Runner setup, supported subset and limits](docs/runner.md)
 - [Private service policy, relay bounds and tests](docs/network.md)
 - [Managed volumes, Postgres workflow and recovery](docs/volumes.md)
+- [Full real-worker qualification after PR #244](docs/qualification-evidence.md)
 - [Recorded storage and restricted-identity CLI evidence](docs/storage-evidence.md)
 - [Recorded runner evidence](docs/runner-evidence.md) and [network evidence](docs/network-evidence.md)
 - [Policy, credentials and control transport](docs/foundation.md)
