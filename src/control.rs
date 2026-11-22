@@ -1,11 +1,13 @@
 use crate::{
-    auth::{Grant, Secret},
+    auth::{random_id, Grant, Secret},
     error::{invalid, unavailable, Error, Result},
     linux,
     policy::{Manifest, MAX_DOCUMENT},
 };
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Sha256;
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
@@ -148,19 +150,81 @@ pub fn write_frame(writer: &mut impl Write, value: &impl Serialize) -> Result<()
     buf.zeroize();
     result
 }
-pub fn endpoint(path: &Path) -> Result<SocketAddr> {
-    linux::private_dir(path.parent().ok_or_else(unavailable)?)?;
-    let bytes = linux::read_private(path, 128)?;
-    let addr: SocketAddr = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-    if !matches!(addr, SocketAddr::V4(a) if *a.ip() == Ipv4Addr::LOCALHOST && a.port() != 0) {
-        return Err(unavailable());
-    }
-    Ok(addr)
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Endpoint {
+    pub address: SocketAddr,
+    // Per-start server identity, shared only with the protected client/broker.
+    // It never authenticates an operator or grants access to a resource.
+    pub server_key: Secret,
 }
-pub fn call(path: &Path, req: Request) -> Result<Value> {
-    let mut stream = TcpStream::connect_timeout(&endpoint(path)?, Duration::from_secs(2))
+impl Endpoint {
+    fn load(path: &Path) -> Result<Self> {
+        linux::private_dir(path.parent().ok_or_else(unavailable)?)?;
+        let bytes = zeroize::Zeroizing::new(linux::read_private(path, 512)?);
+        let endpoint: Self = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+        if !matches!(endpoint.address, SocketAddr::V4(a) if *a.ip() == Ipv4Addr::LOCALHOST && a.port() != 0)
+            || !endpoint.server_key.valid()
+        {
+            return Err(unavailable());
+        }
+        Ok(endpoint)
+    }
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Challenge {
+    nonce: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ServerProof {
+    proof: [u8; 32],
+}
+fn server_mac(key: &Secret, nonce: &str) -> Hmac<Sha256> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.0.as_bytes()).expect("HMAC accepts any key");
+    mac.update(b"silo-control-server-v1\0");
+    mac.update(nonce.as_bytes());
+    mac
+}
+// Authenticate the server before sending any bearer credential. Fresh challenges
+// prevent replay if a different local principal takes over a stale endpoint port.
+pub fn verify_server(stream: &mut TcpStream, key: &Secret) -> Result<()> {
+    let challenge = Challenge {
+        nonce: random_id("")?,
+    };
+    write_frame(stream, &challenge)?;
+    let bytes = read_frame(stream).map_err(|_| unavailable())?;
+    let proof: ServerProof = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    server_mac(key, &challenge.nonce)
+        .verify_slice(&proof.proof)
+        .map_err(|_| unavailable())
+}
+pub fn prove_server(stream: &mut TcpStream, key: &Secret) -> Result<()> {
+    let bytes = read_frame(stream)?;
+    let challenge: Challenge = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if challenge.nonce.len() != 64 || !challenge.nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let proof = server_mac(key, &challenge.nonce)
+        .finalize()
+        .into_bytes()
+        .into();
+    write_frame(stream, &ServerProof { proof })
+}
+pub fn endpoint(path: &Path) -> Result<SocketAddr> {
+    Ok(Endpoint::load(path)?.address)
+}
+pub fn connect(path: &Path) -> Result<TcpStream> {
+    let endpoint = Endpoint::load(path)?;
+    let mut stream = TcpStream::connect_timeout(&endpoint.address, Duration::from_secs(2))
         .map_err(|_| unavailable())?;
     timeouts(&stream)?;
+    verify_server(&mut stream, &endpoint.server_key)?;
+    Ok(stream)
+}
+pub fn call(path: &Path, req: Request) -> Result<Value> {
+    let mut stream = connect(path)?;
     write_frame(&mut stream, &req)?;
     drop(req); // Zeroize token before waiting for a reply.
     let mut buf = read_frame(&mut stream).map_err(|_| unavailable())?;

@@ -59,10 +59,11 @@ fn exchange(s: &mut Supervisor, token: &Secret, operation: Operation) -> Result<
         let server = scope.spawn(|| {
             let (mut stream, _) = listener.accept().unwrap();
             control::timeouts(&stream).unwrap();
-            handle_connection(s, &mut stream);
+            handle_connection(s, &mut stream, &Secret("c".repeat(64)));
         });
         let mut stream = TcpStream::connect(address).unwrap();
         control::timeouts(&stream).unwrap();
+        control::verify_server(&mut stream, &Secret("c".repeat(64))).unwrap();
         control::write_frame(
             &mut stream,
             &Request {

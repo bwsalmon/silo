@@ -450,12 +450,15 @@ pub fn serve(root: &Path, operator: Secret) -> Result<()> {
         )
     })?;
     listener.set_nonblocking(true).map_err(|_| unavailable())?;
+    let identity = control::Endpoint {
+        address: listener.local_addr().map_err(|_| unavailable())?,
+        server_key: Secret(crate::auth::random_id("")?),
+    };
     let endpoint = root.join("endpoint.json");
     let mut file = linux::create(&endpoint)?; // Refuse stale endpoints; never reattach after loss.
-    file.write_all(
-        &serde_json::to_vec(&listener.local_addr().map_err(|_| unavailable())?)
-            .map_err(|_| unavailable())?,
-    )
+    file.write_all(&zeroize::Zeroizing::new(
+        serde_json::to_vec(&identity).map_err(|_| unavailable())?,
+    ))
     .and_then(|_| file.sync_all())
     .map_err(|_| unavailable())?;
     while !supervisor.shutdown {
@@ -465,7 +468,7 @@ pub fn serve(root: &Path, operator: Secret) -> Result<()> {
                 if !peer.ip().is_loopback() || control::timeouts(&stream).is_err() {
                     continue;
                 }
-                handle_connection(&mut supervisor, &mut stream);
+                handle_connection(&mut supervisor, &mut stream, &identity.server_key);
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(20))
@@ -477,7 +480,16 @@ pub fn serve(root: &Path, operator: Secret) -> Result<()> {
     Ok(())
 }
 
-fn handle_connection(supervisor: &mut Supervisor, stream: &mut std::net::TcpStream) {
+fn handle_connection(
+    supervisor: &mut Supervisor,
+    stream: &mut std::net::TcpStream,
+    server_key: &Secret,
+) {
+    if let Err(error) = control::prove_server(stream, server_key) {
+        supervisor.malformed(now());
+        let _ = control::write_frame(stream, &Response::from(Err(error)));
+        return;
+    }
     let mut response = match control::read_frame(stream) {
         Ok(mut bytes) => {
             let request = serde_json::from_slice::<Request>(&bytes);

@@ -175,8 +175,7 @@ impl Harness {
         (token_path, v["grant"].as_str().unwrap().into())
     }
     fn raw(&self, value: Value) -> Value {
-        let addr = control::endpoint(&self.endpoint).unwrap();
-        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut stream = control::connect(&self.endpoint).unwrap();
         control::timeouts(&stream).unwrap();
         control::write_frame(&mut stream, &value).unwrap();
         serde_json::from_slice(&control::read_frame(&mut stream).unwrap()).unwrap()
@@ -468,6 +467,50 @@ fn diagnostics_and_reserved_helper_do_not_expose_inputs() {
     let v = failure(out, 2, "invalid_manifest");
     assert!(!v.to_string().contains("secret-marker"));
 }
+#[test]
+fn stale_loopback_port_cannot_collect_bearer_credentials() {
+    let mut h = Harness::start();
+    let address = control::endpoint(&h.endpoint).unwrap();
+    // A valid proof from an earlier exchange cannot authenticate a later one.
+    let mut old_connection = TcpStream::connect(address).unwrap();
+    control::timeouts(&old_connection).unwrap();
+    control::write_frame(&mut old_connection, &json!({"nonce": "d".repeat(64)})).unwrap();
+    let recorded_proof: Value =
+        serde_json::from_slice(&control::read_frame(&mut old_connection).unwrap()).unwrap();
+    drop(old_connection);
+    h.process.kill().unwrap();
+    h.process.wait().unwrap();
+    // The protected endpoint still points at the old port after abnormal loss.
+    let impostor = std::net::TcpListener::bind(address).unwrap();
+    let capture = thread::spawn(move || {
+        let (mut stream, _) = impostor.accept().unwrap();
+        control::timeouts(&stream).unwrap();
+        let first = control::read_frame(&mut stream).unwrap();
+        control::write_frame(&mut stream, &recorded_proof).unwrap();
+        let mut remaining = Vec::new();
+        stream.read_to_end(&mut remaining).unwrap();
+        [first, remaining].concat()
+    });
+    let result = control::call(
+        &h.endpoint,
+        Request {
+            version: 1,
+            auth: Secret("a".repeat(64)),
+            operation: Operation::Ps,
+        },
+    );
+    let captured = String::from_utf8_lossy(&capture.join().unwrap()).into_owned();
+    assert!(
+        !captured.contains(&"a".repeat(64)),
+        "peer received bearer token"
+    );
+    assert!(
+        !captured.contains("auth"),
+        "request preceded server authentication"
+    );
+    assert!(result.is_err());
+}
+
 #[test]
 fn library_client_uses_the_same_authenticated_transport() {
     let h = Harness::start();

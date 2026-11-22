@@ -173,8 +173,17 @@ fresh protected directory only after verified cleanup; there is no live edit.
 ## Private transport, persistence and limits
 
 The supervisor binds only `127.0.0.1` on an ephemeral TCP port and creates an
-owner-only endpoint file. Loopback is not authentication: every request carries
-an independently authenticated opaque bearer token. The directory must be
+owner-only endpoint file containing the address and an independent random
+256-bit server key, renewed on every start. Before sending any bearer token,
+clients verify an HMAC-SHA256 server proof over a fresh random challenge using
+that protected key. A stale port taken by another local user cannot collect
+credentials, and recorded proofs cannot be replayed. The key is never sent over
+the socket and grants no operator or resource permissions. Protect endpoint
+file contents like credentials; do not log or mount them into workloads. Clients
+without access must use the trusted broker rather than copying the server key
+into an agent environment. Old address-only endpoint files fail closed.
+Every request still requires an independently authenticated opaque bearer token.
+The directory must be
 absolute, symlink-free, owned by the supervisor UID, mode 0700 or stricter, with
 trusted ancestors preventing untrusted rename. Endpoint/policy/lock files use
 owner-only modes and no-follow/close-on-exec descriptors. No remote binding or
@@ -182,9 +191,10 @@ environment-controlled helper path exists. Loopback availability and filesystem
 protection are checked; namespace, storage and workload resource qualification
 are pending and cannot be inferred from activation success.
 
-The private version-1 protocol is a four-byte big-endian length plus a strictly
-typed JSON request. One request per connection, two-second I/O timeouts and a
-256 KiB frame bound constrain each exchange. The server is serial and intended
+The private version-1 protocol uses four-byte big-endian lengths and strictly
+typed JSON. A client challenge and server proof precede the authenticated request.
+One request per connection, two-second I/O timeouts and a 256 KiB frame bound
+constrain each exchange. The server is serial and intended
 for local control, not high request throughput. An abusive local caller can
 delay other calls; no availability guarantee against the worker's OS peers is
 made. Policy activation sends typed content, never a path for the server to open.
