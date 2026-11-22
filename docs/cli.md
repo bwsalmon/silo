@@ -1,6 +1,6 @@
 # Silo v1 CLI design
 
-**Status:** Proposed interface. Examples show expected behavior, not output from an implemented CLI.
+**Status:** Full v1 interface design. The Rust [policy/control foundation](foundation.md) implements validation, activation without startup, authenticated control and scoped metadata. Runtime/storage commands remain unavailable. Examples below are future acceptance behavior, not evidence of launched workloads.
 
 The CLI is a client of one local supervisor. Every request is authorized server-side. An operator owns policy, services, and volumes; a restricted agent can ask for launches and limited lifecycle operations. The CLI is not a Docker replacement or an arbitrary command runner.
 

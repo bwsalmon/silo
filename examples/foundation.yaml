@@ -1,0 +1,60 @@
+# Foundation example. Image digests are illustrative; no runtime is implemented.
+version: 1
+project: example
+jobs:
+  app:
+    image: registry.example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    command: [/usr/bin/app]
+    workdir: /app
+    uid: 1000
+    gid: 1000
+    executable_inputs: [/app/config.json]
+    mounts:
+      - {volume: fixtures, target: /fixtures, mode: ro}
+      - {volume: results, target: /results, mode: rw}
+    limits: &limits
+      processes: 32
+      memory_bytes: 268435456
+      cpu_millis: 1000
+      scratch_bytes: 67108864
+      connections: 16
+      duration_secs: 300
+      max_instances: 2
+    agent: [run, list, status, stop]
+services:
+  db:
+    template:
+      image: postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      command: [/usr/local/bin/postgres, "-c", "unix_socket_directories="]
+      workdir: /
+      uid: 999
+      gid: 999
+      executable_inputs: []
+      mounts:
+        - {volume: pgdata, target: /var/lib/postgresql/data, mode: rw}
+      limits: *limits
+    listen: [5432]
+    agent: []
+volumes:
+  fixtures:
+    sharing: exclusive-writer
+    uid: 1000
+    gid: 1000
+    max_bytes: 67108864
+    agent: [volume_list, volume_inspect]
+  results:
+    sharing: exclusive-writer
+    uid: 1000
+    gid: 1000
+    max_bytes: 67108864
+    agent: []
+  pgdata:
+    sharing: exclusive-writer
+    uid: 999
+    gid: 999
+    max_bytes: 1073741824
+    agent: []
+network:
+  external: deny
+  allow:
+    - {from: app, to: db, protocol: tcp, port: 5432}
