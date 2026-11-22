@@ -44,6 +44,7 @@ assertions, actual resource counters and observations:
 
 - [Full runner and network report](evidence/tcp-worker.json).
 - [Network repeat with concurrency measurements](evidence/tcp-network.json).
+- [Live listener preconditions for denial tests](evidence/tcp-listener-validation.json).
 - [Initial and tuned bounded-buffer comparison](evidence/tcp-buffer-comparison.json).
 
 Report paths, registry ports, socket inodes and task-owned resources have been
@@ -69,6 +70,9 @@ Actual isolated workloads verified:
   invisible to unauthorized instance operations.
 - Undeclared services, another port on a running approved service, caller
   localhost, direct outbound IP and new reverse connections are denied.
+  A further network repetition reads actual destination namespace TCP tables
+  before testing: db ports 8080/8081/9000 and both other service listeners are
+  present, while the setup-failure target 9001 is absent.
   Replies still work on existing directional links.
 - Declared workload/wildcard relay conflicts fail before exec. Actual workload
   wildcard bind attempts receive EADDRINUSE.

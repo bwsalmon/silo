@@ -1,0 +1,76 @@
+{
+  "kind": "real-worker",
+  "result": "passed",
+  "kernel": "6.1.0-56-amd64",
+  "pins": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "silo_sha256": "c682bd76b351af62a6ac77fddce5df976a68b72dec33805028428b27766a61d6",
+    "stock_busybox": {
+      "sha256": "3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6",
+      "version": "BusyBox v1.35.0 (Debian 1:1.35.0-4+deb12u1+b1) multi-call binary."
+    },
+    "network_fixture": "localhost:35357/silo/probe@sha256:87db1bf15d73b0797e9f74c9949810efd0095ee146eb56095e4545ec39f04986"
+  },
+  "service_listener_ports": {
+    "db": [
+      8080,
+      8081,
+      9000
+    ],
+    "other": [
+      8080
+    ],
+    "secret": [
+      8080
+    ]
+  },
+  "passed": [
+    "static ELF has no interpreter or shared dependencies",
+    "missing immutable link grant denies template launch over raw protocol",
+    "raw protocol rejects destination/link/command/environment overrides",
+    "CLI rejects endpoint overrides",
+    "operator up starts actual services",
+    "repeated identical up is idempotent",
+    "agents cannot stop or see operator service instances",
+    "unmodified stock wget reaches only approved named and numeric endpoints",
+    "distinct service destinations share a port with readonly generated hosts",
+    "other-agent job denied named and numeric destination",
+    "other-port is denied inside actual isolated image",
+    "other-service is denied inside actual isolated image",
+    "local-address is denied inside actual isolated image",
+    "outbound is denied inside actual isolated image",
+    "workload wildcard bind cannot steal helper port",
+    "missing destination workload listener closes setup",
+    "reverse-live with real Bubblewrap kernel TCP descriptors",
+    "half with real Bubblewrap kernel TCP descriptors",
+    "reset with real Bubblewrap kernel TCP descriptors",
+    "repeat with real Bubblewrap kernel TCP descriptors",
+    "parallel with real Bubblewrap kernel TCP descriptors",
+    "parallel stream accounting stays bounded",
+    "excess parallel connection is rejected within per-instance limit",
+    "stalled reader triggers bounded buffers and idle deadline",
+    "live relay descriptors remain outside workload and in fixed supervisor budget",
+    "security revocation closes open stream and removes grant-owned processes",
+    "operator services survive caller security revocation",
+    "credential expiry closes established relay and stops job",
+    "template lease closes established link before credential expiry",
+    "service still accepts fresh approved grant after revocation/expiry",
+    "repeated parallel failure and revoke paths return supervisor FD/thread counts",
+    "only operator service cgroups remain after caller cleanup",
+    "directional service link grants no new reverse connection",
+    "missing real SCM_RIGHTS capability fails before workload execution",
+    "declared workload/wildcard relay conflict fails activation before exec",
+    "all network workload/helper cgroups removed"
+  ]
+}

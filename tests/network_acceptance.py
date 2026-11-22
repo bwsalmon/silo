@@ -175,10 +175,26 @@ exec /tcp-probe server
         check("CLI rejects endpoint overrides", True)
 
         activation = s.call(["up", s.manifest])
-        check("operator up starts actual services", activation["started"])
         instances = {i["template"]: i for i in s.call(["ps"])["instances"]}
         service_ids = {name: instances[name]["id"] for name in services}
         assert len(service_ids) == 3
+        # Prove denial preconditions: the forbidden port and service really listen.
+        # Reading namespace socket tables avoids an absent-listener false positive.
+        observed = {}
+        for name, required in {"db": {8080, 8081, 9000}, "other": {8080}, "secret": {8080}}.items():
+            def listening():
+                group = Path(config["cgroup"]) / service_ids[name]
+                helper = next((pid for pid in r.host_processes(group)
+                    if b"__namespace_helper" in Path("/proc/%d/cmdline" % pid).read_bytes()), None)
+                if helper is None: return None
+                table = r.run(["sudo", "cat", "/proc/%d/net/tcp" % helper], text=True).stdout
+                ports = {int(line.split()[1].split(":")[1], 16)
+                         for line in table.splitlines()[1:] if line.split()[3] == "0A"}
+                return ports if required <= ports else None
+            observed[name] = sorted(eventually(listening, "real workload listeners for " + name))
+        assert 9001 not in observed["db"]
+        r.REPORT["service_listener_ports"] = observed
+        check("operator up starts actual services", activation["started"] and len(observed) == 3)
         s.call(["up", s.manifest])
         check("repeated identical up is idempotent", len(s.call(["ps"])["instances"]) == 3)
         for name, instance in service_ids.items():
