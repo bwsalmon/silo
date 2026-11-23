@@ -1,0 +1,187 @@
+{
+  "kind": "real-worker",
+  "frontend": "mcp",
+  "passed": [
+    "static ELF has no interpreter or shared dependencies",
+    "authenticated approved stock OCI image runs with verified output",
+    "OCI entrypoint/args/env/workdir defaults",
+    "fixed template command/env override",
+    "native agent cannot join helper namespaces",
+    "helper shares private net but has separate PID/mount namespaces",
+    "real descriptor/env noninheritance; denied host files/network/nested namespaces; zero caps",
+    "real layered whiteouts and opaque directory handling",
+    "native agent OS principal cannot browse protected image storage",
+    "bounded scratch tmpfs reaches actual ENOSPC",
+    "actual process exhaustion and orphan cleanup",
+    "actual cgroup memory exhaustion fails without fabricated success",
+    "CPU is kernel-throttled",
+    "nonzero workload exit code preserved",
+    "stdout snapshot is bounded",
+    "unsupported identities/config/mount requirements and malicious archives rejected",
+    "mature unpacker scopes absolute layer symlinks inside rootfs",
+    "cross-principal status invisible",
+    "cross-principal stop invisible",
+    "worker-wide instance ceiling enforced",
+    "whole process tree including setsid grandchildren removed",
+    "normal parent exit also removes leftover children",
+    "grant instance quota enforced separately",
+    "logs require separate permission",
+    "duration bound enforced",
+    "MCP cancellation and lost launch response preserve bounded lease and verified teardown",
+    "MCP credential FD closes before requests and credential is absent from argv/environment",
+    "credential lease independently bounded",
+    "security revocation tears down grant-owned tree",
+    "missing worker configuration fails closed precisely",
+    "wrong Bubblewrap pin rejected",
+    "helper missing fails closed before workload success",
+    "helper substitution fails closed before workload success",
+    "helper wrong-architecture fails closed before workload success",
+    "helper not-executable fails closed before workload success",
+    "helper setuid fails closed before workload success",
+    "helper setgid fails closed before workload success",
+    "helper group-writable fails closed before workload success",
+    "helper missing-library fails closed before workload success",
+    "symlinked helper path fails closed",
+    "unbounded/shared storage rejected",
+    "mock cgroup files cannot qualify a real worker",
+    "actual missing writable CPU controller fails closed precisely",
+    "kernel denial of user namespaces fails closed precisely",
+    "supervisor crash kills descendants and refuses stale endpoint recovery",
+    "missing immutable link grant denies template launch over raw protocol",
+    "raw protocol rejects destination/link/command/environment overrides"
+  ],
+  "pins": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "silo_sha256": "455f3c9c68ebac8a9b19e045abf0f163f9b5db923172bfef431807d344d6829c",
+    "fixture_index": "localhost:42933/silo/probe@sha256:c5d15efdc9ad2b795047706c39f43705211d88518b41cc789a870fa2f69ff36e",
+    "stock_platform_manifest": "sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e",
+    "stock_image": "docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9",
+    "stock_busybox": {
+      "sha256": "3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6",
+      "version": "BusyBox v1.35.0 (Debian 1:1.35.0-4+deb12u1+b1) multi-call binary."
+    },
+    "network_fixture": "localhost:42933/silo/probe@sha256:87db1bf15d73b0797e9f74c9949810efd0095ee146eb56095e4545ec39f04986"
+  },
+  "result": "failed",
+  "completed_suites": [
+    "runner"
+  ],
+  "cleanup": {
+    "verified": true
+  },
+  "qualification": {
+    "status": "blocked",
+    "reasons": [
+      "real integration checks did not pass",
+      "runner, network and volumes suites are all required",
+      "missing real evidence: agent_kernel_profiles",
+      "missing real evidence: postgres_platform_digest",
+      "missing real evidence: network_direct_measurements",
+      "missing real evidence: network_relay_measurements"
+    ],
+    "scope": "only the recorded disposable worker configuration; no production approval"
+  },
+  "architecture": "x86_64",
+  "kernel": "6.1.0-56-amd64",
+  "namespace_policy": {
+    "/proc/sys/kernel/unprivileged_userns_clone": "1",
+    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": null,
+    "/proc/sys/user/max_user_namespaces": "62289"
+  },
+  "worker": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-v1mb59p1/certs",
+    "storage": "/tmp/silo-worker-v1mb59p1/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-cdb3260351a3/jobs",
+    "ceilings": {
+      "processes": 256,
+      "memory_bytes": 536870912,
+      "cpu_millis": 2000,
+      "scratch_bytes": 16777216,
+      "disk_bytes": 1073741824,
+      "duration_secs": 60,
+      "max_instances": 2
+    }
+  },
+  "mcp_calls": 125,
+  "native_namespace_join": {
+    "exit": 1,
+    "stderr": "nsenter: cannot open /proc/25719/ns/net: Permission denied\n"
+  },
+  "resources": {
+    "scratch_stdout": "scratch_bytes=4194304\n",
+    "pids_events": {
+      "max": 1
+    },
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 18,
+      "oom": 1,
+      "oom_kill": 5,
+      "oom_group_kill": 1
+    },
+    "cpu_stat": {
+      "usage_usec": 422906,
+      "user_usec": 402572,
+      "system_usec": 20334,
+      "nr_periods": 21,
+      "nr_throttled": 21,
+      "throttled_usec": 2747401,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "cpu_stdout": "cpu_ms=379 loops=4732372\n"
+  },
+  "network_worker": {
+    "bwrap": {
+      "path": "/usr/bin/bwrap",
+      "sha256": "85580dd52ed366ece8844e90fa75ac7c4de8802963071344e123221fb9f6f11e"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-v1mb59p1/certs",
+    "storage": "/tmp/silo-worker-v1mb59p1/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-cdb3260351a3/jobs",
+    "ceilings": {
+      "processes": 512,
+      "memory_bytes": 1073741824,
+      "cpu_millis": 2000,
+      "scratch_bytes": 50331648,
+      "disk_bytes": 1073741824,
+      "duration_secs": 300,
+      "max_instances": 6
+    }
+  },
+  "error": "AssertionError((['run', 'stock', '--destination', 'secret:8080'], 2, {'error': {'code': 'launch_failed', 'message': 'Approved service has not been started'}}))"
+}

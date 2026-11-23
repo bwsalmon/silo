@@ -1,0 +1,138 @@
+{
+  "kind": "real-worker",
+  "frontend": "mcp",
+  "passed": [
+    "static ELF has no interpreter or shared dependencies",
+    "two distinct project identities launch real jobs through MCP",
+    "direct cross-project list/status/stop/log calls preserve hidden-versus-unknown equivalence",
+    "direct tool calls cannot override bound project identity credential endpoint or destination",
+    "foreign project credential fails closed before MCP initialization",
+    "both project jobs receive verified whole-cgroup teardown through MCP",
+    "malicious caller PATH cannot substitute the pinned Bubblewrap helper"
+  ],
+  "pins": {
+    "bwrap": {
+      "path": "/home/debian/mcp-crossproject-artifact/install/silo-0.1.0-linux-x86_64/libexec/bwrap",
+      "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "silo_sha256": "6423f06d1400043b5bd38d8c21c8713dbaf84a8cb61e891c57ed0d1a64d555eb"
+  },
+  "result": "passed",
+  "completed_suites": [
+    "runner"
+  ],
+  "cleanup": {
+    "verified": true
+  },
+  "qualification": {
+    "status": "blocked",
+    "reasons": [
+      "runner, network and volumes suites are all required",
+      "missing real evidence: agent_kernel_profiles",
+      "missing real evidence: resources",
+      "missing real evidence: postgres_platform_digest",
+      "missing real evidence: network_direct_measurements",
+      "missing real evidence: network_relay_measurements"
+    ],
+    "scope": "only the recorded disposable worker configuration; no production approval"
+  },
+  "architecture": "x86_64",
+  "kernel": "6.1.0-56-amd64",
+  "namespace_policy": {
+    "/proc/sys/kernel/unprivileged_userns_clone": "1",
+    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": null,
+    "/proc/sys/user/max_user_namespaces": "62289"
+  },
+  "worker": {
+    "bwrap": {
+      "path": "/home/debian/mcp-crossproject-artifact/install/silo-0.1.0-linux-x86_64/libexec/bwrap",
+      "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-eqjtq818/certs",
+    "storage": "/tmp/silo-worker-eqjtq818/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-e457fa58f4d3/jobs",
+    "ceilings": {
+      "processes": 256,
+      "memory_bytes": 536870912,
+      "cpu_millis": 2000,
+      "scratch_bytes": 16777216,
+      "disk_bytes": 1073741824,
+      "duration_secs": 60,
+      "max_instances": 2
+    }
+  },
+  "project_workers": [
+    {
+      "bwrap": {
+        "path": "/home/debian/mcp-crossproject-artifact/install/silo-0.1.0-linux-x86_64/libexec/bwrap",
+        "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+      },
+      "skopeo": {
+        "path": "/usr/bin/skopeo",
+        "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+      },
+      "umoci": {
+        "path": "/usr/bin/umoci",
+        "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+      },
+      "agent_uid": 65534,
+      "registry_ca_dir": "/tmp/silo-worker-eqjtq818/certs",
+      "storage": "/tmp/silo-worker-eqjtq818/project-a-storage",
+      "cgroup": "/sys/fs/cgroup/silo-test-e457fa58f4d3/jobs/project-a",
+      "ceilings": {
+        "processes": 256,
+        "memory_bytes": 536870912,
+        "cpu_millis": 2000,
+        "scratch_bytes": 16777216,
+        "disk_bytes": 1073741824,
+        "duration_secs": 60,
+        "max_instances": 2
+      }
+    },
+    {
+      "bwrap": {
+        "path": "/home/debian/mcp-crossproject-artifact/install/silo-0.1.0-linux-x86_64/libexec/bwrap",
+        "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+      },
+      "skopeo": {
+        "path": "/usr/bin/skopeo",
+        "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+      },
+      "umoci": {
+        "path": "/usr/bin/umoci",
+        "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+      },
+      "agent_uid": 65534,
+      "registry_ca_dir": "/tmp/silo-worker-eqjtq818/certs",
+      "storage": "/tmp/silo-worker-eqjtq818/project-b-storage",
+      "cgroup": "/sys/fs/cgroup/silo-test-e457fa58f4d3/jobs/project-b",
+      "ceilings": {
+        "processes": 256,
+        "memory_bytes": 536870912,
+        "cpu_millis": 2000,
+        "scratch_bytes": 16777216,
+        "disk_bytes": 1073741824,
+        "duration_secs": 60,
+        "max_instances": 2
+      }
+    }
+  ],
+  "mcp_calls": 20
+}

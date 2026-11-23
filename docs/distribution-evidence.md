@@ -166,3 +166,114 @@ There was no ARM64, XFS, reboot/power-loss, VM tenant-boundary or production
 qualification. No release, tag, registry publication, deployment, live grant or
 configuration change occurred. All v1 exclusions and runtime limits remain in
 force; operator release/installation/workload approval are separate decisions.
+
+## Requested built-in MCP extension
+
+On **2026-11-23**, implementation commit
+**`cf58181869a33168c7fb020f87f0883cc73c5f5b`** passed the additive local stdio
+MCP qualification. Git ancestry verified the landed task #104–#109 PRs
+#239 and #241–#244/#246, plus the intervening #245 real-worker qualification,
+before extending the baseline. The original MCP deferral is deliberately
+superseded only for this frontend; the other security boundaries remain.
+See [MCP protocol/operator instructions](mcp.md) and
+[exact schemas](mcp-tools.json).
+
+| Item | Measured MCP-extension result |
+| --- | --- |
+| Archive | `silo-0.1.0-linux-x86_64.tar.xz`, **19,536,612 bytes** |
+| Archive SHA-256 | `c5ae6f81f303ae674ca038d71267c23df8a7109e900b9bb4eb3d63e82071035a` |
+| Silo SHA-256 | `6423f06d1400043b5bd38d8c21c8713dbaf84a8cb61e891c57ed0d1a64d555eb` |
+| Bundled Bubblewrap SHA-256 | `8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0` (unchanged upstream 0.13.1) |
+| Source snapshot SHA-256 | `62a073a805fb475492d47916b6310edb057ee14fbb61da69fc09e2066b25b14f` |
+| Reproducibility | Two independent local builds and the independent CI build produced the same complete archive hash |
+| Protocol/client | Local stdio MCP **2025-06-18**; pinned official **rmcp 0.8.5** server and SDK test client; independent `silo-acceptance` JSON-RPC client version 1 |
+| Regression checks | Formatting, native/musl Clippy with warnings denied, **49 Rust tests**, **17 Python tests against the extracted archive**, actual initialization/discovery/scoped-call artifact smoke |
+| Builder-worker archive acceptance | **113 passing assertion groups**, **525 actual MCP calls**, all runner/network/volume suites, qualified worker/archive verdicts, verified cleanup |
+| Clean-runtime archive acceptance | **113 passing assertion groups**, **515 actual MCP calls**, all suites, qualified worker/archive verdicts, verified cleanup |
+
+The unaltered [clean worker report](evidence/distribution-mcp-clean-worker.json),
+[clean archive verdict](evidence/distribution-mcp-clean-archive.json),
+[builder worker report](evidence/distribution-mcp-builder-worker.json) and
+[builder archive verdict](evidence/distribution-mcp-builder-archive.json) bind
+these observations to the exact extracted executable and bundled helper.
+[Independent verification](evidence/distribution-mcp-verification.json) records
+source/harness/report hashes, prerequisite merge commits, staged clean-root
+harness equality, actual ELF results and post-run disposal. The
+[clean package inventory](evidence/distribution-mcp-clean-packages.tsv) records
+185 runtime/prerequisite packages; the [kernel process profile](evidence/distribution-mcp-clean-profile.txt)
+records worker UID/GID 1000:1000 and zero effective/permitted/inheritable/ambient
+capabilities. The two isolated native-agent principals remain 65534 and 65533.
+
+The separate freshly bootstrapped Debian 12 filesystem contained **no system
+Bubblewrap, Rust compiler, Cargo/cache or Rust checkout**. Only the candidate
+and matching Python/C acceptance harness were staged. The retained
+[provisioning script](evidence/distribution-mcp-prepare-root.sh) and
+[private-root runner](evidence/distribution-mcp-run-root.sh) show the
+`pivot_root`, old-root detachment and rootless execution; this shares the
+worker's **6.1.0-56-amd64** kernel and is not a new VM/kernel qualification.
+Provisioning initially stopped at a missing local CA parent directory; creating
+that directory and resuming installation completed the fresh root. The
+already trusted task CA was installed only in that disposable root, with its
+hash recorded. Sudoers and package changes were confined to it. Sudo emitted a
+fixed hostname-resolution warning because the disposable root lacked the host
+name entry; acceptance completed successfully and MCP protocol diagnostics
+remained redacted. The runtime root and temporary extracted installation were
+disposed after exporting evidence; independent checks found no recorded
+cgroups, mounts, loop backing files or agent bridges left behind.
+
+The exact distributed binary served the five MCP tools. Restricted launches,
+list/status/stop and separately granted logs traversed the authenticated
+supervisor. Actual tests covered cross-principal denials, malformed/oversized
+messages, strict schemas and forbidden overrides, expired/revoked identities,
+credential FD closure and argv/environment non-disclosure, audit attribution,
+cancellation/disconnect with a deliberately lost launch response, and bounded
+lease teardown. The existing live TCP revocation, namespace/control-descriptor
+separation, egress denial and protected-volume/Postgres persistence/recovery
+assertions remained enabled. Operator setup and legacy raw-protocol/actual OS
+principal attacks stayed on their original interfaces; MCP gained no operator
+capabilities. Unit mocks did not qualify these runs. Missing helper/worker
+capabilities still failed closed, and rejected profiles stayed unqualified.
+
+Two preliminary direct-worker runs are retained as **blocked**, not used for
+qualification: [temporary log-bound mismatch](evidence/distribution-mcp-failed-log-bound.json)
+and [test adapter dropping extra CLI override arguments](evidence/distribution-mcp-failed-adapter.json).
+The frontend retained the supervisor's 16 KiB-per-stream snapshot contract,
+and the adapter now maps extra override inputs into rejected MCP arguments.
+No security assertion was weakened or skipped. Both final archive runs above
+passed with those corrections and the stricter transport validation.
+
+Reproduce the exact-artifact checks with the commands in
+[distribution.md](distribution.md); `qualify-bundle.py` now requires actual
+MCP call evidence and invokes `--frontend mcp`. The
+[implementation CI run](https://github.com/bwsalmon/silo/actions/runs/45149404721)
+completed both jobs successfully and its [candidate artifact](https://github.com/bwsalmon/silo/actions/runs/45149404721/artifacts/14806157060)
+has the same archive hash (14-day CI retention). `grain ci wait` was denied for
+lack of `grain#ci`; completed verdicts and logs were checked with authorized
+`grain ci list/log` and PR commands. Evidence files and this attestation remain
+excluded from archive inputs, so the evidence-only commit preserves those
+archive bytes. Final-head CI must finish before the PR is complete.
+
+The scope is only this recorded disposable Debian 12 x86-64 configuration and
+exact artifact. ARM64, XFS, reboot/power-loss, production approval, remote/HTTP
+MCP and confinement of the agent's other tools are not claimed. The protected
+worker/OS model, session/project scope, immutable templates, fixed network and
+volume grants, redacted errors, expiry/revocation and supervisor-owned teardown
+remain required. No deployment, production grant/configuration change,
+release tag, external package publication or automatic follow-up task occurred.
+
+A [supplemental two-project executable test](evidence/distribution-mcp-crossproject-test.py)
+then launched one real job in each of two protected project supervisors using
+the same extracted archive. Its [raw report](evidence/distribution-mcp-crossproject-worker.json)
+records successful direct cross-project list/status/stop/log denials,
+invisible-versus-unknown equivalence, rejected identity/project/token/endpoint/
+destination overrides, foreign-credential rejection before initialization,
+and verified teardown of both jobs. This partial supplement deliberately
+retains the full gate's **blocked** qualification (it does not run the network
+and volume suites); the two complete qualified reports above establish runtime
+parity. Initial attempts using a [shared cgroup domain](evidence/distribution-mcp-crossproject-shared-cgroup-rejected.json)
+and [shared storage root](evidence/distribution-mcp-crossproject-shared-storage-rejected.json)
+failed closed and remain unqualified. The corrected test supplies each
+supervisor its own protected storage and cgroup roots, as required by the
+existing worker contract. All supplemental domains, mounts and the extracted
+installation were removed. Recreating the build source snapshot after adding
+all evidence produced the same source archive hash recorded above.

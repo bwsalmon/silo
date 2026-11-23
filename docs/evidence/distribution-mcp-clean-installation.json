@@ -1,0 +1,15 @@
+{
+  "bwrap": {
+    "path": "/var/tmp/silo-artifact-t75qg541/install/silo-0.1.0-linux-x86_64/libexec/bwrap",
+    "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+  },
+  "library_resolution": "\tlinux-vdso.so.1 (0x00007ffd4c24f000)\n\tlibcap.so.2 => /lib/x86_64-linux-gnu/libcap.so.2 (0x00007fee699cf000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fee697ed000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007fee699f4000)\n",
+  "mcp": {
+    "protocol": "2025-06-18",
+    "result": "passed",
+    "tools": 5,
+    "transport": "stdio"
+  },
+  "qualification": "not performed; run full real-worker acceptance",
+  "silo_sha256": "6423f06d1400043b5bd38d8c21c8713dbaf84a8cb61e891c57ed0d1a64d555eb"
+}
