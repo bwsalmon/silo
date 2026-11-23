@@ -1,0 +1,89 @@
+{
+  "kind": "supplemental-real-worker-verification",
+  "observed_at_utc": "2026-11-22T20:11:03.859329+00:00",
+  "report": {
+    "path": "docs/evidence/task-115-worker-attempt-1.json",
+    "sha256": "1492c5530a9c0926b6f7b81c4cac316e8309dd54069c4d0683ec591311fed9dd",
+    "qualification": {
+      "status": "qualified",
+      "reasons": [],
+      "scope": "only the recorded disposable worker configuration; no production approval"
+    }
+  },
+  "source": {
+    "commit": "c6485cb46c3a9da84ef0ef4962447da148711b9c",
+    "tree": "fa170aa1edb581c4f8c9c302bdeb880141e00fa3",
+    "runtime_and_harness_unchanged": true,
+    "files_sha256": {
+      "Cargo.lock": "467dcbe8ddd876255daf05a7d495dd3e7fd722175ec78fe5958f62fdad02c41b",
+      "Cargo.toml": "861718fbdf94143a63be19d641d7cb18b63a502f7dff1e20eb15d1d1fd4899cc",
+      "rust-toolchain.toml": "b323b19900e4b811af0a8facce5ec11249ed135ae5a46ff5c0be90067521e11f",
+      "tests/real_worker.py": "90b1eb2dfc9cf09cd1c24c0d91b1102a178de9c23ec4b754085fbf7e6a56e3b6",
+      "tests/qualification.py": "b3e6a7a7c019a6c601797e9f0b8a9639829212c4b5a2c7e62e40c228666db450",
+      "tests/network_acceptance.py": "824382c11f3d0e443dad33110065ecbd888ceaa5d0125ec80fcc258fd440086f",
+      "tests/volume_acceptance.py": "c81205cdf4abf9b21423f97a96903b6d5739873ce686509d94f2128b2f6c45d1",
+      "tests/fixtures/probe.c": "1f70c481dc94c511c06eb32dcc910a6a6db666c2edd86fa35952e32804f24710",
+      "tests/fixtures/tcp_probe.c": "3a0893ed05a90bb63b7afe5b9e09dfddbd7312a3548a00c6110cc99dabb14f0b"
+    }
+  },
+  "build": {
+    "rustc": "rustc 1.85.1 (4eb161250 2025-03-15)",
+    "cargo": "cargo 1.85.1 (d73d2caf9 2024-12-31)",
+    "target": "x86_64-unknown-linux-musl",
+    "locked": true,
+    "profile": "release",
+    "binary_sha256": "56f63de84cbc1d09220ab13f61ed13e44fe231b0b8e6ec1543eac19af0c872f9",
+    "elf_interpreter_present": false,
+    "elf_needed_present": false,
+    "rust_tests_passed": 46,
+    "python_reporting_tests_passed": 5,
+    "validation_log_sha256": "bc8b4a8a1963af1371026f97780f9820627f2fc4fba0243dec5389e18d932f24",
+    "integration_log_sha256": "89153f2aa4fa7550d6db52e8e40e5cbf149b0d28979c9caf3933f93c4c5c885d"
+  },
+  "host": {
+    "uname": "Linux debuerreotype 6.1.0-56-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.192-2 (2026-11-16) x86_64 GNU/Linux",
+    "os_release": "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"12\"\nVERSION=\"12 (bookworm)\"\nVERSION_CODENAME=bookworm\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n",
+    "logical_cpus": 4,
+    "mem_total_kib": 15989576,
+    "swap_total_kib": 0,
+    "persistent_backing": "/dev/vda ext4   rw,relatime",
+    "root_subtree_control": "cpuset cpu io memory pids",
+    "namespace_policy": {
+      "/proc/sys/kernel/unprivileged_userns_clone": "1",
+      "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": null,
+      "/proc/sys/user/max_user_namespaces": "62289"
+    },
+    "packages": [
+      "binutils 2.40-2",
+      "bubblewrap 0.8.0-2+deb12u1",
+      "busybox-static 1:1.35.0-4+deb12u1+b1",
+      "e2fsprogs 1.47.0-2+b2",
+      "gcc 4:12.2.0-3",
+      "musl-tools 1.2.3-1",
+      "openssl 3.0.22-1~deb12u2",
+      "python3 3.11.2-1+b1",
+      "skopeo 1.9.3+ds1-1+b10",
+      "sudo 1.9.13p3-1+deb12u4",
+      "umoci 0.4.7+ds-3+b7",
+      "util-linux 2.38.1-5+deb12u3"
+    ]
+  },
+  "independent_cleanup": {
+    "verified": true,
+    "recorded_paths_absent": {
+      "/tmp/silo-worker-lub52ny2": true,
+      "/var/tmp/silo-persistent-dsp4nuqb": true,
+      "/sys/fs/cgroup/silo-test-0c83b9c13fee": true
+    },
+    "remaining_task_resources": {
+      "worker_roots": [],
+      "agent_fixtures": [],
+      "persistent_roots": [],
+      "cgroups": []
+    },
+    "loopdevices": [],
+    "mounts_referencing_recorded_roots": [],
+    "processes_executing_tested_binary": [],
+    "method": "post-run procfs executable inode scan; cgroup and fixture directory enumeration; findmnt; sudo losetup --json --list"
+  }
+}
