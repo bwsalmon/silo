@@ -1,0 +1,32 @@
+{
+  "kind": "real-worker",
+  "passed": [],
+  "pins": {},
+  "result": "failed",
+  "completed_suites": [],
+  "cleanup": {
+    "verified": true
+  },
+  "qualification": {
+    "status": "blocked",
+    "reasons": [
+      "real integration checks did not pass",
+      "runner, network and volumes suites are all required",
+      "missing real evidence: agent_kernel_profiles",
+      "missing real evidence: resources",
+      "missing real evidence: postgres_platform_digest",
+      "missing real evidence: network_direct_measurements",
+      "missing real evidence: network_relay_measurements",
+      "tested executable hash is missing"
+    ],
+    "scope": "only the recorded disposable worker configuration; no production approval"
+  },
+  "architecture": "x86_64",
+  "kernel": "6.1.0-56-amd64",
+  "namespace_policy": {
+    "/proc/sys/kernel/unprivileged_userns_clone": "1",
+    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": null,
+    "/proc/sys/user/max_user_namespaces": "62289"
+  },
+  "error": "RuntimeError((['gcc', '-O2', '-Wall', '-Wextra', '-Werror', PosixPath('/tmp/silo-worker-w120lgeo/deny-userns.c'), '-o', PosixPath('/tmp/silo-worker-w120lgeo/deny-userns')], 1, b'', b'/tmp/silo-worker-w120lgeo/deny-userns.c:3:10: fatal error: errno.h: No such file or directory\\n    3 | #include <errno.h>\\n      |          ^~~~~~~~~\\ncompilation terminated.\\n'))"
+}

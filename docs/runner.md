@@ -230,5 +230,7 @@ The full suite also runs the stock Postgres and actual restricted-identity CLI a
 The report records exact tool/image/binary hashes, kernel, assertions and actual
 resource counters. A missing worker feature makes this suite fail with its
 precise reason; it is never silently skipped or treated as qualified.
-Third-party source/notices, packaged Bubblewrap library validation and release
-archive distribution remain separate release gates. No release is published.
+[Candidate distribution](distribution.md) now bundles pinned upstream Bubblewrap,
+its source/notices and separate library validation. Run the full suite against
+that exact extracted archive using its bundled helper; source-build qualification
+and generic CI smoke tests do not qualify an archive. No release is published.

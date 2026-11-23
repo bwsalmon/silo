@@ -273,6 +273,34 @@ print(json.dumps({'uid':os.getuid(),'gid':os.getgid(),'groups':os.getgroups(),
             assert profile['mount_namespace_inode'] != os.stat('/proc/self/ns/mnt').st_ino
             assert s.pid_file.read_text().strip() not in profile['visible_pids']
             profiles.append(profile)
+        if getattr(r, "BUNDLED_HELPER", None):
+            protection = []
+            for uid, _ in identities:
+                code = """import os,sys,json
+denied=[]
+for path in sys.argv[1:4]:
+ try:
+  fd=os.open(path,os.O_WRONLY);os.close(fd)
+ except PermissionError:
+  denied.append(path)
+ else:
+  raise SystemExit('agent can modify installed binary')
+try:
+ fd=os.open(sys.argv[4],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.close(fd)
+except PermissionError:
+ denied.append(sys.argv[4])
+else:
+ raise SystemExit('agent can create replacement in installation root')
+print(json.dumps(denied))
+"""
+                bundle_root = Path(r.BINARY).parent
+                paths = [r.BINARY, str(r.BUNDLED_HELPER), str(bundle_root / "bundle.json"),
+                         str(bundle_root / ("agent-replacement-" + str(uid)))]
+                denied = json.loads(r.run(agent_prefix(uid) + ["python3", "-c", code] + paths).stdout)
+                assert denied == paths
+                protection.append({"uid":uid, "denied_write_or_create":denied})
+            r.REPORT["bundle_installation_denials"] = protection
+            check("both actual native principals cannot replace installed binaries, manifest or bundle root", True)
         r.REPORT['agent_kernel_profiles'] = profiles
         check('kernel confirms both agent UID/GID, empty groups, zero capabilities, no_new_privs and private process views', True)
         instance = agent_cli(s, a, ["run", "app"])

@@ -1,0 +1,16 @@
+{
+  "archive_sha256": "30d67a3eadb9488c90a435ae432b709611c951dc2725fe6cc6f1898c2f165bea",
+  "bwrap_sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0",
+  "cleanup": {
+    "verified": true
+  },
+  "executable_sha256": "f803a3a5d7f80fb57decc0fde0e5ca0f645be3de3de633773197ecb5b6840024",
+  "qualification": {
+    "reasons": [],
+    "scope": "only this archive and recorded disposable worker; no production approval",
+    "status": "qualified"
+  },
+  "relocation": "passed",
+  "result": "passed",
+  "worker_report_sha256": "4fb450a731f2263b63a00039704019d1bf8a8ba898c0067424df440ddb436601"
+}

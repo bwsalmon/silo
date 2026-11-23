@@ -403,6 +403,7 @@ fn source_changed(diagnostics: &[u8]) -> bool {
         "Race condition binding dirfd",
         "Can't get type of source",
         "Can't find source path",
+        "Can't open source",
     ]
     .iter()
     .any(|message| text.contains(message))
@@ -640,4 +641,26 @@ fn data_file(bytes: &[u8]) -> Result<File> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| failed("Cannot rewind hosts"))?;
     Ok(file)
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::error::Code;
+
+    #[test]
+    fn renamed_source_failure_is_distinct_from_missing_namespace_support() {
+        let race = setup_error(
+            "setup failed",
+            b"bwrap: Can't open source /trusted/slot/saved-data: No such file or directory\n",
+        );
+        assert_eq!(race.code, Code::LaunchFailed);
+        assert!(race.message.contains("changed mount source"));
+        let capability = setup_error(
+            "setup failed",
+            b"bwrap: Creating new namespace failed: Operation not permitted\n",
+        );
+        assert_eq!(capability.code, Code::UnsupportedWorker);
+        assert!(capability.message.contains("Operation not permitted"));
+    }
 }

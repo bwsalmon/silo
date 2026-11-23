@@ -1,0 +1,75 @@
+{
+  "kind": "real-worker",
+  "passed": [
+    "static ELF has no interpreter or shared dependencies"
+  ],
+  "pins": {
+    "bwrap": {
+      "path": "/var/tmp/silo-artifact-fbhpsuyf/install/relocated/libexec/bwrap",
+      "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "silo_sha256": "ce0ed204bd5c39ef175cc220ea8030f21d8df0e02b632f728969756a2b4b3281",
+    "fixture_index": "localhost:33317/silo/probe@sha256:c5d15efdc9ad2b795047706c39f43705211d88518b41cc789a870fa2f69ff36e"
+  },
+  "result": "failed",
+  "completed_suites": [],
+  "cleanup": {
+    "verified": true
+  },
+  "qualification": {
+    "status": "blocked",
+    "reasons": [
+      "real integration checks did not pass",
+      "runner, network and volumes suites are all required",
+      "missing real evidence: agent_kernel_profiles",
+      "missing real evidence: resources",
+      "missing real evidence: postgres_platform_digest",
+      "missing real evidence: network_direct_measurements",
+      "missing real evidence: network_relay_measurements"
+    ],
+    "scope": "only the recorded disposable worker configuration; no production approval"
+  },
+  "architecture": "x86_64",
+  "kernel": "6.1.0-56-amd64",
+  "namespace_policy": {
+    "/proc/sys/kernel/unprivileged_userns_clone": "1",
+    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": null,
+    "/proc/sys/user/max_user_namespaces": "62289"
+  },
+  "worker": {
+    "bwrap": {
+      "path": "/var/tmp/silo-artifact-fbhpsuyf/install/relocated/libexec/bwrap",
+      "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
+    },
+    "skopeo": {
+      "path": "/usr/bin/skopeo",
+      "sha256": "639cefd9b555d9bf1a8dcf29bbbc2568c5e1382a47582da1dca7e4298b10f122"
+    },
+    "umoci": {
+      "path": "/usr/bin/umoci",
+      "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
+    },
+    "agent_uid": 65534,
+    "registry_ca_dir": "/tmp/silo-worker-iun64zdm/certs",
+    "storage": "/tmp/silo-worker-iun64zdm/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-e9f79d040146/jobs",
+    "ceilings": {
+      "processes": 256,
+      "memory_bytes": 536870912,
+      "cpu_millis": 2000,
+      "scratch_bytes": 16777216,
+      "disk_bytes": 1073741824,
+      "duration_secs": 60,
+      "max_instances": 2
+    }
+  },
+  "error": "AssertionError((['run', 'hello'], 5, {'error': {'code': 'unsupported_worker', 'message': 'Worker denies CLONE_NEWUSER'}}, b''))"
+}
