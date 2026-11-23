@@ -28,6 +28,7 @@ from qualification import finalization, namespace_policy, write_report
 
 HELLO = "docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9"
 OCI = "application/vnd.oci.image."
+MCP_FRONTEND = False
 REPORT = {"kind": "real-worker", "passed": [], "pins": {}}
 
 
@@ -148,6 +149,7 @@ class Registry(http.server.ThreadingHTTPServer):
 
 class Supervisor:
     def __init__(self, binary, workspace, worker, manifest, restriction=None):
+        self.mcp_clients = {}
         self.dir = Path(tempfile.mkdtemp(prefix="state-", dir=workspace))
         self.operator = self.dir / "operator"
         protected(self.operator, secrets.token_hex(32))
@@ -172,6 +174,25 @@ class Supervisor:
         self.policy = activation["policy"]
 
     def call(self, args, credential=None, expected=0, extra_fds=()):
+        if MCP_FRONTEND and credential is not None and str(args[0]) in ("run", "ps", "status", "logs", "stop"):
+            from mcp_client import Client
+            key = str(credential)
+            if key not in self.mcp_clients:
+                self.mcp_clients[key] = Client(BINARY, self.endpoint, credential)
+            client = self.mcp_clients[key]
+            operation = str(args[0])
+            arguments = {} if operation == "ps" else {"template" if operation == "run" else "id":str(args[1])}
+            if len(args) > (1 if operation == "ps" else 2):
+                arguments["forbidden_cli_override"] = [str(v) for v in args[2:]]
+            value = client.call("silo_"+operation, arguments)
+            value = value["data"] if value["ok"] else {"error":value["error"]}
+            assert ("error" not in value) == (expected == 0), (args, expected, value)
+            if "error" in value:
+                code = value["error"]["code"]
+                exit_code = 2 if code in ("invalid_request","invalid_manifest") else 3 if code in ("unauthenticated","forbidden","not_found") else 4 if code in ("volume_busy","quota_exceeded","policy_in_use","port_conflict") else 5
+                assert exit_code == expected, (args, expected, value)
+            REPORT["mcp_calls"] = REPORT.get("mcp_calls", 0)+1
+            return value
         credential = credential or self.operator
         with credential.open("rb") as auth:
             result = subprocess.run(
@@ -203,6 +224,8 @@ class Supervisor:
         return eventually(poll, "verified terminal state", timeout)
 
     def close(self):
+        for client in self.mcp_clients.values(): client.close()
+        self.mcp_clients.clear()
         if self.process.poll() is None:
             try:
                 for instance in self.call(["ps"])["instances"]:
@@ -414,10 +437,45 @@ def suite(workspace, worker, registry, probe):
         s.call(["stop", own["id"]], no_logs); s.terminal(own, no_logs)
         start = time.time(); duration = s.call(["run", "duration"], token); s.terminal(duration, token)
         check("duration bound enforced", time.time() - start < 4)
+        if MCP_FRONTEND:
+            from mcp_client import Client
+            lost_token, _ = s.issue("lost-mcp", ["duration"])
+            lost = Client(BINARY, s.endpoint, lost_token)
+            before = {i["id"] for i in s.call(["ps"])["instances"]}
+            lost.sequence += 1
+            lost.send({"jsonrpc":"2.0", "id":lost.sequence, "method":"tools/call",
+                       "params":{"name":"silo_run", "arguments":{"template":"duration"}}})
+            def launched_without_response():
+                return next((i for i in s.call(["ps"])["instances"] if i["id"] not in before), None)
+            uncertain = eventually(launched_without_response, "supervisor accepts launch before lost MCP response")
+            lost.send({"jsonrpc":"2.0", "method":"notifications/cancelled",
+                       "params":{"requestId":lost.sequence,"reason":"disposable client cancellation"}})
+            # Deliberately discard the response: cancellation/disconnect never roll
+            # back a supervisor mutation, extend a lease or claim cleanup success.
+            lost.process.stdout.close()
+            lost.close()
+            s.terminal(uncertain)
+            check("MCP cancellation and lost launch response preserve bounded lease and verified teardown",
+                  not (Path(worker["cgroup"]) / uncertain["id"]).exists())
+            client = s.mcp_clients[str(token)]
+            inspection = run(["sudo", "python3", "-c",
+                "import os,sys; p='/proc/'+sys.argv[1]; token=sys.argv[2]; "
+                "links=[os.readlink(p+'/fd/'+f) for f in os.listdir(p+'/fd')]; "
+                "assert token not in links; "
+                "secret=open(token,'rb').read().strip(); "
+                "assert secret not in open(p+'/cmdline','rb').read(); "
+                "assert secret not in open(p+'/environ','rb').read()",
+                str(client.process.pid), str(token)])
+            check("MCP credential FD closes before requests and credential is absent from argv/environment", inspection.returncode == 0)
         expiring, _ = s.issue("expiring", ["sleep"], expires=int(time.time()) + 3)
         lease = s.call(["run", "sleep"], expiring)
         expiry_start = time.time(); s.terminal(lease)
         check("credential lease independently bounded", time.time() - expiry_start < 4)
+        if MCP_FRONTEND:
+            audit = s.call(["operator", "audit"])
+            check("MCP audit preserves restricted session attribution without credentials or paths",
+                  any(r["operation"] == "mcp_run" and r["principal"] == "worker-test:agent-a" and r["allowed"] for r in audit["records"])
+                  and token.read_text().strip() not in json.dumps(audit) and str(token) not in json.dumps(audit))
         revoked = s.call(["run", "tree"], token)
         s.call(["operator", "revoke", grant])
         s.terminal(revoked)
@@ -426,7 +484,7 @@ def suite(workspace, worker, registry, probe):
         s.close()
 
         no_worker = server(config=None)
-        error = no_worker.call(["run", "defaults"], expected=5)
+        error = no_worker.call(["run", "defaults"], no_worker.issue("unsupported-mcp", ["defaults"])[0] if MCP_FRONTEND else None, expected=5)
         check("missing worker configuration fails closed precisely",
               error["error"]["code"] == "unsupported_worker" and "worker.json" in error["error"]["message"])
         no_worker.close()
@@ -531,13 +589,15 @@ int main(int argc, char **argv) {
 
 
 def main():
-    global BINARY, BUNDLED_HELPER
+    global BINARY, BUNDLED_HELPER, MCP_FRONTEND
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--bwrap", type=Path, help="exact bundled helper path; no PATH lookup")
+    parser.add_argument("--frontend", choices=["cli", "mcp"], default="cli", help="route restricted job operations through actual stdio MCP sessions")
     parser.add_argument("--suite", choices=["runner", "network", "volumes", "all"], default="all")
     args = parser.parse_args()
+    MCP_FRONTEND = args.frontend == "mcp"
     report_path = args.report.resolve()
     workspace = None
     group = None
@@ -546,7 +606,7 @@ def main():
     registry = None
     # Invalidate previous evidence before even discovering worker capabilities.
     REPORT.clear()
-    REPORT.update(kind="real-worker", passed=[], pins={}, result="running", completed_suites=[],
+    REPORT.update(kind="real-worker", frontend=args.frontend, passed=[], pins={}, result="running", completed_suites=[],
                   cleanup={"verified": False}, qualification={"status": "blocked", "reasons": ["run incomplete"]})
     write_report(report_path, REPORT)
     try:

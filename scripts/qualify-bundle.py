@@ -38,10 +38,12 @@ try:
         helper = relocated / "libexec/bwrap"
         binary = relocated / "silo"
         with (reports / "real-worker.log").open("w") as log:
-            run(["/usr/bin/python3", ROOT / "tests/real_worker.py", "--suite", "all",
+            run(["/usr/bin/python3", ROOT / "tests/real_worker.py", "--suite", "all", "--frontend", "mcp",
                  "--binary", binary, "--bwrap", helper, "--report", reports / "worker.json"],
                 stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         worker = json.loads((reports / "worker.json").read_text())
+        if worker.get("frontend") != "mcp" or worker.get("mcp_calls", 0) < 20:
+            raise ValueError("missing real MCP worker evidence")
         if worker["qualification"]["status"] != "qualified":
             raise ValueError("real worker qualification is blocked")
         if worker["pins"]["bwrap"] != {"path":str(helper), "sha256":sha(helper)}:

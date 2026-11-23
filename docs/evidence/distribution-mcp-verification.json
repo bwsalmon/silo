@@ -1,0 +1,183 @@
+{
+  "source_commit": "cf58181869a33168c7fb020f87f0883cc73c5f5b",
+  "source_tree": "212c70679d5b9312537e3eace22f968be7247014",
+  "prerequisite_merge_commits": {
+    "104": "2c1f62bcd9aa6fffea5e59c8a9f226df01fec262",
+    "105": "e9a34d4078b21ce8ad5b5579ab2becb49d5e4167",
+    "106": "99b487acc71799fa6317a6f0c69838f059d8cd69",
+    "107": "ab9f0069bd1fa4201158241f7544ecd21b0c54e0",
+    "108": "c6485cb46c3a9da84ef0ef4962447da148711b9c",
+    "115": "e8a1a6b63c2a588438c13751a30eb16750887bfb",
+    "109": "8b6291ac94d9349829408abf8f904e6383bf3852"
+  },
+  "archive_sha256": "c5ae6f81f303ae674ca038d71267c23df8a7109e900b9bb4eb3d63e82071035a",
+  "archive_bytes": 19536612,
+  "source_archive_sha256": "62a073a805fb475492d47916b6310edb057ee14fbb61da69fc09e2066b25b14f",
+  "silo_sha256": "6423f06d1400043b5bd38d8c21c8713dbaf84a8cb61e891c57ed0d1a64d555eb",
+  "bwrap_sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0",
+  "actual_elf": {
+    "libexec/bwrap": {
+      "interpreter": [
+        "/lib64/ld-linux-x86-64.so.2"
+      ],
+      "needed": [
+        "libc.so.6",
+        "libcap.so.2"
+      ]
+    },
+    "silo": {
+      "interpreter": [],
+      "needed": []
+    }
+  },
+  "independent_local_archives_equal": true,
+  "protocol": "2025-06-18",
+  "sdk_and_official_test_client": "rmcp 0.8.5",
+  "python_client": "silo-acceptance 1",
+  "rust_tests_passed": 49,
+  "extracted_archive_python_tests_passed": 17,
+  "kernel": "6.1.0-56-amd64",
+  "rootless_worker_uid": 1000,
+  "native_agent_uids": [
+    65534,
+    65533
+  ],
+  "clean_runtime_shares_worker_kernel": true,
+  "clean_runtime_absences": [
+    "system Bubblewrap",
+    "Rust compiler",
+    "Cargo/cache",
+    "Rust checkout"
+  ],
+  "clean_runtime_package_count": 185,
+  "clean_runtime_ca_sha256": "343e11d9f513cd5a0512485efa714fb59416ba787b12b08aede6b5e3741df79b",
+  "clean_root_provisioning_note": "The base bootstrap completed; provisioning resumed after creating the missing local CA parent directory. The corrected complete script is retained.",
+  "checks": {
+    "clean": {
+      "recorded_fixture_paths_exist": {
+        "/tmp/silo-worker-8vzjhxrw/storage": false,
+        "/var/tmp/silo-persistent-3ky1ul6w": false
+      },
+      "cgroup_parent_exists": false,
+      "relocated_installation_exists": false,
+      "assertion_groups": 113,
+      "mcp_calls": 515,
+      "worker_report_sha256": "f083383953c2376c1991ccb159da4fadcafbd1a931d5e4e7f34fb49ba4c8f639",
+      "archive_report_sha256": "8ba60efc5d86fd68ede3dd9171f58a33238ab4a42c5263f0228526845dce80ce"
+    },
+    "builder": {
+      "recorded_fixture_paths_exist": {
+        "/tmp/silo-worker-gnvo1b2f/storage": false,
+        "/var/tmp/silo-persistent-f1k0r4xn": false
+      },
+      "cgroup_parent_exists": false,
+      "relocated_installation_exists": false,
+      "assertion_groups": 113,
+      "mcp_calls": 525,
+      "worker_report_sha256": "d90db55690cbdba8b2c559f5b115bd3477c8110067ff8f80ebc8ac6988b57367",
+      "archive_report_sha256": "9122fdc527434aaa91ba0ae6b783ce93c8c8644191595bbf71809c7bbde03e7f"
+    }
+  },
+  "staged_clean_harness_sha256": {
+    "scripts/validate-bundle.py": "0cf8131872d242c4c5e515362cd0079f499b15b5a31e95c5f37e91dfbe138a18",
+    "scripts/qualify-bundle.py": "b8fae85edb337fc287cfee33a82dfafc21c2c748a4d2c5503cc45c904e466258",
+    "scripts/bundle_common.py": "f6746d756455a672957a2614c58663c2200f4e43746c3f39b0e792d0af91bc29",
+    "tests/mcp_client.py": "bd84963a53022e2748f540e16d40cf98d3259ac1ff8d8e7487b8036e06a790f9",
+    "tests/network_acceptance.py": "824382c11f3d0e443dad33110065ecbd888ceaa5d0125ec80fcc258fd440086f",
+    "tests/real_worker.py": "9141a06044455b4debeb7ca329787b27d5f5f8b7f970a3df631206cb70e744e9",
+    "tests/qualification.py": "b3e6a7a7c019a6c601797e9f0b8a9639829212c4b5a2c7e62e40c228666db450",
+    "tests/volume_acceptance.py": "13e4d7cf8e502af7a1c2923f994da22edb976c6d2eb775484cb10355c096754d",
+    "tests/test_mcp.py": "5245e0e3a34ba82fda72ac860cea9cc7ae6d4c2a5963b4e7d5ba84e0b04fc7d1",
+    "tests/test_bundle.py": "90cdafe9130c4b3dbda963b47ecb3fbedb96a09fe7d2678ecd67965ce9e7e5e9",
+    "tests/test_qualification.py": "17a2bceab48944ff729fef758117029c2dfcd29dfc50252707eb2ef98dd4ed9e",
+    "tests/fixtures/probe.c": "1f70c481dc94c511c06eb32dcc910a6a6db666c2edd86fa35952e32804f24710",
+    "tests/fixtures/tcp_probe.c": "3a0893ed05a90bb63b7afe5b9e09dfddbd7312a3548a00c6110cc99dabb14f0b"
+  },
+  "source_files_sha256": {
+    "src/supervisor.rs": "41aa659301a82ee9dd0ce04ea3a6ef7feeb02dceed7023abfb399d3d5c170fc3",
+    "src/policy.rs": "191906c7e549ab726eaa5f4cd52181704c4ae22c5f2d4ee5f40e4293e6fd753e",
+    "src/runner.rs": "390c464dd6e0cf26356ec382b5338bd7112074e61235ec4cc22d73a3ea6ab56d",
+    "src/supervisor_tests.rs": "331a4db257f63a9fe254250371193aea3f0e3f218d901adc2602343e044e6d20",
+    "src/fd_channel.rs": "3edb7947f46573aa38681a00be892ce5cfd2045af96289fcd68fc84b1ac93db1",
+    "src/control.rs": "b8914b3cea8a0adcb8e39af52803ff32ff0c97d708cae01d4084b58d21131370",
+    "src/relay_tests.rs": "314567dfefe99eed93829cea9642d192d7aed0f82315bfdc5b4816f2f583477e",
+    "src/main.rs": "e4d3f55dac2b8254e4231c3bcd0739adb26c2559d31fc6652b804a2f09816f8b",
+    "src/helper.rs": "6baae8daff7d9c2ec0d0dc3e7f9543ffc5faaa4aa966d7f9f2da1da38119c327",
+    "src/lib.rs": "a51e95a4e041f5dc766afc8f7272c70547b88b7045eda4825d43ed589a1865f5",
+    "src/process.rs": "53e35fcb8a90a2b40306cc77ae6b7a43cd53e8034b6a431a12fc1286d4baf3b3",
+    "src/trampoline.rs": "f2278e35b2df6d134e9ab76d2dd4dcc95ebdc56cd4d41606269cee2bebe12e96",
+    "src/volume.rs": "9286f1f01cc8ab8c5ff8dabb14b08ba3045782a2607fe4321872c7259cb8408e",
+    "src/cli.rs": "149c0dd26deec9724099397c90c2a35d6ed0fb2e2afbdfbe766a63effb1689b7",
+    "src/auth.rs": "9bdd58ff94c4e2d4c185ef05d5c747bd6eff6f3bd21685b1c56ea2c56ae57e7d",
+    "src/relay_channel.rs": "1d4dc91c57fd0625be9fcf86dcb62490caf2c6f474af47332ecbf482f7387681",
+    "src/linux.rs": "6da39e01602fa4f067e595df4bdc7597c53c16031b41649bac08bc545a2dcacb",
+    "src/relay.rs": "cc19c419adf454cc8551202a024e82b780283f1a23216541032089950ea51ac6",
+    "src/image.rs": "4cbede5595681bbe71247bc83acdbe39c95ab32ae841f3090916225048f025fa",
+    "src/error.rs": "3d7a1a6c1f2bc02018f92f4757a306231cc9373e8db122071537848c4939627c",
+    "src/mcp.rs": "d2f2d967284f09761f31acbb60fdd41d2c195621df686911a20d31e87e47ac5e",
+    "src/worker.rs": "55de72ef06eeac52ec33dfd86ef29e881f5cbafaad5984005b555da395a7a4e8",
+    "Cargo.toml": "d62ae66e348e0fbbd7f420d0fa4fb2ad1f1edca2a24e4b9fe27a0e84d0d9eb8d",
+    "Cargo.lock": "5abce1828187b7a823a18dad3e9f27fa540287bbf794e5a79042791e2fcd5419",
+    "docs/mcp-tools.json": "8abe80b5f8d17a20b4a164ea1867f5641fc507f1d8b7f4648dd6efe2f7c792a8",
+    "docs/mcp.md": "4444a987198fa73ba1d14252e23cb154871b0437256b8396fa32066930549ff5",
+    "examples/mcp-client.json": "60478fdbaa9d555385bf3f00ff113b4c0194e8d9b12d7f3df0227ea2c46d9bc5",
+    "scripts/validate-bundle.py": "0cf8131872d242c4c5e515362cd0079f499b15b5a31e95c5f37e91dfbe138a18",
+    "scripts/qualify-bundle.py": "b8fae85edb337fc287cfee33a82dfafc21c2c748a4d2c5503cc45c904e466258",
+    "scripts/bundle_common.py": "f6746d756455a672957a2614c58663c2200f4e43746c3f39b0e792d0af91bc29",
+    "tests/mcp_client.py": "bd84963a53022e2748f540e16d40cf98d3259ac1ff8d8e7487b8036e06a790f9",
+    "tests/network_acceptance.py": "824382c11f3d0e443dad33110065ecbd888ceaa5d0125ec80fcc258fd440086f",
+    "tests/real_worker.py": "9141a06044455b4debeb7ca329787b27d5f5f8b7f970a3df631206cb70e744e9",
+    "tests/qualification.py": "b3e6a7a7c019a6c601797e9f0b8a9639829212c4b5a2c7e62e40c228666db450",
+    "tests/volume_acceptance.py": "13e4d7cf8e502af7a1c2923f994da22edb976c6d2eb775484cb10355c096754d",
+    "tests/test_mcp.py": "5245e0e3a34ba82fda72ac860cea9cc7ae6d4c2a5963b4e7d5ba84e0b04fc7d1",
+    "tests/test_bundle.py": "90cdafe9130c4b3dbda963b47ecb3fbedb96a09fe7d2678ecd67965ce9e7e5e9",
+    "tests/test_qualification.py": "17a2bceab48944ff729fef758117029c2dfcd29dfc50252707eb2ef98dd4ed9e",
+    "tests/fixtures/probe.c": "1f70c481dc94c511c06eb32dcc910a6a6db666c2edd86fa35952e32804f24710",
+    "tests/fixtures/tcp_probe.c": "3a0893ed05a90bb63b7afe5b9e09dfddbd7312a3548a00c6110cc99dabb14f0b"
+  },
+  "report_files_sha256": {
+    "distribution-mcp-crossproject-worker.json": "6a832d3e88b98bca3e315e27a300effcadc579545a4a236c744f8b90f7bf7bac",
+    "distribution-mcp-builder-worker.json": "d90db55690cbdba8b2c559f5b115bd3477c8110067ff8f80ebc8ac6988b57367",
+    "distribution-mcp-clean-installation.json": "d4616480c35e2fed14bec82f2d24ad7d3a8071efa79c2e629faf57b8ed9001cc",
+    "distribution-mcp-failed-adapter.json": "155fe1582c6cc12a8ce704d538c9d3a2d9348b6c2f3ad303f2ffa75bfe0ff453",
+    "distribution-mcp-crossproject-test.py": "821058c04183f9fe58eaa0a7aeb75441299a749936b045ee49da76cc277aa1e9",
+    "distribution-mcp-clean-packages.tsv": "fc75f841309081614df15fa4f739b07d405f0965e49c055ee328165ea715ab14",
+    "distribution-mcp-crossproject-shared-storage-rejected.json": "c26ba60e4b6c2d762ca0efa58e8fc867345a81e65adbe8990ba79dd129cf5645",
+    "distribution-mcp-prepare-root.sh": "bbdd7dab4d9c3770bfc4bb4edc9786054dcf7a02d6e9b9e091c55cb199621417",
+    "distribution-mcp-clean-profile.txt": "bf3ac27751e66f5310f76bcdf150379063baafe6399f8014bbca13bb7267072d",
+    "distribution-mcp-builder-archive.json": "9122fdc527434aaa91ba0ae6b783ce93c8c8644191595bbf71809c7bbde03e7f",
+    "distribution-mcp-clean-archive.json": "8ba60efc5d86fd68ede3dd9171f58a33238ab4a42c5263f0228526845dce80ce",
+    "distribution-mcp-crossproject-shared-cgroup-rejected.json": "3ff839a140ee50c79a81e29f0aff7c2c997b64c2d8472e1689259cae954a2212",
+    "distribution-mcp-clean-worker.json": "f083383953c2376c1991ccb159da4fadcafbd1a931d5e4e7f34fb49ba4c8f639",
+    "distribution-mcp-run-root.sh": "d7c30f5f45bd06fe162c8a0a8604c4e80fde476345a91fbd2ca05e0a6bf120fb",
+    "distribution-mcp-builder-installation.json": "1fd280e7362f5f37ed08b1c0ee835412df6f970cae50b42bf5966496e48fa62a",
+    "distribution-mcp-failed-log-bound.json": "deb569444c2ad8a8000433ab880a7dec15435bd801554f591a862064099f8ae8"
+  },
+  "ci_implementation_run": "https://github.com/bwsalmon/silo/actions/runs/45149404721",
+  "ci_candidate_artifact": "https://github.com/bwsalmon/silo/actions/runs/45149404721/artifacts/14806157060",
+  "ci_wait": "denied: no grain#ci grant; completed verdicts and logs verified with authorized list/log/PR commands",
+  "merge_check": {
+    "main": "8b6291ac94d9349829408abf8f904e6383bf3852",
+    "merged_tree": "212c70679d5b9312537e3eace22f968be7247014"
+  },
+  "qualification_scope": "Only this exact archive and the recorded disposable Debian 12 x86-64/kernel configuration, including a separate clean filesystem root; no production, ARM64, XFS, reboot/power-loss or VM boundary approval.",
+  "post_disposal": {
+    "private_runtime_root_exists": false,
+    "manual_extracted_installation_exists": false,
+    "task_runtime_root_mounts": 0,
+    "task_runtime_root_loop_backing_files": 0,
+    "recorded_agent_bridges_exist": false,
+    "all_recorded_fixture_mounts_and_loop_files": 0
+  },
+  "ci_archive_sha256_verified_from_build_log": "c5ae6f81f303ae674ca038d71267c23df8a7109e900b9bb4eb3d63e82071035a",
+  "cross_project_supplement": {
+    "result": "passed",
+    "assertion_groups": 7,
+    "mcp_calls": 20,
+    "qualification": "partial supplemental run; blocked by the normal full-suite gate; use the two complete qualified reports",
+    "project_domains_removed": true,
+    "extracted_installation_removed": true,
+    "separate_protected_storage_and_cgroup_roots": true
+  },
+  "evidence_commit_source_snapshot_unchanged": "62a073a805fb475492d47916b6310edb057ee14fbb61da69fc09e2066b25b14f"
+}

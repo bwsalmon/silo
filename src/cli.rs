@@ -14,7 +14,7 @@ use std::{
 use zeroize::Zeroize;
 
 pub const HELP: &str = "silo: authenticated rootless jobs, private services and managed volumes
-Local: validate MANIFEST
+MCP: mcp serve --endpoint /absolute/private/endpoint.json --auth-fd FD\nLocal: validate MANIFEST
 Control: up MANIFEST [--no-start] | run TEMPLATE | ps | status ID | logs ID | stop ID
 Metadata: volume list|inspect NAME; service list|inspect NAME
 Managed storage: volume create|rm|recover NAME
@@ -27,6 +27,7 @@ See docs/runner.md and docs/foundation.md for qualification, schema and transpor
 
 pub enum Command {
     Help,
+    Mcp,
     Validate(PathBuf),
     Serve(PathBuf),
     Remote(Operation),
@@ -81,6 +82,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
         i += 1;
     }
     let command = match positional.as_slice() {
+        ["mcp", "serve"] => Command::Mcp,
         ["validate", path] => Command::Validate(PathBuf::from(path)),
         ["up", path] => Command::Up(PathBuf::from(path), no_start),
         ["supervisor"] => Command::Serve(state_dir.clone().ok_or_else(invalid)?),
@@ -117,9 +119,10 @@ pub fn parse(args: &[String]) -> Result<Args> {
     };
     let remote = matches!(
         command,
-        Command::Remote(_) | Command::Up(..) | Command::Issue(_)
+        Command::Mcp | Command::Remote(_) | Command::Up(..) | Command::Issue(_)
     );
-    if (remote && endpoint.is_none())
+    if (matches!(command, Command::Mcp) && (json || auth_fd.is_none()))
+        || (remote && endpoint.is_none())
         || (!remote && endpoint.is_some())
         || (state_dir.is_some() && !matches!(command, Command::Serve(_)))
         || (no_start && !matches!(command, Command::Up(..)))
@@ -150,6 +153,15 @@ fn local_manifest(path: &Path) -> Result<Manifest> {
 pub fn execute(args: Args) -> Result<Value> {
     match args.command {
         Command::Help => Ok(json!({"help": HELP})),
+        Command::Mcp => {
+            crate::mcp::serve(
+                args.endpoint.as_deref().ok_or_else(invalid)?,
+                args.auth_fd.ok_or_else(invalid)?,
+            )?;
+            // Tokio stdin can have an outstanding blocking read after protocol shutdown.
+            // All service/credential owners have dropped before this process exit.
+            std::process::exit(0);
+        }
         Command::Helper => Err(crate::error::unsupported()),
         Command::Validate(path) => {
             let m = local_manifest(&path)?;

@@ -22,7 +22,20 @@ fn main() {
             }
         }
     }
-    let json = raw.iter().any(|s| s == "--json");
+    // Recognize the subcommand even when global flags precede/interleave it,
+    // so an invalid --json invocation cannot contaminate MCP stdout.
+    let mut options = raw.iter();
+    let mcp = loop {
+        match options.next().and_then(|arg| arg.to_str()) {
+            Some("--endpoint" | "--auth-fd" | "--token-fd" | "--state-dir") => {
+                options.next();
+            }
+            Some("--json" | "--no-start") => {}
+            Some("mcp") => break true,
+            _ => break false,
+        }
+    };
+    let json = !mcp && raw.iter().any(|s| s == "--json");
     let strings = raw
         .into_iter()
         .map(|s| s.into_string().map_err(|_| silo::error::invalid()))

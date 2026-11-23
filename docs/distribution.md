@@ -209,6 +209,28 @@ Deleting a binary archive/install tree must never implicitly delete named data.
 Linux x86-64 is the sole supported distribution target; ARM64 is untested and
 not shipped. Silo shares the kernel and is not a VM boundary. Exclusions remain:
 Docker compatibility, external workload egress, dynamic topology, UDP/DNS server,
-public API/ingress, MCP frontend, attach/exec and multi-host support. Image
+public API/ingress, attach/exec and multi-host support. Image
 ownership mapping, native-agent process-view, storage migration and crash
 recovery limits in the runtime guides remain in force.
+
+
+## Local MCP extension
+
+The same distributed static \`silo\` now includes the requested
+[local stdio MCP frontend](mcp.md), deliberately superseding only that v1 deferral.
+The archive carries its exact schemas, configuration example, pinned SDK source
+and notices. Archive validation initializes the actual extracted binary, discovers
+strict tools and calls the scoped instance list through an authenticated supervisor.
+This control smoke alone never qualifies kernel/runtime isolation.
+
+The bundle qualification command now routes restricted run/list/status/stop/log
+operations through actual MCP sessions and requires MCP call evidence alongside
+all real runner, TCP relay, protected-volume and Postgres checks. Operator setup
+and legacy raw-protocol attacks retain their existing interfaces. Unsupported
+workers and incomplete cleanup remain blocked. Requalify the exact relocated
+archive and exact trusted bundled helper on a fresh disposable worker; previous
+CLI qualification is not automatically MCP qualification. Include cancellation,
+lost launch-response reconciliation, expiry/revocation, live relay teardown,
+credential cleanup and separate log grants in the release checklist. Do not put
+a token in an MCP host's argv/environment configuration or expose the worker OS
+identity to the agent. No deployment, live grant or release is enabled by packaging.

@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import sys
 import tarfile
 
-from bundle_common import capture, elf, sha, trusted
+from bundle_common import ROOT, capture, elf, sha, trusted
+sys.path.insert(0, str(ROOT / "tests"))
+from mcp_client import smoke as mcp_smoke
 
 
 def extract(archive, destination, expected):
@@ -106,7 +109,8 @@ def validate(root):
         result = json.loads(capture([root / "silo", "validate", root / "examples" / example, "--json"], env=env))
         if result.get("valid") is not True:
             raise ValueError("bundled example validation failed")
-    return {"bwrap":{"path":str(helper), "sha256":manifest["files"]["libexec/bwrap"]["sha256"]},
+    mcp = mcp_smoke(root / "silo", root / "examples/foundation.yaml")
+    return {"mcp":mcp, "bwrap":{"path":str(helper), "sha256":manifest["files"]["libexec/bwrap"]["sha256"]},
             "silo_sha256":manifest["files"]["silo"]["sha256"],
             "library_resolution":resolved, "qualification":"not performed; run full real-worker acceptance"}
 
