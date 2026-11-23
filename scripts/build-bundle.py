@@ -28,6 +28,8 @@ if not capture([cargo_bin / "rustc", "--version"]).startswith("rustc 1.85.1 (4eb
     raise SystemExit("Run scripts/bootstrap-rust.py first")
 sysroot = Path(capture([cargo_bin / "rustc", "--print", "sysroot"]).strip())
 bwrap_input = fetch(lock["bubblewrap"]["url"], lock["bubblewrap"]["sha256"], cache / "bubblewrap.tar.xz")
+musl_input = fetch(lock["musl"]["url"], lock["musl"]["sha256"], cache / "musl.tar.gz")
+musl_recipe = fetch(lock["musl"]["rust_recipe_url"], lock["musl"]["rust_recipe_sha256"], cache / "rust-musl.sh")
 epoch = lock["source_date_epoch"]
 with tempfile.TemporaryDirectory(prefix="silo-package-") as temp:
     work = Path(temp)
@@ -84,11 +86,17 @@ with tempfile.TemporaryDirectory(prefix="silo-package-") as temp:
     (bundle / "source").mkdir()
     shutil.copyfile(bwrap_input, bundle / "source" / ("bubblewrap-" + lock["bubblewrap"]["version"] + ".tar.xz"))
     shutil.copyfile(work / "silo-source.tar.xz", bundle / "source/silo.tar.xz")
+    shutil.copyfile(musl_input, bundle / "source/musl-1.2.3.tar.gz")
+    shutil.copyfile(musl_recipe, bundle / "source/rust-musl.sh")
     archive(vendor, bundle / "source/rust-dependencies.tar.xz", epoch)
     notices = bundle / "notices"; notices.mkdir()
     shutil.copyfile(src / "LICENSE", notices / "Silo-Apache-2.0.txt")
     shutil.copyfile(bsrc / "COPYING", notices / "Bubblewrap-LGPL-2.0-or-later.txt")
     shutil.copytree(sysroot / "share/doc/rust", notices / "rust")
+    shutil.copytree(src / "packaging/licenses", notices / "gcc-runtime")
+    import tarfile
+    with tarfile.open(musl_input, "r:gz") as musl_tar:
+        (notices / "musl-COPYRIGHT.txt").write_bytes(musl_tar.extractfile("musl-1.2.3/COPYRIGHT").read())
     shutil.copytree(src / "docs", bundle / "docs")
     shutil.copyfile(src / "README.md", bundle / "README.md")
     shutil.copytree(src / "examples", bundle / "examples")
@@ -104,7 +112,9 @@ with tempfile.TemporaryDirectory(prefix="silo-package-") as temp:
                       "source_sha256":lock["bubblewrap"]["sha256"],"changes":"none"},
         "runtime_requirements":{"silo":silo_elf,"libexec/bwrap":bwrap_elf},
         "external_runtime_libraries":"glibc >= 2.34 and libcap.so.2; not shipped; test on each worker",
-        "notices":"Rust toolchain COPYRIGHT includes musl and compiler runtime notices; crate notices are in complete vendored source"})
+        "musl":{"version":lock["musl"]["version"],"license":"MIT and included notices",
+                "source_sha256":lock["musl"]["sha256"],"rust_patch_recipe_sha256":lock["musl"]["rust_recipe_sha256"]},
+        "notices":"Rust/LLVM notices, separate musl COPYRIGHT and GCC runtime exception; crate notices in complete vendored source"})
     payload = {str(p.relative_to(bundle)):{"sha256":sha(p), "mode":format(p.stat().st_mode & 0o7777, "04o")}
                for p in sorted(bundle.rglob("*")) if p.is_file()}
     write_json(bundle / "bundle.json", {

@@ -3,7 +3,9 @@
 The archive contains a static musl `silo` and unmodified upstream Bubblewrap
 **0.13.1** at `libexec/bwrap`. It also contains manifests, examples, operator
 guides, dependency/license inventory, notices, exact Bubblewrap source and
-complete Silo/vendored-crate source. It is a candidate artifact, not a published
+complete Silo/vendored-crate source. Separate musl copyright/source and Rust’s
+exact musl security-patch recipe are included, alongside Rust/LLVM and GCC
+runtime-library notices. It is a candidate artifact, not a published
 release or permission to run untrusted jobs.
 
 Silo is inspected for **no ELF interpreter and no DT_NEEDED entries**.
@@ -42,7 +44,9 @@ cmp dist/first/silo-0.1.0-linux-x86_64.tar.xz \
 ```
 
 Rust 1.85.1's manifest and rustup bootstrap are hash-pinned. Rustup verifies
-component downloads against that manifest. Cargo.lock pins crate versions and
+component downloads against that manifest, and the build compares the installed
+Rust compiler/Cargo and host/musl standard-library payloads against those exact
+component archives. Cargo.lock pins crate versions and
 registry checksums; Cargo vendors those inputs and compiles offline/frozen.
 Bubblewrap's upstream archive hash, build options and fixed SOURCE_DATE_EPOCH
 are pinned. Builds use fresh temporary source/target trees, fixed ownership,

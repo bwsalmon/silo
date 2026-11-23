@@ -25,5 +25,12 @@
       "-Dstrip=true"
     ]
   },
-  "builder_image": "debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc"
+  "builder_image": "debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc",
+  "musl": {
+    "version": "1.2.3 with Rust 1.85.1 security patches",
+    "url": "https://musl.libc.org/releases/musl-1.2.3.tar.gz",
+    "sha256": "7d5b0b6062521e4627e099e4c9dc8248d32a30285e959b7eecaa780cf8cfd4a4",
+    "rust_recipe_url": "https://raw.githubusercontent.com/rust-lang/rust/4eb161250e340c8f48f66e2b929ef4a5bed7c181/src/ci/docker/scripts/musl.sh",
+    "rust_recipe_sha256": "12d85e4ae6735397663175501dbe3d3c2cacdd4465edde8fe602e58806c5c226"
+  }
 }
