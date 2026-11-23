@@ -124,7 +124,7 @@ updating the exact worker pin before starting a fresh supervisor. Do not use a
 
 Use a **new disposable worker** meeting [runner requirements](runner.md) and
 [protected persistent-storage requirements](volumes.md). Build tools are not
-runtime dependencies of Silo, but the acceptance fixtures require musl-gcc/gcc,
+runtime dependencies of Silo, but the acceptance fixtures require musl-gcc/gcc (including libc6-dev headers),
 binutils, Python, sudo, skopeo, umoci, openssl, busybox-static, e2fsprogs and
 util-linux mount/loop/setpriv support. These test prerequisites are recorded
 separately from the archive's runtime libraries.
