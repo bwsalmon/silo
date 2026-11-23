@@ -32,5 +32,10 @@
     "sha256": "7d5b0b6062521e4627e099e4c9dc8248d32a30285e959b7eecaa780cf8cfd4a4",
     "rust_recipe_url": "https://raw.githubusercontent.com/rust-lang/rust/4eb161250e340c8f48f66e2b929ef4a5bed7c181/src/ci/docker/scripts/musl.sh",
     "rust_recipe_sha256": "12d85e4ae6735397663175501dbe3d3c2cacdd4465edde8fe602e58806c5c226"
+  },
+  "llvm_unwinder_notice": {
+    "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-19.1.7/libunwind/LICENSE.TXT",
+    "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+    "path": "packaging/llvm-notices/libunwind-LICENSE.txt"
   }
 }

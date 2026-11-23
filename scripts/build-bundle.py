@@ -94,6 +94,9 @@ with tempfile.TemporaryDirectory(prefix="silo-package-") as temp:
     shutil.copyfile(bsrc / "COPYING", notices / "Bubblewrap-LGPL-2.0-or-later.txt")
     shutil.copytree(sysroot / "share/doc/rust", notices / "rust")
     shutil.copytree(src / "packaging/licenses", notices / "gcc-runtime")
+    if sha(src / lock["llvm_unwinder_notice"]["path"]) != lock["llvm_unwinder_notice"]["sha256"]:
+        raise ValueError("LLVM unwinder notice differs from pinned upstream text")
+    shutil.copytree(src / "packaging/llvm-notices", notices / "llvm-runtime")
     import tarfile
     with tarfile.open(musl_input, "r:gz") as musl_tar:
         (notices / "musl-COPYRIGHT.txt").write_bytes(musl_tar.extractfile("musl-1.2.3/COPYRIGHT").read())
