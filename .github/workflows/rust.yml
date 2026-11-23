@@ -68,12 +68,29 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+      volumes:
+        - /usr/local/share/ca-certificates:/etc/ssl/host-ca-certificates:ro
     timeout-minutes: 30
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Bootstrap disposable builder transport
-        run: apt-get update && apt-get install -y python3 ca-certificates curl git xz-utils
+        run: |
+          set -eu
+          apt-get update
+          apt-get install -y python3 ca-certificates curl git xz-utils
+          if [ -d /etc/ssl/host-ca-certificates ]; then
+            added=0
+            for crt in /etc/ssl/host-ca-certificates/*.crt; do
+              if [ -f "$crt" ]; then
+                cp -L "$crt" /usr/local/share/ca-certificates/
+                added=1
+              fi
+            done
+            if [ "$added" -eq 1 ]; then
+              update-ca-certificates
+            fi
+          fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install and verify integrity-pinned builder packages
         run: python3 scripts/builder.py --install
@@ -92,6 +109,14 @@ jobs:
           mv /tmp/silo-ci-private/install/silo-0.1.0-linux-x86_64 /tmp/silo-ci-private/install/relocated
           SILO_TEST_BUNDLE_ROOT=/tmp/silo-ci-private/install/relocated python3 -m unittest discover -s tests -p 'test_*.py'
       # CI artifacts only. No release event, tag, package registry, write token or signing credential.
+      - name: Ensure Node.js is available for local artifact upload
+        if: ${{ env.ACT == 'true' }}
+        run: |
+          set -eu
+          if ! command -v node >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y --no-install-recommends nodejs
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: silo-linux-x86_64-candidate
