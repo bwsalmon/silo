@@ -1,0 +1,102 @@
+{
+  "source_commit": "95e3080bde67696d34714c534e2bcc3900c18a3b",
+  "source_tree": "0b2eed43c0333e3d8c641d448e2af055f72fff5b",
+  "source_snapshot_sha256": "2d470bdc7ce2efb39f7704d3c00d5aa4642e1b839af7426fc50f2160c9fb9f9a",
+  "archive": {
+    "name": "silo-0.1.0-linux-x86_64.tar.xz",
+    "bytes": 9706144,
+    "sha256": "767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e",
+    "local_independent_builds_identical": true
+  },
+  "elf": {
+    "libexec/bwrap": {
+      "interpreter": [
+        "/lib64/ld-linux-x86-64.so.2"
+      ],
+      "needed": [
+        "libc.so.6",
+        "libcap.so.2"
+      ]
+    },
+    "silo": {
+      "interpreter": [],
+      "needed": []
+    }
+  },
+  "bwrap_glibc_symbol_versions": [
+    "GLIBC_2.14",
+    "GLIBC_2.2.5",
+    "GLIBC_2.28",
+    "GLIBC_2.3",
+    "GLIBC_2.33",
+    "GLIBC_2.34",
+    "GLIBC_2.4",
+    "GLIBC_2.7",
+    "GLIBC_2.9"
+  ],
+  "silo_sha256": "f803a3a5d7f80fb57decc0fde0e5ca0f645be3de3de633773197ecb5b6840024",
+  "bwrap_sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0",
+  "builder_packages": 90,
+  "rust_toolchain": "1.85.1",
+  "native_rust_tests": 47,
+  "python_tests_against_archive": 13,
+  "clippy_native_and_musl": "passed with warnings denied",
+  "formatting": "passed",
+  "clean_profile": {
+    "debian": "12",
+    "architecture": "x86_64",
+    "kernel": "6.1.0-56-amd64",
+    "mount_namespace": "private; fresh filesystem root through pivot_root; old root detached",
+    "kernel_shared_with_disposable_worker": true,
+    "supervisor_uid_gid": "1000:1000; zero effective/permitted/inheritable/ambient caps",
+    "system_bwrap_present": false,
+    "rust_toolchain_or_checkout_present": false,
+    "package_inventory_sha256": "004954a97edeac8c9ee744b57d2e9aa53d68c0c135816fe358cc5a83f03cf32a",
+    "trusted_existing_package_cache_ca_sha256": "343e11d9f513cd5a0512485efa714fb59416ba787b12b08aede6b5e3741df79b",
+    "runtime_library_sha256": "02bcda52c1a5dfc236f94d9e5255b4a0e26347d8a372a5223b650e31f291ce3c  /lib64/ld-linux-x86-64.so.2\n6b4a45352fd0c540a9c7c718f35ce8c8e46a4e482f9d3885a910c32d1a0e1421  /lib/x86_64-linux-gnu/libc.so.6\n206b61879ef80e797677e3b4c21f7b76ef9e963c4c4fd4e1311eb44fdde13165  /lib/x86_64-linux-gnu/libcap.so.2\n",
+    "acceptance_source_sha256": {
+      "scripts/bundle_common.py": "f6746d756455a672957a2614c58663c2200f4e43746c3f39b0e792d0af91bc29",
+      "scripts/qualify-bundle.py": "5350c8ee4a5bcbee83cac08679b92b1bb44abea2c0033b2521a4135688da4c5e",
+      "scripts/validate-bundle.py": "7b983e5c105941f62be5d6107d0bfbf21f19917b0750d28b167dff3e38c41c11",
+      "tests/real_worker.py": "004cc2041233dee07245f8ec4bfaa4a555a17c6581b4e6250cb7ff893ae46870",
+      "tests/qualification.py": "b3e6a7a7c019a6c601797e9f0b8a9639829212c4b5a2c7e62e40c228666db450",
+      "tests/network_acceptance.py": "824382c11f3d0e443dad33110065ecbd888ceaa5d0125ec80fcc258fd440086f",
+      "tests/volume_acceptance.py": "13e4d7cf8e502af7a1c2923f994da22edb976c6d2eb775484cb10355c096754d",
+      "tests/fixtures/probe.c": "1f70c481dc94c511c06eb32dcc910a6a6db666c2edd86fa35952e32804f24710",
+      "tests/fixtures/tcp_probe.c": "3a0893ed05a90bb63b7afe5b9e09dfddbd7312a3548a00c6110cc99dabb14f0b"
+    }
+  },
+  "reports": {
+    "distribution-clean-worker.json": "4fa8f218d2c3c2fa82ea6e79bec39728b384deba9cde7ad15514997a88fb4de2",
+    "distribution-clean-archive.json": "8eb4270ac0c572b61ff87eb297b9327142638e2c6bb826083426d0daf6017575",
+    "distribution-builder-worker.json": "5aa25e93bb20479f77fe4a884e6031a9f83208ab328712d7b66935ca1b8dd8e3",
+    "distribution-builder-archive.json": "5f48659fe9cd09736483c60b1691ce80b231e7d5bc21ae8908764a7afef15a45",
+    "distribution-failed-headers.json": "2135930f1ec22dcae0aa633accd6afe98b5a21d935a00a4e3d5d8bddb2efba33",
+    "distribution-failed-chroot.json": "a6722d5ca8416d5fab468ceaf5e14f68f0617de5eef44b7e64eb76d1104a08da",
+    "distribution-failed-source-race.json": "9110364bfa940a518089399d31ad3575b0147464a3035174bc7bc34e05490fb3"
+  },
+  "ci": {
+    "source_commit": "95e3080bde67696d34714c534e2bcc3900c18a3b",
+    "completed_successful_runs": [
+      "45140564761",
+      "45140572819"
+    ],
+    "artifact_url": "https://github.com/bwsalmon/silo/actions/runs/45140564761/artifacts/14802350454",
+    "artifact_archive_sha256": "767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e",
+    "qualification_in_generic_ci": false,
+    "wait_command": "denied: missing grain#ci grant; completed GitHub verdicts/logs read through grain ci list/log and grain pr open"
+  },
+  "independent_cleanup": {
+    "all_silo_test_cgroups_absent": true,
+    "recorded_cgroup_roots_absent": [
+      "/sys/fs/cgroup/silo-test-e78ff062460e",
+      "/sys/fs/cgroup/silo-test-9ab6f0c86c0c"
+    ],
+    "task_mounts": [],
+    "task_loop_devices": [],
+    "fixture_data_agent_bridge_and_installation_leftovers": [],
+    "worker_and_archive_cleanup_verified": true,
+    "clean_runtime_root_removed": true
+  },
+  "scope": "only the recorded archive and disposable Debian 12/kernel configuration; no production approval, release or deployment"
+}
