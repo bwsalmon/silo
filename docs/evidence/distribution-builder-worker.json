@@ -114,7 +114,7 @@
   ],
   "pins": {
     "bwrap": {
-      "path": "/var/tmp/silo-artifact-li8a56ni/install/relocated/libexec/bwrap",
+      "path": "/var/tmp/silo-artifact-hqw28oqb/install/relocated/libexec/bwrap",
       "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
     },
     "skopeo": {
@@ -126,14 +126,14 @@
       "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
     },
     "silo_sha256": "f803a3a5d7f80fb57decc0fde0e5ca0f645be3de3de633773197ecb5b6840024",
-    "fixture_index": "localhost:41967/silo/probe@sha256:c5d15efdc9ad2b795047706c39f43705211d88518b41cc789a870fa2f69ff36e",
+    "fixture_index": "localhost:44545/silo/probe@sha256:c5d15efdc9ad2b795047706c39f43705211d88518b41cc789a870fa2f69ff36e",
     "stock_platform_manifest": "sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e",
     "stock_image": "docker.io/library/hello-world@sha256:5e22040d441e5fb3aed38368acbe8486b575d7018df38dbdfbc7311fbb2ef3a9",
     "stock_busybox": {
       "sha256": "3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6",
       "version": "BusyBox v1.35.0 (Debian 1:1.35.0-4+deb12u1+b1) multi-call binary."
     },
-    "network_fixture": "localhost:41967/silo/probe@sha256:87db1bf15d73b0797e9f74c9949810efd0095ee146eb56095e4545ec39f04986",
+    "network_fixture": "localhost:44545/silo/probe@sha256:87db1bf15d73b0797e9f74c9949810efd0095ee146eb56095e4545ec39f04986",
     "stock_postgres": "docker.io/library/postgres@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d"
   },
   "result": "passed",
@@ -159,7 +159,7 @@
   },
   "worker": {
     "bwrap": {
-      "path": "/var/tmp/silo-artifact-li8a56ni/install/relocated/libexec/bwrap",
+      "path": "/var/tmp/silo-artifact-hqw28oqb/install/relocated/libexec/bwrap",
       "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
     },
     "skopeo": {
@@ -171,9 +171,9 @@
       "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
     },
     "agent_uid": 65534,
-    "registry_ca_dir": "/tmp/silo-worker-663ioba1/certs",
-    "storage": "/tmp/silo-worker-663ioba1/storage",
-    "cgroup": "/sys/fs/cgroup/silo-test-9ab6f0c86c0c/jobs",
+    "registry_ca_dir": "/tmp/silo-worker-m05hwfwo/certs",
+    "storage": "/tmp/silo-worker-m05hwfwo/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-e28a095319fe/jobs",
     "ceilings": {
       "processes": 256,
       "memory_bytes": 536870912,
@@ -186,7 +186,7 @@
   },
   "native_namespace_join": {
     "exit": 1,
-    "stderr": "nsenter: cannot open /proc/52941/ns/net: Permission denied\n"
+    "stderr": "nsenter: cannot open /proc/75440/ns/net: Permission denied\n"
   },
   "resources": {
     "scratch_stdout": "scratch_bytes=4194304\n",
@@ -196,26 +196,26 @@
     "memory_events": {
       "low": 0,
       "high": 0,
-      "max": 18,
+      "max": 19,
       "oom": 1,
-      "oom_kill": 6,
+      "oom_kill": 5,
       "oom_group_kill": 1
     },
     "cpu_stat": {
-      "usage_usec": 428726,
-      "user_usec": 412699,
-      "system_usec": 16027,
+      "usage_usec": 421843,
+      "user_usec": 405299,
+      "system_usec": 16543,
       "nr_periods": 22,
       "nr_throttled": 21,
-      "throttled_usec": 2300578,
+      "throttled_usec": 2499072,
       "nr_bursts": 0,
       "burst_usec": 0
     },
-    "cpu_stdout": "cpu_ms=396 loops=4994048\n"
+    "cpu_stdout": "cpu_ms=386 loops=5212311\n"
   },
   "network_worker": {
     "bwrap": {
-      "path": "/var/tmp/silo-artifact-li8a56ni/install/relocated/libexec/bwrap",
+      "path": "/var/tmp/silo-artifact-hqw28oqb/install/relocated/libexec/bwrap",
       "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
     },
     "skopeo": {
@@ -227,9 +227,9 @@
       "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
     },
     "agent_uid": 65534,
-    "registry_ca_dir": "/tmp/silo-worker-663ioba1/certs",
-    "storage": "/tmp/silo-worker-663ioba1/storage",
-    "cgroup": "/sys/fs/cgroup/silo-test-9ab6f0c86c0c/jobs",
+    "registry_ca_dir": "/tmp/silo-worker-m05hwfwo/certs",
+    "storage": "/tmp/silo-worker-m05hwfwo/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-e28a095319fe/jobs",
     "ceilings": {
       "processes": 512,
       "memory_bytes": 1073741824,
@@ -256,13 +256,13 @@
   "network_supervisor_baseline": {
     "fds": 14,
     "threads": 5,
-    "rss_kib": 4172,
-    "cpu_ticks": 31
+    "rss_kib": 4168,
+    "cpu_ticks": 30
   },
   "clock_ticks_per_second": 100,
   "network_scenarios": {
     "stock": {
-      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_cpu_ticks_delta": 1,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
@@ -278,35 +278,35 @@
       }
     },
     "other-port": {
-      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_cpu_ticks_delta": 0,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
-        "rss_kib": 4180
+        "rss_kib": 4176
       }
     },
     "other-service": {
-      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_cpu_ticks_delta": 2,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
-        "rss_kib": 4180
+        "rss_kib": 4176
       }
     },
     "local-address": {
-      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_cpu_ticks_delta": 0,
+      "supervisor_peak_observed": {
+        "fds": 14,
+        "threads": 5,
+        "rss_kib": 4188
+      }
+    },
+    "outbound": {
+      "supervisor_cpu_ticks_delta": 0,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
         "rss_kib": 4192
-      }
-    },
-    "outbound": {
-      "supervisor_cpu_ticks_delta": 1,
-      "supervisor_peak_observed": {
-        "fds": 14,
-        "threads": 5,
-        "rss_kib": 4196
       }
     },
     "conflict": {
@@ -326,7 +326,7 @@
       }
     },
     "reverse-live": {
-      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_cpu_ticks_delta": 1,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
@@ -334,7 +334,7 @@
       }
     },
     "half": {
-      "supervisor_cpu_ticks_delta": 2,
+      "supervisor_cpu_ticks_delta": 1,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
@@ -342,7 +342,7 @@
       }
     },
     "reset": {
-      "supervisor_cpu_ticks_delta": 1,
+      "supervisor_cpu_ticks_delta": 0,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
@@ -350,75 +350,75 @@
       }
     },
     "repeat": {
-      "supervisor_cpu_ticks_delta": 10,
+      "supervisor_cpu_ticks_delta": 6,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
-        "rss_kib": 4228
+        "rss_kib": 4244
       }
     },
     "parallel": {
-      "supervisor_cpu_ticks_delta": 4,
+      "supervisor_cpu_ticks_delta": 3,
       "supervisor_peak_observed": {
         "fds": 24,
         "threads": 6,
-        "rss_kib": 4356
+        "rss_kib": 4372
       }
     },
     "direct": {
-      "supervisor_cpu_ticks_delta": 0,
+      "supervisor_cpu_ticks_delta": 2,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
-        "rss_kib": 4392
+        "rss_kib": 4304
       }
     },
     "quota": {
-      "supervisor_cpu_ticks_delta": 3,
+      "supervisor_cpu_ticks_delta": 1,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
-        "rss_kib": 4276
+        "rss_kib": 4272
       }
     },
     "backpressure": {
-      "supervisor_cpu_ticks_delta": 40,
+      "supervisor_cpu_ticks_delta": 55,
       "supervisor_peak_observed": {
         "fds": 14,
         "threads": 5,
-        "rss_kib": 4292
+        "rss_kib": 4296
       }
     }
   },
-  "network_relay_measurements": "relay_short_32_seconds=0.307825 relay_bulk_bytes=4194304 relay_bulk_seconds=0.591829\nrepeat-duplex=ok\n",
-  "network_direct_measurements": "direct_short_32_seconds=0.010423 direct_bulk_bytes=4194304 direct_bulk_seconds=0.012430\n",
-  "network_backpressure": "backpressure_bytes=335872 seconds=15.277748 errno=32\n",
+  "network_relay_measurements": "relay_short_32_seconds=0.309778 relay_bulk_bytes=4194304 relay_bulk_seconds=0.580731\nrepeat-duplex=ok\n",
+  "network_direct_measurements": "direct_short_32_seconds=0.007949 direct_bulk_bytes=4194304 direct_bulk_seconds=0.007336\n",
+  "network_backpressure": "backpressure_bytes=335872 seconds=15.269609 errno=32\n",
   "established_source_socket_inodes": [
     [
-      "254797"
+      "375467"
     ],
     [
-      "253714"
+      "377276"
     ],
     [
-      "261083"
+      "383152"
     ]
   ],
   "network_supervisor_live": {
     "fds": 18,
     "threads": 6,
-    "rss_kib": 4308,
-    "cpu_ticks": 107
+    "rss_kib": 4312,
+    "cpu_ticks": 110
   },
   "network_supervisor_after": {
     "fds": 14,
     "threads": 5,
     "rss_kib": 4332,
-    "cpu_ticks": 133
+    "cpu_ticks": 135
   },
   "storage_worker": {
     "bwrap": {
-      "path": "/var/tmp/silo-artifact-li8a56ni/install/relocated/libexec/bwrap",
+      "path": "/var/tmp/silo-artifact-hqw28oqb/install/relocated/libexec/bwrap",
       "sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0"
     },
     "skopeo": {
@@ -430,9 +430,9 @@
       "sha256": "3c0fefdb6ec73d5f186e05b88644e3cd555a2ed00713ee69a1e52eb72a724a76"
     },
     "agent_uid": 65534,
-    "registry_ca_dir": "/tmp/silo-worker-663ioba1/certs",
-    "storage": "/tmp/silo-worker-663ioba1/storage",
-    "cgroup": "/sys/fs/cgroup/silo-test-9ab6f0c86c0c/jobs",
+    "registry_ca_dir": "/tmp/silo-worker-m05hwfwo/certs",
+    "storage": "/tmp/silo-worker-m05hwfwo/storage",
+    "cgroup": "/sys/fs/cgroup/silo-test-e28a095319fe/jobs",
     "ceilings": {
       "processes": 512,
       "memory_bytes": 2147483648,
@@ -442,7 +442,7 @@
       "duration_secs": 600,
       "max_instances": 8
     },
-    "volume_root": "/var/tmp/silo-persistent-jcxt4uja"
+    "volume_root": "/var/tmp/silo-persistent-55obk22j"
   },
   "agent_os_profile": {
     "uids": [
@@ -773,19 +773,19 @@
     {
       "uid": 65534,
       "denied_write_or_create": [
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/silo",
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/libexec/bwrap",
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/bundle.json",
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/agent-replacement-65534"
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/silo",
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/libexec/bwrap",
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/bundle.json",
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/agent-replacement-65534"
       ]
     },
     {
       "uid": 65533,
       "denied_write_or_create": [
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/silo",
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/libexec/bwrap",
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/bundle.json",
-        "/var/tmp/silo-artifact-li8a56ni/install/relocated/agent-replacement-65533"
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/silo",
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/libexec/bwrap",
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/bundle.json",
+        "/var/tmp/silo-artifact-hqw28oqb/install/relocated/agent-replacement-65533"
       ]
     }
   ],
@@ -826,11 +826,11 @@
     }
   ],
   "postgres_platform_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
-  "postgres_listening_tcp": "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode                                                     \n   0: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 268292 1 00000000e9fb74c2 100 0 0 10 0                    \n   1: 0100007F:C64E 0100007F:1538 06 00000000:00000000 03:000016B4 00000000     0        0 0 3 0000000067747d5c                                      \n   2: 0100007F:C652 0100007F:1538 06 00000000:00000000 03:000016BC 00000000     0        0 0 3 0000000043c1f101                                      \n",
+  "postgres_listening_tcp": "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode                                                     \n   0: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 385787 1 00000000b831c5b7 100 0 0 10 0                    \n   1: 0100007F:81A4 0100007F:1538 06 00000000:00000000 03:000016B7 00000000     0        0 0 3 0000000028c3ee79                                      \n   2: 0100007F:81B0 0100007F:1538 06 00000000:00000000 03:000016C0 00000000     0        0 0 3 00000000cb3667e1                                      \n",
   "symlink_race": {
     "attempts": 16,
-    "safe_launches": 5,
-    "rejected_before_exec": 11
+    "safe_launches": 1,
+    "rejected_before_exec": 15
   },
   "crash_writer_process_count": 9,
   "cli_transcript": [
@@ -842,7 +842,7 @@
       ],
       "exit": 0,
       "response": {
-        "id": "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457",
+        "id": "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9",
         "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
         "state": "running",
         "template": "app"
@@ -852,11 +852,11 @@
       "identity": 65534,
       "argv": [
         "status",
-        "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457"
+        "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9"
       ],
       "exit": 0,
       "response": {
-        "id": "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457",
+        "id": "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9",
         "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
         "state": "running",
         "template": "app"
@@ -866,12 +866,12 @@
       "identity": 65534,
       "argv": [
         "status",
-        "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457"
+        "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9"
       ],
       "exit": 0,
       "response": {
         "exit_code": 0,
-        "id": "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457",
+        "id": "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9",
         "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
         "state": "exited",
         "template": "app"
@@ -881,7 +881,7 @@
       "identity": 65533,
       "argv": [
         "status",
-        "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457"
+        "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9"
       ],
       "exit": 3,
       "response": {
@@ -940,12 +940,12 @@
       "identity": 65534,
       "argv": [
         "stop",
-        "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457"
+        "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9"
       ],
       "exit": 0,
       "response": {
         "exit_code": 0,
-        "id": "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457",
+        "id": "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9",
         "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
         "state": "exited",
         "template": "app"
@@ -955,7 +955,7 @@
       "identity": 65534,
       "argv": [
         "logs",
-        "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457"
+        "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9"
       ],
       "exit": 3,
       "response": {
@@ -975,7 +975,7 @@
         "instances": [
           {
             "exit_code": 0,
-            "id": "job_33e2b1ab453d75865fcb43c6b50c9609da288fe985cd825102260c34c34f5457",
+            "id": "job_206fda6524fa9313c1aff3ce5d28e4c8b56b4993a6291db21d3229a95d1e46b9",
             "image_digest": "sha256:9d9e487c1bd6413c52ccb3c02f46c8e37fa1e1d1a32a84519eb4e68d0ad1da30",
             "state": "exited",
             "template": "app"
@@ -987,7 +987,7 @@
       "identity": 65534,
       "argv": [
         "status",
-        "svc_ef27c26aa5f4995d0c21321b842e15dccca8ea0360ce30e5a90b0fa679988bc8"
+        "svc_bd0b819abf92641ee8c0c5f512407e35d76831d94524dc6bf49ac79b416bdb27"
       ],
       "exit": 3,
       "response": {
@@ -1001,7 +1001,7 @@
       "identity": 65534,
       "argv": [
         "logs",
-        "svc_ef27c26aa5f4995d0c21321b842e15dccca8ea0360ce30e5a90b0fa679988bc8"
+        "svc_bd0b819abf92641ee8c0c5f512407e35d76831d94524dc6bf49ac79b416bdb27"
       ],
       "exit": 3,
       "response": {
@@ -1015,7 +1015,7 @@
       "identity": 65534,
       "argv": [
         "stop",
-        "svc_ef27c26aa5f4995d0c21321b842e15dccca8ea0360ce30e5a90b0fa679988bc8"
+        "svc_bd0b819abf92641ee8c0c5f512407e35d76831d94524dc6bf49ac79b416bdb27"
       ],
       "exit": 3,
       "response": {

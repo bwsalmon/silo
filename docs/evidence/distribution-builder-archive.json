@@ -1,5 +1,5 @@
 {
-  "archive_sha256": "767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e",
+  "archive_sha256": "30d67a3eadb9488c90a435ae432b709611c951dc2725fe6cc6f1898c2f165bea",
   "bwrap_sha256": "8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0",
   "cleanup": {
     "verified": true
@@ -12,5 +12,5 @@
   },
   "relocation": "passed",
   "result": "passed",
-  "worker_report_sha256": "5aa25e93bb20479f77fe4a884e6031a9f83208ab328712d7b66935ca1b8dd8e3"
+  "worker_report_sha256": "4fb450a731f2263b63a00039704019d1bf8a8ba898c0067424df440ddb436601"
 }

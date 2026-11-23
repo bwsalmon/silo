@@ -1,6 +1,6 @@
 # Measured Linux x86-64 candidate qualification
 
-On **2026-11-23**, source **95e3080bde67696d34714c534e2bcc3900c18a3b**
+On **2026-11-23**, source **865720414cd8e98b74233734856c54bd1219aee0**
 passed distribution acceptance on this task's disposable Debian 12 worker and
 a separate clean Debian runtime filesystem in a private mount namespace.
 Prerequisite PRs #244 and #245 were verified on main before implementation.
@@ -9,8 +9,8 @@ another worker.
 
 | Item | Measured result |
 | --- | --- |
-| Archive | `silo-0.1.0-linux-x86_64.tar.xz`, 9,706,144 bytes |
-| Archive SHA-256 | `767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e` |
+| Archive | `silo-0.1.0-linux-x86_64.tar.xz`, 9,707,484 bytes |
+| Archive SHA-256 | `30d67a3eadb9488c90a435ae432b709611c951dc2725fe6cc6f1898c2f165bea` |
 | Silo SHA-256 | `f803a3a5d7f80fb57decc0fde0e5ca0f645be3de3de633773197ecb5b6840024` |
 | Bubblewrap 0.13.1 SHA-256 | `8d261496c2452c932f1e249d08a1beb30a807504a274b45deb1df802b72d09e0` |
 | Reproducibility | Two fresh local source/target trees produced identical complete archives; independent CI builds produced the same archive SHA-256 |
@@ -30,7 +30,8 @@ binaries, harness sources, package inventory, runtime libraries and cleanup.
 
 The archive contains unmodified checksum-pinned upstream Bubblewrap source and
 its LGPL notice, complete Silo/vendored Rust dependency source and inventory,
-Rust/LLVM notices, musl copyright/source with Rust's exact security-patch recipe,
+Rust/LLVM notices including the unwinder’s separate legacy notice block,
+musl copyright/source with Rust's exact security-patch recipe,
 and GCC runtime notices/exception. Compiler/header/tool payloads were checked
 against **90 SHA-pinned Debian packages**; installed Rust compiler/Cargo and
 host/musl standard libraries were checked against components from the pinned
@@ -80,8 +81,8 @@ access, COPY PROGRAM and role escalation were denied. The row survived server
 replacement and supervisor SIGKILL with a live writer, refused fresh-state
 reattachment and explicit recovery after verified whole-cgroup removal.
 The source-swap race made 16 attempts in each run: the clean worker had
-**2 safe launches / 14 pre-exec rejections**; the builder worker had
-**5 / 11**. No alternate data was exposed.
+**1 safe launch / 15 pre-exec rejections**; the builder worker also had
+**1 / 15**. No alternate data was exposed.
 
 ## Reproduction and rejected profiles
 
@@ -96,17 +97,19 @@ cmp dist/release-first/silo-0.1.0-linux-x86_64.tar.xz \
     dist/release-second/silo-0.1.0-linux-x86_64.tar.xz
 python3 scripts/qualify-bundle.py \
     --archive dist/release-first/silo-0.1.0-linux-x86_64.tar.xz \
-    --sha256 767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e \
+    --sha256 30d67a3eadb9488c90a435ae432b709611c951dc2725fe6cc6f1898c2f165bea \
     --reports /private/evidence/new-run
 ```
 
-The second acceptance used a fresh `debootstrap --variant=minbase` Debian 12
+The final clean acceptance used a fresh `debootstrap --variant=minbase` Debian 12
 root with ca-certificates, sudo, Python, libcap2, binutils, gcc, libc6-dev,
 musl-tools, skopeo, umoci, openssl, busybox-static, e2fsprogs, util-linux and
-procps. Its CNI/iptables packages were an apt dependency of skopeo's Debian
-common package; Silo did not invoke them or change firewall rules. The initial
-debootstrap left that virtual dependency unconfigured; `apt-get --fix-broken
-install --no-install-recommends` completed it. Only this new root's trust store
+procps, containernetworking-plugins and iptables. Its CNI/iptables packages were an apt dependency of skopeo's Debian
+common package; Silo did not invoke them or change firewall rules. An earlier
+provisioning attempt left that virtual dependency unconfigured; `apt-get
+--fix-broken install --no-install-recommends` completed it. The final fresh
+root included the provider and libc headers explicitly and bootstrapped
+successfully. Only this new root's trust store
 received the already trusted package-cache CA; TLS verification stayed enabled
 and the CA fingerprint is in the verification record.
 
@@ -120,7 +123,9 @@ configuration were changed. A fresh VM satisfying the same recorded
 requirements can run the qualifier directly; a chroot is not an equivalent
 worker configuration.
 
-Three failed runs remain explicitly **blocked**:
+Three earlier runs of archive
+`1fa91e7ff0673d65ef87f330ba6d63ea09e2687ad48989d748c61a8450cbf5a7`
+remain explicitly **blocked**:
 
 - [Missing fixture headers](evidence/distribution-failed-headers.json):
   minimal-root gcc could not find errno.h while compiling the seccomp fixture.
@@ -145,10 +150,10 @@ worker report and archive wrapper separately verified cleanup. The separate
 runtime root was disposed after reports/package/library observations were
 exported; it holds no live named data.
 
-[CI run 45140564761](https://github.com/bwsalmon/silo/actions/runs/45140564761)
-and run 45140572819 completed successfully for the source above, including both
+[CI run 45142599948](https://github.com/bwsalmon/silo/actions/runs/45142599948)
+and run 45142608597 completed successfully for the source above, including both
 independent builds, 13 extracted-archive tests and CI artifact generation.
-The [candidate artifact](https://github.com/bwsalmon/silo/actions/runs/45140564761/artifacts/14802350454)
+The [candidate artifact](https://github.com/bwsalmon/silo/actions/runs/45142599948/artifacts/14803565213)
 contains the same archive hash (14-day CI retention). `grain ci wait` was denied
 because this task lacks grain#ci; completed forge verdicts and logs were read
 through the authorized `grain ci list/log` and PR commands instead. Generic CI

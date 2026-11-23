@@ -1,11 +1,11 @@
 {
-  "source_commit": "95e3080bde67696d34714c534e2bcc3900c18a3b",
-  "source_tree": "0b2eed43c0333e3d8c641d448e2af055f72fff5b",
-  "source_snapshot_sha256": "2d470bdc7ce2efb39f7704d3c00d5aa4642e1b839af7426fc50f2160c9fb9f9a",
+  "source_commit": "865720414cd8e98b74233734856c54bd1219aee0",
+  "source_tree": "eddb0f791c70bc51649521d7ec77c9db22c15ebc",
+  "source_snapshot_sha256": "a73d6d7b57d8eb742c1d3521355aaf21a01f5dccda03949c854d77c0c7f9407f",
   "archive": {
     "name": "silo-0.1.0-linux-x86_64.tar.xz",
-    "bytes": 9706144,
-    "sha256": "767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e",
+    "bytes": 9707484,
+    "sha256": "30d67a3eadb9488c90a435ae432b709611c951dc2725fe6cc6f1898c2f165bea",
     "local_independent_builds_identical": true
   },
   "elf": {
@@ -67,30 +67,30 @@
     }
   },
   "reports": {
-    "distribution-clean-worker.json": "4fa8f218d2c3c2fa82ea6e79bec39728b384deba9cde7ad15514997a88fb4de2",
-    "distribution-clean-archive.json": "8eb4270ac0c572b61ff87eb297b9327142638e2c6bb826083426d0daf6017575",
-    "distribution-builder-worker.json": "5aa25e93bb20479f77fe4a884e6031a9f83208ab328712d7b66935ca1b8dd8e3",
-    "distribution-builder-archive.json": "5f48659fe9cd09736483c60b1691ce80b231e7d5bc21ae8908764a7afef15a45",
+    "distribution-clean-worker.json": "a8920cd93b3f839cbb47ed54c8e89084c268a4b01e2c0f9be63efab6138076d1",
+    "distribution-clean-archive.json": "18b9ed3bf0e8b1409a7a2502da4336e7de75829465569a3f8729a2e219dae14d",
+    "distribution-builder-worker.json": "4fb450a731f2263b63a00039704019d1bf8a8ba898c0067424df440ddb436601",
+    "distribution-builder-archive.json": "39833bd0fa4aba77fad67c14aac248884b04bc692d0b600f655e3a6cd1e3cceb",
     "distribution-failed-headers.json": "2135930f1ec22dcae0aa633accd6afe98b5a21d935a00a4e3d5d8bddb2efba33",
     "distribution-failed-chroot.json": "a6722d5ca8416d5fab468ceaf5e14f68f0617de5eef44b7e64eb76d1104a08da",
     "distribution-failed-source-race.json": "9110364bfa940a518089399d31ad3575b0147464a3035174bc7bc34e05490fb3"
   },
   "ci": {
-    "source_commit": "95e3080bde67696d34714c534e2bcc3900c18a3b",
+    "source_commit": "865720414cd8e98b74233734856c54bd1219aee0",
     "completed_successful_runs": [
-      "45140564761",
-      "45140572819"
+      "45142599948",
+      "45142608597"
     ],
-    "artifact_url": "https://github.com/bwsalmon/silo/actions/runs/45140564761/artifacts/14802350454",
-    "artifact_archive_sha256": "767cd95115f17a0f3d9c9bb64a61971fa8e73d6b13f89d51a93b45d63bb14c0e",
+    "artifact_url": "https://github.com/bwsalmon/silo/actions/runs/45142599948/artifacts/14803565213",
+    "artifact_archive_sha256": "30d67a3eadb9488c90a435ae432b709611c951dc2725fe6cc6f1898c2f165bea",
     "qualification_in_generic_ci": false,
     "wait_command": "denied: missing grain#ci grant; completed GitHub verdicts/logs read through grain ci list/log and grain pr open"
   },
   "independent_cleanup": {
     "all_silo_test_cgroups_absent": true,
     "recorded_cgroup_roots_absent": [
-      "/sys/fs/cgroup/silo-test-e78ff062460e",
-      "/sys/fs/cgroup/silo-test-9ab6f0c86c0c"
+      "/sys/fs/cgroup/silo-test-4fc0c319674e",
+      "/sys/fs/cgroup/silo-test-e28a095319fe"
     ],
     "task_mounts": [],
     "task_loop_devices": [],
@@ -98,5 +98,7 @@
     "worker_and_archive_cleanup_verified": true,
     "clean_runtime_root_removed": true
   },
+  "rejected_run_archive_sha256": "1fa91e7ff0673d65ef87f330ba6d63ea09e2687ad48989d748c61a8450cbf5a7",
+  "clean_root_unprivileged_probe_stdout": "uid=1000(worker) gid=1000(worker) groups=1000(worker)\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nuserns-probe-passed\n",
   "scope": "only the recorded archive and disposable Debian 12/kernel configuration; no production approval, release or deployment"
 }
