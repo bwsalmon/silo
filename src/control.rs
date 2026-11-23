@@ -26,6 +26,9 @@ pub struct Request {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Mcp {
+        operation: McpOperation,
+    },
     Activate {
         manifest: Box<Manifest>,
         no_start: bool,
@@ -72,6 +75,7 @@ pub enum Operation {
 impl Operation {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Mcp { operation } => operation.label(),
             Self::Activate { .. } => "activate",
             Self::Run { .. } => "run",
             Self::Ps => "list",
@@ -90,6 +94,57 @@ impl Operation {
             Self::Audit => "audit",
             Self::Shutdown => "shutdown",
         }
+    }
+}
+// Deliberately closed surface: the supervisor rejects operator identities for this
+// frontend and applies the same per-resource authorization as the CLI.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpOperation {
+    Check,
+    Run { template: String },
+    Ps,
+    Status { id: String },
+    Logs { id: String },
+    Stop { id: String },
+}
+impl McpOperation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Check => "mcp_check",
+            Self::Run { .. } => "mcp_run",
+            Self::Ps => "mcp_list",
+            Self::Status { .. } => "mcp_status",
+            Self::Logs { .. } => "mcp_logs",
+            Self::Stop { .. } => "mcp_stop",
+        }
+    }
+    pub fn operation(self) -> Result<Operation> {
+        let resource = match &self {
+            Self::Run { template } => Some(template.as_str()),
+            Self::Status { id } | Self::Logs { id } | Self::Stop { id } => Some(id.as_str()),
+            _ => None,
+        };
+        if let Some(value) = resource {
+            let valid = if matches!(self, Self::Run { .. }) {
+                crate::policy::name(value)
+            } else {
+                value.len() == 68
+                    && value.starts_with("job_")
+                    && value[4..].bytes().all(|b| b.is_ascii_hexdigit())
+            };
+            if !valid {
+                return Err(invalid());
+            }
+        }
+        Ok(match self {
+            Self::Run { template } => Operation::Run { template },
+            Self::Ps => Operation::Ps,
+            Self::Status { id } => Operation::Status { id },
+            Self::Logs { id } => Operation::Logs { id },
+            Self::Stop { id } => Operation::Stop { id },
+            Self::Check => return Err(invalid()),
+        })
     }
 }
 #[derive(Deserialize, Serialize)]
@@ -231,7 +286,9 @@ pub fn call(path: &Path, req: Request) -> Result<Value> {
     let mut stream = connect(path)?;
     if matches!(
         req.operation,
-        Operation::Run { .. }
+        Operation::Mcp {
+            operation: McpOperation::Run { .. }
+        } | Operation::Run { .. }
             | Operation::Activate {
                 no_start: false,
                 ..

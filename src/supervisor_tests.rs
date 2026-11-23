@@ -355,3 +355,85 @@ fn audits_are_bounded_redacted_and_record_allowed_but_unavailable_operations() {
     assert_eq!(entry.code, Some(Code::UnsupportedWorker));
     assert!(entry.resource.starts_with("tpl_"));
 }
+
+#[test]
+fn mcp_wrapper_keeps_server_side_identity_resource_and_audit_enforcement() {
+    use crate::control::McpOperation as M;
+    let (_root, mut s) = fixture();
+    let ga = grant(
+        &s,
+        "mcp-a",
+        &[Permission::List, Permission::Status, Permission::Stop],
+    );
+    let gb = grant(
+        &s,
+        "mcp-b",
+        &[Permission::List, Permission::Status, Permission::Stop],
+    );
+    let (aid, a) = issue(&mut s, ga.clone());
+    let (_, b) = issue(&mut s, gb);
+    let id = format!("job_{}", "1".repeat(64));
+    insert(&mut s, &id, &aid, &ga, State::Exited);
+    let wrap = |operation| Operation::Mcp { operation };
+    assert_eq!(
+        exchange(&mut s, &a, wrap(M::Status { id: id.clone() })).unwrap()["exit_code"],
+        17
+    );
+    for operation in [
+        M::Status { id: id.clone() },
+        M::Stop { id: id.clone() },
+        M::Logs { id: id.clone() },
+    ] {
+        assert_eq!(
+            exchange(&mut s, &b, wrap(operation)).unwrap_err(),
+            not_found()
+        );
+    }
+    assert_eq!(
+        exchange(
+            &mut s,
+            &b,
+            wrap(M::Status {
+                id: format!("job_{}", "2".repeat(64))
+            })
+        )
+        .unwrap_err(),
+        not_found()
+    );
+    assert_eq!(
+        exchange(&mut s, &a, wrap(M::Logs { id })).unwrap_err(),
+        not_found()
+    );
+    assert_eq!(
+        exchange(&mut s, &Secret("a".repeat(64)), wrap(M::Ps)).unwrap_err(),
+        forbidden()
+    );
+    assert!(s
+        .audit
+        .iter()
+        .any(|r| r.principal.ends_with(":mcp-a") && r.operation == "mcp_status" && r.allowed));
+    s.credentials.revoke(&aid).unwrap();
+    assert_eq!(
+        exchange(&mut s, &a, wrap(M::Ps)).unwrap_err(),
+        unauthenticated()
+    );
+    let mut expired = ga;
+    expired.expires_at = now() + 1;
+    let (_, token) = issue(&mut s, expired);
+    let result = s.handle(
+        Request {
+            version: 1,
+            auth: token,
+            operation: wrap(M::Ps),
+        },
+        now() + 2,
+    );
+    assert_eq!(result.unwrap_err(), unauthenticated());
+    for value in [
+        json!({"op":"mcp","operation":{"op":"issue"}}),
+        json!({"op":"mcp","operation":{"op":"run","template":"app","env":{}}}),
+        json!({"op":"mcp","operation":{"op":"activate"}}),
+    ] {
+        assert!(serde_json::from_value::<Operation>(value).is_err());
+    }
+}

@@ -4,6 +4,27 @@
 
 The CLI is a client of one local supervisor. Every request is authorized server-side. An operator owns policy, services, and volumes; a restricted agent can ask for launches and limited lifecycle operations. The CLI is not a Docker replacement or an arbitrary command runner.
 
+## Built-in MCP interface
+
+The requested additive frontend deliberately supersedes the original MCP deferral.
+The same executable serves local stdio MCP with
+\`silo mcp serve --endpoint /private/endpoint.json --auth-fd 3\`.
+A trusted launcher supplies a restricted session/project identity through the dedicated
+inherited descriptor and exposes only protocol streams to the isolated agent.
+There is no \`--json\` mode for MCP; stdout is exclusively protocol traffic and
+startup diagnostics go to stderr. Operator credentials are rejected server-side.
+
+See [protocol, schemas, credentials and retry semantics](mcp.md) and the
+[trusted-launcher client configuration example](../examples/mcp-client.json).
+The five tools translate fixed-template launch, scoped list/status/stop and
+separately granted bounded logs into the supervisor's existing authorization.
+Launch acceptance/running do not imply terminal success or application readiness.
+Cancellation/disconnect cannot roll back a sent mutation; reconcile a lost launch
+response through list/status before considering another launch. The supervisor's
+expiry, revocation, bounded leases and verified teardown remain authoritative.
+Logs are untrusted resource content. This frontend does not confine other native
+agent shell, filesystem or MCP access; the protected worker/OS boundary remains required.
+
 ## Operator workflow
 
 The operator starts the supervisor through trusted deployment configuration and uses a separate operator control identity. For v1, activate one operator-owned manifest rather than accepting policy paths from restricted callers.
@@ -85,4 +106,4 @@ agent A$ silo stop job_01 --json
 
 The executable [Postgres fixture](../examples/postgres.yaml) and [acceptance harness](../tests/volume_acceptance.py) configure the approved test template to use stock psql, exercise the allowed SQL role, verify fixture reads and denied fixture writes, and write results. Have the unrelated client verify it cannot connect even if given the numeric loopback address. Separately exercise the raw private protocol to verify that rejected CLI arguments cannot bypass supervisor policy. Revoke a running grant with an open TCP connection and verify teardown; attempt a second writer and a restart after supervisor loss, then verify persisted rows after safe recovery.
 
-Defer attach, exec, arbitrary volume content commands, live policy editing, external egress, DNS, remote/public APIs and MCP integration.
+Defer attach, exec, arbitrary volume content commands, live policy editing, external egress, DNS, remote/public APIs. MCP is limited to the requested local stdio extension.

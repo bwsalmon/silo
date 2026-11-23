@@ -170,6 +170,13 @@ impl Supervisor {
         result
     }
     fn audit_resource(&self, op: &Operation) -> String {
+        if let Operation::Mcp { operation } = op {
+            return operation
+                .clone()
+                .operation()
+                .map(|op| self.audit_resource(&op))
+                .unwrap_or_else(|_| "-".into());
+        }
         let m = match &self.policy {
             Some(m) => m,
             None => return "-".into(),
@@ -237,6 +244,20 @@ impl Supervisor {
     fn dispatch(&mut self, p: &Principal, op: Operation, time: u64) -> Result<Value> {
         let operator = matches!(p, Principal::Operator);
         match op {
+            Operation::Mcp { operation } => {
+                if operator {
+                    return Err(forbidden());
+                }
+                let (_, grant) = agent(p)?; // Never accept an operator credential via MCP.
+                let m = self.manifest()?;
+                if grant.project != m.project || grant.policy != m.id() {
+                    return Err(forbidden());
+                }
+                if matches!(operation, control::McpOperation::Check) {
+                    return Ok(json!({"authorized":true}));
+                }
+                self.dispatch(p, operation.operation()?, time)
+            }
             Operation::Activate { manifest, no_start } => {
                 if !operator {
                     return Err(forbidden());

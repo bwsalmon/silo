@@ -66,7 +66,7 @@ volume creation and ID-bound mount grants. Operator `up` starts
 are illustrative, so use the [stock Postgres fixture](../examples/postgres.yaml)
 for real storage acceptance. Activation may persist policy before service setup
 fails. Attach/exec, overrides, external egress, UDP/DNS, dynamic topology,
-public/remote APIs, MCP and multi-host operation remain absent.
+public/remote APIs and multi-host operation remain absent. The requested [local MCP extension](mcp.md) reuses this supervisor with a closed restricted operation envelope; it intentionally supersedes the original MCP deferral.
 
 `--json` writes exactly one JSON value to stdout for success or error. Invalid
 CLI arguments, manifests and raw protocol fields have fixed, redacted messages.

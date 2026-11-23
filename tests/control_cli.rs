@@ -548,3 +548,116 @@ fn library_client_uses_the_same_authenticated_transport() {
     f.read_to_string(&mut token).unwrap();
     let _ = token; // credentials were never passed in argv or environment.
 }
+
+#[test]
+fn official_mcp_client_discovers_strict_tools_and_calls_authenticated_supervisor() {
+    use rmcp::{model::CallToolRequestParam, transport::TokioChildProcess, ServiceExt};
+    let h = Harness::start();
+    h.activate();
+    let (token, grant) = h.issue("mcp-a", now() + 3600, json!(["list", "status"]), None);
+    let mut command = launch(
+        &[
+            "mcp".into(),
+            "serve".into(),
+            "--endpoint".into(),
+            h.endpoint.to_str().unwrap().into(),
+        ],
+        &token,
+        None,
+    );
+    command.stdin(Stdio::piped());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let client =
+            ().serve(TokioChildProcess::new(tokio::process::Command::from(command)).unwrap())
+                .await
+                .unwrap();
+        let tools = client.peer().list_all_tools().await.unwrap();
+        assert_eq!(tools.len(), 5);
+        for tool in &tools {
+            assert_eq!(tool.input_schema["additionalProperties"], false);
+            assert!(tool.output_schema.is_some());
+            let schema = serde_json::to_string(&tool.input_schema).unwrap();
+            for forbidden in ["token", "endpoint", "mount", "command", "identity"] {
+                assert!(!schema.contains(forbidden));
+            }
+        }
+        async fn call(
+            peer: &rmcp::service::Peer<rmcp::RoleClient>,
+            name: &str,
+            args: Value,
+        ) -> Value {
+            peer.call_tool(CallToolRequestParam {
+                name: name.to_owned().into(),
+                arguments: Some(args.as_object().unwrap().clone()),
+            })
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap()
+        }
+        assert_eq!(
+            call(client.peer(), "silo_ps", json!({})).await["data"]["instances"],
+            json!([])
+        );
+        let id = format!("job_{}", "0".repeat(64));
+        assert_eq!(
+            call(client.peer(), "silo_status", json!({"id":id})).await["error"]["code"],
+            "not_found"
+        );
+        for (name, args) in [
+            (
+                "silo_run",
+                json!({"template":"app","env":{"TOKEN":"secret"}}),
+            ),
+            ("silo_ps", json!({"token":"secret"})),
+            ("operator_issue", json!({})),
+            ("silo_status", json!({"id":"../secret"})),
+            ("silo_run", json!({"template":3})),
+        ] {
+            let result = call(client.peer(), name, args).await;
+            assert_eq!(result["error"]["code"], "invalid_request");
+            assert!(!result.to_string().contains("secret"));
+        }
+        assert_eq!(
+            call(client.peer(), "silo_run", json!({"template":"app"})).await["error"]["code"],
+            "forbidden"
+        );
+        success(h.operator(&["operator", "revoke", &grant]));
+        assert_eq!(
+            call(client.peer(), "silo_ps", json!({})).await["error"]["code"],
+            "unauthenticated"
+        );
+        assert!(client.peer().list_all_tools().await.is_err());
+        client.cancel().await.unwrap();
+    });
+    let operator_mcp = launch(
+        &[
+            "mcp".into(),
+            "serve".into(),
+            "--endpoint".into(),
+            h.endpoint.to_str().unwrap().into(),
+        ],
+        &h.operator,
+        None,
+    )
+    .output()
+    .unwrap();
+    assert!(!operator_mcp.status.success());
+    assert!(operator_mcp.stdout.is_empty());
+    let invalid = Command::new(env!("CARGO_BIN_EXE_silo"))
+        .args(["mcp", "serve", "--json"])
+        .output()
+        .unwrap();
+    assert!(invalid.stdout.is_empty());
+    for args in [["--json", "mcp", "serve"], ["mcp", "--json", "serve"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_silo"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.stdout.is_empty());
+    }
+}

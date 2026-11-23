@@ -9,6 +9,7 @@ pub mod fd_channel;
 pub mod helper;
 pub mod image;
 pub mod linux;
+pub mod mcp;
 pub mod policy;
 pub mod process;
 pub mod runner;
