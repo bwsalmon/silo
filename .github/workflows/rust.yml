@@ -86,10 +86,11 @@ jobs:
           cmp dist/first/silo-0.1.0-linux-x86_64.tar.xz dist/second/silo-0.1.0-linux-x86_64.tar.xz
       - name: Validate the actual archive and relocated installation
         run: |
+          mkdir -m 700 /tmp/silo-ci-private
           digest=$(cut -d ' ' -f 1 dist/first/SHA256SUMS)
-          python3 scripts/validate-bundle.py --archive dist/first/silo-0.1.0-linux-x86_64.tar.xz --sha256 "$digest" --extract-to /tmp/silo-ci-install
-          mv /tmp/silo-ci-install/silo-0.1.0-linux-x86_64 /tmp/silo-ci-install/relocated
-          SILO_TEST_BUNDLE_ROOT=/tmp/silo-ci-install/relocated python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 scripts/validate-bundle.py --archive dist/first/silo-0.1.0-linux-x86_64.tar.xz --sha256 "$digest" --extract-to /tmp/silo-ci-private/install
+          mv /tmp/silo-ci-private/install/silo-0.1.0-linux-x86_64 /tmp/silo-ci-private/install/relocated
+          SILO_TEST_BUNDLE_ROOT=/tmp/silo-ci-private/install/relocated python3 -m unittest discover -s tests -p 'test_*.py'
       # CI artifacts only. No release event, tag, package registry, write token or signing credential.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
