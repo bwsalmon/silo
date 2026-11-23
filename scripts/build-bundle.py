@@ -33,7 +33,9 @@ with tempfile.TemporaryDirectory(prefix="silo-package-") as temp:
     work = Path(temp)
     src = work / "source"; src.mkdir()
     # Snapshot the exact tracked/new source inputs, excluding ignored build outputs.
-    files = capture(["git", "-C", ROOT, "ls-files", "--cached", "--others", "--exclude-standard"]).splitlines()
+    # Trust only this explicitly selected checkout, including container-mounted CI ownership.
+    files = capture(["git", "-c", "safe.directory=" + str(ROOT), "-C", ROOT,
+                     "ls-files", "--cached", "--others", "--exclude-standard"]).splitlines()
     # Measured reports are attestations about an archive, not inputs to that archive.
     files = [name for name in files if name != "docs/distribution-evidence.md"
              and not name.startswith("docs/evidence/distribution-")]

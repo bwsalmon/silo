@@ -23,7 +23,7 @@ for package in packages:
 if args.install:
     if os.geteuid() != 0:
         sys.exit("--install requires root; never use on a live worker")
-    subprocess.run(["apt-get", "install", "-y", "--allow-downgrades"] + [str(p.resolve()) for p in debs], check=True)
+    subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", "--allow-downgrades"] + [str(p.resolve()) for p in debs], check=True)
 for package, deb in zip(packages, debs):
     actual = capture(["dpkg-query", "-W", "-f=${Version}", package["name"]]).strip()
     if actual != package["version"]:
