@@ -435,6 +435,32 @@ def suite(workspace, worker, registry, probe):
         error = bad_pin.call(["run", "defaults"], expected=5)
         check("wrong Bubblewrap pin rejected", "SHA-256" in error["error"]["message"])
         bad_pin.close()
+        helper = Path(worker["bwrap"]["path"]).read_bytes()
+        cases = [("missing", None, 0o755, False), ("substitution", b"#!/bin/sh\nexit 99\n", 0o755, False),
+                 ("wrong-architecture", helper[:18] + b"\xb7\x00" + helper[20:], 0o755, True),
+                 ("not-executable", helper, 0o644, True), ("setuid", helper, 0o4755, True),
+                 ("setgid", helper, 0o2755, True), ("group-writable", helper, 0o775, True)]
+        if b"libcap.so.2" in helper:
+            cases.append(("missing-library", helper.replace(b"libcap.so.2", b"missing.so2"), 0o755, True))
+        for name, data, mode, repin in cases:
+            path = workspace / ("bad-bwrap-" + name)
+            config = copy.deepcopy(worker)
+            config["bwrap"]["path"] = str(path)
+            if data is not None:
+                path.write_bytes(data); path.chmod(mode)
+                if repin:
+                    config["bwrap"]["sha256"] = hashlib.sha256(data).hexdigest()
+            broken = server(config=config)
+            error = broken.call(["run", "defaults"], expected=5)
+            check("helper " + name + " fails closed before workload success",
+                  error["error"]["code"] in ("unsupported_worker", "launch_failed"))
+            broken.close()
+        link = workspace / "linked-bwrap"; link.symlink_to(worker["bwrap"]["path"])
+        config = copy.deepcopy(worker); config["bwrap"]["path"] = str(link)
+        linked = server(config=config)
+        error = linked.call(["run", "defaults"], expected=5)
+        check("symlinked helper path fails closed", "symlink-free" in error["error"]["message"])
+        linked.close()
         wrong_storage = copy.deepcopy(worker); wrong_storage["storage"] = str(workspace)
         bad_storage = server(config=wrong_storage)
         error = bad_storage.call(["run", "defaults"], expected=5)
@@ -505,10 +531,11 @@ int main(int argc, char **argv) {
 
 
 def main():
-    global BINARY
+    global BINARY, BUNDLED_HELPER
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--bwrap", type=Path, help="exact bundled helper path; no PATH lookup")
     parser.add_argument("--suite", choices=["runner", "network", "volumes", "all"], default="all")
     args = parser.parse_args()
     report_path = args.report.resolve()
@@ -524,6 +551,7 @@ def main():
     write_report(report_path, REPORT)
     try:
         BINARY = str(args.binary.resolve())
+        BUNDLED_HELPER = args.bwrap.absolute() if args.bwrap else None
         REPORT.update(architecture=os.uname().machine, kernel=os.uname().release,
                       namespace_policy=namespace_policy())
         workspace = Path(tempfile.mkdtemp(prefix="silo-worker-"))
@@ -531,7 +559,7 @@ def main():
         original_cgroup = Path("/sys/fs/cgroup" + Path("/proc/self/cgroup").read_text().strip().split("::")[1])
         group = Path("/sys/fs/cgroup") / ("silo-test-" + secrets.token_hex(6))
         assert os.getuid() != 0, "Run as non-root; sudo provisions only task-owned mounts/cgroups"
-        for tool in ["sudo", "bwrap", "umoci", "skopeo", "openssl", "musl-gcc", "gcc", "readelf"]:
+        for tool in ["sudo", "umoci", "skopeo", "openssl", "musl-gcc", "gcc", "readelf"] + ([] if args.bwrap else ["bwrap"]):
             assert shutil.which(tool), "Missing disposable test prerequisite: " + tool
         storage = workspace / "storage"; storage.mkdir(mode=0o700)
         run(["sudo", "mkdir", group])
@@ -552,6 +580,10 @@ def main():
         run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", certs / "key.pem",
              "-out", certs / "ca.crt", "-days", "1", "-subj", "/CN=localhost",
              "-addext", "subjectAltName=DNS:localhost"])
+        # An executable named bwrap on caller PATH must never replace the exact pinned helper.
+        malicious = workspace / "malicious-path"; malicious.mkdir()
+        (malicious / "bwrap").write_text("#!/bin/sh\necho substituted > " + str(workspace / "path-substitution") + "\nexit 99\n")
+        (malicious / "bwrap").chmod(0o755)
         # Privilege is used ONLY to drop the test supervisor's own supplementary groups.
         # It immediately becomes the unprivileged worker UID before opening files or exec.
         (workspace / "launch-supervisor.py").write_text("""
@@ -559,6 +591,7 @@ import os,sys
 uid,gid=map(int,sys.argv[1:3]);auth,sentinel,pidfile=sys.argv[3:6]
 os.setgroups([]);os.setresgid(gid,gid,gid);os.setresuid(uid,uid,uid)
 os.environ.clear();os.environ['SILO_SENTINEL_SECRET']='never-in-workload'
+os.environ['PATH']=str(__import__('pathlib').Path(sentinel).parent/'malicious-path')+':/usr/bin:/bin'
 a=os.open(auth,os.O_RDONLY);s=os.open(sentinel,os.O_RDONLY)
 os.dup2(a,3,inheritable=True);os.dup2(s,427,inheritable=True)
 os.set_inheritable(3,True);os.set_inheritable(427,True)
@@ -573,7 +606,7 @@ os.execv(sys.argv[6],sys.argv[6:])
         run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror",
              workspace / "deny-userns.c", "-o", workspace / "deny-userns"])
         def pin(tool):
-            path = Path(shutil.which(tool)).resolve()
+            path = args.bwrap.absolute() if tool == "bwrap" and args.bwrap else Path(shutil.which(tool)).resolve()
             result = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
             REPORT["pins"][tool] = result
             return result
@@ -602,6 +635,7 @@ os.execv(sys.argv[6],sys.argv[6:])
             from volume_acceptance import suite as volume_suite
             volume_suite(sys.modules[__name__], workspace, worker, registry, (workspace / "probe").read_bytes())
             REPORT["completed_suites"].append("volumes")
+        check("malicious caller PATH cannot substitute the pinned Bubblewrap helper", not (workspace / "path-substitution").exists())
         REPORT["result"] = "checks_passed"
     except BaseException as error:
         REPORT["result"] = "failed"
